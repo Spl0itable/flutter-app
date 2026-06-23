@@ -1,7 +1,7 @@
 name: nym_bar
 description: "Experience the future of decentralized communication with Nymchat, a sleek and secure shell app that wraps around our powerful PWA, delivering instant notifications and seamless external browsing for an uncompromised user experience."
 publish_to: "none"
-version: 1.0.1+117
+version: 1.0.1+118
 
 environment:
   sdk: ^3.6.0
@@ -95,7 +95,6 @@ flutter:
   assets:
     - assets/images/
     - assets/text/
-    - assets/documents/
     - assets/data/
 
 flutter_launcher_icons:

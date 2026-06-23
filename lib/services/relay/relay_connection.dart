@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/constants/relays.dart';
@@ -153,6 +154,7 @@ class RelayConnection {
   }
 
   void _onError(Object error) {
+    debugPrint('[RelayConnection] socket error for $url: $error');
     _setStatus(RelayStatus.failed);
     _cleanupSocket();
     _scheduleReconnect();

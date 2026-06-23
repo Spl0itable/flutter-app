@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/constants/relays.dart';
@@ -348,7 +349,8 @@ class _ShardSocket {
       _reconnectAttempt = 0;
       send(PoolFrame.relays(shard.relays, shard.dmRelays));
       onConnected(this);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[RelayPoolProxy] Failed to open shard socket ($url): $e');
       _onDone();
     }
   }

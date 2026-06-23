@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:async';
 
 import 'app.dart';
 import 'core/constants/storage_keys.dart';
@@ -13,29 +15,42 @@ import 'state/settings_provider.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Open the key/value store (mirrors the PWA's synchronous localStorage).
-  final kv = await KeyValueStore.open();
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    debugPrint('[FlutterError] ${details.exceptionAsString()}');
+    if (details.stack != null) debugPrint(details.stack.toString());
+  };
 
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  // Catch otherwise-fatal async errors (e.g. WebSocket DNS failures when the
+  // emulator/device is offline) so they don’t terminate the app.
+  await runZonedGuarded(() async {
+    // Open the key/value store (mirrors the PWA's synchronous localStorage).
+    final kv = await KeyValueStore.open();
 
-  // Manual container so we can boot the Nostr controller (identity + relays)
-  // here in the real app only — widget tests construct their own ProviderScope
-  // and never touch networking / secure storage.
-  final container = ProviderContainer(
-    overrides: [keyValueStoreProvider.overrideWithValue(kv)],
-  );
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
 
-  runApp(
-    UncontrolledProviderScope(
-      container: container,
-      // The boot-unlock gate mirrors `DOMContentLoaded → await
-      // nym.unlockVaultAtBoot() BEFORE initialize()`: when the vault is enabled
-      // it blocks until the user unlocks (decrypting the stored secrets) and
-      // only THEN boots the controller. When the vault is off it boots
-      // immediately, behaving exactly as before.
-      child: const _BootUnlockGate(),
-    ),
-  );
+    // Manual container so we can boot the Nostr controller (identity + relays)
+    // here in the real app only — widget tests construct their own ProviderScope
+    // and never touch networking / secure storage.
+    final container = ProviderContainer(
+      overrides: [keyValueStoreProvider.overrideWithValue(kv)],
+    );
+
+    runApp(
+      UncontrolledProviderScope(
+        container: container,
+        // The boot-unlock gate mirrors `DOMContentLoaded → await
+        // nym.unlockVaultAtBoot() BEFORE initialize()`: when the vault is enabled
+        // it blocks until the user unlocks (decrypting the stored secrets) and
+        // only THEN boots the controller. When the vault is off it boots
+        // immediately, behaving exactly as before.
+        child: const _BootUnlockGate(),
+      ),
+    );
+  }, (error, stack) {
+    debugPrint('[Zone] Unhandled async error: $error');
+    debugPrint(stack.toString());
+  });
 }
 
 /// Top-level gate enforcing the PWA's boot ordering: identity-vault unlock runs

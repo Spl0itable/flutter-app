@@ -152,83 +152,129 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ));
     }
 
-    return Container(
-      // .emoji-picker: glass bg, glass border, radius md, padding 12,
-      // max 360×400, scroll-y (styles-components.css:2090-2106).
-      constraints: const BoxConstraints(maxWidth: 360, maxHeight: 400),
-      decoration: BoxDecoration(
-        color: c.glassBg,
-        border: Border.all(color: c.glassBorder),
-        borderRadius: NymRadius.rmd,
-        boxShadow: const [
-          BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
-        ],
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _search(c),
-          const SizedBox(height: 8),
-          Flexible(
-            child: SingleChildScrollView(
-              child: LayoutBuilder(builder: (context, _) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: sections.isEmpty
-                      ? [
-                          Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Text(
-                              'No emoji found',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: c.textDim, fontSize: 12),
-                            ),
-                          ),
-                        ]
-                      : [
-                          for (final s in sections)
-                            _GridSection(columns: columns, section: s),
-                        ],
-                );
-              }),
+    // NOTE: This widget is used inside overlays/portals in a few places.
+    // TextField requires a Material ancestor, and Flexible/Expanded require a
+    // bounded main-axis constraint. We enforce both here so the picker is safe
+    // to mount anywhere.
+    return Material(
+      type: MaterialType.transparency,
+      child: ConstrainedBox(
+        // .emoji-picker: max 360×400.
+        constraints: const BoxConstraints(maxWidth: 360, maxHeight: 400),
+        child: LayoutBuilder(builder: (context, constraints) {
+          final height = constraints.maxHeight.isFinite ? constraints.maxHeight : 400.0;
+          return Container(
+            height: height,
+            decoration: BoxDecoration(
+              color: c.glassBg,
+              border: Border.all(color: c.glassBorder),
+              borderRadius: NymRadius.rmd,
+              boxShadow: const [
+                BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+              ],
             ),
-          ),
-        ],
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisSize: MainAxisSize.max,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _search(c),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: sections.isEmpty
+                          ? [
+                              Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Text(
+                                  'No emoji found',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: c.textDim, fontSize: 12),
+                                ),
+                              ),
+                            ]
+                          : [
+                              for (final s in sections) _GridSection(columns: columns, section: s),
+                            ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
       ),
     );
   }
 
   /// `.emoji-picker-search-input` (styles-components.css:2121-2135).
   Widget _search(NymColors c) {
-    return TextField(
-      controller: _searchController,
-      onChanged: (v) => setState(() => _query = v.trim()),
-      style: TextStyle(color: c.textBright, fontSize: 12),
-      cursorColor: c.primary,
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: 'Search emoji...',
-        hintStyle: TextStyle(color: c.textDim, fontSize: 12),
-        filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.05),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        border: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.primary),
+    // Some callers mount the picker inside an OverlayPortal / LookupBoundary.
+    // TextField requires a Material ancestor *within the closest*
+    // LookupBoundary, so wrap the input itself defensively.
+    return Material(
+      type: MaterialType.transparency,
+      child: TextField(
+        controller: _searchController,
+        onChanged: (v) => setState(() => _query = _sanitizeUserText(v).trim()),
+        style: TextStyle(color: c.textBright, fontSize: 12),
+        cursorColor: c.primary,
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search emoji...',
+          hintStyle: TextStyle(color: c.textDim, fontSize: 12),
+          filled: true,
+          fillColor: Colors.white.withValues(alpha: 0.05),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          border: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.glassBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.glassBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.primary),
+          ),
         ),
       ),
     );
+  }
+
+  /// Defensively sanitize user input to avoid crashes when the platform IME
+  /// sends an unpaired surrogate (rare, but can happen on Android).
+  static String _sanitizeUserText(String input) {
+    final units = input.codeUnits;
+    final out = StringBuffer();
+    for (var i = 0; i < units.length; i++) {
+      final u = units[i];
+      // High surrogate.
+      if (u >= 0xD800 && u <= 0xDBFF) {
+        if (i + 1 < units.length) {
+          final next = units[i + 1];
+          if (next >= 0xDC00 && next <= 0xDFFF) {
+            out.writeCharCode(u);
+            out.writeCharCode(next);
+            i++;
+            continue;
+          }
+        }
+        // Unpaired high surrogate -> replacement.
+        out.write('\uFFFD');
+        continue;
+      }
+      // Unpaired low surrogate -> replacement.
+      if (u >= 0xDC00 && u <= 0xDFFF) {
+        out.write('\uFFFD');
+        continue;
+      }
+      out.writeCharCode(u);
+    }
+    return out.toString();
   }
 
   /// `.emoji-picker-section` + `.emoji-picker-section-title` (10px uppercase
