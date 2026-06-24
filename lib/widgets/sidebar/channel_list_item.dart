@@ -11,7 +11,7 @@ import '../../models/channel.dart';
 /// Mirrors `.channel-item` (docs/specs/02 §5.3): padding 9/12, margin 2/4,
 /// radius rxs, min-height 36, 1px transparent border; active state gets a
 /// primary@10 fill, primary@20 border, glow, and a 3px left accent bar. Unread
-/// count renders as a pill badge; geohash/std channels carry a small badge.
+/// count renders as a pill badge — the PWA's ONLY channel badge.
 ///
 /// A long-press (mobile) or secondary-tap / right-click (desktop) opens the
 /// `.channel-context-menu` (Favorite/Hide/Share/Copy link/Block/Leave) — see
@@ -90,23 +90,12 @@ class ChannelListItem extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      if (entry.isGeohash)
-                        _Badge(
-                          label: 'geo',
-                          color: c.warning,
-                          bg: c.warning.withValues(alpha: 0.08),
-                          border: c.warning.withValues(alpha: 0.20),
-                        )
-                      else
-                        _Badge(
-                          label: 'std',
-                          color: c.blue,
-                          bg: c.blue.withValues(alpha: 0.10),
-                          border: c.blue.withValues(alpha: 0.25),
-                        ),
+                      // PWA `.channel-badges` only ever contains the unread
+                      // pill. `.std-badge` / `.geohash-badge` are DEAD CSS —
+                      // never emitted by channels.js/pms.js/groups.js. Geohash
+                      // vs standard channels are distinguished by the name only.
                       if (unread > 0) ...[
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 8),
                         _UnreadPill(count: unread),
                       ],
                     ],
@@ -143,41 +132,6 @@ class ChannelListItem extends ConsumerWidget {
               ],
             ),
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// `.std-badge` / `.geohash-badge`: 9px pill.
-class _Badge extends StatelessWidget {
-  const _Badge({
-    required this.label,
-    required this.color,
-    required this.bg,
-    required this.border,
-  });
-  final String label;
-  final Color color;
-  final Color bg;
-  final Color border;
-
-  @override
-  Widget build(BuildContext context) {
-    // `.std-badge` / `.geohash-badge`: 9px weight 500, 1px border, pill.
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        border: Border.all(color: border),
-        borderRadius: const BorderRadius.all(Radius.circular(20)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: color,
-          fontSize: 9,
-          fontWeight: FontWeight.w500,
         ),
       ),
     );
