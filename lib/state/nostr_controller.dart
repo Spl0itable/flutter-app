@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/crypto/keys.dart' as keys;
+import '../core/crypto/pow.dart' as pow;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
@@ -16,6 +17,7 @@ import '../features/commands/command_registry.dart';
 import '../features/emoji/custom_emoji.dart';
 import '../features/groups/group_logic.dart';
 import '../features/groups/group_manager.dart';
+import '../features/messages/trust_graph.dart';
 import '../features/notifications/notifications_service.dart';
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
@@ -243,6 +245,11 @@ class NostrController {
       // `discoverChannels`, called on connect from relays.js).
       discoverChannels();
 
+      // Subscribe to peers' `nym-vouches` lists (web of trust). On boot the only
+      // trusted authors are the seeded dev/bot roots; the graph then expands one
+      // hop at a time as their vouches arrive (relays.js:2536-2542).
+      _subscribeVouches();
+
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
       // not only on a later view switch (`_onViewOpened`).
@@ -333,6 +340,13 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _vouchPublishTimer?.cancel();
+    _vouchPublishTimer = null;
+    _vouchExpansionTimer?.cancel();
+    _vouchExpansionTimer = null;
+    _trustPersistTimer?.cancel();
+    _trustPersistTimer = null;
+    _lastVouchPublishAt = 0;
     _profileBackfillTimer?.cancel();
     _profileBackfillTimer = null;
     _profileBackfillQueue.clear();
@@ -367,6 +381,7 @@ class NostrController {
     _lastPresenceBroadcast = 0;
     _presenceTimestamps.clear();
     _typingThrottle.clear();
+    _sentChannelReadReceipts.clear();
     _reactionToggleTracker.clear();
 
     // 3) Stop syncing settings on change (the binding captured the old signer).
@@ -449,7 +464,14 @@ class NostrController {
   void _onEvent(NostrEvent event) {
     final appState = _ref.read(appStateProvider.notifier);
     if (event.kind == EventKind.appData) {
-      _ingestPresence(event);
+      // Kind 30078 is multiplexed by the `['t', ...]` topic (nostr-core.js:
+      // 570-577 dispatches on `tTag[1]`): presence / poll / poll-vote / vouches.
+      final topic = event.tagValue('t');
+      if (topic == AppDataTopic.vouches) {
+        _ingestVouch(event);
+      } else {
+        _ingestPresence(event);
+      }
       return;
     }
     // NIP-30 custom emoji packs / the user's emoji-pack list (nostr-core.js:595).
@@ -459,6 +481,13 @@ class NostrController {
     }
     if (event.kind == EventKind.userEmojiList) {
       _ingestUserEmojiList(event);
+      return;
+    }
+    // Public channel read receipt (kind 24421) — someone saw one of our channel
+    // messages. Ephemeral; routed here from the active channel's typing/receipt
+    // sub. Channel typing (24420) inbound is handled elsewhere.
+    if (event.kind == EventKind.channelReceipt) {
+      _onChannelReadReceipt(event);
       return;
     }
     // A live kind-0 from relays refreshes the D1 profile cache so we don't
@@ -512,10 +541,47 @@ class NostrController {
         }
       }
       _maybeNotifyChannel(event);
+
+      // Web-of-trust observation for a non-own channel message (nostr-core.js:
+      // 383-392). Two effects:
+      //  (1) ≥2 distinct messages from a sender earns them session trust
+      //      (`_trackPubkeyMessage`), exempting them from the spam gate.
+      //  (2) NIP-13 PoW meeting the Nymchat floor (16 bits) is a self-attestation
+      //      that the sender runs Nymchat → add to the trust graph + our vouch
+      //      list (`_markNymchatPubkey` + `_observeNymchatPubkey`).
+      final selfPk = _identity?.pubkey ?? '';
+      if (event.pubkey != selfPk) {
+        final earnedTrust = _ref
+            .read(appStateProvider.notifier)
+            .trackPubkeyMessage(event.pubkey, event.id);
+        if (earnedTrust) _scheduleTrustPersist();
+        if (pow.validatePow(event, _nymchatPowFloor)) {
+          _observeNymchatPubkey(event.pubkey);
+        }
+      }
+
       // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
       // a profile fetch for every message author it lacks a profile for —
       // `queueProfileFetch`, nostr-core.js:1767). Debounced/batched.
       _maybeBackfillProfiles(event.pubkey);
+
+      // Send a public read receipt (kind 24421) for a fresh, visible, non-own
+      // channel message in the channel we currently have open — the native
+      // analogue of the PWA's `addMessageToUI` send (gated on `canBeSeen &&
+      // !isOwn && !isHistorical && geohash && id matches`). The open channel is
+      // our visibility proxy (no scroll-position tracking on native).
+      final self = _identity?.pubkey ?? '';
+      final geohash = event.tagValue('g');
+      final key = EventMapper.channelKeyOf(event);
+      if (event.pubkey != self &&
+          geohash != null &&
+          geohash.isNotEmpty &&
+          _isChannelMessageId(event.id) &&
+          !_isHistorical(event.createdAt) &&
+          key != null &&
+          _isActiveView(key)) {
+        unawaited(sendChannelReadReceipt(event.id, event.pubkey, geohash));
+      }
     }
   }
 
@@ -908,6 +974,142 @@ class NostrController {
   /// Per-pubkey newest presence timestamp (users.js `presenceTimestamps`) so a
   /// redelivered/older replaceable presence event can't clobber a newer one.
   final Map<String, int> _presenceTimestamps = {};
+
+  // ---------------------------------------------------------------------------
+  // Web of trust ("nym-vouch") — kind 30078, `['t','nym-vouches']`. Ported from
+  // nostr-core.js (`handleVouchEvent`, `_observeNymchatPubkey`,
+  // `publishNymchatVouches`, `_scheduleVouchExpansion`). The trust graph gates
+  // channel/PM spam (app_state `isSpamGated`); observing PoW-valid Nymchat
+  // activity grows OUR vouch list (published so peers expand through us), and
+  // ingesting a trusted peer's vouch list grows the graph (and triggers a
+  // one-hop resubscribe so the web of trust expands and then goes quiet).
+  // ---------------------------------------------------------------------------
+
+  /// Ingests a peer's kind-30078 `nym-vouches` event (nostr-core.js
+  /// `handleVouchEvent`, line 2663). The content is a JSON array of pubkeys the
+  /// author vouches for. Only honored when the author is already trusted
+  /// (rooted at dev/bot); each valid pubkey is added to the graph. When new
+  /// pubkeys appear, schedule a one-hop expansion (resubscribe to the now-larger
+  /// author set).
+  void _ingestVouch(NostrEvent e) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (e.pubkey.isEmpty || e.pubkey == self) return;
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(e.content.isEmpty ? '[]' : e.content);
+    } catch (_) {
+      return;
+    }
+    final list = TrustGraph.parseVouchList(decoded, selfPubkey: self);
+    final added = _ref.read(appStateProvider.notifier).ingestVouchList(
+          authorPubkey: e.pubkey,
+          vouchedPubkeys: list,
+        );
+    // Newly trusted pubkeys are new vouch authors to fetch — expand one hop via
+    // a heavily debounced resubscribe (converges, then goes quiet).
+    if (added) {
+      _scheduleVouchExpansion();
+      _scheduleTrustPersist();
+    }
+  }
+
+  /// Records an observation that [pubkey] is running Nymchat (valid PoW channel
+  /// message or read receipt) — nostr-core.js `_observeNymchatPubkey` (line
+  /// 2623). Marks them in the graph AND in our own vouch list, then schedules a
+  /// debounced publish of the updated list.
+  void _observeNymchatPubkey(String pubkey) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (pubkey.isEmpty || pubkey == self) return;
+    final notifier = _ref.read(appStateProvider.notifier);
+    notifier.markNymchatPubkey(pubkey);
+    final added = notifier.observeNymchatPubkey(pubkey);
+    if (added) _scheduleVouchPublish();
+    _scheduleTrustPersist();
+  }
+
+  /// NIP-13 PoW floor (leading zero bits) a channel message must meet to be
+  /// treated as a Nymchat-client self-attestation (`this.nymchatPowFloor = 16`,
+  /// app.js:556).
+  static const int _nymchatPowFloor = 16;
+
+  /// Debounce for the vouch-list publish (nostr-core.js `_scheduleVouchPublish`,
+  /// line 2635): at most one publish per 60s, else a 5s coalescing delay.
+  Timer? _vouchPublishTimer;
+  int _lastVouchPublishAt = 0;
+
+  void _scheduleVouchPublish() {
+    if (_vouchPublishTimer != null) return;
+    final sinceLast = DateTime.now().millisecondsSinceEpoch - _lastVouchPublishAt;
+    final delayMs = sinceLast < 60000 ? 60000 - sinceLast : 5000;
+    _vouchPublishTimer = Timer(Duration(milliseconds: delayMs), () {
+      _vouchPublishTimer = null;
+      unawaited(_publishVouches());
+    });
+  }
+
+  /// Signs + publishes our `nym-vouches` list (nostr-core.js
+  /// `publishNymchatVouches`, line 2645). Best-effort.
+  Future<void> _publishVouches() async {
+    final service = _service;
+    if (service == null) return;
+    if (service.pool.connectedCount == 0) return;
+    final list = _ref.read(appStateProvider).nymchatVouches.toList();
+    if (list.isEmpty) return;
+    try {
+      await service.publishVouches(list);
+      _lastVouchPublishAt = DateTime.now().millisecondsSinceEpoch;
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// Debounced (5s coalescing) persist of the three web-of-trust sets to the
+  /// on-disk cache, so the graph survives a restart instead of rebuilding cold
+  /// every launch (the PWA persists nymchatPubkeys/Vouches/trusted to its meta
+  /// store). Scheduled whenever an observation/vouch/earned-trust mutates a set.
+  Timer? _trustPersistTimer;
+  void _scheduleTrustPersist() {
+    if (_trustPersistTimer != null) return;
+    _trustPersistTimer = Timer(const Duration(seconds: 5), () {
+      _trustPersistTimer = null;
+      unawaited(_persistTrust());
+    });
+  }
+
+  Future<void> _persistTrust() async {
+    final cache = _cache;
+    if (cache == null) return;
+    final s = _ref.read(appStateProvider);
+    try {
+      await cache.saveMetaSet(CacheStore.metaNymchatPubkeys, s.nymchatPubkeys);
+      await cache.saveMetaSet(CacheStore.metaNymchatVouches, s.nymchatVouches);
+      await cache.saveMetaSet(CacheStore.metaTrustedPubkeys, s.trustedPubkeys);
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// Debounce for the one-hop graph expansion (nostr-core.js
+  /// `_scheduleVouchExpansion`, line 2685): 15s after new trusted pubkeys
+  /// appear, resubscribe to vouches authored by the now-larger trust set.
+  Timer? _vouchExpansionTimer;
+
+  void _scheduleVouchExpansion() {
+    if (_vouchExpansionTimer != null) return;
+    _vouchExpansionTimer = Timer(const Duration(seconds: 15), () {
+      _vouchExpansionTimer = null;
+      _subscribeVouches();
+    });
+  }
+
+  /// (Re)subscribes to peers' `nym-vouches` lists authored by our current trust
+  /// graph (relays.js:2538-2542). Called on connect and on each expansion hop.
+  void _subscribeVouches() {
+    final service = _service;
+    if (service == null) return;
+    final authors = _ref.read(appStateProvider).nymchatPubkeys;
+    service.subscribeVouches(authors);
+  }
 
   void _onGiftWrap(GiftWrapUnwrapped u) {
     final appState = _ref.read(appStateProvider.notifier);
@@ -2751,6 +2953,121 @@ class NostrController {
     );
   }
 
+  // --- Public channel read receipts (kind 24421) -----------------------------
+  // Mirrors the PWA's channel read-receipt path (nostr-core.js
+  // `sendChannelReadReceipt` / `markVisibleChannelMessagesRead` /
+  // `handleChannelReadReceipt`). Geohash channels only, like channel typing.
+
+  /// Message ids we've already published a 24421 read receipt for, so we never
+  /// re-announce the same channel message (PWA `_sentChannelReadReceipts`,
+  /// capped 2000 → trimmed to the most recent 1500).
+  final Set<String> _sentChannelReadReceipts = <String>{};
+
+  bool _channelReceiptAllowed() =>
+      _indicatorScopeAllows(
+          _ref.read(settingsProvider).readReceiptsScope, 'channel');
+
+  /// Publishes a public channel read receipt (kind 24421) for [messageId] by
+  /// [authorPubkey] in [geohash], once per message. Scope-gated to the channel
+  /// context and geohash channels only (PWA `sendChannelReadReceipt`): never
+  /// receipts our own message, and dedupes via [_sentChannelReadReceipts].
+  Future<void> sendChannelReadReceipt(
+      String messageId, String authorPubkey, String geohash) async {
+    if (!_channelReceiptAllowed()) return;
+    if (messageId.isEmpty || authorPubkey.isEmpty || geohash.isEmpty) return;
+    final identity = _identity;
+    final service = _service;
+    if (identity == null || service == null) return;
+    if (authorPubkey == identity.pubkey) return;
+    if (_sentChannelReadReceipts.contains(messageId)) return;
+    _sentChannelReadReceipts.add(messageId);
+    if (_sentChannelReadReceipts.length > 2000) {
+      final keep = _sentChannelReadReceipts.toList().sublist(
+          _sentChannelReadReceipts.length - 1500);
+      _sentChannelReadReceipts
+        ..clear()
+        ..addAll(keep);
+    }
+    await service.publishChannelReceipt(
+      messageId: messageId,
+      authorPubkey: authorPubkey,
+      geohash: geohash,
+      nym: identity.nym,
+    );
+  }
+
+  /// Catch-up: receipts every visible, fresh, non-own message in the currently
+  /// open geohash channel (PWA `markVisibleChannelMessagesRead`). Called when
+  /// the user opens / returns to a channel and on inbound messages, so receipts
+  /// fire for messages that piled up while away. Per-message dedup lives in
+  /// [sendChannelReadReceipt].
+  void markVisibleChannelMessagesRead() {
+    if (!_channelReceiptAllowed()) return;
+    final identity = _identity;
+    if (identity == null) return;
+    final state = _ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return;
+    final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
+    if (entry.isEmpty || !entry.first.isGeohash) return;
+    final geohash = entry.first.geohash;
+    final messages = state.messages[view.storageKey];
+    if (messages == null || messages.isEmpty) return;
+    // Mirror the PWA's tail window (`messages.slice(-channelPageSize)`); 100 is
+    // the runtime channel page size used elsewhere.
+    final tail = messages.length > 100
+        ? messages.sublist(messages.length - 100)
+        : messages;
+    for (final m in tail) {
+      if (m.isOwn || m.isHistorical) continue;
+      if (!_isChannelMessageId(m.id)) continue;
+      final gh = (m.geohash ?? '').isNotEmpty ? m.geohash! : geohash;
+      unawaited(sendChannelReadReceipt(m.id, m.pubkey, gh));
+    }
+  }
+
+  /// True for a 64-hex channel-message id (PWA `/^[0-9a-f]{64}$/i` gate before
+  /// a channel read receipt is sent).
+  static final RegExp _channelMessageIdRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+  bool _isChannelMessageId(String id) => _channelMessageIdRe.hasMatch(id);
+
+  /// Routes an inbound public channel read receipt (kind 24421): someone saw a
+  /// channel message. Mirrors the PWA's `handleChannelReadReceipt`: skips our
+  /// own + stale (>5 min) receipts, parses the `['e', id]` / `['g'|'d', geo]` /
+  /// `['n', nym]` tags, resolves the reader's display nym, and records it so the
+  /// matching own message's reader avatars render.
+  void _onChannelReadReceipt(NostrEvent event) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (event.pubkey == self) return;
+    final ageMs = DateTime.now().millisecondsSinceEpoch - event.createdAt * 1000;
+    if (ageMs > 5 * 60 * 1000) return;
+
+    final messageId = event.tagValue('e');
+    final geohash = event.tagValue('g') ?? event.tagValue('d');
+    if (messageId == null || messageId.isEmpty || geohash == null) return;
+
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(event.pubkey)) return;
+
+    // A read receipt is a self-attestation that the reader runs Nymchat — add
+    // them to the trust graph + our vouch list (nostr-core.js:1647-1650).
+    _observeNymchatPubkey(event.pubkey);
+
+    // Reader display name: the receipt's `['n', nym]` (base), else the known
+    // user nym, decorated with the pubkey suffix (PWA `stripPubkeySuffix(rawNym
+    // || getNymFromPubkey(pubkey))`).
+    final rawNym = event.tagValue('n');
+    final base = stripPubkeySuffix(
+        rawNym ?? appState.users[event.pubkey]?.nym ?? 'anon');
+    final readerNym = '$base#${getPubkeySuffix(event.pubkey)}';
+
+    _ref.read(appStateProvider.notifier).applyChannelReader(
+          messageId: messageId,
+          readerPubkey: event.pubkey,
+          readerNym: readerNym,
+        );
+  }
+
   // ---------------------------------------------------------------------------
   // Reactions (kind 7 public / gift-wrapped private)
   // ---------------------------------------------------------------------------
@@ -3148,6 +3465,9 @@ class NostrController {
         state.channels.where((c) => c.key == state.view.id.toLowerCase());
     if (entry.isEmpty || !entry.first.isGeohash) return;
     _service?.subscribeChannelTyping(entry.first.geohash);
+    // Receipt the messages that piled up here while we were away (PWA
+    // `openChannel` → `markVisibleChannelMessagesRead`).
+    markVisibleChannelMessagesRead();
   }
 
   // ---------------------------------------------------------------------------
@@ -3198,6 +3518,15 @@ class NostrController {
       final reactions = results[1] as Map<String, List<dynamic>>;
       if (profiles.isNotEmpty) appState.hydrateProfiles(profiles);
       if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
+      // Web-of-trust graph: restore the persisted nymchatPubkeys / vouches /
+      // trusted sets so the spam gate isn't cold on launch (it still grows live
+      // from PoW-valid messages + receipts + vouches).
+      final trust = await Future.wait([
+        cache.loadMetaSet(CacheStore.metaNymchatPubkeys),
+        cache.loadMetaSet(CacheStore.metaNymchatVouches),
+        cache.loadMetaSet(CacheStore.metaTrustedPubkeys),
+      ]);
+      appState.hydrateTrustSets(trust[0], trust[1], trust[2]);
       // Channel/PM message rehydration happens lazily as channels are opened
       // (loadChannelMessages); the cache is wired so saves persist 1000 caps.
     } catch (e) {
@@ -3296,6 +3625,30 @@ class NostrController {
         pubkey: identity.pubkey,
       );
     });
+
+    // Activate the WS-first storage transport (the PWA's persistent `/api`
+    // socket). Reads in [StorageSync] now try `wss://<host>/api` FIRST and fall
+    // back to HTTP on ANY socket failure (no socket, auth failure, timeout,
+    // error frame, disconnect — all routed to null inside [ApiClient._trySocket]).
+    // The HTTP path is untouched, so data loading is never lost to the socket.
+    //
+    // The socket's one-time AUTH handshake signs a kind-27235 `api-ws` event
+    // bound to `https://<host>/api/WS` — the PWA's `_signBotAuth('api-ws','WS')`
+    // (endpoint 'WS' → `/api/WS`), distinct from the storage `/api/storage`
+    // `u`-tag. Only the local-key path can sign it; a NIP-46 remote signer
+    // returns null, so the socket simply opens UNAUTHENTICATED and carries only
+    // public reads (channel/profile/shop-status), exactly like a logged-out PWA.
+    api.setApiSocketAuthBuilder(() async {
+      final l = local;
+      if (l == null) return null;
+      return Nip98Auth.build(
+        action: 'api-ws',
+        url: _apiWsAuthUrl(),
+        privkey: l.privkey,
+        pubkey: identity.pubkey,
+      );
+    });
+    api.activateApiSocket();
     _storageSync = sync;
 
     // The other-users shop-status fetcher (cosmetics for OTHER pubkeys) must
@@ -3313,6 +3666,26 @@ class NostrController {
     _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
   }
 
+  /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
+  /// `https://<host>/api/WS`. Mirrors the PWA's `_signBotAuth('api-ws', 'WS')`
+  /// (endpoint 'WS' → `https://${apiHost}/api/WS`, pms.js:1652). Derived from the
+  /// storage URL so it tracks the same fixed host without an extra import.
+  static String _apiWsAuthUrl() {
+    final u = Uri.parse(StorageSync.storageUrl()); // …/api/storage
+    final segs = List<String>.from(u.pathSegments);
+    if (segs.isNotEmpty) {
+      segs[segs.length - 1] = 'WS';
+    } else {
+      segs.add('WS');
+    }
+    return Uri(
+      scheme: u.scheme,
+      host: u.host,
+      port: u.hasPort ? u.port : null,
+      pathSegments: segs,
+    ).toString();
+  }
+
   /// Reacts to a conversation being opened ([AppStateNotifier.switchView]) by
   /// fetching its D1 message archive and ingesting it through the same pipeline
   /// live events use. Channels hit `channel-get`; groups pull the ephemeral
@@ -3324,6 +3697,10 @@ class NostrController {
     switch (view.kind) {
       case ViewKind.channel:
         unawaited(_backfillChannelArchive(view.id));
+        // Catch up read receipts for messages already loaded in this channel
+        // (PWA `openChannel` → `markVisibleChannelMessagesRead`). Newly
+        // backfilled messages are receipted as they ingest in `_onEvent`.
+        markVisibleChannelMessagesRead();
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
       case ViewKind.pm:

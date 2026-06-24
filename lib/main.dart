@@ -8,11 +8,18 @@ import 'core/constants/storage_keys.dart';
 import 'core/theme/nym_theme.dart';
 import 'features/identity/vault_boot_unlock.dart';
 import 'services/storage/key_value_store.dart';
+import 'state/app_state.dart';
 import 'state/nostr_controller.dart';
 import 'state/settings_provider.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // The web-of-trust spam gate is safe to enable now that channel sends carry
+  // the NIP-13 PoW floor (so Nymchat-client messages self-attest) and the trust
+  // graph persists across launches. Enabled in the real app only — widget tests
+  // leave it off by default.
+  nymVouchSpamGateEnabled = true;
 
   FlutterError.onError = (details) {
     FlutterError.presentError(details);

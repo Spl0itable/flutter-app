@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/core/crypto/keys.dart';
 import 'package:nym_bar/core/crypto/bech32_codec.dart' as b19;
+import 'package:nym_bar/core/crypto/isolate_verifier.dart';
 import 'package:nym_bar/core/crypto/schnorr.dart' as schnorr;
 import 'package:nym_bar/core/crypto/nip44.dart' as nip44;
 import 'package:nym_bar/core/crypto/bitchat.dart' as bitchat;
@@ -116,6 +117,90 @@ void main() {
         sig: '${event.sig[0] == 'a' ? 'b' : 'a'}${event.sig.substring(1)}',
       );
       expect(schnorr.verifyEvent(badSig), isFalse);
+    });
+  });
+
+  group('isolate verifier (off-thread batch verification)', () {
+    NostrEvent signedEvent(String content) {
+      final sk = generatePrivateKey();
+      return schnorr.finalizeEvent(
+        UnsignedEvent(
+          pubkey: getPublicKeyHex(sk),
+          createdAt: 1700000000,
+          kind: 1,
+          content: content,
+        ),
+        sk,
+      );
+    }
+
+    NostrEvent forge(NostrEvent valid, String newContent) => NostrEvent(
+          id: valid.id, // stale id; no longer matches the tampered content
+          pubkey: valid.pubkey,
+          createdAt: valid.createdAt,
+          kind: valid.kind,
+          tags: valid.tags,
+          content: newContent,
+          sig: valid.sig,
+        );
+
+    test('verifyEventsBatch returns one positionally-aligned verdict per event',
+        () {
+      final good0 = signedEvent('zero');
+      final good2 = signedEvent('two');
+      final bad1 = forge(good0, 'tampered');
+      // Order: valid, INVALID, valid. The verdict list must line up exactly.
+      final results = verifyEventsBatch(
+        [good0.toJson(), bad1.toJson(), good2.toJson()],
+      );
+      expect(results, [true, false, true]);
+    });
+
+    test('verifyEventsBatch agrees with synchronous verifyEvent element-wise',
+        () {
+      final events = [
+        signedEvent('a'),
+        forge(signedEvent('b'), 'b!'),
+        signedEvent('c'),
+        signedEvent('d'),
+      ];
+      final batch = verifyEventsBatch([for (final e in events) e.toJson()]);
+      final sync = [for (final e in events) schnorr.verifyEvent(e)];
+      expect(batch, sync);
+    });
+
+    test('empty batch yields empty result (no drops, no spurious passes)', () {
+      expect(verifyEventsBatch(const []), isEmpty);
+    });
+
+    test(
+        'IsolateVerifier resolves each event to its own verdict across a burst',
+        () async {
+      final verifier = IsolateVerifier();
+      final good0 = signedEvent('keep-0');
+      final good1 = signedEvent('keep-1');
+      final bad = forge(good0, 'forged');
+      final good2 = signedEvent('keep-2');
+      // Submit all in the SAME synchronous turn so they coalesce into one
+      // isolate hop; each future must still get its own positional verdict.
+      final futures = <Future<bool>>[
+        verifier.verify(good0),
+        verifier.verify(bad),
+        verifier.verify(good1),
+        verifier.verify(good2),
+      ];
+      final results = await Future.wait(futures);
+      expect(results, [true, false, true, true]);
+    });
+
+    test('IsolateVerifier never drops a valid event in a large batch', () async {
+      final verifier = IsolateVerifier(maxBatch: 8);
+      // More events than maxBatch so the buffer flushes mid-turn; all valid.
+      final events = [for (var i = 0; i < 20; i++) signedEvent('e$i')];
+      final results =
+          await Future.wait([for (final e in events) verifier.verify(e)]);
+      expect(results.length, events.length);
+      expect(results.every((ok) => ok), isTrue);
     });
   });
 

@@ -85,6 +85,31 @@ class FlairBadge extends StatelessWidget {
     'flair-genesis': Color(0xFFFFDF6B),
   };
 
+  /// Light-mode `.flair-X` colours (`body.light-mode .flair-X`,
+  /// styles-themes-responsive.css:765-985) — darker / desaturated for legibility
+  /// on a light surface; the CSS also drops the glow (`text-shadow: none`).
+  static const Map<String, Color> lightColors = {
+    'flair-crown': Color(0xFFB8960A),
+    'flair-diamond': Color(0xFF0088AA),
+    'flair-skull': Color(0xFFCC0000),
+    'flair-star': Color(0xFF8A7200),
+    'flair-lightning': Color(0xFFC47A15),
+    'flair-heart': Color(0xFFCC0066),
+    'flair-mask': Color(0xFF333333),
+    'flair-rocket': Color(0xFFCC3333),
+    'flair-shield': Color(0xFF228855),
+    'flair-flame': Color(0xFFCC5500),
+    'flair-snowflake': Color(0xFF0077AA),
+    'flair-moon': Color(0xFF4A4FA0),
+    'flair-sun': Color(0xFFB8860A),
+    'flair-leaf': Color(0xFF2E8B2E),
+    'flair-music': Color(0xFF7A3FCC),
+    'flair-eye': Color(0xFF1F7A9C),
+    'flair-anchor': Color(0xFF2855A3),
+    'flair-gem': Color(0xFFCC1F4F),
+    'flair-genesis': Color(0xFFB8860A),
+  };
+
   /// The `.flair-X` glow: the CSS `text-shadow` blur(s) (and for the brighter
   /// star/flame/diamond/genesis the extra `filter: drop-shadow`). Each entry is
   /// a blurred tinted copy of the glyph painted behind the crisp icon. The CSS
@@ -128,8 +153,12 @@ class FlairBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final svg = ShopCatalog.flairIcon(flairId, edition);
     if (svg.isEmpty) return const SizedBox.shrink();
-    final color = colors[flairId] ?? context.nym.primary;
-    final glow = _glows[flairId];
+    final isLight = context.nym.isLight;
+    // Light mode swaps to the darker `body.light-mode .flair-X` colour and drops
+    // the glow (`text-shadow: none`); dark mode keeps the bright colour + glow.
+    final color =
+        (isLight ? lightColors[flairId] : colors[flairId]) ?? context.nym.primary;
+    final glow = isLight ? null : _glows[flairId];
     final icon = ShopSvgIcon(svg: svg, size: size, color: color);
     return Padding(
       padding: const EdgeInsets.only(left: 5),
@@ -172,27 +201,37 @@ class SupporterBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Light mode (`body.light-mode .supporter-badge*`): a darker amber pill —
+    // bg rgba(180,140,0,.15→.08), border #b8960a, text #7a5c00, icon #9a7800 —
+    // so the gold reads on a light surface. Dark mode keeps the bright gold.
+    final isLight = context.nym.isLight;
+    final gradient = isLight
+        ? const [Color(0x26B48C00), Color(0x14B48C00)]
+        : const [Color(0x1FFFD700), Color(0x0FFFD700)];
+    final border = isLight ? const Color(0xFFB8960A) : const Color(0x4DFFD700);
+    final textColor = isLight ? const Color(0xFF7A5C00) : _gold;
+    final iconColor = isLight ? const Color(0xFF9A7800) : _gold;
     return Container(
       margin: const EdgeInsets.only(left: 5),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0x1FFFD700), Color(0x0FFFD700)],
+          colors: gradient,
         ),
-        border: Border.all(color: const Color(0x4DFFD700)),
+        border: Border.all(color: border),
         borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ShopSvgIcon(svg: ShopCatalog.trophyIcon, size: 14, color: _gold),
+          ShopSvgIcon(svg: ShopCatalog.trophyIcon, size: 14, color: iconColor),
           const SizedBox(width: 5),
-          const Text(
+          Text(
             'SUPPORTER',
             style: TextStyle(
-              color: _gold,
+              color: textColor,
               fontSize: 11,
               letterSpacing: 1,
               fontWeight: FontWeight.w600,

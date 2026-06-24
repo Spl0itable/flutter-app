@@ -9,7 +9,9 @@ import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/p2p/p2p_transfers_modal.dart';
 import '../../features/settings/about_screen.dart';
+import '../../features/settings/settings_helpers.dart' show geohashLocationLabel;
 import '../../features/settings/settings_screen.dart';
+import '../../features/shop/cosmetics.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
 import '../../models/group.dart';
@@ -19,6 +21,11 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
+import '../context_menu/context_menu_actions.dart' show CtxTarget;
+import '../context_menu/context_menu_panel.dart' show ContextMenuPanel;
+import '../context_menu/group_context_menu_panel.dart'
+    show GroupContextMenuPanel;
+import 'message_row.dart' show formatRelativeTime;
 import 'composer.dart';
 import 'messages_list.dart';
 
@@ -213,8 +220,14 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                     // `.channel-title` (#currentChannel): a plain `#name` for a
                     // channel; `.pm-header-row` (26px avatar + status dot + name)
                     // for a PM; `.group-header-row` (group glyph + stacked member
-                    // avatars + name) for a group.
+                    // avatars + name) for a group. The PWA nests a second
+                    // `.channel-location` line (12px) inside `#currentChannel`
+                    // beneath the title row, so it lives in this same block.
                     _titleLine(c, app, view, title, titleSize),
+                    _locationLine(c, app, view),
+                    // `.channel-meta` (#channelMeta): the 11px line below the
+                    // title block — online-nym count (channel) or the E2E lock
+                    // notice (PM/group).
                     if (metaText.isNotEmpty)
                       Row(
                         mainAxisSize: MainAxisSize.min,
@@ -285,7 +298,8 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         final user = app.users[view.id];
         final status = user?.effectiveStatus() ?? UserStatus.offline;
         // `.pm-header-row`: `.pm-name-text` (base nym) + a dimmed `.nym-suffix`
-        // (`#abcd`, 0.9em / w100 / opacity 0.7), mirroring the PWA header markup.
+        // (`#abcd`, 0.9em / w100 / opacity 0.7) + flair/supporter + verified ✓ +
+        // friend badge, mirroring the PWA `displayNym` markup (pms.js:2920).
         final base = stripPubkeySuffix(title);
         final suffix = getPubkeySuffix(view.id);
         final nameRich = Text.rich(
@@ -307,9 +321,16 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
         );
+
+        final controller = ref.read(nostrControllerProvider);
+        final isDev = controller.isVerifiedDeveloper(view.id);
+        final isBot = !isDev && controller.isVerifiedBot(view.id);
+        final isFriend = app.friends.contains(view.id);
+        final cosmetics = ref.watch(userCosmeticsProvider(view.id));
+
         // `.pm-header-avatar`: 26px round, margin-right 10, with a 7px status dot
         // (bottom-right -2) ringed by the bg. Hidden status drops the dot.
-        return Row(
+        final row = Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Stack(
@@ -338,33 +359,60 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
             ),
             const SizedBox(width: 10),
             Flexible(child: nameRich),
+            // `.flair-badge` (20px, margin-left 5), `.verified-badge` (20×20,
+            // margin-left 4), `.friend-badge` (20×20 svg) — the PWA sizes these
+            // independently of the title text, so they stay 20px in the header.
+            CosmeticNymBadges(
+              cosmetics: cosmetics,
+              flairSize: 20,
+              supporterHeight: 20,
+            ),
+            if (isDev || isBot) ...[
+              const SizedBox(width: 4),
+              const _VerifiedBadge(size: 20),
+            ],
+            if (isFriend) ...[
+              const SizedBox(width: 4),
+              const _FriendBadge(size: 20),
+            ],
           ],
+        );
+        // `.pm-header-row.header-clickable`: tap opens the contact's profile
+        // context menu (pms.js:2931 `showContextMenu(..., profileOnly=true)`).
+        return _HeaderClickable(
+          onTap: () => _openPMProfile(view.id, '$base#$suffix', isBot),
+          child: row,
         );
 
       case ViewKind.group:
-        Group? g;
+        Group? found;
         for (final cand in app.groups) {
           if (cand.id == view.id) {
-            g = cand;
+            found = cand;
             break;
           }
         }
-        if (g == null) return titleText;
+        if (found == null) return titleText;
+        final g = found;
         final customAvatar = g.avatar;
         final hasCustom = customAvatar != null && customAvatar.isNotEmpty;
         final others =
             g.members.where((pk) => pk != app.selfPubkey).take(4).toList();
 
         if (hasCustom) {
-          // `.group-header-custom-wrap`: a 26px round custom avatar, margin-right
-          // 8 (mirrors the PM avatar slot).
-          return Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              NymAvatar(seed: g.id, size: 26, imageUrl: customAvatar),
-              const SizedBox(width: 8),
-              Flexible(child: titleText),
-            ],
+          // `.group-header-custom-wrap`: a 26px round custom avatar with
+          // margin-right 4 (styles-features.css:5365-5377). The name carries no
+          // extra margin in the custom-avatar case (`nameCls` is empty).
+          return _HeaderClickable(
+            onTap: () => GroupContextMenuPanel.show(context, g.id),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                NymAvatar(seed: g.id, size: 26, imageUrl: customAvatar),
+                const SizedBox(width: 4),
+                Flexible(child: titleText),
+              ],
+            ),
           );
         }
 
@@ -390,7 +438,14 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
             final shown = others.take(fit).toList();
 
             final prefix = <Widget>[
-              Icon(Icons.groups, size: 18, color: c.primary),
+              // `.group-header-icon` → `.group-header-svg` (18×18, stroke-width
+              // 1.75, currentColor = `.channel-title` `--primary`), margin-right
+              // 5 (groups.js:2910, styles-features.css:2480-2491).
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CustomPaint(painter: _GroupGlyphPainter(color: c.primary)),
+              ),
               const SizedBox(width: 5),
             ];
             for (var i = 0; i < shown.length; i++) {
@@ -399,7 +454,11 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                 child: Container(
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    border: Border.all(color: c.bg, width: 1),
+                    // `.group-header-avatar { border: 1px solid var(--bg-primary) }`
+                    // — `--bg-primary` is undefined in the PWA, so the declaration
+                    // is invalid-at-computed-value and `border-color` falls back to
+                    // `currentColor` = the `.channel-title` `--primary`.
+                    border: Border.all(color: c.primary, width: 1),
                   ),
                   child: NymAvatar(
                     seed: shown[i],
@@ -415,16 +474,140 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
               prefix.add(SizedBox(
                   width: (8 - 4.0 * (shown.length - 1)).clamp(0.0, 8.0)));
             }
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ...prefix,
-                Flexible(child: titleText),
-              ],
+            // `.group-header-row.header-clickable`: tap opens the group context
+            // menu (groups.js:2982 `showGroupContextMenu`).
+            return _HeaderClickable(
+              onTap: () => GroupContextMenuPanel.show(context, g.id),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ...prefix,
+                  Flexible(child: titleText),
+                ],
+              ),
             );
           },
         );
     }
+  }
+
+  /// Opens the PM contact's profile context menu (PWA `header-clickable` →
+  /// `showContextMenu(..., profileOnly=true)`, pms.js:2931).
+  void _openPMProfile(String pubkey, String nym, bool isBot) {
+    if (pubkey.isEmpty) return;
+    final state = ref.read(appStateProvider);
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: pubkey,
+        nym: stripPubkeySuffix(nym),
+        isSelf: pubkey == state.selfPubkey,
+        isBot: isBot,
+        profileOnly: true,
+      ),
+    );
+  }
+
+  /// The `.channel-location` line nested inside `#currentChannel` beneath the
+  /// title row (12px, text-dim, margin-top 2px). Per variant:
+  /// - Channel (geohash): the resolved place name + optional ` (N.Nkm)` proximity
+  ///   distance (channels.js `_renderChannelTitle`, 996-1032). We render the
+  ///   coordinate label (`getGeohashLocation`) the PWA shows as its pre-resolve
+  ///   fallback — async place-name resolution is owned by the channels service.
+  /// - Channel (non-geohash): "Not a geohash".
+  /// - PM: the live presence / last-seen line (pms.js `_pmLastSeenText`).
+  /// - Group: "{N} members" (groups.js:2927).
+  Widget _locationLine(NymColors c, AppState app, ChatView view) {
+    final loc = _locationFor(app, view);
+    if (loc.text.isEmpty) return const SizedBox.shrink();
+    // `.channel-location`: font-size 12, color --text-dim, margin-top 2px.
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Flexible(
+            child: Text(
+              loc.text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            ),
+          ),
+          // `.channel-location-dist`: never shrinks (`flex:0 0 auto`).
+          if (loc.dist.isNotEmpty)
+            Text(
+              loc.dist,
+              maxLines: 1,
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            ),
+        ],
+      ),
+    );
+  }
+
+  ({String text, String dist}) _locationFor(AppState app, ChatView view) {
+    switch (view.kind) {
+      case ViewKind.channel:
+        final ch = app.channels.firstWhere(
+          (c) => c.key == view.id,
+          orElse: () => ChannelEntry(channel: view.id),
+        );
+        final gh = ch.isGeohash ? ch.geohash : view.id;
+        if (!isValidGeohash(gh)) {
+          // `loc-country` → "Not a geohash" for a named channel.
+          return (text: 'Not a geohash', dist: '');
+        }
+        // `getGeohashLocation` coordinate label (the PWA's pre-resolve fallback).
+        final place = geohashLocationLabel(gh);
+        // ` (N.Nkm)` proximity, only with a known location + sortByProximity on.
+        var dist = '';
+        final settings = ref.watch(settingsProvider);
+        final userLoc = ref.watch(userLocationProvider);
+        if (settings.sortByProximity && userLoc != null) {
+          try {
+            final coords = decodeGeohash(gh);
+            final km = calculateDistance(
+                userLoc.lat, userLoc.lng, coords.lat, coords.lng);
+            dist = ' (${km.toStringAsFixed(1)}km)';
+          } catch (_) {}
+        }
+        return (text: place, dist: dist);
+      case ViewKind.pm:
+        return (text: _pmLastSeenText(app, view.id), dist: '');
+      case ViewKind.group:
+        for (final g in app.groups) {
+          if (g.id == view.id) {
+            return (
+              text: '${_abbreviateCount(g.members.length)} members',
+              dist: '',
+            );
+          }
+        }
+        return (text: '', dist: '');
+    }
+  }
+
+  /// PWA `_pmLastSeenText` (pms.js:36): bot → "Always at your service";
+  /// hidden → ""; online → "Active now"; away → "Away"; else the relative
+  /// last-seen ("Last seen 5m ago") or "Last seen unknown".
+  String _pmLastSeenText(AppState app, String pubkey) {
+    if (ref.read(nostrControllerProvider).isVerifiedBot(pubkey)) {
+      return 'Always at your service';
+    }
+    final user = app.users[pubkey];
+    final status = user?.effectiveStatus() ?? UserStatus.offline;
+    if (status == UserStatus.hidden) return '';
+    if (status == UserStatus.online) return 'Active now';
+    if (status == UserStatus.away) return 'Away';
+    final lastSeen = user?.lastSeen ?? 0;
+    if (lastSeen > 0) {
+      return 'Last seen '
+          '${formatRelativeTime(DateTime.fromMillisecondsSinceEpoch(lastSeen))}';
+    }
+    return 'Last seen unknown';
   }
 
   /// `.mobile-header-actions`: the `.icon-btn`-class notif + hamburger toggles,
@@ -1004,4 +1187,157 @@ class _CountBadge extends StatelessWidget {
       ),
     );
   }
+}
+
+/// `.header-clickable`: the PM/group title row becomes a pointer-cursor tap
+/// target (pms.js:2613 / groups.js:2982) that opens the contact-profile or
+/// group context menu. A bare wrapper so the row's intrinsic min-size layout is
+/// preserved (no extra padding/ink box — the PWA only sets `cursor:pointer`).
+class _HeaderClickable extends StatelessWidget {
+  const _HeaderClickable({required this.child, required this.onTap});
+  final Widget child;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: child,
+      ),
+    );
+  }
+}
+
+/// `.verified-badge` (styles-components.css:1382-1414): a #1DA1F2 circle with a
+/// centered white ✓ (font-weight 700). Sized to the surrounding nym.
+class _VerifiedBadge extends StatelessWidget {
+  const _VerifiedBadge({required this.size});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Color(0xFF1DA1F2),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        '✓',
+        style: TextStyle(
+          color: const Color(0xFFFFFFFF),
+          fontSize: size * 0.6,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
+/// `.friend-badge` (styles-features.css:1483-1495): a people-with-check glyph in
+/// #4fc3f7 (light-mode #0288d1, `body.light-mode .friend-badge`). Mirrors the
+/// call surface's friend badge so the glyph matches the rest of the app.
+class _FriendBadge extends StatelessWidget {
+  const _FriendBadge({required this.size});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = context.nym.isLight
+        ? const Color(0xFF0288D1)
+        : const Color(0xFF4FC3F7);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: CustomPaint(painter: _FriendBadgePainter(color)),
+    );
+  }
+}
+
+class _FriendBadgePainter extends CustomPainter {
+  _FriendBadgePainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width / 16.0;
+    final fill = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5 * s
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
+
+    canvas.drawCircle(Offset(6 * s, 5 * s), 2.5 * s, fill);
+    final body = Path()
+      ..moveTo(1.5 * s, 14 * s)
+      ..cubicTo(1.5 * s, 10.5 * s, 3.5 * s, 9 * s, 6 * s, 9 * s)
+      ..cubicTo(8.5 * s, 9 * s, 10.5 * s, 10.5 * s, 10.5 * s, 14 * s);
+    canvas.drawPath(body, fill);
+    canvas.drawLine(Offset(13 * s, 6 * s), Offset(13 * s, 10 * s), stroke);
+    canvas.drawLine(Offset(11 * s, 8 * s), Offset(15 * s, 8 * s), stroke);
+  }
+
+  @override
+  bool shouldRepaint(_FriendBadgePainter old) => old.color != color;
+}
+
+/// `.group-header-svg` (groups.js:2910): the three-figure group glyph, drawn in
+/// a 24×24 viewBox at stroke-width 1.75 (currentColor). A faithful copy of the
+/// PWA SVG path data; scaled to the requested box size.
+class _GroupGlyphPainter extends CustomPainter {
+  _GroupGlyphPainter({required this.color});
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width / 24; // uniform scale from the 24×24 viewBox.
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.75 * s
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    Offset p(double x, double y) => Offset(x * s, y * s);
+
+    // Center head + shoulders: circle cx12 cy7 r2.75; M5 21v-1.5 a7 7 0 0 1 14 0 V21.
+    canvas.drawCircle(p(12, 7), 2.75 * s, paint);
+    final centre = Path()
+      ..moveTo(5 * s, 21 * s)
+      ..relativeLineTo(0, -1.5 * s)
+      ..arcToPoint(p(19, 19.5), radius: Radius.circular(7 * s), clockwise: true)
+      ..lineTo(19 * s, 21 * s);
+    canvas.drawPath(centre, paint);
+
+    // Left figure: circle cx4.5 cy9.5 r2; M1 20v-1 a4.5 4.5 0 0 1 5.5-4.35.
+    canvas.drawCircle(p(4.5, 9.5), 2 * s, paint);
+    final left = Path()
+      ..moveTo(1 * s, 20 * s)
+      ..relativeLineTo(0, -1 * s)
+      ..relativeArcToPoint(p(5.5, -4.35),
+          radius: Radius.circular(4.5 * s), clockwise: true);
+    canvas.drawPath(left, paint);
+
+    // Right figure: circle cx19.5 cy9.5 r2; M23 20v-1 a4.5 4.5 0 0 0-5.5-4.35.
+    canvas.drawCircle(p(19.5, 9.5), 2 * s, paint);
+    final right = Path()
+      ..moveTo(23 * s, 20 * s)
+      ..relativeLineTo(0, -1 * s)
+      ..relativeArcToPoint(p(-5.5, -4.35),
+          radius: Radius.circular(4.5 * s), clockwise: false);
+    canvas.drawPath(right, paint);
+  }
+
+  @override
+  bool shouldRepaint(_GroupGlyphPainter old) => old.color != color;
 }

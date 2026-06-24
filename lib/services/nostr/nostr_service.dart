@@ -8,8 +8,11 @@ import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
 import '../../core/crypto/bitchat.dart' as bitchat;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
+import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
+import '../../core/crypto/pow.dart';
 import '../../core/crypto/schnorr.dart' as schnorr;
+import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
 import '../../models/nostr_event.dart';
 import '../api/api_client.dart';
@@ -228,6 +231,18 @@ class NostrHandlers {
 /// to the channel/profile/reaction kinds and publishes channel messages.
 /// (docs/specs/01 §4.5, 03 §2.2)
 class NostrService {
+  /// Process-wide off-thread signature verifier, shared by every transport this
+  /// service builds (proxy, direct-fallback, restore probe) so a burst of
+  /// inbound EVENTs across them coalesces into one isolate hop. Mirrors the
+  /// PWA's single shared `verify-worker.js`. Stateless, so one instance is safe.
+  static final IsolateVerifier _verifier = IsolateVerifier();
+
+  /// The [EventVerifier] handed to every pool: verify each inbound event off
+  /// the main thread (batched). Preserves the per-event keep/drop contract the
+  /// relay layer relies on — see [IsolateVerifier].
+  static Future<bool> _verifyOffThread(NostrEvent event) =>
+      _verifier.verify(event);
+
   /// Default constructor. [useProxy] selects the transport: when true (the
   /// native default per spec §4.2) the service runs over the multiplexed
   /// `RelayPoolProxy` (`wss://<host>/api/relay-pool`); when false it uses the
@@ -255,12 +270,12 @@ class NostrService {
                 ? RelayPoolProxy(
                     relays: relays ?? RelayConfig.defaultRelays,
                     dmRelays: RelayConfig.defaultRelays,
-                    verify: (e) async => schnorr.verifyEvent(e),
+                    verify: _verifyOffThread,
                   )
                 : RelayPool(
                     relays: relays ?? RelayConfig.defaultRelays,
                     writeOnlyRelays: RelayConfig.writeOnlyRelays,
-                    verify: (e) async => schnorr.verifyEvent(e),
+                    verify: _verifyOffThread,
                   )) {
     // Route every ApiClient's /api traffic into our persistent api-stats object
     // so the Network Stats "App data" section is populated (mirrors the PWA's
@@ -464,7 +479,7 @@ class NostrService {
     final direct = RelayPool(
       relays: _relays ?? RelayConfig.defaultRelays,
       writeOnlyRelays: RelayConfig.writeOnlyRelays,
-      verify: (e) async => schnorr.verifyEvent(e),
+      verify: _verifyOffThread,
     );
     unawaited(_swapToDirect(direct));
   }
@@ -571,7 +586,7 @@ class NostrService {
     probe = RelayPoolProxy(
       relays: _relays ?? RelayConfig.defaultRelays,
       dmRelays: RelayConfig.defaultRelays,
-      verify: (e) async => schnorr.verifyEvent(e),
+      verify: _verifyOffThread,
       onProxyUnreachable: () {
         // Probe failed to reach the host — drop it and schedule the next try.
         _bgRestoreInFlight = false;
@@ -870,6 +885,7 @@ class NostrService {
     required String nym,
     String? geohash,
     List<List<String>> emojiTags = const [],
+    int powDifficulty = 0,
     EventSigner? signerOverride,
   }) async {
     // [signerOverride] is the pseudonymous-send path: a fresh per-message
@@ -892,7 +908,13 @@ class NostrService {
       ...emojiTags,
     ];
 
-    final signed = await sig.sign(
+    // Channel messages carry the Nymchat NIP-13 PoW floor (and any higher user
+    // setting) — the self-attestation the web-of-trust uses to tell a Nymchat
+    // client from spam (PWA `max(userPow, nymchatPowFloor)`). Mined off the main
+    // thread, then signed by the (local or remote) signer.
+    final difficulty =
+        powDifficulty > kNymchatPowFloor ? powDifficulty : kNymchatPowFloor;
+    final mined = await mineNonce(
       UnsignedEvent(
         pubkey: sig.pubkey,
         createdAt: nowSec,
@@ -900,7 +922,9 @@ class NostrService {
         tags: tags,
         content: content,
       ),
+      difficulty,
     );
+    final signed = await sig.sign(mined);
 
     // Geohash channel messages (kind 20000 with a `g` tag) route through
     // GEO_EVENT so the proxy prioritizes the closest geo relays; the proxy
@@ -967,6 +991,67 @@ class NostrService {
     await pool.publish(signed);
     return signed;
   }
+
+  /// Publishes our kind-30078 `nym-vouches` list (web-of-trust). Mirrors
+  /// nostr-core.js `publishNymchatVouches` (line 2645): a parameterized
+  /// replaceable event tagged `['d','nym-vouches'],['t','nym-vouches']` whose
+  /// content is the JSON array of pubkeys we've observed running Nymchat, so
+  /// other clients can expand their trust graph through us. No-op for an empty
+  /// list (the PWA returns early when `list.length === 0`). Returns the signed
+  /// event, or null when there's nothing to publish / no signer.
+  Future<NostrEvent?> publishVouches(List<String> vouchedPubkeys) async {
+    final sig = signer;
+    if (sig == null || vouchedPubkeys.isEmpty) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.appData,
+        tags: const [
+          ['d', AppDataTopic.vouches],
+          ['t', AppDataTopic.vouches],
+        ],
+        content: jsonEncode(vouchedPubkeys),
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
+  /// (Re)subscribes to peers' kind-30078 `nym-vouches` lists, authored by the
+  /// pubkeys currently in our trust graph ([nymchatPubkeys]). Mirrors the PWA's
+  /// REQ (relays.js:2538-2542): `{ kinds:[30078], "#t":["nym-vouches"], authors:
+  /// trusted-pubkeys-intersect-hex64-capped-500, limit: authors.length }`.
+  /// Ingesting a trusted peer's vouches grows the graph one hop; the controller
+  /// calls this again (debounced) when new authors appear, so the web of trust
+  /// expands and then goes quiet. Returns null when there are no valid authors.
+  Subscription? subscribeVouches(Iterable<String> nymchatPubkeys) {
+    final authors = nymchatPubkeys
+        .where(TrustGraph.isHex64)
+        .take(_vouchAuthorCap)
+        .toList();
+    if (authors.isEmpty) return null;
+    _vouchSub?.close();
+    final sub = pool.subscribe([
+      NostrFilter(
+        kinds: [EventKind.appData],
+        authors: authors,
+        tags: {
+          't': [AppDataTopic.vouches],
+        },
+        limit: authors.length,
+      ),
+    ]);
+    _vouchSub = sub;
+    sub.events.listen(_routeInbound);
+    return sub;
+  }
+
+  /// Author cap on the vouch REQ (relays.js:2539 `.slice(0, 500)`).
+  static const int _vouchAuthorCap = 500;
+
+  Subscription? _vouchSub;
 
   /// Publishes a kind-0 profile metadata event with [content] (the JSON-encoded
   /// profile object). Returns the signed event. (docs/specs/03 §Appendix A)
@@ -1160,6 +1245,39 @@ class NostrService {
         kind: EventKind.channelTyping,
         tags: [
           ['typing', status],
+          ['g', geohash],
+          ['n', nym],
+        ],
+        content: '',
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
+  /// Publishes a public channel read receipt (kind 24421) for [messageId] by
+  /// [authorPubkey] in the geohash [geohash]. Mirrors the PWA's
+  /// `sendChannelReadReceipt` (nostr-core.js): tags are
+  /// `['e', messageId]`, `['p', authorPubkey]`, `['g', geohash]`, `['n', nym]`.
+  /// Ephemeral kind — relays don't store it, so it's fire-and-forget. Returns
+  /// the signed event (null when there is no signer).
+  Future<NostrEvent?> publishChannelReceipt({
+    required String messageId,
+    required String authorPubkey,
+    required String geohash,
+    required String nym,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.channelReceipt,
+        tags: [
+          ['e', messageId],
+          ['p', authorPubkey],
           ['g', geohash],
           ['n', nym],
         ],
@@ -1397,6 +1515,7 @@ class NostrService {
     }
     await _eventSub?.cancel();
     await _channelTypingSub?.close();
+    await _vouchSub?.close();
     await _mainSub?.close();
     await pool.disconnectAll();
   }
