@@ -92,6 +92,18 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
   @override
   void didChangePlatformBrightness() => _syncBrightness();
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // On resume, re-hydrate the open conversation from D1 (the PWA backfills the
+    // active channel on `visibilitychange`). Guarded so a missing controller in
+    // tests/headless never throws.
+    if (state == AppLifecycleState.resumed) {
+      try {
+        ref.read(nostrControllerProvider).onAppResumed();
+      } catch (_) {}
+    }
+  }
+
   void _syncBrightness() {
     final b = WidgetsBinding.instance.platformDispatcher.platformBrightness;
     ref.read(platformBrightnessProvider.notifier).state = b;

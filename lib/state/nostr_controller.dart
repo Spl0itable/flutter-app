@@ -3331,6 +3331,13 @@ class NostrController {
     }
   }
 
+  /// App returned to the foreground. Re-hydrate the open conversation from D1 so
+  /// the active channel/group immediately catches up on anything missed while
+  /// backgrounded — the native equivalent of the PWA's `visibilitychange →
+  /// backfillFromD1OnReconnect`. Live relay feeds resume via the service's own
+  /// socket reconnect, so this only needs the per-view archive top-up.
+  void onAppResumed() => _onViewOpened(_ref.read(appStateProvider).view);
+
   /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
   /// 60s freshness window lives in [StorageSync.channelGet]; this set just
   /// avoids redundant in-flight calls within the same tight switch loop.
