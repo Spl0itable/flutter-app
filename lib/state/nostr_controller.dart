@@ -3242,6 +3242,11 @@ class NostrController {
     });
     _storageSync = sync;
 
+    // The other-users shop-status fetcher (cosmetics for OTHER pubkeys) must
+    // never query our own pubkey — our own record loads via shop-get below.
+    _ref.read(otherUsersShopProvider.notifier).selfPubkey =
+        identity.pubkey.toLowerCase();
+
     // Fire a debounced encrypted-settings publish whenever a synced setting
     // changes (the PWA's `nostrSettingsSave()` peppered through every setter).
     _ref.read(settingsProvider.notifier).onSyncedChange = syncSettings;
@@ -3392,6 +3397,14 @@ class NostrController {
     if (sync == null) return;
     await _mergeRemoteSettings(sync);
     await _restorePmArchive(sync);
+    // Load the user's own shop record (owned + active cosmetics) from D1 so their
+    // purchased flair/style applies on a fresh device (PWA `loadShopFromServer`,
+    // shop.js:358). Local-key only (remote signers can't auth the read).
+    final id = _identity;
+    if (id != null && id.privkey != null) {
+      unawaited(_ref.read(shopControllerProvider.notifier).loadFromServer(
+          ShopIdentity(pubkey: id.pubkey, privkey: id.privkey)));
+    }
   }
 
   /// `settings-get` → merge into the local [Settings] when the remote blob is
