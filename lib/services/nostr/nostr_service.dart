@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
+import 'dart:math';
+
+import 'package:flutter/foundation.dart';
 
 import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
@@ -238,11 +240,15 @@ class NostrService {
     bool useProxy = true,
     ApiClient? apiClient,
   })  : _apiClient = apiClient ?? ApiClient(),
+        _relays = relays,
+        // An explicitly-injected pool (tests) disables the proxy→direct
+        // auto-fallback: the caller owns the transport.
+        _autoFallback = pool == null && useProxy,
         signer = signer ??
             (identity.privkey != null
                 ? LocalSigner(identity.privkey!)
                 : null),
-        pool = pool ??
+        _pool = pool ??
             (useProxy
                 ? RelayPoolProxy(
                     relays: relays ?? RelayConfig.defaultRelays,
@@ -279,11 +285,46 @@ class NostrService {
   /// NIP-46 remote path works end-to-end (mirrors the PWA's `signEvent`).
   final EventSigner? signer;
 
-  final PoolTransport pool;
+  /// The active transport. Swappable: starts as the proxy (default) and is
+  /// replaced by a direct [RelayPool] if the proxy proves unreachable (and back
+  /// again if the proxy recovers). Read through the [pool] getter so callers
+  /// always route through the CURRENT transport.
+  PoolTransport _pool;
+
+  /// The relay set this service was constructed with (null = defaults). Reused
+  /// when building the direct-fallback / restored-proxy pools so the swap keeps
+  /// the same relay coverage.
+  final List<String>? _relays;
+
+  /// True only for the production proxy-default path: enables the
+  /// proxy→direct auto-fallback + background restore. An injected pool (tests)
+  /// or `useProxy:false` leaves the transport fixed.
+  final bool _autoFallback;
+
   final ApiClient _apiClient;
 
-  /// True when the active transport is the multiplexed proxy pool.
-  bool get isProxyMode => pool is RelayPoolProxy;
+  /// The active transport (current pool after any swap).
+  PoolTransport get pool => _pool;
+
+  /// True when the active transport is the multiplexed proxy pool. Reflects the
+  /// CURRENT pool, so it flips to false after a fallback to direct and back to
+  /// true after a background proxy restore.
+  bool get isProxyMode => _pool is RelayPoolProxy;
+
+  /// True while running on the direct-relay fallback (proxy was unreachable).
+  /// Mirrors the PWA's `_poolFallbackActive`.
+  bool _poolFallbackActive = false;
+  bool get isFallbackActive => _poolFallbackActive;
+
+  /// Background timer + attempt counter for restoring proxy mode after a
+  /// fallback (mirrors `_schedulePoolReconnectInBackground`, relays.js:1610).
+  Timer? _bgRestoreTimer;
+  int _bgRestoreAttempts = 0;
+  bool _bgRestoreInFlight = false;
+
+  /// Guards [_swapPool] so overlapping triggers (multiple shard callbacks, or a
+  /// restore racing a fallback) can't run two swaps at once.
+  bool _swapping = false;
 
   Subscription? _mainSub;
   StreamSubscription<NostrEvent>? _eventSub;
@@ -294,6 +335,7 @@ class NostrService {
   /// gift-wrap (kind 1059, `#p:[self]`) and presence (kind 30078) feeds.
   Future<void> start(NostrHandlers handlers) async {
     _handlers = handlers;
+    _wireProxyFallback();
     pool.connectAll();
 
     final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 3600;
@@ -340,6 +382,201 @@ class NostrService {
       handlers.onConnectionChanged?.call(pool.connectedCount);
     });
     handlers.onConnectionChanged?.call(pool.connectedCount);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Proxy → direct fallback + background restore.
+  //
+  // The proxy (`wss://<host>/api/relay-pool`) is the DEFAULT transport. When it
+  // can't establish a connection (host-lookup / socket errors before it EVER
+  // confirms — e.g. the relay-pool host is unreachable on a real device), the
+  // PWA falls back to DIRECT relay connections after 2 consecutive pool failures
+  // and keeps trying to restore pool mode in the background (relays.js
+  // `_fallbackToDirectConnections` / `_schedulePoolReconnectInBackground`). This
+  // ports that: it swaps `_pool` to a direct [RelayPool], replays every live
+  // subscription onto it (so channel / PM / gift-wrap feeds resume seamlessly),
+  // then periodically retries a fresh proxy and swaps back if it comes up.
+  // ---------------------------------------------------------------------------
+
+  /// Wire the active pool's [RelayPoolProxy.onProxyUnreachable] to the
+  /// fall-back-to-direct swap (no-op unless [_autoFallback] and the pool is a
+  /// proxy). Re-invoked whenever a new proxy is constructed (initial + restore).
+  void _wireProxyFallback() {
+    if (!_autoFallback) return;
+    final p = _pool;
+    if (p is RelayPoolProxy) {
+      p.onProxyUnreachable = _onProxyUnreachable;
+    }
+  }
+
+  /// The proxy reported it can't reach its endpoint (2 consecutive pre-connect
+  /// failures). Swap to a direct [RelayPool] and start the background restore.
+  void _onProxyUnreachable() {
+    if (!_autoFallback || _poolFallbackActive) return;
+    _poolFallbackActive = true;
+    final direct = RelayPool(
+      relays: _relays ?? RelayConfig.defaultRelays,
+      writeOnlyRelays: RelayConfig.writeOnlyRelays,
+      verify: (e) async => schnorr.verifyEvent(e),
+    );
+    unawaited(_swapToDirect(direct));
+  }
+
+  /// Forward fallback: replace the proxy with the freshly-built direct [pool]
+  /// (not yet connected). Tears the old proxy's SOCKETS down (keeping the live
+  /// `Subscription` objects alive), connects [pool], and replays every active
+  /// subscription onto it so its `events` stream keeps flowing. Then arms the
+  /// background proxy-restore loop.
+  Future<void> _swapToDirect(RelayPool direct) async {
+    if (_swapping) return;
+    _swapping = true;
+    try {
+      final old = _pool;
+
+      // Snapshot the live subscriptions from the OLD pool's registry. This
+      // captures BOTH service-created subs and any created directly via
+      // `service.pool.subscribe(...)` (e.g. the controller's P2P sub), because
+      // they all registered on the pool. Reuse the same `Subscription` objects
+      // so every existing `events.listen(...)` downstream keeps receiving.
+      final live = _activeSubsOf(old);
+
+      // Detach the old pool's sockets without closing the subscriptions.
+      await _detachSockets(old);
+
+      // Bring up the direct pool and replay every live subscription on it (same
+      // objects → same streams; the sub's dedup makes replay idempotent).
+      _pool = direct;
+      direct.connectAll();
+      for (final entry in live.values) {
+        direct.replaySubscription(entry.sub, entry.filters);
+      }
+
+      // The mainSub object is unchanged, so _eventSub keeps routing inbound.
+      debugPrint('[NostrService] proxy unreachable; swapped proxy → direct '
+          '(${live.length} subs replayed)');
+
+      _scheduleBgRestore();
+      _handlers?.onConnectionChanged?.call(_pool.connectedCount);
+    } finally {
+      _swapping = false;
+    }
+  }
+
+  Map<String, ({Subscription sub, List<NostrFilter> filters})> _activeSubsOf(
+      PoolTransport p) {
+    if (p is RelayPoolProxy) return p.activeSubscriptions();
+    if (p is RelayPool) return p.activeSubscriptions();
+    return const {};
+  }
+
+  Future<void> _detachSockets(PoolTransport p) async {
+    if (p is RelayPoolProxy) {
+      p.onProxyUnreachable = null; // don't let a teardown close fire the trigger
+      await p.disconnectSocketsOnly();
+    } else if (p is RelayPool) {
+      await p.disconnectSocketsOnly();
+    } else {
+      await p.disconnectAll();
+    }
+  }
+
+  /// Background restore cadence, mirroring `_schedulePoolReconnectInBackground`
+  /// (relays.js:1610): first retry after 15s, then exponential backoff
+  /// `min(15000 * 2^min(n-1,4), 120000)` with 50–100% jitter.
+  void _scheduleBgRestore() {
+    if (!_autoFallback || !_poolFallbackActive) return;
+    if (_bgRestoreInFlight) return;
+    _bgRestoreTimer?.cancel();
+    final delay = _bgRestoreAttempts == 0
+        ? const Duration(seconds: 15)
+        : _bgRestoreBackoff(_bgRestoreAttempts);
+    _bgRestoreTimer = Timer(delay, _tryRestoreProxy);
+  }
+
+  Duration _bgRestoreBackoff(int attempts) {
+    final expIdx = min(attempts - 1, 4);
+    final base = min(15000 * pow(2, expIdx).toInt(), 120000);
+    // 50–100% jitter (relays.js `_jitter`).
+    final jittered = (base * (0.5 + _bgRng.nextDouble() * 0.5)).floor();
+    return Duration(milliseconds: jittered);
+  }
+
+  final Random _bgRng = Random();
+
+  /// Try a fresh [RelayPoolProxy] connect in the background; if it CONFIRMS
+  /// (reaches a connected POOL:STATUS), swap back to proxy mode. Otherwise the
+  /// probe's own unreachable trigger reschedules the next attempt.
+  void _tryRestoreProxy() {
+    _bgRestoreTimer = null;
+    if (!_poolFallbackActive) return;
+    _bgRestoreAttempts++;
+    _bgRestoreInFlight = true;
+
+    // A short-lived probe proxy: if it confirms, we adopt it as the live pool
+    // (already connected) and replay subs onto it. If it can't reach the host
+    // (its own onProxyUnreachable fires), we discard it and back off.
+    late final RelayPoolProxy probe;
+    probe = RelayPoolProxy(
+      relays: _relays ?? RelayConfig.defaultRelays,
+      dmRelays: RelayConfig.defaultRelays,
+      verify: (e) async => schnorr.verifyEvent(e),
+      onProxyUnreachable: () {
+        // Probe failed to reach the host — drop it and schedule the next try.
+        _bgRestoreInFlight = false;
+        unawaited(probe.disconnectAll());
+        _scheduleBgRestore();
+      },
+    );
+    probe.onProxyConnected = () {
+      // Probe reached the host: promote it to the live transport.
+      if (!_poolFallbackActive) {
+        // A concurrent restore already happened; discard this probe.
+        unawaited(probe.disconnectAll());
+        return;
+      }
+      _bgRestoreInFlight = false;
+      _bgRestoreAttempts = 0;
+      // The probe is already connected; swap WITHOUT re-running connectAll on it
+      // by handing it over as the live pool and replaying subs.
+      unawaited(_adoptRestoredProxy(probe));
+    };
+    probe.connectAll();
+  }
+
+  /// Promote a probe proxy that has already confirmed connectivity to the live
+  /// transport: replay the direct pool's live subscriptions onto it and tear the
+  /// direct sockets down. (The probe is already connected, so unlike
+  /// [_swapToDirect] we do NOT call `connectAll` again — we replay directly.)
+  Future<void> _adoptRestoredProxy(RelayPoolProxy restored) async {
+    if (_swapping || !_poolFallbackActive) {
+      unawaited(restored.disconnectAll());
+      return;
+    }
+    _swapping = true;
+    try {
+      final old = _pool;
+      final live = _activeSubsOf(old);
+      await _detachSockets(old);
+      _pool = restored;
+      restored.onProxyUnreachable = _onProxyUnreachable; // future blips
+      for (final entry in live.values) {
+        restored.replaySubscription(entry.sub, entry.filters);
+      }
+      _poolFallbackActive = false;
+      _stopBgRestore();
+      debugPrint('[NostrService] proxy restored; swapped direct → proxy '
+          '(${live.length} subs replayed)');
+      _handlers?.onConnectionChanged?.call(_pool.connectedCount);
+    } finally {
+      _swapping = false;
+    }
+  }
+
+  void _stopBgRestore() {
+    _bgRestoreTimer?.cancel();
+    _bgRestoreTimer = null;
+    _bgRestoreInFlight = false;
+    _bgRestoreAttempts = 0;
   }
 
   /// Subscribes the active channel's typing/read-receipt feed (kinds 24420 /
@@ -979,6 +1216,8 @@ class NostrService {
 
   Future<void> stop() async {
     _statusTimer?.cancel();
+    _stopBgRestore();
+    _poolFallbackActive = false;
     await _eventSub?.cancel();
     await _channelTypingSub?.close();
     await _mainSub?.close();

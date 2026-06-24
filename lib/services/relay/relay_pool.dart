@@ -414,6 +414,56 @@ class RelayPool implements PoolTransport {
     }
   }
 
+  /// Snapshot of the live subscriptions (subId → its `Subscription` + filters),
+  /// so [NostrService] can replay them onto a replacement pool after a swap
+  /// (e.g. when the proxy endpoint becomes reachable again and we swap back).
+  Map<String, ({Subscription sub, List<NostrFilter> filters})>
+      activeSubscriptions() => {
+            for (final e in _subscriptions.entries)
+              e.key: (
+                sub: e.value,
+                filters: _activeFilters[e.key] ?? const [],
+              ),
+          };
+
+  /// Adopt an EXISTING [sub] (created on a previous pool) onto this pool and
+  /// re-issue its REQ to every readable relay, so its live `events` stream keeps
+  /// flowing after a swap. The sub's internal dedup suppresses any events it
+  /// already delivered (seamless, no duplicates). Newly added relays back-fill
+  /// it via [addRelay]/[_subscriptions].
+  void replaySubscription(Subscription sub, List<NostrFilter> filters) {
+    final id = sub.subId;
+    _subscriptions[id] = sub;
+    _activeFilters[id] = filters;
+    for (final entry in _connections.entries) {
+      if (_isReadable(entry.key)) {
+        entry.value.subscribe(id, filters);
+      }
+    }
+  }
+
+  /// Tear down every relay socket WITHOUT closing the active [Subscription]
+  /// objects, so they can be re-driven on another pool (the direct↔proxy swap).
+  /// Mirrors [RelayPoolProxy.disconnectSocketsOnly].
+  Future<void> disconnectSocketsOnly() async {
+    _stopSampler();
+    _subscriptions.clear();
+    _activeFilters.clear();
+    for (final s in _msgSubs.values) {
+      await s.cancel();
+    }
+    for (final s in _statusSubs.values) {
+      await s.cancel();
+    }
+    _msgSubs.clear();
+    _statusSubs.clear();
+    final conns = _connections.values.toList();
+    _connections.clear();
+    for (final c in conns) {
+      await c.close();
+    }
+  }
+
   /// Broadcast [event] to all writable relays. Returns the number of relays
   /// that accepted it (OK with accepted=true).
   @override

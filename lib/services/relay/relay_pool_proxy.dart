@@ -8,7 +8,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../../core/constants/relays.dart';
 import '../../models/nostr_event.dart';
 import '../api/api_config.dart';
-import 'relay_connection.dart' show WebSocketChannelFactory;
+import 'relay_connection.dart'
+    show WebSocketChannelFactory, defaultRelayChannelFactory;
 import 'relay_message.dart';
 import 'relay_pool.dart';
 import 'relay_stats.dart';
@@ -344,6 +345,16 @@ class _ShardSocket {
   bool _closedByUser = false;
   bool _open = false;
 
+  /// Consecutive times this shard's socket closed BEFORE the pool ever confirmed
+  /// it was up (no POOL:STATUS / inbound traffic). Drives the proxy's
+  /// host-unreachable fallback (mirrors the PWA's 2-consecutive-pool-failure
+  /// trigger, relays.js:1824-1832). Reset the moment the socket confirms.
+  int failuresBeforeConfirm = 0;
+
+  /// True once this socket has produced a confirming inbound frame (POOL:STATUS
+  /// or any parseable pool message), i.e. the proxy endpoint is reachable.
+  bool confirmed = false;
+
   /// Relays this shard's proxy reports as connected (from POOL:STATUS).
   List<String> connectedRelays = const [];
 
@@ -385,12 +396,25 @@ class _ShardSocket {
     if (data is! String) return;
     final msg = PoolMessage.parse(data);
     if (msg == null) return;
+    // Any parseable inbound pool frame confirms the proxy endpoint is reachable
+    // and speaking the protocol; clear the pre-connect failure streak so a later
+    // mid-session blip is treated as a normal reconnect (not a host-unreachable
+    // fallback).
+    if (!confirmed) {
+      confirmed = true;
+      failuresBeforeConfirm = 0;
+    }
     if (msg is PoolStatus) connectedRelays = msg.connected;
     onMessage(this, msg);
   }
 
   void _onDone() {
     _open = false;
+    // A close before this socket ever confirmed means the connect attempt failed
+    // outright (host lookup / refused / dropped pre-handshake). Count the streak
+    // so the proxy can fall back after the PWA's threshold.
+    if (!confirmed) failuresBeforeConfirm++;
+    connectedRelays = const [];
     _cleanup();
     onClosed(this);
     if (_closedByUser) return;
@@ -462,6 +486,9 @@ class RelayPoolProxy implements PoolTransport {
     String? poolUrl,
     WebSocketChannelFactory? channelFactory,
     Random? random,
+    this.onProxyUnreachable,
+    this.onProxyConnected,
+    this.maxPreConnectFailures = 2,
     this.eoseQuorum = 0.6,
     this.eoseTimeout = const Duration(seconds: 4),
   })  : _verify = verify ?? ((_) async => true),
@@ -470,7 +497,7 @@ class RelayPoolProxy implements PoolTransport {
         _dmRelays = dmRelays ?? RelayConfig.defaultRelays,
         _permanentBlacklist = {...?permanentBlacklist},
         _poolUrl = poolUrl ?? ApiConfig.relayPoolUrl(),
-        _channelFactory = channelFactory ?? WebSocketChannel.connect,
+        _channelFactory = channelFactory ?? defaultRelayChannelFactory,
         _rng = random ?? Random();
 
   final EventVerifier _verify;
@@ -484,6 +511,36 @@ class RelayPoolProxy implements PoolTransport {
 
   final double eoseQuorum;
   final Duration eoseTimeout;
+
+  /// Fired ONCE when the proxy can't establish a connection — a shard socket
+  /// closes for the [maxPreConnectFailures]-th consecutive time before the pool
+  /// has EVER confirmed (no POOL:STATUS / inbound frame). Mirrors the PWA's
+  /// fall-back-to-direct trigger after 2 consecutive pool failures
+  /// (relays.js:1824-1832). Settable so [NostrService] can wire the swap-to-direct
+  /// without touching the [PoolTransport] interface. Not invoked for a normal
+  /// mid-session disconnect after a successful connect (that keeps the per-shard
+  /// reconnect backoff).
+  void Function()? onProxyUnreachable;
+
+  /// Fired ONCE the first time any shard confirms the proxy endpoint is
+  /// reachable (a POOL:STATUS / inbound frame arrives). Used by [NostrService]'s
+  /// background restore to promote a probe proxy that has come up. Like
+  /// [onProxyUnreachable], settable so it stays off the [PoolTransport] interface.
+  void Function()? onProxyConnected;
+
+  /// Consecutive pre-confirm shard-connect failures that trip
+  /// [onProxyUnreachable] (PWA threshold: 2).
+  final int maxPreConnectFailures;
+
+  /// True once any shard has confirmed the proxy endpoint is reachable. Latches:
+  /// after this, pre-connect failure counting is disabled forever.
+  bool _proxyEverConnected = false;
+
+  /// True once [onProxyUnreachable] has fired, so it fires at most once.
+  bool _unreachableFired = false;
+
+  /// True after [disconnectAll] so a late shard callback can't fire the trigger.
+  bool _disposed = false;
 
   final List<_ShardSocket> _sockets = [];
 
@@ -674,6 +731,7 @@ class RelayPoolProxy implements PoolTransport {
   /// Close every shard socket and all subscriptions.
   @override
   Future<void> disconnectAll() async {
+    _disposed = true;
     _stopSampler();
     final subs = _subscriptions.values.toList();
     for (final s in subs) {
@@ -683,6 +741,54 @@ class RelayPoolProxy implements PoolTransport {
     _sockets.clear();
     for (final s in socks) {
       await s.close();
+    }
+  }
+
+  /// Tear down every shard socket WITHOUT closing the active [Subscription]
+  /// objects, so they can be re-driven on another pool (the proxy↔direct swap).
+  /// Used by [NostrService] when falling back / restoring: the caller keeps the
+  /// same `Subscription` instances (and their live `events` streams) and
+  /// re-issues them on the replacement pool via [RelayPool.replaySubscription] /
+  /// [replaySubscription].
+  Future<void> disconnectSocketsOnly() async {
+    _disposed = true;
+    _stopSampler();
+    _subscriptions.clear();
+    _activeFilters.clear();
+    _reqSentAt.clear();
+    _eosedShards.clear();
+    final socks = _sockets.toList();
+    _sockets.clear();
+    for (final s in socks) {
+      await s.close();
+    }
+  }
+
+  /// Snapshot of the live subscriptions (subId → its `Subscription` + filters),
+  /// so [NostrService] can replay them onto a replacement pool after a swap.
+  Map<String, ({Subscription sub, List<NostrFilter> filters})>
+      activeSubscriptions() => {
+            for (final e in _subscriptions.entries)
+              e.key: (
+                sub: e.value,
+                filters: _activeFilters[e.key] ?? const [],
+              ),
+          };
+
+  /// Adopt an EXISTING [sub] (created on a previous pool) onto this proxy and
+  /// (re-)broadcast its REQ to every shard, so its live `events` stream keeps
+  /// flowing after a swap. The sub's internal dedup suppresses any events it
+  /// already delivered, so replay is seamless (no duplicates). The REQ is also
+  /// re-issued automatically on every shard that (re)connects (`_onShardConnected`).
+  void replaySubscription(Subscription sub, List<NostrFilter> filters) {
+    final id = sub.subId;
+    _subscriptions[id] = sub;
+    _activeFilters[id] = filters;
+    _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
+    _eosedShards[id] = <String>{};
+    final frame = PoolFrame.req(id, filters);
+    for (final sock in _sockets) {
+      sock.send(frame);
     }
   }
 
@@ -696,8 +802,21 @@ class RelayPoolProxy implements PoolTransport {
   }
 
   void _onShardClosed(_ShardSocket sock) {
-    // Per-shard reconnect is handled inside _ShardSocket; nothing else to do
-    // here at the transport level.
+    // Per-shard reconnect is handled inside _ShardSocket. At the transport level
+    // we only watch for the host-unreachable case: a shard that has closed
+    // [maxPreConnectFailures] times in a row before the pool EVER confirmed.
+    // Mirrors the PWA's 2-consecutive-pool-failure fallback (relays.js:1824).
+    if (_proxyEverConnected || _unreachableFired || _disposed) return;
+    if (sock.failuresBeforeConfirm >= maxPreConnectFailures) {
+      _unreachableFired = true;
+      final cb = onProxyUnreachable;
+      if (cb != null) {
+        debugPrint('[RelayPoolProxy] proxy unreachable after '
+            '${sock.failuresBeforeConfirm} pre-connect failures on '
+            '${sock.shard.id}; falling back to direct relays');
+        cb();
+      }
+    }
   }
 
   /// Stamp REQ→EOSE latency for [shardId] on subscription [subId]: compute
@@ -718,6 +837,15 @@ class RelayPoolProxy implements PoolTransport {
   }
 
   void _onShardMessage(_ShardSocket sock, PoolMessage msg) {
+    // Reaching here means a parseable pool frame arrived, so the proxy endpoint
+    // is reachable. Latch it so a later mid-session disconnect is NOT treated as
+    // "host unreachable" (it keeps the per-shard reconnect backoff instead), and
+    // fire the one-shot connected signal (background-restore promotion).
+    if (!_proxyEverConnected) {
+      _proxyEverConnected = true;
+      final cb = onProxyConnected;
+      if (cb != null && !_disposed) cb();
+    }
     switch (msg) {
       case PoolEvent(:final subId, :final event, :final sourceRelay):
         // Cross-shard dedup: the first shard to deliver an id wins.
