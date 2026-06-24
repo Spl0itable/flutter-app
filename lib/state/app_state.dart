@@ -705,6 +705,13 @@ AppState _seedAppState() {
 class AppStateNotifier extends StateNotifier<AppState> {
   AppStateNotifier() : super(AppState.seed());
 
+  /// Fired whenever a conversation is opened via [switchView] (channel, PM, or
+  /// group). The controller wires this to its D1 history backfill so opening a
+  /// channel/group fetches the archive (mirrors the PWA's per-open
+  /// `channelRestoreFromD1` in `switchChannel`). Best-effort and may be null
+  /// (e.g. before the controller boots, or in pure UI/state tests).
+  void Function(ChatView view)? onViewOpened;
+
   int _localSeq = 1000000;
   int _ingestSeq = 1;
   final Set<String> _seenIds = <String>{};
@@ -1349,6 +1356,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state.unreadCounts.remove(view.id);
     state.unreadCounts.remove(view.storageKey);
     state = state.copyWith(view: view);
+    // Best-effort D1 history backfill on open (channel-get / group archive).
+    // Wrapped so a backfill failure can't break the view switch.
+    final cb = onViewOpened;
+    if (cb != null) {
+      try {
+        cb(view);
+      } catch (_) {}
+    }
   }
 
   // -------------------------------------------------------------------------
