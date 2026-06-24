@@ -548,33 +548,47 @@ class _RelayListSection extends StatelessWidget {
     final hasApiData = stats?.hasApiData ?? false;
     final shardInfo = stats?.shardInfo ?? const <ShardInfo>[];
 
-    // Compose the ordered list rows: [App data hdr, api row], [Relay data hdr,
-    // relay rows]. Matches `renderRelayList`'s `ordered` assembly (app.js:7606).
+    // Compose the list rows. The shard line (proxy mode) renders first and is
+    // always shown when present — even before any relay/app data, mirroring the
+    // PWA which inserts it ahead of `#rsRelayList` (app.js:7407). Then the two
+    // sub-sections: "App data" + its api row, and "Relay data" + its relay rows
+    // (`renderRelayList`'s `ordered` assembly, app.js:7606).
     final rows = <Widget>[];
     if (shardInfo.isNotEmpty) {
       rows.add(_ShardLine(shardInfo: shardInfo));
     }
-    if (hasApiData) {
-      rows.add(const _ListSubHeader('App data'));
-      rows.add(_ApiRow(
-        stats: stats!,
-        expanded: expandedRow == _kApiRowKey,
-        onTap: () => onToggleRow(_kApiRowKey),
+    final contentEmpty = entries.isEmpty && !hasApiData;
+    if (contentEmpty) {
+      // .nm-app-5 empty state ("No relays connected", app.js:7601) — shown
+      // below the shard line if one exists.
+      rows.add(Padding(
+        padding: const EdgeInsets.all(12),
+        child: Text(
+          'No relays connected',
+          style: TextStyle(color: c.textDim, fontSize: 12),
+        ),
       ));
-    }
-    if (entries.isNotEmpty) {
-      rows.add(const _ListSubHeader('Relay data'));
-      for (final e in entries) {
-        rows.add(_RelayRow(
-          data: e,
-          stats: stats,
-          expanded: expandedRow == e.url,
-          onTap: () => onToggleRow(e.url),
+    } else {
+      if (hasApiData) {
+        rows.add(const _ListSubHeader('App data'));
+        rows.add(_ApiRow(
+          stats: stats!,
+          expanded: expandedRow == _kApiRowKey,
+          onTap: () => onToggleRow(_kApiRowKey),
         ));
       }
+      if (entries.isNotEmpty) {
+        rows.add(const _ListSubHeader('Relay data'));
+        for (final e in entries) {
+          rows.add(_RelayRow(
+            data: e,
+            stats: stats,
+            expanded: expandedRow == e.url,
+            onTap: () => onToggleRow(e.url),
+          ));
+        }
+      }
     }
-
-    final isEmpty = rows.isEmpty || (entries.isEmpty && !hasApiData);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -589,21 +603,12 @@ class _RelayListSection extends StatelessWidget {
             border: Border.all(color: c.glassBorder),
           ),
           clipBehavior: Clip.antiAlias,
-          child: isEmpty
-              ? Padding(
-                  // .nm-app-5 empty state ("No relays connected", app.js:7601).
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'No relays connected',
-                    style: TextStyle(color: c.textDim, fontSize: 12),
-                  ),
-                )
-              : SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: rows,
-                  ),
-                ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: rows,
+            ),
+          ),
         ),
       ],
     );

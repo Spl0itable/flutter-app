@@ -130,7 +130,7 @@ class NostrController {
   /// Live relay throughput / byte / latency stats for the Network Stats modal
   /// (`relay_stats_modal.dart`), aggregated across the pool (PWA
   /// `nym.relayStats`). Null before boot → the modal renders the empty state.
-  RelayStats? get relayStats => _service?.pool.stats;
+  RelayStats? get relayStats => _service?.relayStats;
 
   // --- Slash commands -------------------------------------------------------
 
@@ -2944,6 +2944,12 @@ class NostrController {
     appState.switchChannel(channel, geohash: geohash);
     _persistJoinedChannels();
     _subscribeActiveChannelTyping();
+    // Connect the closest geo relays for a geohash channel so its messages are
+    // delivered to nearby relays (PWA `connectToGeoRelays` on channel entry).
+    final gh = geohash.isNotEmpty ? geohash : channel;
+    if (isChannelGeohash(gh)) {
+      unawaited(_service?.connectGeoRelaysForGeohash(gh) ?? Future.value());
+    }
   }
 
   /// Adds [channel] to the registry + persists (`addChannel`).
