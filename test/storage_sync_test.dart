@@ -579,4 +579,193 @@ void main() {
       expect(b.containsKey('pubkey'), isFalse);
     });
   });
+
+  // ===========================================================================
+  // 6. channel activity discovery (channel-active / channel-active-named /
+  //    channel-activity) — all PUBLIC reads, no auth.
+  // ===========================================================================
+  group('channel activity discovery', () {
+    String activityBody(Map<String, dynamic> activity, Map<String, dynamic> last) =>
+        jsonEncode({'activity': activity, 'last': last});
+
+    test('channel-active body is public (no pubkey/auth) and parses buckets/last',
+        () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (
+          200,
+          activityBody({
+            '9q8y': List<int>.generate(24, (i) => i),
+          }, {
+            '9q8y': 1700000000,
+          }),
+          const {},
+        ),
+      );
+      final res = await sync.channelActive();
+      final b = bodies.single;
+      expect(b['action'], 'channel-active');
+      expect(b.containsKey('auth'), isFalse, reason: 'public read');
+      expect(b.containsKey('pubkey'), isFalse, reason: 'public read');
+      expect(res.activity['9q8y']!.length, 24);
+      expect(res.activity['9q8y']![5], 5);
+      expect(res.last['9q8y'], 1700000000);
+    });
+
+    test('channel-active-named issues the named-discovery action', () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (200, activityBody({}, {}), const {}),
+      );
+      await sync.channelActiveNamed();
+      expect(bodies.single['action'], 'channel-active-named');
+      expect(bodies.single.containsKey('auth'), isFalse);
+    });
+
+    test('channel-activity lowercases + de-dups names, public, parses result',
+        () async {
+      List<dynamic>? sentChannels;
+      final sync = _syncWith(
+        (b) => sentChannels = b['channels'] as List<dynamic>?,
+        respond: (b) => (
+          200,
+          activityBody({
+            'nymchat': List<int>.filled(24, 0)..[0] = 3,
+          }, {
+            'nymchat': 1700000123,
+          }),
+          const {},
+        ),
+      );
+      final res = await sync.channelActivity(['NymChat', 'nymchat', 'NYMCHAT']);
+      expect(sentChannels, ['nymchat']); // lowercased + de-duped
+      expect(res.activity['nymchat']![0], 3);
+      expect(res.last['nymchat'], 1700000123);
+    });
+
+    test('channel-activity caps the batch at 200 names', () async {
+      List<dynamic>? sent;
+      final sync = _syncWith(
+        (b) => sent = b['channels'] as List<dynamic>?,
+        respond: (_) => (200, activityBody({}, {}), const {}),
+      );
+      final many = List<String>.generate(250, (i) => 'chan$i');
+      await sync.channelActivity(many);
+      expect(sent!.length, 200);
+    });
+
+    test('channel-activity throttles a re-fetch within 30s unless forced',
+        () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (200, activityBody({}, {}), const {}),
+      );
+      await sync.channelActivity(['9q8y']);
+      expect(calls, 1);
+      await sync.channelActivity(['9q8y']); // within 30s → skipped
+      expect(calls, 1);
+      await sync.channelActivity(['9q8y'], force: true); // forced
+      expect(calls, 2);
+    });
+
+    test('empty channel list makes no request', () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (200, activityBody({}, {}), const {}),
+      );
+      final res = await sync.channelActivity(const []);
+      expect(calls, 0);
+      expect(res.isEmpty, isTrue);
+    });
+  });
+
+  // ===========================================================================
+  // 7. shop-status (other users' active cosmetics) — PUBLIC read, no auth.
+  // ===========================================================================
+  group('shop-status', () {
+    final pkA = 'a' * 64;
+    final pkB = 'b' * 64;
+
+    test('body is public (no auth/pubkey), batches valid pubkeys, parses active',
+        () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (
+          200,
+          jsonEncode({
+            'statuses': {
+              pkA: {
+                'active': {
+                  'style': 'style-satoshi',
+                  'flair': ['flair-crown', 'flair-genesis'],
+                  'cosmetics': ['cosmetic-frost'],
+                  'supporter': true,
+                  'editions': {'flair-genesis': 42},
+                },
+                'updatedAt': 1700000000,
+              },
+            },
+          }),
+          const {},
+        ),
+      );
+      final got = await sync.shopStatus([pkA, pkB]);
+      final b = bodies.single;
+      expect(b['action'], 'shop-status');
+      expect(b.containsKey('auth'), isFalse, reason: 'public read');
+      expect(b.containsKey('pubkey'), isFalse, reason: 'public read');
+      expect((b['pubkeys'] as List).length, 2);
+      // Parsed active record.
+      final st = got[pkA]!;
+      expect(st.active.style, 'style-satoshi');
+      expect(st.active.flair, ['flair-crown', 'flair-genesis']);
+      expect(st.active.cosmetics, ['cosmetic-frost']);
+      expect(st.active.supporter, isTrue);
+      expect(st.active.editions['flair-genesis'], 42);
+      expect(st.updatedAt, 1700000000);
+    });
+
+    test('drops invalid pubkeys and lowercases, caps at 100', () async {
+      List<dynamic>? sent;
+      final sync = _syncWith(
+        (b) => sent = b['pubkeys'] as List<dynamic>?,
+        respond: (_) => (200, jsonEncode({'statuses': {}}), const {}),
+      );
+      // 120 valid distinct hex + 1 invalid; only the first 100 valid go.
+      final many = [
+        'not-hex',
+        ...List<String>.generate(120, (i) => i.toRadixString(16).padLeft(64, '0')),
+      ];
+      await sync.shopStatus(many);
+      expect(sent!.length, 100);
+      expect(sent!.contains('not-hex'), isFalse);
+    });
+
+    test('forwards a fresh[] cache-bust list only for requested pubkeys',
+        () async {
+      Map<String, dynamic>? body;
+      final sync = _syncWith(
+        (b) => body = b,
+        respond: (_) => (200, jsonEncode({'statuses': {}}), const {}),
+      );
+      await sync.shopStatus([pkA, pkB], fresh: [pkA, 'c' * 64]);
+      expect(body!['fresh'], [pkA]); // pkA only (c… wasn't requested)
+    });
+
+    test('empty pubkey list makes no request', () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (200, jsonEncode({'statuses': {}}), const {}),
+      );
+      final got = await sync.shopStatus(const []);
+      expect(calls, 0);
+      expect(got, isEmpty);
+    });
+  });
 }
