@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/storage_keys.dart';
 import '../../services/api/api_client.dart';
+import '../../services/api/storage_sync.dart' show ShopStatus, ShopStatusActive;
 import '../../services/storage/key_value_store.dart';
 import '../../state/settings_provider.dart';
 import 'shop_catalog.dart';
@@ -489,8 +490,34 @@ class ShopController extends StateNotifier<ShopState> {
     await _persist();
   }
 
+  /// Pulls the authoritative `{owned, active}` shop record for the current
+  /// identity from D1 (`shop-get`, storage.js:283) and applies it via
+  /// [applyOwnRecord], so the user's own purchased flairs/cosmetics/style render
+  /// on a fresh device (or after switching identity). Mirrors shop.js
+  /// `loadShopFromServer` (shop.js:358) — an AUTHENTICATED read; without a
+  /// signable [identity] (NIP-46 delegated signer) it no-ops and the cached
+  /// record stays. Best-effort: transport failure keeps the local state.
+  ///
+  /// Call this once the identity is known at boot (see the nostr_controller
+  /// wiring in the task report). The PWA invokes it on login and on identity
+  /// switch (`applyCachedShopItemsToNewIdentity`, shop.js:366).
+  Future<void> loadFromServer(ShopIdentity identity) async {
+    final auth = _auth('shop-get', identity);
+    if (auth == null) return; // delegated signer can't auth; keep cached record.
+    try {
+      final data = await _api.storageAction({
+        'action': 'shop-get',
+        'pubkey': identity.pubkey,
+        'auth': auth,
+      });
+      await applyOwnRecord(data);
+    } catch (_) {
+      // Keep cached state (shop.js swallows and keeps the cached record).
+    }
+  }
+
   // ---------------------------------------------------------------------------
-  // Limited-drop supply (shop-supply, public/no-auth; shop.js:832-854)
+  // Other users' active cosmetics (shop-status, public/no-auth; shop.js:445-483)
   // ---------------------------------------------------------------------------
 
   /// Last `shop-supply` fetch time (ms epoch); throttles refetches to 30s like
@@ -648,4 +675,213 @@ class ShopException implements Exception {
 final shopControllerProvider =
     StateNotifierProvider<ShopController, ShopState>((ref) {
   return ShopController(ref.watch(keyValueStoreProvider));
+});
+
+/// Cache + debounced fetch of OTHER users' active shop items from D1
+/// (`shop-status`), so flairs/styles/cosmetics render on their messages and
+/// nyms without a Nostr REQ — the authoritative source the PWA uses
+/// (`getUserShopItems(pubkey)` → `_queueShopStatusFetch` → `_flushShopStatusQueue`,
+/// shop.js:434-483). This is the canonical per-user cosmetics source; a presence
+/// `shop-update` tag is only a cache-bust trigger that should call [invalidate].
+///
+/// The state is a `Map<pubkey, ShopStatusActive>` (`otherUsersShopItems`,
+/// shop.js:268). Persisted across sessions in [StorageKeys] so cosmetics show
+/// immediately on the next launch (`nym_shop_active_cache`, shop.js:290).
+class OtherUsersShopController extends StateNotifier<Map<String, ShopStatusActive>> {
+  OtherUsersShopController(this._kv, {ApiClient? api})
+      : _api = api ?? ApiClient(),
+        super(const {}) {
+    _restore();
+  }
+
+  final KeyValueStore _kv;
+  final ApiClient _api;
+
+  /// localStorage key the PWA persists the other-users cache under (shop.js:271).
+  static const String _cacheKey = 'nym_shop_active_cache';
+
+  /// 24h persisted-cache TTL (shop.js:275).
+  static const int _cacheMaxAgeMs = 24 * 60 * 60 * 1000;
+
+  /// 10-minute in-memory freshness gate per pubkey (shop.js:437) — a pubkey
+  /// fetched within this window isn't re-queued.
+  static const int _freshMs = 600000;
+
+  /// 600ms debounce before a queued batch flushes (shop.js:442).
+  static const Duration _debounce = Duration(milliseconds: 600);
+
+  /// The self pubkey, so we never fetch our own status (the owner reads its own
+  /// record via [ShopController.loadFromServer]). Set by the wiring layer.
+  String? selfPubkey;
+
+  final Set<String> _queue = <String>{};
+  final Set<String> _inFlight = <String>{};
+  final Set<String> _forceFresh = <String>{};
+  final Map<String, int> _fetchedAt = {};
+  final Map<String, int> _updatedAt = {};
+  Timer? _timer;
+
+  static final RegExp _hex64 = RegExp(r'^[0-9a-f]{64}$');
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _api.dispose();
+    super.dispose();
+  }
+
+  /// Active items for [pubkey] from the cache, or null when unknown. Pure — does
+  /// NOT trigger a fetch (call [queue] from a side-effecting hook instead). Used
+  /// by the cosmetics provider.
+  ShopStatusActive? itemsFor(String pubkey) => state[pubkey.toLowerCase()];
+
+  /// Queues [pubkey] for a batched `shop-status` lookup (shop.js
+  /// `_queueShopStatusFetch`). Skips self, invalid pubkeys, in-flight pubkeys
+  /// and anyone with a fresh (<10min) entry. Debounced 600ms; the flush batches
+  /// up to 100 pubkeys per request.
+  void queue(String pubkey) {
+    final pk = pubkey.toLowerCase();
+    if (pk == selfPubkey || !_hex64.hasMatch(pk)) return;
+    final at = _fetchedAt[pk];
+    if (at != null && DateTime.now().millisecondsSinceEpoch - at < _freshMs) {
+      return;
+    }
+    if (_inFlight.contains(pk)) return;
+    _queue.add(pk);
+    _timer ??= Timer(_debounce, _flush);
+  }
+
+  /// Drops the cached entry for [pubkey] and re-queues a fresh fetch so a flair
+  /// or style change shows up before the 10-minute cache expires — the PWA's
+  /// `invalidateShopCache` (shop.js:302), driven by a presence `shop-update`.
+  void invalidate(String pubkey) {
+    final pk = pubkey.toLowerCase();
+    if (pk == selfPubkey || !_hex64.hasMatch(pk)) return;
+    _fetchedAt.remove(pk);
+    _inFlight.remove(pk);
+    _forceFresh.add(pk);
+    if (state.containsKey(pk)) {
+      final next = Map<String, ShopStatusActive>.from(state)..remove(pk);
+      state = next;
+    }
+    _persistRemove(pk);
+    queue(pk);
+  }
+
+  Future<void> _flush() async {
+    _timer = null;
+    final pubkeys = _queue.toList();
+    _queue.clear();
+    if (pubkeys.isEmpty) return;
+    for (final pk in pubkeys) {
+      _inFlight.add(pk);
+    }
+    final fresh = <String>[];
+    for (final pk in pubkeys) {
+      if (_forceFresh.remove(pk)) fresh.add(pk);
+    }
+    try {
+      // shop-status is a PUBLIC read (withAuth === false, shop.js:457).
+      final data = await _api.storageAction({
+        'action': 'shop-status',
+        'pubkeys': pubkeys.take(100).toList(),
+        if (fresh.isNotEmpty) 'fresh': fresh,
+      });
+      final statuses = data['statuses'];
+      if (statuses is Map) {
+        final next = Map<String, ShopStatusActive>.from(state);
+        final now = DateTime.now().millisecondsSinceEpoch;
+        var changed = false;
+        statuses.forEach((pk, st) {
+          if (pk is! String || st is! Map) return;
+          final key = pk.toLowerCase();
+          final status = ShopStatus.fromJson(st.cast<String, dynamic>());
+          _fetchedAt[key] = now;
+          // Skip the re-render when the record is unchanged (shop.js:471).
+          if (_updatedAt[key] == status.updatedAt && next.containsKey(key)) {
+            return;
+          }
+          _updatedAt[key] = status.updatedAt;
+          next[key] = status.active;
+          _persistPut(key, status.active, status.updatedAt);
+          changed = true;
+        });
+        if (changed) state = next;
+      }
+    } catch (_) {
+      // Best-effort (shop.js swallows and keeps cached items).
+    } finally {
+      for (final pk in pubkeys) {
+        _inFlight.remove(pk);
+      }
+    }
+  }
+
+  // --- Persistence (nym_shop_active_cache, shop.js:269-298) ------------------
+
+  void _restore() {
+    final raw = _kv.getString(_cacheKey);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final cache = jsonDecode(raw);
+      if (cache is! Map) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final restored = <String, ShopStatusActive>{};
+      cache.forEach((pk, entry) {
+        if (entry is! Map) return;
+        final ts = (entry['ts'] as num?)?.toInt() ?? 0;
+        if (now - ts >= _cacheMaxAgeMs) return;
+        final items = entry['items'];
+        if (items is! Map) return;
+        final key = pk.toString().toLowerCase();
+        restored[key] = ShopStatusActive.fromJson(items.cast<String, dynamic>());
+        _updatedAt[key] = (entry['updatedAt'] as num?)?.toInt() ?? 0;
+      });
+      if (restored.isNotEmpty) state = restored;
+    } catch (_) {
+      // Corrupt cache — ignore.
+    }
+  }
+
+  Map<String, dynamic> _readCache() {
+    final raw = _kv.getString(_cacheKey);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final c = jsonDecode(raw);
+      return c is Map ? c.cast<String, dynamic>() : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  void _persistPut(String pubkey, ShopStatusActive items, int updatedAt) {
+    final cache = _readCache();
+    cache[pubkey] = {
+      'items': {
+        'style': items.style,
+        'flair': items.flair,
+        'cosmetics': items.cosmetics,
+        'supporter': items.supporter,
+        'editions': items.editions,
+      },
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'updatedAt': updatedAt,
+    };
+    _kv.setString(_cacheKey, jsonEncode(cache));
+  }
+
+  void _persistRemove(String pubkey) {
+    final cache = _readCache();
+    if (cache.remove(pubkey) != null) {
+      _kv.setString(_cacheKey, jsonEncode(cache));
+    }
+  }
+}
+
+/// Provides the [OtherUsersShopController] (other users' active shop items,
+/// fetched from D1 `shop-status`). Cosmetics widgets read it via
+/// [userCosmeticsProvider]; the presence/render layer calls [queue]/[invalidate].
+final otherUsersShopProvider = StateNotifierProvider<OtherUsersShopController,
+    Map<String, ShopStatusActive>>((ref) {
+  return OtherUsersShopController(ref.watch(keyValueStoreProvider));
 });

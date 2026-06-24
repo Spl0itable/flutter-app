@@ -782,6 +782,172 @@ class StorageSync {
   }
 
   // ===========================================================================
+  // Channel activity discovery (D1 `channel-active`/`channel-active-named` +
+  // `channel-activity`) — all PUBLIC reads, no auth. Mirrors channels.js
+  // `fetchGeohashActivityFromD1` / `fetchNamedChannelActivityFromD1`.
+  // ===========================================================================
+
+  /// A `{ activity, last }` channel-activity result: `activity` maps a channel
+  /// name → 24 hourly buckets (index 0 = current hour), `last` maps a channel
+  /// name → its last-activity unix-seconds timestamp. The shape is shared by
+  /// `channel-active`, `channel-active-named` and `channel-activity`
+  /// (storage.js:1086/1102/1118).
+  final Map<String, List<int>> _emptyActivity = const {};
+
+  /// Discovers recently-active GEOHASH channels (kind 20000) from D1
+  /// (`channel-active`, storage.js:1092) so the sidebar/explorer can surface
+  /// channels the client has never opened. PUBLIC read (`withAuth === false`,
+  /// channels.js:150) — no `pubkey`/`auth`. Returns `{activity, last}`; failures
+  /// resolve to empty maps (best-effort, like the PWA's `.catch(() => null)`).
+  Future<ChannelActivityResult> channelActive() =>
+      _channelDiscover('channel-active');
+
+  /// Discovers recently-active NAMED channels (kind 23333) from D1
+  /// (`channel-active-named`, storage.js:1108). PUBLIC read (channels.js:305).
+  /// Same `{activity, last}` shape as [channelActive].
+  Future<ChannelActivityResult> channelActiveNamed() =>
+      _channelDiscover('channel-active-named');
+
+  Future<ChannelActivityResult> _channelDiscover(String action) async {
+    Map<String, dynamic> data;
+    try {
+      // Public read: no pubkey/auth (channels.js passes withAuth === false).
+      data = await _api.storageAction({'action': action});
+    } catch (_) {
+      return ChannelActivityResult(activity: _emptyActivity, last: const {});
+    }
+    return _parseActivity(data);
+  }
+
+  /// Per-name "last fetched" wall-clock (ms) for the spam-aware activity probe,
+  /// mirroring the PWA's 30s throttle on `fetchGeohashActivityFromD1` /
+  /// `fetchNamedChannelActivityFromD1`. The discovery calls themselves are
+  /// edge-cached server-side so only the batched `channel-activity` lookup is
+  /// throttled here, against the union of requested names.
+  int _activityFetchedAt = 0;
+
+  /// Fetches lightweight recent-activity counts for many [channelNames] at once
+  /// (`channel-activity`, storage.js:1048) so the sidebar can seed unread badges
+  /// from the D1 archive. PUBLIC read (channels.js:151) — no `pubkey`/`auth`.
+  /// Lowercases + de-dups the names and caps the batch at the server's 200-name
+  /// limit. Throttled to one fetch per 30s unless [force]. Returns
+  /// `{activity, last}` (empty on failure / empty input).
+  Future<ChannelActivityResult> channelActivity(
+    List<String> channelNames, {
+    bool force = false,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && _activityFetchedAt != 0 && now - _activityFetchedAt < 30000) {
+      return ChannelActivityResult(activity: _emptyActivity, last: const {});
+    }
+    final names = <String>[];
+    final seen = <String>{};
+    for (final raw in channelNames) {
+      if (raw.isEmpty) continue;
+      final name = raw.toLowerCase();
+      if (!seen.add(name)) continue;
+      names.add(name);
+      if (names.length >= 200) break; // server caps at 200 (storage.js:1052)
+    }
+    if (names.isEmpty) {
+      return ChannelActivityResult(activity: _emptyActivity, last: const {});
+    }
+    _activityFetchedAt = now;
+    Map<String, dynamic> data;
+    try {
+      data = await _api.storageAction({
+        'action': 'channel-activity',
+        'channels': names,
+      });
+    } catch (_) {
+      _activityFetchedAt = 0; // allow a retry on transport failure
+      return ChannelActivityResult(activity: _emptyActivity, last: const {});
+    }
+    return _parseActivity(data);
+  }
+
+  /// Parses a `{activity:{name:[24]}, last:{name:tsSec}}` channel-activity
+  /// response into a [ChannelActivityResult]. Lowercases names; coerces bucket
+  /// entries + last timestamps to ints; tolerates a malformed/absent field.
+  static ChannelActivityResult _parseActivity(Map<String, dynamic> data) {
+    final activity = <String, List<int>>{};
+    final rawAct = data['activity'];
+    if (rawAct is Map) {
+      rawAct.forEach((name, buckets) {
+        if (buckets is! List) return;
+        activity[name.toString().toLowerCase()] = [
+          for (final b in buckets) (b is num) ? b.toInt() : 0,
+        ];
+      });
+    }
+    final last = <String, int>{};
+    final rawLast = data['last'];
+    if (rawLast is Map) {
+      rawLast.forEach((name, ts) {
+        if (ts is num && ts > 0) last[name.toString().toLowerCase()] = ts.toInt();
+      });
+    }
+    return ChannelActivityResult(activity: activity, last: last);
+  }
+
+  // ===========================================================================
+  // Other users' active shop items (D1 `shop-status`) — PUBLIC read, no auth.
+  // Mirrors shop.js `_flushShopStatusQueue` (the batched cosmetics lookup that
+  // backs `getUserShopItems(pubkey)` / `getFlairForUser(pubkey)`).
+  // ===========================================================================
+
+  /// Batch-reads other users' active shop items from D1 (`shop-status`,
+  /// storage.js:206). PUBLIC read (`withAuth === false`, shop.js:457) — no
+  /// `pubkey`/`auth`. Caps the batch at the server's 100-pubkey limit and
+  /// lowercases/validates the keys (storage.js:207-212). [fresh] forces a cache
+  /// bypass on the server for those pubkeys (the PWA's `shop-update`-driven
+  /// `invalidateShopCache`, shop.js:453); only pubkeys also present in [pubkeys]
+  /// matter.
+  ///
+  /// Returns a map of pubkey → [ShopStatus] (`active` items + `updatedAt`) for
+  /// every pubkey the server reported. Failures resolve to an empty map
+  /// (best-effort; the PWA swallows the error and keeps the cached items).
+  Future<Map<String, ShopStatus>> shopStatus(
+    List<String> pubkeys, {
+    List<String> fresh = const [],
+  }) async {
+    final pks = <String>[];
+    final seen = <String>{};
+    for (final raw in pubkeys) {
+      final pk = raw.toLowerCase();
+      if (!_isHex64(pk) || !seen.add(pk)) continue;
+      pks.add(pk);
+      if (pks.length >= 100) break; // server caps at 100 (storage.js:207)
+    }
+    if (pks.isEmpty) return const {};
+    final freshPks = <String>[];
+    final freshSeen = <String>{};
+    for (final raw in fresh) {
+      final pk = raw.toLowerCase();
+      if (!_isHex64(pk) || !freshSeen.add(pk)) continue;
+      if (seen.contains(pk)) freshPks.add(pk);
+    }
+    Map<String, dynamic> data;
+    try {
+      data = await _api.storageAction({
+        'action': 'shop-status',
+        'pubkeys': pks,
+        if (freshPks.isNotEmpty) 'fresh': freshPks,
+      });
+    } catch (_) {
+      return const {};
+    }
+    final statuses = data['statuses'];
+    if (statuses is! Map) return const {};
+    final out = <String, ShopStatus>{};
+    statuses.forEach((pk, st) {
+      if (pk is! String || st is! Map) return;
+      out[pk.toLowerCase()] = ShopStatus.fromJson(st.cast<String, dynamic>());
+    });
+    return out;
+  }
+
+  // ===========================================================================
   // Helpers.
   // ===========================================================================
 
@@ -916,4 +1082,81 @@ class SettingsTransferOffer {
 
   /// The category's `updatedAt` in ms (D1 wall-clock of the publishing device).
   final int updatedAt;
+}
+
+/// The result of a channel-activity D1 read ([StorageSync.channelActive] /
+/// [StorageSync.channelActiveNamed] / [StorageSync.channelActivity]). [activity]
+/// maps a lowercased channel name → 24 hourly buckets (index 0 = current hour);
+/// [last] maps a lowercased channel name → its last-activity unix-seconds
+/// timestamp. Mirrors the `{activity, last}` payload (storage.js:1086).
+class ChannelActivityResult {
+  const ChannelActivityResult({required this.activity, required this.last});
+
+  /// Channel name → 24 hourly message-count buckets (kind 20000/23333 only).
+  final Map<String, List<int>> activity;
+
+  /// Channel name → last-activity timestamp in unix seconds.
+  final Map<String, int> last;
+
+  bool get isEmpty => activity.isEmpty && last.isEmpty;
+}
+
+/// Another user's active shop items from a `shop-status` D1 read
+/// (storage.js:226-237): the `active` cosmetics record + the record's
+/// `updatedAt` (used to skip a re-render when nothing changed, shop.js:471).
+class ShopStatus {
+  const ShopStatus({required this.active, required this.updatedAt});
+
+  final ShopStatusActive active;
+  final int updatedAt;
+
+  factory ShopStatus.fromJson(Map<String, dynamic> j) => ShopStatus(
+        active: ShopStatusActive.fromJson(
+          (j['active'] as Map?)?.cast<String, dynamic>(),
+        ),
+        updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
+      );
+}
+
+/// The `active` block of a `shop-status` record — the same `{style, flair,
+/// cosmetics, supporter, editions}` shape the owner publishes via
+/// `shop-set-active` (storage.js:308-314, read back at shop.js:459-467).
+class ShopStatusActive {
+  const ShopStatusActive({
+    this.style,
+    this.flair = const [],
+    this.cosmetics = const [],
+    this.supporter = false,
+    this.editions = const {},
+  });
+
+  /// Active message-style item id, or null.
+  final String? style;
+
+  /// Active nickname-flair item ids (the PWA renders the last, shop.js:401).
+  final List<String> flair;
+
+  /// Active special-cosmetic ids.
+  final List<String> cosmetics;
+
+  /// True when the supporter badge is active.
+  final bool supporter;
+
+  /// Numbered-edition map (item id → edition number, e.g. Genesis #42).
+  final Map<String, int> editions;
+
+  factory ShopStatusActive.fromJson(Map<String, dynamic>? j) {
+    if (j == null) return const ShopStatusActive();
+    return ShopStatusActive(
+      style: j['style'] is String ? j['style'] as String : null,
+      flair: (j['flair'] as List?)?.whereType<String>().toList() ?? const [],
+      cosmetics:
+          (j['cosmetics'] as List?)?.whereType<String>().toList() ?? const [],
+      supporter: j['supporter'] == true,
+      editions: (j['editions'] as Map?)?.map(
+            (k, v) => MapEntry(k.toString(), (v is num) ? v.toInt() : 0),
+          ) ??
+          const {},
+    );
+  }
 }
