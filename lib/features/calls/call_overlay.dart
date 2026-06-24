@@ -20,6 +20,8 @@ import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/context_menu/context_menu_actions.dart';
+import '../../widgets/context_menu/context_menu_panel.dart';
 import '../emoji/emoji_picker.dart';
 import '../reactions/quick_react_popup.dart';
 import 'call_nym.dart';
@@ -27,6 +29,34 @@ import 'call_providers.dart';
 import 'call_service.dart';
 import 'call_signaling.dart';
 import 'call_state.dart';
+
+/// Opens the shared user context menu (block / friend / PM / report …) from a
+/// nickname tapped in the call overlay or call chat — a 1:1 port of the PWA's
+/// `showCallUserMenu` (calls.js:41), which calls `showContextMenu(..., /*
+/// profileOnly */ true)`. [profileOnly] trims the message-only actions that
+/// don't apply during a call (React/Quote/Copy/Translate/Slap/Hug/Edit), leaving
+/// PM / Create Group / Gift Credits / Friend / Report / Block. No-op for self /
+/// empty pubkey (calls.js:42). `ContextMenuPanel` re-derives the live
+/// friend/block flags from app_state, so only pubkey + base nym are needed.
+void showCallUserMenu(BuildContext context, String pubkey, {String? nym}) {
+  if (pubkey.isEmpty) return;
+  // Resolve the display base nym: prefer a caller-supplied nym, else the live
+  // `usersProvider` entry (the call chat-from line carries no nym), else fall
+  // back to the pubkey (`_nymForPubkey`, calls.js).
+  final container = ProviderScope.containerOf(context);
+  final resolved = (nym != null && nym.isNotEmpty)
+      ? nym
+      : (container.read(usersProvider)[pubkey]?.nym ?? pubkey);
+  ContextMenuPanel.show(
+    context,
+    target: CtxTarget(
+      pubkey: pubkey,
+      nym: stripPubkeySuffix(resolved),
+      isSelf: false,
+      profileOnly: true,
+    ),
+  );
+}
 
 class CallOverlay extends ConsumerStatefulWidget {
   const CallOverlay({super.key});
@@ -480,12 +510,19 @@ class _Tile extends StatelessWidget {
                   child: self || pubkey.isEmpty
                       ? const Text('You',
                           style: TextStyle(color: Colors.white, fontSize: 12))
-                      : CallNym(
-                          pubkey: pubkey,
-                          nym: label,
-                          baseColor: Colors.white,
-                          baseStyle: const TextStyle(fontSize: 12),
-                          badgeSize: 12,
+                      // Tile name → shared user context menu (PWA
+                      // `callNickMenu` / `showCallUserMenu`, calls.js:1566).
+                      : GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () =>
+                              showCallUserMenu(context, pubkey, nym: label),
+                          child: CallNym(
+                            pubkey: pubkey,
+                            nym: label,
+                            baseColor: Colors.white,
+                            baseStyle: const TextStyle(fontSize: 12),
+                            badgeSize: 12,
+                          ),
                         ),
                 ),
               ),
@@ -864,12 +901,18 @@ class _ChatRow extends StatelessWidget {
                     fontSize: 11,
                     fontWeight: FontWeight.w600))
           else
-            CallNym(
-              pubkey: msg.pubkey,
-              baseColor: c.primary,
-              baseStyle:
-                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-              badgeSize: 11,
+            // Chat-from nym → shared user context menu (PWA `callNickMenu` →
+            // `showCallUserMenu`, inline-bindings.js:289).
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => showCallUserMenu(context, msg.pubkey),
+              child: CallNym(
+                pubkey: msg.pubkey,
+                baseColor: c.primary,
+                baseStyle:
+                    const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                badgeSize: 11,
+              ),
             ),
           const SizedBox(height: 2),
           // Bubble with @mention highlighting (`_formatCallChatText`).

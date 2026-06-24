@@ -8,8 +8,11 @@ import '../core/theme/nym_metrics.dart';
 import '../features/calls/call_overlay.dart';
 import '../features/calls/call_providers.dart';
 import '../features/calls/incoming_call.dart';
+import '../features/nymbot/bot_credits_modal.dart';
 import '../features/onboarding/tutorial_overlay.dart';
+import '../state/nostr_controller.dart';
 import '../state/settings_provider.dart';
+import '../widgets/context_menu/interaction_hooks.dart';
 import '../widgets/chat/chat_pane.dart';
 import '../widgets/columns/columns_deck.dart';
 import '../widgets/sidebar/sidebar.dart';
@@ -110,6 +113,27 @@ class HomeShellState extends ConsumerState<HomeShell>
 
   @override
   Widget build(BuildContext context) {
+    // Always-mounted "Gift Nymbot Credits" listener (PWA `showBotCreditsModal`
+    // opens from ANYWHERE, not just inside the bot PM). The context menu posts
+    // the recipient to `giftCreditsRequestProvider`; here we bind the bot chat
+    // (so the paid gift action authenticates), open the gift-credit modal
+    // prefilled with the recipient, then consume the one-shot request.
+    ref.listen<GiftCreditsRequest?>(giftCreditsRequestProvider, (prev, next) {
+      if (next == null) return;
+      // Consume immediately so a rebuild can't re-open the modal.
+      ref.read(giftCreditsRequestProvider.notifier).consume();
+      ref.read(nostrControllerProvider).bindBotChat();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        BotCreditsModal.show(
+          context,
+          colors: context.nym,
+          giftRecipientPubkey: next.pubkey,
+          giftRecipientNym: next.nym,
+        );
+      });
+    });
+
     final c = context.nym;
     final width = MediaQuery.of(context).size.width;
     // Off-canvas drawer governs the whole 0–1024 range; fixed two-pane is

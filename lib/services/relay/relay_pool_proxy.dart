@@ -11,6 +11,7 @@ import '../api/api_config.dart';
 import 'relay_connection.dart' show WebSocketChannelFactory;
 import 'relay_message.dart';
 import 'relay_pool.dart';
+import 'relay_stats.dart';
 
 /// One role-keyed shard: a stable id, its relay set, and (for critical) the DM
 /// relays. Mirrors the objects produced by `_shardRelaysByRole` (relays.js).
@@ -243,7 +244,17 @@ sealed class PoolMessage {
         final connected = (status['connected'] is List)
             ? (status['connected'] as List).map((e) => e.toString()).toList()
             : const <String>[];
-        return PoolStatus(connected);
+        // Per-relay latency reported by this worker (relays.js:2137-2141), used
+        // for the Network Stats per-relay rows + Avg Latency in proxy mode.
+        final latency = <String, int>{};
+        final rawLat = status['latency'];
+        if (rawLat is Map) {
+          rawLat.forEach((k, v) {
+            final ms = v is num ? v.round() : int.tryParse('$v');
+            if (ms != null) latency[k.toString()] = ms;
+          });
+        }
+        return PoolStatus(connected, latency);
       case 'POOL:RELAY_BAN':
         // ["POOL:RELAY_BAN", relayUrl, reason?] — the proxy permanently dropped
         // this relay (relays.js:2117 `_permanentlyBlacklistRelay`).
@@ -287,8 +298,11 @@ class PoolPing extends PoolMessage {
 }
 
 class PoolStatus extends PoolMessage {
-  const PoolStatus(this.connected);
+  const PoolStatus(this.connected, [this.latency = const {}]);
   final List<String> connected;
+
+  /// Per-relay latency in ms reported by the worker (relays.js POOL:STATUS).
+  final Map<String, int> latency;
 }
 
 class PoolRelayBan extends PoolMessage {
@@ -305,6 +319,7 @@ class _ShardSocket {
     required this.url,
     required this.channelFactory,
     required this.rng,
+    required this.stats,
     required this.onMessage,
     required this.onConnected,
     required this.onClosed,
@@ -314,6 +329,10 @@ class _ShardSocket {
   final String url;
   final WebSocketChannelFactory channelFactory;
   final Random rng;
+
+  /// Shared, pool-owned counters. This shard adds its inbound/outbound frame
+  /// byte lengths here (mirrors the PWA's per-socket writes to `relayStats`).
+  final RelayStats stats;
   final void Function(_ShardSocket sock, PoolMessage msg) onMessage;
   final void Function(_ShardSocket sock) onConnected;
   final void Function(_ShardSocket sock) onClosed;
@@ -356,6 +375,13 @@ class _ShardSocket {
   }
 
   void _onData(dynamic data) {
+    // Count every inbound frame's UTF-8 byte length (relays.js pool
+    // ws.onmessage: `relayStats.bytesReceived += dataLen`).
+    if (data is String) {
+      stats.bytesReceived += utf8.encode(data).length;
+    } else if (data is List<int>) {
+      stats.bytesReceived += data.length;
+    }
     if (data is! String) return;
     final msg = PoolMessage.parse(data);
     if (msg == null) return;
@@ -395,6 +421,9 @@ class _ShardSocket {
     if (ch == null || !_open) return false;
     try {
       ch.sink.add(frame);
+      // Count the outbound frame's UTF-8 byte length (relays.js `_safeWsSend`:
+      // `relayStats.bytesSent += msg.length`).
+      stats.bytesSent += utf8.encode(frame).length;
       return true;
     } catch (_) {
       return false;
@@ -466,6 +495,27 @@ class RelayPoolProxy implements PoolTransport {
   /// Global cross-shard event dedup (relays.js: `eventDeduplication`, cap 10k).
   final EventDeduper _deduper = EventDeduper(maxIds: 10000);
 
+  /// Pool-owned live traffic counters. Shard sockets write byte counts here;
+  /// [_onShardMessage] writes event counts + REQ→EOSE latency. The 1-second
+  /// [_sampler] feeds its throughput history (mirrors the PWA's single
+  /// `nym.relayStats`).
+  final RelayStats _stats = RelayStats();
+
+  /// 1-second throughput sampler (`startRelayStatsSampling`): pushes the last
+  /// second's event count onto the throughput history (cap 60) and resets the
+  /// per-second counter.
+  Timer? _sampler;
+
+  /// subId → epoch-ms the REQ was broadcast, so an inbound EOSE can stamp
+  /// REQ→EOSE latency. In proxy mode the per-relay unit is the shard, so
+  /// latency is keyed by the delivering shard's id (the same attribution the
+  /// proxy uses for events). Cleared once every open shard has EOSE'd.
+  final Map<String, int> _reqSentAt = {};
+
+  /// subId → shard ids that have already EOSE'd, so we stamp each shard's
+  /// REQ→EOSE latency exactly once and can drop [_reqSentAt] when all are in.
+  final Map<String, Set<String>> _eosedShards = {};
+
   // --- Public surface (matches RelayPool) -----------------------------------
 
   /// Total relays the proxy reports as connected across all shards (deduped).
@@ -491,12 +541,34 @@ class RelayPoolProxy implements PoolTransport {
   /// Number of shard sockets currently open (transport-level).
   int get openShardCount => _sockets.where((s) => s.isOpen).length;
 
+  /// Live aggregate traffic counters (a fresh snapshot each read). Bytes are
+  /// summed by the shard sockets; events + latency by [_onShardMessage]. Mirrors
+  /// the PWA's single `nym.relayStats`.
+  @override
+  RelayStats get stats => _stats.snapshot();
+
+  /// Start the 1-second throughput sampler (idempotent). Mirrors
+  /// `startRelayStatsSampling`.
+  void _startSampler() {
+    if (_sampler != null) return;
+    _sampler = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _stats.sampleThroughput(),
+    );
+  }
+
+  void _stopSampler() {
+    _sampler?.cancel();
+    _sampler = null;
+  }
+
   /// The current shard layout (for inspection / tests).
   List<RelayShard> get shards => _sockets.map((s) => s.shard).toList();
 
   /// Build shards and open one socket per shard.
   @override
   void connectAll() {
+    _startSampler();
     if (_sockets.isNotEmpty) {
       for (final s in _sockets) {
         s.connect();
@@ -515,6 +587,7 @@ class RelayPoolProxy implements PoolTransport {
         url: _poolUrl,
         channelFactory: _channelFactory,
         rng: _rng,
+        stats: _stats,
         onMessage: _onShardMessage,
         onConnected: _onShardConnected,
         onClosed: _onShardClosed,
@@ -539,6 +612,10 @@ class RelayPoolProxy implements PoolTransport {
     );
     _subscriptions[id] = sub;
     _activeFilters[id] = filters;
+    // Record the REQ broadcast time so each shard's EOSE can stamp REQ→EOSE
+    // latency (keyed by shard id — the proxy's per-relay unit).
+    _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
+    _eosedShards[id] = <String>{};
     sub.startEose();
     final frame = PoolFrame.req(id, filters);
     for (final sock in _sockets) {
@@ -551,6 +628,8 @@ class RelayPoolProxy implements PoolTransport {
   void closeSubscription(Subscription sub) {
     _subscriptions.remove(sub.subId);
     _activeFilters.remove(sub.subId);
+    _reqSentAt.remove(sub.subId);
+    _eosedShards.remove(sub.subId);
     final frame = PoolFrame.close(sub.subId);
     for (final sock in _sockets) {
       sock.send(frame);
@@ -595,6 +674,7 @@ class RelayPoolProxy implements PoolTransport {
   /// Close every shard socket and all subscriptions.
   @override
   Future<void> disconnectAll() async {
+    _stopSampler();
     final subs = _subscriptions.values.toList();
     for (final s in subs) {
       await s.close();
@@ -620,22 +700,56 @@ class RelayPoolProxy implements PoolTransport {
     // here at the transport level.
   }
 
+  /// Stamp REQ→EOSE latency for [shardId] on subscription [subId]: compute
+  /// `now - reqSentAt` once per shard and record it under the shard id. When
+  /// every open shard has EOSE'd, drop the timing entry so a later re-REQ on
+  /// the same subId re-measures.
+  void _stampShardLatency(String subId, String shardId) {
+    final sentAt = _reqSentAt[subId];
+    if (sentAt == null) return;
+    final eosed = _eosedShards[subId] ??= <String>{};
+    if (!eosed.add(shardId)) return; // already stamped this shard
+    final ms = DateTime.now().millisecondsSinceEpoch - sentAt;
+    if (ms >= 0) _stats.latencyPerRelay[shardId] = ms;
+    if (eosed.length >= openShardCount) {
+      _reqSentAt.remove(subId);
+      _eosedShards.remove(subId);
+    }
+  }
+
   void _onShardMessage(_ShardSocket sock, PoolMessage msg) {
     switch (msg) {
-      case PoolEvent(:final subId, :final event):
+      case PoolEvent(:final subId, :final event, :final sourceRelay):
         // Cross-shard dedup: the first shard to deliver an id wins.
         if (!_deduper.add(event.id)) return;
+        // Post-dedup event accounting (relays.js handleRelayMessage:3738-3746):
+        // bump the unique total + per-second counter, and the per-relay tally
+        // attributed to the proxy-tagged sourceRelay when present.
+        _stats.totalEvents++;
+        _stats.eventsThisSecond++;
+        if (sourceRelay != null && sourceRelay.startsWith('wss://')) {
+          _stats.eventsPerRelay[sourceRelay] =
+              (_stats.eventsPerRelay[sourceRelay] ?? 0) + 1;
+        }
         final sub = _subscriptions[subId];
         if (sub != null) unawaited(sub.onEvent(sock.shard.id, event));
       case PoolEose(:final subId):
+        _stampShardLatency(subId, sock.shard.id);
         _subscriptions[subId]?.onEose(sock.shard.id);
       case PoolClosed(:final subId):
+        _stampShardLatency(subId, sock.shard.id);
         _subscriptions[subId]?.onEose(sock.shard.id);
       case PoolOk():
         // Publish ACK; publish() does not await per-relay OK in proxy mode.
         break;
-      case PoolStatus():
-        // connectedRelays already updated on the socket.
+      case PoolStatus(:final latency):
+        // connectedRelays already updated on the socket. Fold this worker's
+        // per-relay latency into the aggregate (relays.js:2137-2141) so the
+        // Network Stats rows + Avg Latency show real per-URL numbers in proxy
+        // mode (complements the per-shard REQ→EOSE timing).
+        latency.forEach((url, ms) {
+          _stats.latencyPerRelay[url] = ms;
+        });
         break;
       case PoolRelayBan(:final url):
         // The proxy permanently dropped this relay (relays.js:2117). Mirror the

@@ -1716,17 +1716,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Appends a locally-echoed self message to the current view (composer SEND).
   /// For PM/group sends, pass [nymMessageId] so inbound receipts can match it
   /// and advance the delivery ticks. Returns the appended [Message].
-  Message? sendLocal(String text, {String? nymMessageId}) {
+  Message? sendLocal(String text,
+      {String? nymMessageId, String? pubkeyOverride, String? authorOverride}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return null;
     final view = state.view;
     final list = state.messages.putIfAbsent(view.storageKey, () => <Message>[]);
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nowSec = nowMs ~/ 1000;
+    // [pubkeyOverride]/[authorOverride] are the pseudonymous-send path: the
+    // optimistic echo carries the per-message ephemeral pubkey + random anon
+    // nym instead of the durable identity (publishMessagePseudonymous).
     final m = Message(
       id: '_optim_${_nextLocalSeq().toRadixString(36)}',
-      pubkey: state.selfPubkey,
-      author: state.selfNym,
+      pubkey: pubkeyOverride ?? state.selfPubkey,
+      author: authorOverride ?? state.selfNym,
       content: trimmed,
       createdAt: nowSec,
       ms: nowMs,

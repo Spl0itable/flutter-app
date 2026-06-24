@@ -1377,10 +1377,12 @@ class FileOfferCard extends StatelessWidget {
 
         return Container(
           constraints: const BoxConstraints(maxWidth: 320),
-          padding: const EdgeInsets.all(12),
+          // `.file-offer { padding: 14px; border-radius: var(--radius-md)=16 }`
+          // (styles-features.css:2051-2052).
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.04),
-            borderRadius: const BorderRadius.all(Radius.circular(8)),
+            borderRadius: const BorderRadius.all(Radius.circular(16)),
             border: Border.all(
               color: isTorrent ? c.secondaryA(0.3) : c.glassBorder,
             ),
@@ -1391,7 +1393,21 @@ class FileOfferCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Icon(iconData, color: iconColor, size: 28),
+                  // `.file-offer-icon`: a 40×40 boxed icon (white@0.05 bg, 1px
+                  // glass border, radius-xs=8) wrapping a 24px primary-stroke
+                  // glyph (styles-features.css:2064-2080). The category colour
+                  // still drives the glyph shape; the stroke is primary.
+                  Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      border: Border.all(color: c.glassBorder),
+                      borderRadius: NymRadius.rxs,
+                    ),
+                    child: Icon(iconData, color: c.primary, size: 24),
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Column(
@@ -1470,13 +1486,32 @@ class FileOfferCard extends StatelessWidget {
               onTap: () => service.requestFile(offer.offerId),
             )
           else ...[
+            // `.file-offer-progress-bar`: 5px track white@0.05, radius 10;
+            // `.file-offer-progress-fill`: `linear-gradient(90deg, secondary,
+            // primary)`, radius 10 (styles-features.css:2139-2152). A
+            // LinearProgressIndicator can't gradient, so paint a Stack +
+            // FractionallySizedBox like p2p_transfers_modal `_TransferRow`.
             ClipRRect(
               borderRadius: const BorderRadius.all(Radius.circular(10)),
-              child: LinearProgressIndicator(
-                value: pct <= 0 ? null : pct / 100,
-                minHeight: 5,
-                backgroundColor: Colors.white.withValues(alpha: 0.05),
-                valueColor: AlwaysStoppedAnimation(c.primary),
+              child: SizedBox(
+                height: 5,
+                child: Stack(
+                  children: [
+                    Container(color: Colors.white.withValues(alpha: 0.05)),
+                    FractionallySizedBox(
+                      widthFactor: (pct / 100).clamp(0.0, 1.0),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius:
+                              const BorderRadius.all(Radius.circular(10)),
+                          gradient: LinearGradient(
+                            colors: [c.secondary, c.primary],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 4),
@@ -1490,7 +1525,9 @@ class FileOfferCard extends StatelessWidget {
       );
     }
     if (transfer != null && transfer.status == P2PStatus.complete) {
-      return _OfferBtn(label: 'Downloaded', color: c.secondary, onTap: null);
+      // The PWA reverts the completed button to the primary-tinted
+      // `.file-offer-btn` (NOT a special secondary colour; p2p.js:641).
+      return _OfferBtn(label: 'Downloaded', color: c.primary, onTap: null);
     }
     // Available → Download / Download (Torrent).
     return _OfferBtn(
@@ -1539,7 +1576,8 @@ class _OfferBtn extends StatelessWidget {
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.08),
           border: Border.all(color: color.withValues(alpha: 0.25)),
-          borderRadius: const BorderRadius.all(Radius.circular(6)),
+          // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
         ),
         child: Text(
           label,
@@ -1570,7 +1608,8 @@ class _StopBtn extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.05),
           border: Border.all(color: c.danger),
-          borderRadius: const BorderRadius.all(Radius.circular(6)),
+          // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
         ),
         child: Text('Stop',
             style: TextStyle(color: c.danger, fontSize: 10)),

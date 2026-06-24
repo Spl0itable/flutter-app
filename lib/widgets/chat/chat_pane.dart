@@ -6,6 +6,7 @@ import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
+import '../../features/p2p/p2p_transfers_modal.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
@@ -251,6 +252,9 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // `#p2pTransfersModal` trigger — present only while transfers/seeds
+          // exist (`openP2PTransfersModal`, p2p.js:732).
+          _transfersMobileToggle(),
           _MobileToggle(
             icon: settings.notificationsEnabled
                 ? Icons.notifications_none
@@ -368,6 +372,10 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         alignment: WrapAlignment.end,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
+          // `#p2pTransfersModal` trigger (`openP2PTransfersModal`, p2p.js:732):
+          // only present while there are active transfers or seeds; the pill
+          // appears/disappears live as the service notifies.
+          _transfersPill(),
           _HeaderPill(
             icon: Icons.notifications_none,
             label: 'Notifications',
@@ -421,6 +429,57 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   void _openNotifications() {
     showNotificationsPanel(context);
     ref.read(notificationHistoryProvider.notifier).markAllViewed();
+  }
+
+  /// Opens `#p2pTransfersModal` (`openP2PTransfersModal`, p2p.js:732), driven
+  /// live by [P2PService]. The modal `AnimatedBuilder`s on the service, so it
+  /// auto-refreshes as transfers progress / stop / cancel.
+  void _openTransfers() {
+    P2PTransfersModal.open(context, ref.read(p2pServiceProvider));
+  }
+
+  /// The desktop `.header-actions` "Transfers" pill, present only while there
+  /// are active transfers or seeds (`service.transfers.isNotEmpty ||
+  /// service.seeding.isNotEmpty`). Listens to the service so it appears /
+  /// disappears as the transfer/seed set changes.
+  Widget _transfersPill() {
+    final service = ref.watch(p2pServiceProvider);
+    return ListenableBuilder(
+      listenable: service,
+      builder: (context, _) {
+        if (service.transfers.isEmpty && service.seeding.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return _HeaderPill(
+          icon: Icons.swap_vert,
+          label: 'Transfers',
+          onTap: _openTransfers,
+        );
+      },
+    );
+  }
+
+  /// The mobile `.mobile-header-actions` transfers toggle, present only while
+  /// there are active transfers or seeds. A trailing 8px gap keeps the row gap
+  /// consistent when shown.
+  Widget _transfersMobileToggle() {
+    final service = ref.watch(p2pServiceProvider);
+    return ListenableBuilder(
+      listenable: service,
+      builder: (context, _) {
+        if (service.transfers.isEmpty && service.seeding.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: _MobileToggle(
+            icon: Icons.swap_vert,
+            tooltip: 'Transfers',
+            onTap: _openTransfers,
+          ),
+        );
+      },
+    );
   }
 
   void _startCall(ChatView view, {required bool video}) {
