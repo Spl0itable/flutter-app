@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import 'nymbot_models.dart';
@@ -225,7 +229,8 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
               color: active
                   ? c.lightning.withValues(alpha: 0.12)
                   : Colors.white.withValues(alpha: 0.04),
-              borderRadius: BorderRadius.circular(8),
+              // `.bot-credit-tier-btn`: radius --radius-sm (12).
+              borderRadius: BorderRadius.circular(12),
               border: Border.all(
                 color: active ? c.lightning.withValues(alpha: 0.5) : c.border,
               ),
@@ -414,6 +419,7 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
         : 'Nymbot ${isPro ? 'Pro ' : ''}credits — $creditWord';
 
     BotInvoice? inv;
+    String? err;
     try {
       inv = await ref.read(botChatControllerProvider.notifier).buy(
             sats,
@@ -421,28 +427,38 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
             recipientPubkey: widget.giftRecipientPubkey,
             comment: comment,
           );
-    } catch (_) {
+      // A null result means the chat isn't bound to an identity yet — the worker
+      // can't issue an invoice without a pubkey (PWA gates on `this.pubkey`).
+      if (inv == null) {
+        err = 'Open the Nymbot chat once to bind your identity, then try again.';
+      } else if (inv.pr.isEmpty) {
+        err = 'Failed to generate invoice. Please try again.';
+        inv = null;
+      }
+    } catch (e) {
+      // Surface the real failure (PWA: `Failed: ${error.message}`,
+      // zaps.js:627) — never fabricate a placeholder bolt11.
+      err = 'Failed: ${_short(e)}';
       inv = null;
     }
     if (!mounted) return;
     setState(() {
       _loading = false;
-      _invoice = inv ??
-          BotInvoice(
-            // Placeholder when the identity isn't bound (no live backend) so the
-            // flow stays reviewable, mirroring the buy modal's stub.
-            pr: 'lnbc${sats}n1p...stub-invoice-bind-identity-to-buy',
-            invoiceId: 'stub',
-            tier: _tier,
-            amountSats: sats,
-          );
+      _invoice = inv;
+      _error = err;
     });
+  }
+
+  static String _short(Object e) {
+    final s = e.toString();
+    return s.length > 120 ? '${s.substring(0, 120)}…' : s;
   }
 }
 
-/// The invoice screen (QR placeholder + copyable bolt11 + waiting state),
-/// mirroring `displayZapInvoice` for the credit purchase.
-class _InvoiceView extends StatelessWidget {
+/// The invoice screen: a real bolt11 QR + copyable invoice + Open-wallet
+/// (`lightning:` URI) + live settlement polling, mirroring `displayZapInvoice`
+/// + `checkBotCreditPaymentViaServer` for the credit purchase (zaps.js:611-694).
+class _InvoiceView extends ConsumerStatefulWidget {
   const _InvoiceView({
     required this.invoice,
     required this.colors,
@@ -454,32 +470,112 @@ class _InvoiceView extends StatelessWidget {
   final VoidCallback onBack;
 
   @override
+  ConsumerState<_InvoiceView> createState() => _InvoiceViewState();
+}
+
+class _InvoiceViewState extends ConsumerState<_InvoiceView> {
+  Timer? _poll;
+  int _checks = 0;
+  static const int _maxChecks = 180; // PWA: 180 × 2s ≈ 6 min.
+  bool _paid = false;
+  bool _checking = false;
+  String _status = 'Waiting for payment…';
+
+  @override
+  void initState() {
+    super.initState();
+    // Poll the worker every 2s for settlement (PWA: 2000ms interval).
+    _poll = Timer.periodic(const Duration(seconds: 2), (_) => _check());
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _check({bool manual = false}) async {
+    if (_paid) return;
+    if (manual) setState(() => _checking = true);
+    _checks++;
+    final paid = await ref
+        .read(botChatControllerProvider.notifier)
+        .checkInvoicePaid(widget.invoice);
+    if (!mounted) return;
+    if (paid) {
+      _poll?.cancel();
+      setState(() {
+        _paid = true;
+        _checking = false;
+        _status = 'Payment received — credits added!';
+      });
+      return;
+    }
+    if (_checks >= _maxChecks) {
+      _poll?.cancel();
+    }
+    setState(() {
+      _checking = false;
+      if (manual) {
+        _status = 'Not paid yet — complete the payment, then tap again.';
+      }
+    });
+  }
+
+  Future<void> _openWallet() async {
+    final uri = Uri.parse('lightning:${widget.invoice.pr}');
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // No Lightning wallet registered — leave the QR/copy path for the user.
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final c = colors;
+    final c = widget.colors;
+    if (_paid) {
+      // `.zap-status.paid` success state.
+      return Column(
+        children: [
+          Icon(Icons.check_circle, size: 40, color: c.lightning),
+          const SizedBox(height: 12),
+          Text(_status,
+              style: TextStyle(
+                  color: c.lightning,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600)),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: c.lightning),
+              onPressed: () => Navigator.of(context).maybePop(),
+              child: const Text('Done'),
+            ),
+          ),
+        ],
+      );
+    }
     return Column(
       children: [
+        // Real bolt11 QR (200px module) in a white frame.
         Container(
-          width: 200,
-          height: 200,
+          padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: c.border),
+            border: Border.all(color: c.lightning.withValues(alpha: 0.3)),
           ),
-          alignment: Alignment.center,
-          child: const Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.qr_code_2, size: 96, color: Colors.black87),
-              SizedBox(height: 4),
-              Text('Lightning invoice',
-                  style: TextStyle(color: Colors.black54, fontSize: 11)),
-            ],
+          child: QrImageView(
+            data: widget.invoice.pr,
+            size: 200,
+            backgroundColor: Colors.white,
           ),
         ),
         const SizedBox(height: 12),
         SelectableText(
-          invoice.pr,
+          widget.invoice.pr,
           maxLines: 2,
           style: TextStyle(
               color: c.textDim, fontSize: 11, fontFamily: 'monospace'),
@@ -490,7 +586,7 @@ class _InvoiceView extends StatelessWidget {
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: () =>
-                    Clipboard.setData(ClipboardData(text: invoice.pr)),
+                    Clipboard.setData(ClipboardData(text: widget.invoice.pr)),
                 icon: const Icon(Icons.copy, size: 16),
                 label: const Text('Copy'),
               ),
@@ -499,19 +595,39 @@ class _InvoiceView extends StatelessWidget {
             Expanded(
               child: FilledButton.icon(
                 style: FilledButton.styleFrom(backgroundColor: c.lightning),
-                onPressed: () {},
+                onPressed: _openWallet,
                 icon: const Icon(Icons.account_balance_wallet, size: 16),
                 label: const Text('Open wallet'),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        Text('Waiting for payment…',
-            style: TextStyle(color: c.textDim, fontSize: 11)),
+        const SizedBox(height: 10),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_checking) ...[
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(strokeWidth: 2, color: c.textDim),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Flexible(
+              child: Text(_status,
+                  style: TextStyle(color: c.textDim, fontSize: 11)),
+            ),
+          ],
+        ),
         const SizedBox(height: 4),
+        // "I've paid" — an immediate re-check (PWA `manualCheckPayment`).
         TextButton(
-          onPressed: onBack,
+          onPressed: _checking ? null : () => _check(manual: true),
+          child: Text("I've paid", style: TextStyle(color: c.lightning)),
+        ),
+        TextButton(
+          onPressed: widget.onBack,
           child: Text('Change amount', style: TextStyle(color: c.textDim)),
         ),
       ],

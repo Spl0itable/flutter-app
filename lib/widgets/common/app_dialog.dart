@@ -180,11 +180,20 @@ class _AppDialog extends StatefulWidget {
 class _AppDialogState extends State<_AppDialog> {
   late final TextEditingController _input =
       TextEditingController(text: widget.defaultValue);
+  final FocusNode _inputFocus = FocusNode();
   bool _checked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Repaint the `.form-input:focus` glow/fill when focus changes.
+    _inputFocus.addListener(() => setState(() {}));
+  }
 
   @override
   void dispose() {
     _input.dispose();
+    _inputFocus.dispose();
     super.dispose();
   }
 
@@ -230,11 +239,21 @@ class _AppDialogState extends State<_AppDialog> {
                     color: c.bgSecondary,
                     borderRadius: NymRadius.rxl,
                     border: Border.all(color: c.glassBorder),
+                    // `.modal-content` shadow stack: shadow-lg + shadow-glow +
+                    // a 1px white/0.05 ring.
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.4),
-                        blurRadius: 40,
-                        offset: const Offset(0, 20),
+                        color: Colors.black.withValues(alpha: 0.5),
+                        blurRadius: 32,
+                        offset: const Offset(0, 8),
+                      ),
+                      BoxShadow(
+                        color: c.primaryA(0.1),
+                        blurRadius: 20,
+                      ),
+                      BoxShadow(
+                        color: Colors.white.withValues(alpha: 0.05),
+                        spreadRadius: 1,
                       ),
                     ],
                   ),
@@ -243,22 +262,30 @@ class _AppDialogState extends State<_AppDialog> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // `.modal-header`.
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                      // `.modal-header` — 22px primary UPPERCASE ls1.5 w700,
+                      // 1px glass bottom rule, padding-bottom 14, margin-bottom 24.
+                      Container(
+                        margin: const EdgeInsets.fromLTRB(32, 32, 32, 24),
+                        padding: const EdgeInsets.only(bottom: 14),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: c.glassBorder),
+                          ),
+                        ),
                         child: Text(
-                          widget.title,
+                          widget.title.toUpperCase(),
                           style: TextStyle(
-                            color: c.text,
-                            fontSize: 18,
+                            color: c.primary,
+                            fontSize: 22,
                             fontWeight: FontWeight.w700,
+                            letterSpacing: 1.5,
                           ),
                         ),
                       ),
                       // `.modal-body`.
                       Flexible(
                         child: SingleChildScrollView(
-                          padding: const EdgeInsets.fromLTRB(24, 0, 24, 4),
+                          padding: const EdgeInsets.fromLTRB(32, 0, 32, 4),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             mainAxisSize: MainAxisSize.min,
@@ -279,19 +306,16 @@ class _AppDialogState extends State<_AppDialog> {
                           ),
                         ),
                       ),
-                      // `.modal-actions`.
+                      // `.modal-actions` — display:flex; gap:10px; justify:center.
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 12, 16, 16),
+                        padding: const EdgeInsets.fromLTRB(32, 8, 32, 32),
                         child: Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             if (!widget.alertOnly) ...[
-                              TextButton(
-                                onPressed: _cancel,
-                                child: Text(widget.cancelLabel,
-                                    style: TextStyle(color: c.textDim)),
-                              ),
-                              const SizedBox(width: 8),
+                              _cancelButton(c),
+                              const SizedBox(width: 10),
                             ],
                             _okButton(c),
                           ],
@@ -340,50 +364,76 @@ class _AppDialogState extends State<_AppDialog> {
 
   Widget _promptField(NymColors c) {
     final max = widget.maxLength;
+    final focused = _inputFocus.hasFocus;
+    final len = _input.text.length;
+    // `.input-char-count` colors: limit (#ff4444) at 100%, warning (#f59e0b)
+    // at 80%, else text-dim @0.6 base opacity.
+    final Color counterColor;
+    if (max != null && len >= max) {
+      counterColor = c.danger;
+    } else if (max != null && len >= max * 0.8) {
+      counterColor = const Color(0xFFF59E0B);
+    } else {
+      counterColor = c.textDim.withValues(alpha: 0.6);
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // `.app-dialog-input` / `.app-dialog-textarea` — 12px top margin.
+        // `.app-dialog-input` / `.app-dialog-textarea` — 12px top margin, with
+        // the `.form-input:focus` glow ring (`0 0 0 3px primary/0.06`).
         Padding(
           padding: const EdgeInsets.only(top: 12),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: widget.multiline ? 110 : 0),
-            child: TextField(
-              controller: _input,
-              autofocus: true,
-              maxLength: max,
-              maxLines: widget.multiline ? null : 1,
-              minLines: widget.multiline ? 4 : 1,
-              expands: false,
-              onChanged: (_) {
-                if (max != null) setState(() {});
-              },
-              onSubmitted: widget.multiline ? null : (_) => _ok(),
-              buildCounter: (_,
-                      {required currentLength,
-                      required isFocused,
-                      maxLength}) =>
-                  null,
-              style: TextStyle(color: c.text, fontSize: 14),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: widget.placeholder.isEmpty ? null : widget.placeholder,
-                hintStyle: TextStyle(color: c.textDim),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-                filled: true,
-                fillColor: Colors.white.withValues(alpha: 0.05),
-                border: OutlineInputBorder(
-                  borderRadius: NymRadius.rxs,
-                  borderSide: BorderSide(color: c.glassBorder),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: NymRadius.rxs,
-                  borderSide: BorderSide(color: c.glassBorder),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: NymRadius.rxs,
-                  borderSide: BorderSide(color: c.primaryA(0.3)),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              borderRadius: NymRadius.rsm,
+              boxShadow: focused
+                  ? [BoxShadow(color: c.primaryA(0.06), spreadRadius: 3)]
+                  : null,
+            ),
+            child: ConstrainedBox(
+              constraints:
+                  BoxConstraints(minHeight: widget.multiline ? 110 : 0),
+              child: TextField(
+                controller: _input,
+                focusNode: _inputFocus,
+                autofocus: true,
+                maxLength: max,
+                maxLines: widget.multiline ? null : 1,
+                minLines: widget.multiline ? 4 : 1,
+                expands: false,
+                onChanged: (_) {
+                  if (max != null) setState(() {});
+                },
+                onSubmitted: widget.multiline ? null : (_) => _ok(),
+                buildCounter: (_,
+                        {required currentLength,
+                        required isFocused,
+                        maxLength}) =>
+                    null,
+                style: TextStyle(color: c.textBright, fontSize: 15),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText:
+                      widget.placeholder.isEmpty ? null : widget.placeholder,
+                  hintStyle: TextStyle(color: c.textDim),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                  filled: true,
+                  // focus → fill lifts white/0.05 → white/0.07.
+                  fillColor:
+                      Colors.white.withValues(alpha: focused ? 0.07 : 0.05),
+                  border: OutlineInputBorder(
+                    borderRadius: NymRadius.rsm,
+                    borderSide: BorderSide(color: c.glassBorder),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: NymRadius.rsm,
+                    borderSide: BorderSide(color: c.glassBorder),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: NymRadius.rsm,
+                    borderSide: BorderSide(color: c.primaryA(0.3)),
+                  ),
                 ),
               ),
             ),
@@ -396,15 +446,8 @@ class _AppDialogState extends State<_AppDialog> {
             child: Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                '${_input.text.length}/$max',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _input.text.length >= max
-                      ? c.danger
-                      : (_input.text.length >= max * 0.8
-                          ? c.warning
-                          : c.textDim),
-                ),
+                '$len/$max',
+                style: TextStyle(fontSize: 11, color: counterColor),
               ),
             ),
           ),
@@ -412,27 +455,62 @@ class _AppDialogState extends State<_AppDialog> {
     );
   }
 
-  Widget _okButton(NymColors c) {
-    if (widget.danger) {
-      // `.send-btn.danger` — bg danger/.1, border danger/.35, text danger.
-      return OutlinedButton(
-        onPressed: _ok,
-        style: OutlinedButton.styleFrom(
-          backgroundColor: c.danger.withValues(alpha: 0.1),
-          foregroundColor: c.danger,
-          side: BorderSide(color: c.danger.withValues(alpha: 0.35)),
-          shape: RoundedRectangleBorder(borderRadius: NymRadius.rsm),
+  /// `.icon-btn` Cancel — bg white/0.05, glass border, radius 8 (`rxs`),
+  /// color `--text`, UPPERCASE 12px w500 ls0.8, padding 7/14.
+  Widget _cancelButton(NymColors c) {
+    return InkWell(
+      onTap: _cancel,
+      borderRadius: NymRadius.rxs,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rxs,
         ),
-        child: Text(widget.okLabel),
-      );
-    }
-    return FilledButton(
-      style: FilledButton.styleFrom(
-        backgroundColor: c.primary,
-        foregroundColor: c.bg,
+        child: Text(
+          widget.cancelLabel.toUpperCase(),
+          style: TextStyle(
+            color: c.text,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.8,
+          ),
+        ),
       ),
-      onPressed: _ok,
-      child: Text(widget.okLabel),
+    );
+  }
+
+  /// `.send-btn` (translucent outline pill) — non-danger: bg primary/0.1,
+  /// border primary/0.3, text `--primary`; danger: danger/0.1 + danger/0.35 +
+  /// `--danger`. radius 12 (`rsm`), height 42, padding 22/10, UPPERCASE 12px
+  /// w600 ls1.5.
+  Widget _okButton(NymColors c) {
+    final accent = widget.danger ? c.danger : c.primary;
+    return InkWell(
+      onTap: _ok,
+      borderRadius: NymRadius.rsm,
+      child: Container(
+        height: 42,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+        decoration: BoxDecoration(
+          color: accent.withValues(alpha: 0.1),
+          border: Border.all(
+            color: accent.withValues(alpha: widget.danger ? 0.35 : 0.3),
+          ),
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Text(
+          widget.okLabel.toUpperCase(),
+          style: TextStyle(
+            color: accent,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.5,
+          ),
+        ),
+      ),
     );
   }
 }

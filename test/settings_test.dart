@@ -168,7 +168,10 @@ void main() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final kv = await KeyValueStore.open();
 
-    tester.view.physicalSize = const Size(900, 1400);
+    // Phone-width viewport (<=768 logical px) so the mobile-only "Mobile
+    // Gestures" section is rendered (it is width-gated like the PWA's
+    // `.mobile-only` reveal `@media (max-width:768px)`).
+    tester.view.physicalSize = const Size(700, 1400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);

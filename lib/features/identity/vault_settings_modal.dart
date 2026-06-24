@@ -2,16 +2,17 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
 import '../../services/storage/secure_store.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import 'identity_vault.dart';
+import 'modal_chrome.dart';
 
 /// Provides the [IdentityVault] wired to the app key/value + secure stores.
 final identityVaultProvider = Provider<IdentityVault>((ref) {
@@ -79,16 +80,18 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 440),
+          // `.nm-vault-box`: max-width 420, padding 32.
+          constraints: const BoxConstraints(maxWidth: 420),
           child: Material(
-            color: c.bgSecondary,
-            borderRadius: NymRadius.rxl,
-            clipBehavior: Clip.antiAlias,
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: vault.isEnabled
-                  ? _enabledView(c, vault)
-                  : _setupView(c, vault),
+            color: Colors.transparent,
+            child: ModalChrome.box(
+              c,
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: vault.isEnabled
+                    ? _enabledView(c, vault)
+                    : _setupView(c, vault),
+              ),
             ),
           ),
         ),
@@ -101,37 +104,52 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Identity encryption',
-            style: TextStyle(
-                color: c.text, fontSize: 18, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 12),
+        _modalHeader(c, 'Identity encryption'),
+        // `.nm-vault-text`: 13px, line-height 1.5.
         Text(
           'Your identity key is encrypted at rest (${vault.method}).',
-          style: TextStyle(color: c.textDim, fontSize: 13),
+          style: TextStyle(color: c.textDim, fontSize: 13, height: 1.5),
         ),
         if (_error != null) ...[
           const SizedBox(height: 8),
           Text(_error!, style: TextStyle(color: c.danger, fontSize: 12)),
         ],
-        const SizedBox(height: 16),
+        const SizedBox(height: 24),
+        // `.modal-actions`: center, gap 10.
         Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text('Close', style: TextStyle(color: c.textDim)),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: c.danger),
-              onPressed: _busy ? null : () => _disable(vault),
-              child: const Text('Turn off'),
-            ),
+            ModalChrome.iconButton(
+                c, 'Close', () => Navigator.of(context).pop()),
+            const SizedBox(width: 10),
+            // `.send-btn.danger` (NOT a solid fill).
+            ModalChrome.sendButton(c, 'Turn off',
+                _busy ? null : () => _disable(vault),
+                danger: true),
           ],
         ),
       ],
     );
   }
+
+  /// The `.modal-header` (22px primary UPPERCASE ls1.5 w700 + bottom rule),
+  /// rendered inline because the vault box has no separate header row.
+  Widget _modalHeader(NymColors c, String title) => Container(
+        padding: const EdgeInsets.only(bottom: 14),
+        margin: const EdgeInsets.only(bottom: 24),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: c.glassBorder)),
+        ),
+        child: Text(
+          title.toUpperCase(),
+          style: TextStyle(
+            color: c.primary,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.5,
+          ),
+        ),
+      );
 
   Widget _setupView(NymColors c, IdentityVault vault) {
     final isBio = _method == 'biometric';
@@ -140,18 +158,17 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Encrypt identity key',
-            style: TextStyle(
-                color: c.text, fontSize: 18, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 8),
+        _modalHeader(c, 'Encrypt identity key'),
+        // `.nm-vault-text`: 13px, line-height 1.5.
         Text(
           "Protect your saved identity so it can't be read from this device "
           'without unlocking.',
-          style: TextStyle(color: c.textDim, fontSize: 13),
+          style: TextStyle(color: c.textDim, fontSize: 13, height: 1.5),
         ),
         const SizedBox(height: 16),
-        Text('Method', style: TextStyle(color: c.text, fontSize: 12)),
-        const SizedBox(height: 6),
+        // `.form-label`.
+        ModalChrome.formLabel(c, 'Method'),
+        const SizedBox(height: 8),
         DropdownButtonFormField<String>(
           initialValue: _method,
           dropdownColor: c.bgTertiary,
@@ -173,7 +190,10 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
             controller: _pw,
             obscureText: true,
             keyboardType: isPin ? TextInputType.number : TextInputType.text,
-            style: TextStyle(color: c.text),
+            // PIN: hard-strip non-digits on every keystroke (key-vault.js:558).
+            inputFormatters:
+                isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+            style: TextStyle(color: c.textBright, fontSize: 15),
             decoration:
                 _decoration(c, isPin ? 'Choose a PIN code' : 'Choose a password'),
           ),
@@ -182,7 +202,9 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
             controller: _pw2,
             obscureText: true,
             keyboardType: isPin ? TextInputType.number : TextInputType.text,
-            style: TextStyle(color: c.text),
+            inputFormatters:
+                isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+            style: TextStyle(color: c.textBright, fontSize: 15),
             decoration: _decoration(c, 'Confirm'),
           ),
         ] else
@@ -198,24 +220,25 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
           const SizedBox(height: 8),
           Text(_error!, style: TextStyle(color: c.danger, fontSize: 12)),
         ],
-        const SizedBox(height: 18),
+        const SizedBox(height: 24),
+        // `.modal-actions`: center, gap 10.
         Row(
-          mainAxisAlignment: MainAxisAlignment.end,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text('Cancel', style: TextStyle(color: c.textDim)),
-            ),
-            const SizedBox(width: 8),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: c.primary),
-              onPressed: _busy ? null : () => _enable(vault),
+            ModalChrome.iconButton(
+                c, 'Cancel', () => Navigator.of(context).pop()),
+            const SizedBox(width: 10),
+            ModalChrome.sendButton(
+              c,
+              'Enable',
+              _busy ? null : () => _enable(vault),
               child: _busy
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 16,
                       height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Text('Enable'),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: c.primary))
+                  : null,
             ),
           ],
         ),
@@ -223,27 +246,9 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
     );
   }
 
-  InputDecoration _decoration(NymColors c, String hint) => InputDecoration(
-        isDense: true,
-        hintText: hint.isEmpty ? null : hint,
-        hintStyle: TextStyle(color: c.textDim),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-        filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.05),
-        border: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.primaryA(0.3)),
-        ),
-      );
+  // `.form-input`/`.form-select`: radius 12, padding 11/14, font 15.
+  InputDecoration _decoration(NymColors c, String hint) =>
+      ModalChrome.inputDecoration(c, hint);
 
   Future<void> _enable(IdentityVault vault) async {
     setState(() => _error = null);
@@ -272,13 +277,20 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
     }
     setState(() => _busy = true);
     try {
-      await vault.enable(method: _method, password: password);
+      // The PWA collapses password + PIN to method `'password'`; only WebAuthn
+      // factors keep their own name (`_vaultIsWebAuthn(method) ? method :
+      // 'password'`, key-vault.js:180). So a PIN persists as `'password'`, never
+      // the literal `'pin'`. (Mirrored at the call site since identity_vault is
+      // shared core — see CROSS_FILE_NEEDS for the in-engine fix.)
+      final storedMethod = _method == 'biometric' ? 'biometric' : 'password';
+      await vault.enable(method: storedMethod, password: password);
       if (!mounted) return;
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Identity encryption enabled. You\'ll unlock on next launch.')),
+      // PWA uses a modal `_vaultAlert`, not a transient toast (key-vault.js:599).
+      await showAppAlert(
+        context,
+        "Identity encryption enabled and verified. You'll be asked to unlock "
+        'on next launch.',
       );
     } catch (e) {
       setState(() {
@@ -325,9 +337,8 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
       await vault.disable(password);
       if (!mounted) return;
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Encryption turned off.')),
-      );
+      // PWA modal `_vaultAlert` "Encryption turned off." (key-vault.js:527).
+      await showAppAlert(context, 'Encryption turned off.');
     } catch (e) {
       setState(() {
         _busy = false;

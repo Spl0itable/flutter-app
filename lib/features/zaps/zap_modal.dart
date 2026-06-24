@@ -76,6 +76,7 @@ enum _Phase { amount, generating, invoice, paid, error }
 
 class _ZapModalState extends ConsumerState<ZapModal> {
   final _customController = TextEditingController();
+  final _customFocus = FocusNode();
   final _commentController = TextEditingController();
   final _api = ApiClient();
   int? _selected;
@@ -96,10 +97,24 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   @override
   void dispose() {
     _customController.dispose();
+    _customFocus.dispose();
     _commentController.dispose();
     _verifyTimer?.cancel();
     _api.dispose();
     super.dispose();
+  }
+
+  /// The Custom field's "Generate" (and Enter) path (zaps.js `triggerCustom`):
+  /// a blank/≤0 custom amount focuses the field and returns (no fallback to a
+  /// selected preset); a valid one clears any preset highlight and generates.
+  void _triggerCustom() {
+    final val = int.tryParse(_customController.text.trim());
+    if (val == null || val <= 0) {
+      _customFocus.requestFocus();
+      return;
+    }
+    setState(() => _selected = null);
+    _generate();
   }
 
   int? get _amount {
@@ -283,13 +298,15 @@ class _ZapModalState extends ConsumerState<ZapModal> {
             children: [
               _header(c),
               const SizedBox(height: 24), // `.modal-header` margin-bottom
+              // `#zapRecipientInfo` (`.nm-h-75`) — centered, body-size, mb20.
               Text(
                 widget.messageId != null
                     ? 'Zapping @${widget.recipientNym}'
                     : "Zapping @${widget.recipientNym}'s profile",
-                style: TextStyle(color: c.textDim, fontSize: 13),
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.textDim, fontSize: 15),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 20),
               if (_phase == _Phase.amount) ..._amountSection(c),
               if (_phase == _Phase.generating) _status(c, checking: true),
               if (_phase == _Phase.error) _status(c),
@@ -349,19 +366,14 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   }
 
   List<Widget> _amountSection(NymColors c) {
+    // `.zap-amounts` is a 3-col grid, collapsing to 2 cols under 768px
+    // (styles-themes-responsive.css @media).
+    final cols = MediaQuery.of(context).size.width < 768 ? 2 : 3;
     return [
-      Text(
-        'SELECT AMOUNT',
-        style: TextStyle(
-          color: c.textDim,
-          fontSize: 11,
-          letterSpacing: 1.2,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-      const SizedBox(height: 12),
+      _formLabel(c, 'Select Amount'),
+      const SizedBox(height: 8),
       GridView.count(
-        crossAxisCount: 3,
+        crossAxisCount: cols,
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         mainAxisSpacing: 10,
@@ -376,25 +388,48 @@ class _ZapModalState extends ConsumerState<ZapModal> {
         children: [
           Expanded(
             child: _input(c, _customController, 'Custom amount (sats)',
-                number: true, onChanged: (_) => setState(() => _selected = null)),
+                number: true,
+                focusNode: _customFocus,
+                onSubmitted: (_) => _triggerCustom()),
           ),
           const SizedBox(width: 10),
           _generateBtn(c),
         ],
       ),
       const SizedBox(height: 20),
-      Text(
-        'COMMENT (OPTIONAL)',
+      // `Comment <span class="nm-h-2">(optional)</span>` — "(optional)" is
+      // lowercase w400 ls0 (not uppercased with the rest of the label).
+      _formLabel(c, 'Comment', optional: true),
+      const SizedBox(height: 8),
+      _input(c, _commentController, 'Add a comment to your zap'),
+    ];
+  }
+
+  /// `.form-label` — 11px UPPERCASE ls1.2 w600 text-dim, with an optional
+  /// trailing `.nm-h-2` "(optional)" span (lowercase, w400, ls0).
+  Widget _formLabel(NymColors c, String text, {bool optional = false}) {
+    return Text.rich(
+      TextSpan(
+        text: text.toUpperCase(),
         style: TextStyle(
           color: c.textDim,
           fontSize: 11,
           letterSpacing: 1.2,
           fontWeight: FontWeight.w600,
         ),
+        children: optional
+            ? [
+                const TextSpan(
+                  text: ' (optional)',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w400,
+                    letterSpacing: 0,
+                  ),
+                ),
+              ]
+            : null,
       ),
-      const SizedBox(height: 8),
-      _input(c, _commentController, 'Add a comment to your zap'),
-    ];
+    );
   }
 
   Widget _amountBtn(NymColors c, int amt) {
@@ -414,8 +449,12 @@ class _ZapModalState extends ConsumerState<ZapModal> {
           color: selected
               ? c.lightning.withValues(alpha: 0.12)
               : Colors.white.withValues(alpha: 0.04),
+          // `.zap-amount-btn` resting border = `--glass-border`; selected →
+          // lightning/0.5.
           border: Border.all(
-            color: c.lightning.withValues(alpha: selected ? 0.5 : 0.0),
+            color: selected
+                ? c.lightning.withValues(alpha: 0.5)
+                : c.glassBorder,
           ),
           borderRadius: NymRadius.rsm,
           // `.zap-amount-btn.selected` → soft lightning glow.
@@ -431,6 +470,7 @@ class _ZapModalState extends ConsumerState<ZapModal> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // `.zap-amount-btn .sats` — 18px bold lightning.
             Text(
               label,
               style: TextStyle(
@@ -439,7 +479,8 @@ class _ZapModalState extends ConsumerState<ZapModal> {
                 fontWeight: FontWeight.bold,
               ),
             ),
-            Text('sats', style: TextStyle(color: c.text, fontSize: 12)),
+            // bare "sats" text node inherits `.zap-amount-btn` (14px, --text).
+            Text('sats', style: TextStyle(color: c.text, fontSize: 14)),
           ],
         ),
       ),
@@ -448,7 +489,7 @@ class _ZapModalState extends ConsumerState<ZapModal> {
 
   Widget _generateBtn(NymColors c) {
     return InkWell(
-      onTap: _generate,
+      onTap: _triggerCustom,
       borderRadius: NymRadius.rsm,
       child: Container(
         height: 44,
@@ -476,12 +517,14 @@ class _ZapModalState extends ConsumerState<ZapModal> {
     return [
       Container(
         alignment: Alignment.center,
-        margin: const EdgeInsets.symmetric(vertical: 8),
+        // `.zap-invoice-qr` — margin 20px 0.
+        margin: const EdgeInsets.symmetric(vertical: 20),
         child: Container(
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
             color: Colors.white,
-            border: Border.all(color: c.lightning.withValues(alpha: 0.3)),
+            // `.zap-invoice-qr` — 2px lightning/0.3 border.
+            border: Border.all(color: c.lightning.withValues(alpha: 0.3), width: 2),
             borderRadius: NymRadius.rsm,
           ),
           child: QrImageView(
@@ -493,7 +536,8 @@ class _ZapModalState extends ConsumerState<ZapModal> {
       ),
       Container(
         padding: const EdgeInsets.all(15),
-        margin: const EdgeInsets.symmetric(vertical: 8),
+        // `.zap-invoice` — margin 20px 0.
+        margin: const EdgeInsets.symmetric(vertical: 20),
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.03),
           border: Border.all(color: c.lightning.withValues(alpha: 0.3)),
@@ -501,18 +545,18 @@ class _ZapModalState extends ConsumerState<ZapModal> {
         ),
         child: Text(
           pr,
-          style: TextStyle(
-            color: c.textDim,
-            fontSize: 12,
-            fontFamily: 'monospace',
-          ),
+          // `.zap-invoice` inherits --font-sans (no mono rule); 12px text-dim.
+          style: TextStyle(color: c.textDim, fontSize: 12),
         ),
       ),
+      // `.zap-invoice-actions` — Copy / Open Wallet `.icon-btn`s, intrinsic
+      // width, centered, gap 10 (not stretched).
       Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Expanded(child: _iconBtn(c, 'Copy Invoice', _copyInvoice)),
+          _iconBtn(c, 'Copy Invoice', _copyInvoice),
           const SizedBox(width: 10),
-          Expanded(child: _iconBtn(c, 'Open Wallet', _openWallet)),
+          _iconBtn(c, 'Open Wallet', _openWallet),
         ],
       ),
       // WebLN is not applicable on native — mirrors the PWA hiding the WebLN
@@ -587,22 +631,15 @@ class _ZapModalState extends ConsumerState<ZapModal> {
 
   Widget _actions(NymColors c) {
     // On the invoice screen the PWA reveals a primary "I've paid" button beside
-    // Cancel (index.html `#zapPaidBtn`, zaps.js `displayZapInvoice`).
+    // Cancel (index.html `#zapPaidBtn`, zaps.js `displayZapInvoice`). Both keep
+    // intrinsic widths centered with a 10px gap (`.modal-actions`).
     if (_phase == _Phase.invoice) {
       return Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Expanded(
-            child: _iconBtn(c, 'Cancel', () => Navigator.of(context).maybePop()),
-          ),
+          _iconBtn(c, 'Cancel', () => Navigator.of(context).maybePop()),
           const SizedBox(width: 10),
-          Expanded(
-            child: _iconBtn(
-              c,
-              "I've paid",
-              _checkingManual ? null : _manualCheck,
-              filled: true,
-            ),
-          ),
+          _sendBtn(c, "I've paid", _checkingManual ? null : _manualCheck),
         ],
       );
     }
@@ -614,32 +651,58 @@ class _ZapModalState extends ConsumerState<ZapModal> {
     );
   }
 
-  Widget _iconBtn(NymColors c, String label, VoidCallback? onTap,
-      {bool filled = false}) {
-    // `filled` → the PWA's primary "I've paid" call-to-action (solid primary
-    // fill, on-primary text); otherwise the ghost button used for Cancel/Copy.
-    final fg = filled ? c.bg : c.primary;
+  /// `.icon-btn` — bordered uppercase ghost pill (bg white/0.05, glass border,
+  /// radius 8, color `--text`, 12px w500 ls0.8, padding 7/14). Used for
+  /// Cancel / Copy Invoice / Open Wallet.
+  Widget _iconBtn(NymColors c, String label, VoidCallback? onTap) {
     return InkWell(
       onTap: onTap,
-      borderRadius: NymRadius.rsm,
-      child: Opacity(
-        opacity: onTap == null ? 0.6 : 1,
+      borderRadius: NymRadius.rxs,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rxs,
+        ),
+        child: Text(
+          label.toUpperCase(),
+          style: TextStyle(
+            color: c.text,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// `.send-btn` — translucent primary outline pill (bg primary/0.1, border
+  /// primary/0.3, text `--primary`, radius 12, h42, padding 22/10, 12px w600
+  /// ls1.5; disabled opacity 0.35). The PWA's "I've paid" call-to-action.
+  Widget _sendBtn(NymColors c, String label, VoidCallback? onTap) {
+    return Opacity(
+      opacity: onTap == null ? 0.35 : 1,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: NymRadius.rsm,
         child: Container(
           height: 42,
           alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
           decoration: BoxDecoration(
-            color: filled ? c.primary : c.primary.withValues(alpha: 0.1),
-            border: Border.all(
-                color: filled ? c.primary : c.primary.withValues(alpha: 0.3)),
+            color: c.primaryA(0.1),
+            border: Border.all(color: c.primaryA(0.3)),
             borderRadius: NymRadius.rsm,
           ),
           child: Text(
             label.toUpperCase(),
             style: TextStyle(
-              color: fg,
+              color: c.primary,
               fontSize: 12,
-              letterSpacing: 1.5,
               fontWeight: FontWeight.w600,
+              letterSpacing: 1.5,
             ),
           ),
         ),
@@ -653,10 +716,14 @@ class _ZapModalState extends ConsumerState<ZapModal> {
     String hint, {
     bool number = false,
     ValueChanged<String>? onChanged,
+    ValueChanged<String>? onSubmitted,
+    FocusNode? focusNode,
   }) {
     return TextField(
       controller: controller,
+      focusNode: focusNode,
       onChanged: onChanged,
+      onSubmitted: onSubmitted,
       keyboardType: number ? TextInputType.number : TextInputType.text,
       style: TextStyle(color: c.textBright, fontSize: 15),
       decoration: InputDecoration(

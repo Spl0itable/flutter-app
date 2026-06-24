@@ -16,6 +16,7 @@ import '../../features/identity/panic_overlay.dart';
 import '../../features/identity/panic_wipe.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
+import '../../features/relays/relay_stats_modal.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
@@ -587,18 +588,27 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   ),
                   const SizedBox(height: 10),
                   // `.status-indicator` (inline-flex → centered by the header):
-                  // 11px textDim, gap 5, 8px dot.
-                  Row(
-                    key: TutorialTargets.keyFor(TutorialTarget.statusIndicator),
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const StatusDot(status: UserStatus.online, size: 8),
-                      const SizedBox(width: 5),
-                      Text(
-                        'connected',
-                        style: TextStyle(color: c.textDim, fontSize: 11),
+                  // 11px textDim, gap 5, 8px dot. Tapping opens the Network Stats
+                  // modal (index.html:434 `data-action="openRelayStats"`).
+                  MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => RelayStatsModal.open(context),
+                      child: Row(
+                        key: TutorialTargets.keyFor(
+                            TutorialTarget.statusIndicator),
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const StatusDot(status: UserStatus.online, size: 8),
+                          const SizedBox(width: 5),
+                          Text(
+                            'connected',
+                            style: TextStyle(color: c.textDim, fontSize: 11),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),

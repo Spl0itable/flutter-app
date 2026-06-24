@@ -28,6 +28,7 @@ import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
 import '../services/relay/relay_message.dart';
 import '../services/relay/relay_pool.dart';
+import '../services/relay/relay_pool_proxy.dart';
 import '../models/channel.dart';
 import '../models/group.dart';
 import '../models/message.dart';
@@ -101,6 +102,20 @@ class NostrController {
   /// [Nip46SignerAdapter] for a restored NIP-46 remote signer, or null before
   /// boot. Every publish / gift-wrap path flows through this.
   EventSigner? get signer => _signer;
+
+  /// Per-relay connection status (url → connected) for the Network Stats modal
+  /// (`relay_stats_modal.dart`). Direct mode reads [RelayPool.connectionStatus];
+  /// proxy mode exposes its live connected set as `url → true`. Empty before boot.
+  Map<String, bool> get relayConnectionStatus {
+    final svc = _service;
+    if (svc == null) return const {};
+    final pool = svc.pool;
+    if (pool is RelayPool) return pool.connectionStatus;
+    if (pool is RelayPoolProxy) {
+      return {for (final u in pool.connectedRelayUrls) u: true};
+    }
+    return const {};
+  }
 
   // --- Slash commands -------------------------------------------------------
 
@@ -3712,7 +3727,13 @@ class NostrController {
   bool bindBotChat() {
     final identity = _identity;
     if (identity == null) return false;
-    _ref.read(botChatControllerProvider.notifier).bind(pubkey: identity.pubkey);
+    // Pass the privkey so the bot controller can build per-action NIP-98 auth
+    // for paid requests (PWA `_signBotAuth`). Null for delegated signers
+    // (ext/nip46) — those fall back to the pre-supplied auth blob.
+    _ref.read(botChatControllerProvider.notifier).bind(
+          pubkey: identity.pubkey,
+          privkey: identity.privkey,
+        );
     return true;
   }
 

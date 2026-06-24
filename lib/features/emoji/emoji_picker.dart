@@ -17,6 +17,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import 'custom_emoji.dart';
 import 'emoji_data.dart';
 
@@ -106,15 +108,15 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
   }
 
   /// Recents filtered to drop custom `:code:` tokens whose pack is no longer
-  /// known (emoji.js `_recentEmojisForPicker`, lines 150-159). The PWA caps at
-  /// 20 on mobile / 24 desktop; we use the full cap of 24 (composer is the same
-  /// surface regardless of platform here).
-  List<String> _visibleRecents(CustomEmojiState custom) {
+  /// known (emoji.js `_recentEmojisForPicker`, lines 150-159). The PWA caps the
+  /// picker recents at 20 on mobile (`innerWidth<=768`) / 24 on desktop.
+  List<String> _visibleRecents(CustomEmojiState custom, double width) {
+    final cap = width <= 768 ? 20 : kRecentEmojisCap;
     return widget.recents.where((e) {
       final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
       if (m == null) return true;
       return custom.codeToUrl.containsKey(m.group(1));
-    }).take(kRecentEmojisCap).toList();
+    }).take(cap).toList();
   }
 
   /// True when an emoji passes the current search (emoji.js `_applyEmojiSearch`:
@@ -142,14 +144,18 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final custom = ref.watch(customEmojiStateProvider);
+    // Read the LIVE NIP-30 store (kind-30030 packs + kind-10030 list + inbound
+    // `emoji` tags). It hydrates from the persisted cache on launch, so this is
+    // a strict superset of the old static `customEmojiStateProvider` and updates
+    // live as packs arrive over relays.
+    final custom = ref.watch(liveCustomEmojiProvider);
     final width = MediaQuery.sizeOf(context).width;
     final columns = width <= _kFiveColMaxWidth ? 5 : 6;
 
     final sections = <_Section>[];
 
     // Recently Used.
-    final recents = _visibleRecents(custom)
+    final recents = _visibleRecents(custom, width)
         .where((e) {
           final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
           return m == null ? _matches(e) : _matchesCustom(m.group(1)!);
@@ -170,15 +176,27 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ));
     }
 
-    // Custom NIP-30 packs, favorited packs first (emoji.js rank: fav→own→
-    // subscribed→rest; own/subscribed flags aren't reachable from the cache, so
-    // we rank favorites first then keep the cache's recency order — see report
-    // F5 sub-deferral).
+    // Custom NIP-30 packs ranked fav(0)→own(1)→subscribed(2)→rest(3), then
+    // created_at desc (emoji.js `buildCustomEmojiSectionsHtml`:487-495). Own =
+    // authored by the self pubkey; subscribed = referenced by the user's
+    // kind-10030 list (`isPackSubscribed`). Own/subscribed packs get a ` ★`
+    // title suffix.
     final packFavSet = _packFavorites.toSet();
-    final orderedPacks = [
-      ...custom.packs.where((p) => packFavSet.contains(p.key)),
-      ...custom.packs.where((p) => !packFavSet.contains(p.key)),
-    ];
+    final selfPubkey = ref.read(nostrControllerProvider).identity?.pubkey;
+    final liveNotifier = ref.read(liveCustomEmojiProvider.notifier);
+    bool isOwn(CustomEmojiPack p) =>
+        selfPubkey != null && p.pubkey == selfPubkey;
+    bool isSubscribed(CustomEmojiPack p) => liveNotifier.isPackSubscribed(p);
+    int rank(CustomEmojiPack p) => packFavSet.contains(p.key)
+        ? 0
+        : isOwn(p)
+            ? 1
+            : (isSubscribed(p) ? 2 : 3);
+    final orderedPacks = [...custom.packs]..sort((a, b) {
+        final r = rank(a).compareTo(rank(b));
+        if (r != 0) return r;
+        return b.createdAt.compareTo(a.createdAt);
+      });
     for (final pack in orderedPacks) {
       final cells = <Widget>[];
       for (final e in pack.emojis) {
@@ -187,9 +205,10 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         cells.add(_customCell(e.shortcode, custom.codeToUrl[e.shortcode]!));
       }
       if (cells.isEmpty) continue;
+      final star = (isOwn(pack) || isSubscribed(pack)) ? ' ★' : '';
       sections.add(_section(
         c,
-        title: pack.title,
+        title: '${pack.title}$star',
         children: cells,
         isFavorite: packFavSet.contains(pack.key),
         onToggleFavorite:
@@ -233,8 +252,9 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
               color: c.glassBg,
               border: Border.all(color: c.glassBorder),
               borderRadius: NymRadius.rmd,
+              // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
               boxShadow: const [
-                BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+                BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
               ],
             ),
             padding: const EdgeInsets.all(12),
@@ -248,20 +268,13 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
                   child: SingleChildScrollView(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: sections.isEmpty
-                          ? [
-                              Padding(
-                                padding: const EdgeInsets.all(16),
-                                child: Text(
-                                  'No emoji found',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: c.textDim, fontSize: 12),
-                                ),
-                              ),
-                            ]
-                          : [
-                              for (final s in sections) _GridSection(columns: columns, section: s),
-                            ],
+                      // The PWA has NO "no results" node: an empty search just
+                      // toggles every section `.emoji-hidden` and the grid goes
+                      // blank silently (reactions.js:797-801). Render nothing.
+                      children: [
+                        for (final s in sections)
+                          _GridSection(columns: columns, section: s),
+                      ],
                     ),
                   ),
                 ),
@@ -429,11 +442,12 @@ class _GridSection extends StatelessWidget {
                   child: Text(
                     section.title.toUpperCase(),
                     overflow: TextOverflow.ellipsis,
+                    // `.emoji-picker-section-title`: 10px upper, ls1, dim, no
+                    // explicit weight (→ 400).
                     style: TextStyle(
                       fontSize: 10,
                       color: c.textDim,
                       letterSpacing: 1,
-                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
@@ -491,23 +505,43 @@ class _FavStar extends StatelessWidget {
   }
 }
 
-/// `.emoji-btn` tap target: transparent, radius xs, hover highlight.
-class _EmojiCell extends StatelessWidget {
+/// `.emoji-btn` tap target: transparent, radius xs. On hover the cell fills
+/// `rgba(255,255,255,0.08)` and the glyph scales to 1.15
+/// (styles-components.css:2166-2171).
+class _EmojiCell extends StatefulWidget {
   const _EmojiCell({required this.onTap, required this.child});
   final VoidCallback onTap;
   final Widget child;
 
   @override
+  State<_EmojiCell> createState() => _EmojiCellState();
+}
+
+class _EmojiCellState extends State<_EmojiCell> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      borderRadius: NymRadius.rxs,
-      child: InkWell(
-        onTap: onTap,
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Material(
+        color: Colors.transparent,
         borderRadius: NymRadius.rxs,
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Center(child: child),
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: NymRadius.rxs,
+          hoverColor: Colors.white.withValues(alpha: 0.08),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Center(
+              child: AnimatedScale(
+                scale: _hover ? 1.15 : 1.0,
+                duration: const Duration(milliseconds: 120),
+                child: widget.child,
+              ),
+            ),
+          ),
         ),
       ),
     );

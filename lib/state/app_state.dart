@@ -1957,10 +1957,17 @@ final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
   final s = ref.watch(appStateProvider);
   final sortByProximity = ref.watch(
       settingsProvider.select((settings) => settings.sortByProximity));
+  // `hideNonPinned` (settings.js `hideNonPinnedChannels`): when on, the sidebar
+  // shows only pinned channels (the default channel always stays visible).
+  final hideNonPinned =
+      ref.watch(settingsProvider.select((settings) => settings.hideNonPinned));
   final location = ref.watch(userLocationProvider);
   final visible = s.channels
       .where((c) => !s.hiddenChannels.contains(c.key))
       .where((c) => !s.blockedChannels.contains(c.key))
+      .where((c) => !(hideNonPinned &&
+          c.key != kDefaultChannel &&
+          !s.pinnedChannels.contains(c.key)))
       .toList();
   return ChannelManager.sortChannels(
     visible,

@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
@@ -11,7 +13,31 @@ import '../../core/theme/nym_metrics.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import 'dev_nsec_modal.dart';
+import 'modal_chrome.dart';
 import 'nostr_login_modal.dart';
+
+/// Opens an absolute [url] in the external browser (NOTE-banner links).
+TapGestureRecognizer _linkTap(String url) {
+  return TapGestureRecognizer()
+    ..onTap = () =>
+        launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+}
+
+/// The "nymchat" ASCII-art logo, verbatim from index.html:1261-1271
+/// (`.setup-logo`, rendered at monospace 6px). A raw string keeps the literal
+/// backslashes; no `$` appears in the art.
+const String _kAsciiLogo = r'''
+                                            ##\                  ##\
+                                            ## |                 ## |
+#######\  ##\   ##\ ######\####\   #######\ #######\   ######\ ######\
+##  __##\ ## |  ## |##  _##  _##\ ##  _____|##  __##\  \____##\\_##  _|
+## |  ## |## |  ## |## / ## / ## |## /      ## |  ## | ####### | ## |
+## |  ## |## |  ## |## | ## | ## |## |      ## |  ## |##  __## | ## |##\
+## |  ## |\####### |## | ## | ## |\#######\ ## |  ## |\####### | \####  |
+\__|  \__| \____## |\__| \__| \__| \_______|\__|  \__| \_______|  \____/
+          ##\   ## |
+          \######  |
+           \______/''';
 
 /// First-run setup screen mirroring `#setupModal` (index.html 1257–1346).
 ///
@@ -121,6 +147,8 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     final c = context.nym;
     final invite = _inviteBannerText();
 
+    // `.setup-modal-content`: borderless, radius 0, fills the screen, with the
+    // inner column capped at 500 / 90% width (index.html:1258, CSS :30-46/75-89).
     return Material(
       color: c.bg,
       child: SafeArea(
@@ -128,29 +156,22 @@ class _SetupModalState extends ConsumerState<SetupModal> {
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480),
-              child: Container(
-                padding: const EdgeInsets.all(28),
-                decoration: BoxDecoration(
-                  color: c.bgSecondary,
-                  borderRadius: NymRadius.rxl,
-                  border: Border.all(color: c.glassBorder),
-                ),
-                child: Column(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // ASCII "nymchat" logo doubles as a login affordance.
+                    // The 9-line ASCII-art logo (index.html:1261-1271),
+                    // monospace 6px, centered, doubling as a login affordance.
                     GestureDetector(
                       onTap: _login,
                       child: Text(
-                        'nymchat',
+                        _kAsciiLogo,
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: c.primary,
-                          fontSize: 30,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 2,
+                          fontSize: 6,
+                          height: 1.0,
                           fontFamily: 'monospace',
                         ),
                       ),
@@ -160,16 +181,17 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       _InviteBanner(text: invite, c: c),
                       const SizedBox(height: 16),
                     ],
+                    // `.nm-h-50`: text-dim 13px underline (offset 3).
                     GestureDetector(
                       onTap: _login,
                       child: Text(
                         'Login with nsec private key or extension? Click here',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          color: c.secondary,
+                          color: c.textDim,
                           fontSize: 13,
                           decoration: TextDecoration.underline,
-                          decorationColor: c.secondary,
+                          decorationColor: c.textDim,
                         ),
                       ),
                     ),
@@ -207,36 +229,64 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       maxLines: 3,
                       showCounter: true,
                     ),
-                    const SizedBox(height: 14),
-                    Text(
-                      'NOTE: Nymchat is bridged with Bitchat geohash channels '
-                      'and the messages are public and ephemeral; sent across '
-                      'the Nostr relay network. Only private messages and group '
-                      'chats are end-to-end encrypted.',
-                      style: TextStyle(
-                          color: c.textDim, fontSize: 11, height: 1.4),
+                    const SizedBox(height: 15),
+                    // `.nm-h-52`: warning callout box (warning #ffff00 text,
+                    // padding 12/14, border rgba(255,255,0,0.2), radius 12, bg
+                    // rgba(255,255,0,0.04)); "Bitchat"/"Nostr" = secondary links.
+                    Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: c.warning.withValues(alpha: 0.04),
+                        borderRadius: NymRadius.rsm,
+                        border:
+                            Border.all(color: c.warning.withValues(alpha: 0.2)),
+                      ),
+                      child: Text.rich(
+                        TextSpan(
+                          style: TextStyle(color: c.warning, fontSize: 12),
+                          children: [
+                            const TextSpan(text: 'NOTE: Nymchat is bridged with '),
+                            TextSpan(
+                              text: 'Bitchat',
+                              style: TextStyle(color: c.secondary),
+                              recognizer: _linkTap('https://bitchat.free'),
+                            ),
+                            const TextSpan(
+                              text: ' geohash channels and the messages are '
+                                  'public and ephemeral; sent across the ',
+                            ),
+                            TextSpan(
+                              text: 'Nostr',
+                              style: TextStyle(color: c.secondary),
+                              recognizer: _linkTap('https://nostr.com'),
+                            ),
+                            const TextSpan(
+                              text: ' relay network. Only private messages and '
+                                  'group chats are end-to-end encrypted.',
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                     const SizedBox(height: 18),
-                    SizedBox(
-                      height: 46,
-                      child: FilledButton(
-                        key: const Key('setupEnterBtn'),
-                        onPressed: _busy ? null : _enter,
-                        style: FilledButton.styleFrom(
-                          backgroundColor: c.primary,
-                          foregroundColor: c.bg,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: NymRadius.rsm),
-                        ),
+                    // `.send-btn` (translucent primary pill), h42.
+                    Padding(
+                      key: const Key('setupEnterBtn'),
+                      padding: EdgeInsets.zero,
+                      child: ModalChrome.sendButton(
+                        c,
+                        'Enter',
+                        _busy ? null : _enter,
+                        fullWidth: true,
                         child: _busy
-                            ? const SizedBox(
+                            ? SizedBox(
                                 width: 18,
                                 height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: c.primary),
                               )
-                            : const Text('Enter',
-                                style: TextStyle(
-                                    fontWeight: FontWeight.w700, fontSize: 15)),
+                            : null,
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -248,7 +298,6 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                     ),
                   ],
                 ),
-              ),
             ),
           ),
         ),
@@ -268,20 +317,28 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         'below to continue.';
   }
 
+  /// `.form-label`: 11px textDim UPPERCASE ls1.2 w600; the trailing
+  /// "(optional)" span is `.nm-h-2` (w400, none-case, ls0).
   Widget _label(NymColors c, String text, {bool optional = false}) {
     return RichText(
       text: TextSpan(
-        text: text,
+        text: text.toUpperCase(),
         style: TextStyle(
-            color: c.textBright, fontSize: 13, fontWeight: FontWeight.w600),
+          color: c.textDim,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 1.2,
+        ),
         children: [
           if (optional)
             TextSpan(
-              text: '  (optional)',
+              text: ' (optional)',
               style: TextStyle(
-                  color: c.textDim,
-                  fontSize: 12,
-                  fontWeight: FontWeight.normal),
+                color: c.textDim,
+                fontSize: 11,
+                fontWeight: FontWeight.w400,
+                letterSpacing: 0,
+              ),
             ),
         ],
       ),
@@ -303,22 +360,27 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       onChanged: showCounter ? (_) => setState(() {}) : null,
       inputFormatters:
           maxLength == null ? null : [LengthLimitingTextInputFormatter(maxLength)],
-      style: TextStyle(color: c.text, fontSize: 14),
+      style: TextStyle(color: c.textBright, fontSize: 15),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: TextStyle(color: c.textDim, fontSize: 14),
+        hintStyle: TextStyle(color: c.textDim, fontSize: 15),
         counterText: '',
         filled: true,
-        fillColor: c.bg,
+        // `.form-input` fill white/0.05.
+        fillColor: Colors.white.withValues(alpha: 0.05),
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
         enabledBorder: OutlineInputBorder(
+          borderRadius: NymRadius.rsm,
+          borderSide: BorderSide(color: c.glassBorder),
+        ),
+        border: OutlineInputBorder(
           borderRadius: NymRadius.rsm,
           borderSide: BorderSide(color: c.glassBorder),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: NymRadius.rsm,
-          borderSide: BorderSide(color: c.primary),
+          borderSide: BorderSide(color: c.primaryA(0.3), width: 2),
         ),
       ),
     );
@@ -449,23 +511,21 @@ class _InviteBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // `.setup-invite-banner`: 1px secondary border, bg white/0.04, radius 8,
+    // padding 10/12, 13px, centered, NO icon (styles-components.css:59-68).
     return Container(
       key: const Key('setupInviteBanner'),
-      padding: const EdgeInsets.all(12),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: c.primaryA(0.10),
-        borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.primaryA(0.4)),
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: NymRadius.rxs,
+        border: Border.all(color: c.secondary),
       ),
-      child: Row(
-        children: [
-          Icon(Icons.group, size: 18, color: c.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(text,
-                style: TextStyle(color: c.textBright, fontSize: 12)),
-          ),
-        ],
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: TextStyle(color: c.textBright, fontSize: 13),
       ),
     );
   }

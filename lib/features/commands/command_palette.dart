@@ -87,7 +87,8 @@ class CommandPalette extends StatelessWidget {
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
         boxShadow: const [
-          BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+          // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
+          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: SingleChildScrollView(
@@ -118,7 +119,8 @@ class CommandPalette extends StatelessWidget {
         child: Text(
           label.toUpperCase(),
           style: TextStyle(
-            color: c.textDim,
+            // `.command-category` — text-dim @0.7 opacity.
+            color: c.textDim.withValues(alpha: 0.7),
             fontSize: 10,
             fontWeight: FontWeight.w700,
             letterSpacing: 0.6,
@@ -132,6 +134,9 @@ class CommandPalette extends StatelessWidget {
       child: InkWell(
         onTap: () => onSelect(spec),
         borderRadius: const BorderRadius.all(Radius.circular(8)),
+        // `.command-item:hover` → white/0.08, `:active` → white/0.12.
+        hoverColor: Colors.white.withValues(alpha: 0.08),
+        highlightColor: Colors.white.withValues(alpha: 0.12),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
@@ -155,9 +160,13 @@ class CommandPalette extends StatelessWidget {
               Flexible(
                 child: Text(
                   spec.desc,
-                  style: TextStyle(color: c.textDim, fontSize: 12),
+                  // `.command-desc` inherits `.command-item` color: text-dim
+                  // normally, brightening to `--text` when selected/hovered.
+                  style: TextStyle(
+                    color: selected ? c.text : c.textDim,
+                    fontSize: 12,
+                  ),
                   overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.right,
                 ),
               ),
             ],

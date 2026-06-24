@@ -16,6 +16,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
@@ -77,16 +78,36 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
     );
   }
 
+  /// Builds the call-chat panel (`#callChatPanel`). On wide layouts it is a
+  /// fixed-320px flex sibling of the grid (so the grid resizes); on narrow
+  /// layouts it fills the body.
+  Widget _buildChatPanel(CallService service) {
+    final call = ref.watch(currentCallStateProvider);
+    return _ChatPanel(
+      call: call,
+      controller: _chatController,
+      onClose: () => setState(() => _chatOpen = false),
+      onSend: (t) {
+        service.sendChat(t);
+        _chatController.clear();
+      },
+      onTyping: service.sendTyping,
+      onReact: service.toggleChatReaction,
+      onMorePicker: (mid) =>
+          _openEmojiPicker((e) => service.toggleChatReaction(mid, e)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final call = ref.watch(currentCallStateProvider);
     if (!call.isActiveCall) return const SizedBox.shrink();
 
-    final c = context.nym;
     final service = ref.read(callServiceProvider);
 
     return Material(
-      color: c.bg,
+      // `.call-overlay`: background rgba(5,5,10,0.96) (#05050a @ 0.96).
+      color: const Color(0xF505050A),
       child: SafeArea(
         child: Column(
           children: [
@@ -94,7 +115,19 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
             Expanded(
               child: Stack(
                 children: [
-                  _Grid(call: call, service: service),
+                  // `.call-body` is `display:flex`: on wide layouts (>640) the
+                  // grid and the 320px chat panel are siblings, so opening chat
+                  // SHRINKS the grid; on narrow layouts the panel goes
+                  // fullscreen over the grid.
+                  if (_chatOpen && MediaQuery.of(context).size.width > 640)
+                    Row(
+                      children: [
+                        Expanded(child: _Grid(call: call, service: service)),
+                        _buildChatPanel(service),
+                      ],
+                    )
+                  else
+                    _Grid(call: call, service: service),
                   // Floating reactions overlay (`#callReactionsFly`).
                   Positioned.fill(
                     child: IgnorePointer(
@@ -118,8 +151,10 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
                     ),
                   if (_presenterOpen && call.isMod)
                     Positioned(
+                      // `.call-presenter-menu`: right 16, bottom 92 (clear of
+                      // the controls row).
                       right: 16,
-                      bottom: 16,
+                      bottom: 92,
                       child: _PresenterMenu(
                         call: call,
                         selfPubkey:
@@ -131,9 +166,11 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
                     ),
                   if (_reactionsOpen)
                     Positioned(
+                      // `.call-reactions-bar`: bottom 92 (floats above the
+                      // 56px controls).
                       left: 0,
                       right: 0,
-                      bottom: 16,
+                      bottom: 92,
                       child: _ReactionsBar(
                         recents: ref.watch(recentEmojisProvider),
                         onPick: (e) {
@@ -146,23 +183,10 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
                         },
                       ),
                     ),
-                  if (_chatOpen)
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: _ChatPanel(
-                        call: call,
-                        controller: _chatController,
-                        onClose: () => setState(() => _chatOpen = false),
-                        onSend: (t) {
-                          service.sendChat(t);
-                          _chatController.clear();
-                        },
-                        onTyping: service.sendTyping,
-                        onReact: service.toggleChatReaction,
-                        onMorePicker: (mid) =>
-                            _openEmojiPicker((e) => service.toggleChatReaction(mid, e)),
-                      ),
-                    ),
+                  // Narrow (<=640): the panel is `position:absolute; inset:0`
+                  // (fullscreen) over the grid.
+                  if (_chatOpen && MediaQuery.of(context).size.width <= 640)
+                    Positioned.fill(child: _buildChatPanel(service)),
                 ],
               ),
             ),
@@ -219,10 +243,31 @@ class _Top extends ConsumerWidget {
           break;
         }
       }
+      // Up to 4 member avatars (`group-header-avatar`) between the group icon
+      // and the name (`_callTitleHtml` group branch). self + remote members.
+      final selfPk = ref.watch(appStateProvider).selfPubkey;
+      final users = ref.watch(usersProvider);
+      final members = <(String pubkey, String seed)>[
+        if (selfPk.isNotEmpty) (selfPk, selfPk),
+        for (final p in call.participants)
+          (p.pubkey, p.nym.isNotEmpty ? p.nym : p.pubkey),
+      ].take(4).toList();
       id = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.groups, size: 18, color: c.textBright),
+          if (members.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            for (final m in members)
+              Padding(
+                padding: const EdgeInsets.only(left: 2),
+                child: NymAvatar(
+                  seed: m.$2,
+                  size: 20,
+                  imageUrl: users[m.$1]?.profile?.picture, // Rule 4
+                ),
+              ),
+          ],
           const SizedBox(width: 6),
           Flexible(
             child: Text(name,
@@ -236,10 +281,15 @@ class _Top extends ConsumerWidget {
         ],
       );
     } else if (call.peerPubkey != null && call.peerPubkey!.isNotEmpty) {
+      final users = ref.watch(usersProvider);
       id = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          NymAvatar(seed: call.peerNym ?? call.peerPubkey!, size: 22),
+          NymAvatar(
+            seed: call.peerNym ?? call.peerPubkey!,
+            size: 22,
+            imageUrl: users[call.peerPubkey!]?.profile?.picture, // Rule 4
+          ),
           const SizedBox(width: 6),
           Flexible(
             child: CallNym(
@@ -392,8 +442,10 @@ class _Tile extends StatelessWidget {
         child: Container(
           decoration: BoxDecoration(
             color: c.bgTertiary,
+            // `.call-tile` border = `var(--border)` (primary@0.20), primary
+            // when presenting.
             border: Border.all(
-                color: sharing ? c.primary : c.glassBorder, width: 1),
+                color: sharing ? c.primary : c.border, width: 1),
             borderRadius: BorderRadius.circular(14),
           ),
           child: Stack(
@@ -616,7 +668,8 @@ class _ReactionsBar extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
         decoration: BoxDecoration(
           color: c.bgTertiary,
-          border: Border.all(color: c.glassBorder),
+          // `.call-reactions-bar` border = `var(--border)` (primary@0.20).
+          border: Border.all(color: c.border),
           borderRadius: BorderRadius.circular(22),
           boxShadow: const [
             BoxShadow(color: Color(0x66000000), blurRadius: 30, offset: Offset(0, 8)),
@@ -766,6 +819,27 @@ class _ChatRow extends StatelessWidget {
     final c = context.nym;
     final base = TextStyle(color: c.textBright, fontSize: 14, height: 1.3);
 
+    return Stack(
+      children: [
+        _buildRow(context, c, base),
+        // `.call-chat-react-btn`: always-present 24×24 ＋ affordance, top-right.
+        Positioned(
+          top: 0,
+          right: 0,
+          child: _ChatReactBtn(
+            onTap: () {
+              final box = context.findRenderObject() as RenderBox?;
+              if (box == null || !box.hasSize) return;
+              final offset = box.localToGlobal(Offset.zero);
+              _openQuickReact(context, offset & box.size);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRow(BuildContext context, NymColors c, TextStyle base) {
     return GestureDetector(
       onLongPress: () {
         final box = context.findRenderObject() as RenderBox?;
@@ -773,41 +847,94 @@ class _ChatRow extends StatelessWidget {
         final offset = box.localToGlobal(Offset.zero);
         _openQuickReact(context, offset & box.size);
       },
-      child: Align(
-        alignment: msg.isSelf ? Alignment.centerRight : Alignment.centerLeft,
+      // `.call-chat-msg` is a left-aligned IRC-style log row (no align-self /
+      // text-align:right for self in the CSS); self ONLY dims the from-line.
+      // The receipt (`.call-chat-readers`) is the sole right-aligned element.
+      // Right padding clears the absolute react ＋ button.
+      child: Padding(
+        padding: const EdgeInsets.only(right: 28),
         child: Column(
-          crossAxisAlignment:
-              msg.isSelf ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            // `.call-chat-from`: decorated nym (non-self primary, self dim "You").
-            if (msg.isSelf)
-              Text('You',
-                  style: TextStyle(
-                      color: c.textDim,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600))
-            else
-              CallNym(
-                pubkey: msg.pubkey,
-                baseColor: c.primary,
-                baseStyle:
-                    const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-                badgeSize: 11,
-              ),
-            const SizedBox(height: 2),
-            // Bubble with @mention highlighting (`_formatCallChatText`).
-            Text.rich(
-              callChatTextSpans(msg.text, base, c.primary),
-              textAlign: msg.isSelf ? TextAlign.right : TextAlign.left,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // `.call-chat-from`: decorated nym (non-self primary, self dim "You").
+          if (msg.isSelf)
+            Text('You',
+                style: TextStyle(
+                    color: c.textDim,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600))
+          else
+            CallNym(
+              pubkey: msg.pubkey,
+              baseColor: c.primary,
+              baseStyle:
+                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+              badgeSize: 11,
             ),
-            // Reaction count badges.
-            if (msg.reactions.isNotEmpty) ...[
-              const SizedBox(height: 3),
-              _ReactionBadges(msg: msg, onReact: onReact),
-            ],
-            // Read receipt (self only): ✓/✓✓ in 1:1, reader avatars in group.
-            if (msg.isSelf) _Receipt(msg: msg, isGroup: isGroup),
+          const SizedBox(height: 2),
+          // Bubble with @mention highlighting (`_formatCallChatText`).
+          Text.rich(
+            callChatTextSpans(msg.text, base, c.primary),
+            textAlign: TextAlign.left,
+          ),
+          // Reaction count badges.
+          if (msg.reactions.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            _ReactionBadges(msg: msg, onReact: onReact),
           ],
+          // Read receipt (self only): right-aligned ✓/✓✓ in 1:1, reader
+          // avatars in group (`.call-chat-readers { justify-content:flex-end }`).
+          if (msg.isSelf) _Receipt(msg: msg, isGroup: isGroup),
+        ],
+        ),
+      ),
+    );
+  }
+}
+
+/// `.call-chat-react-btn`: a 24×24 ＋ button, top-right of each chat row,
+/// bordered (`var(--border)`) over `--bg-tertiary`, radius 8; opacity 0.65 → 1 +
+/// primary glyph on hover. Opens the same quick-react popup as long-press.
+class _ChatReactBtn extends StatefulWidget {
+  const _ChatReactBtn({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_ChatReactBtn> createState() => _ChatReactBtnState();
+}
+
+class _ChatReactBtnState extends State<_ChatReactBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: Opacity(
+        opacity: _hover ? 1 : 0.65,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: Container(
+            width: 24,
+            height: 24,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: c.bgTertiary,
+              border: Border.all(color: c.border),
+              borderRadius: NymRadius.rxs,
+            ),
+            child: Text(
+              '＋',
+              style: TextStyle(
+                color: _hover ? c.primary : c.textDim,
+                fontSize: 14,
+                height: 1,
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -840,9 +967,11 @@ class _ReactionBadges extends StatelessWidget {
                       ? c.primary.withValues(alpha: 0.22)
                       : c.bgTertiary,
                   border: Border.all(
+                      // `.call-chat-reaction` border = `var(--border)`
+                      // (primary@0.20); self adds the solid primary border.
                       color: entry.value.contains(selfPk)
                           ? c.primary
-                          : c.glassBorder),
+                          : c.border),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Row(
@@ -870,31 +999,37 @@ class _Receipt extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.nym;
     if (isGroup) {
-      // Reader avatars (`.call-chat-readers`); empty when nobody read yet.
+      // Reader avatars (`.call-chat-readers`, justify-end); empty until read.
       if (msg.readers.isEmpty) return const SizedBox.shrink();
       final readers = msg.readers.entries.take(5).toList();
-      return Padding(
-        padding: const EdgeInsets.only(top: 3),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final r in readers)
-              Padding(
-                padding: const EdgeInsets.only(left: 2),
-                child: NymAvatar(seed: r.value, size: 14),
-              ),
-          ],
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final r in readers)
+                Padding(
+                  padding: const EdgeInsets.only(left: 2),
+                  child: NymAvatar(seed: r.value, size: 14),
+                ),
+            ],
+          ),
         ),
       );
     }
-    // 1:1 ✓ (sent) / ✓✓ (read).
+    // 1:1 ✓ (sent) / ✓✓ (read) — right-aligned receipt.
     final read = msg.delivery == CallChatDelivery.read || msg.readers.isNotEmpty;
-    return Padding(
-      padding: const EdgeInsets.only(top: 2),
-      child: Text(
-        read ? '✓✓' : '✓',
-        style: TextStyle(
-            color: read ? c.primary : c.textDim, fontSize: 11),
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Text(
+          read ? '✓✓' : '✓',
+          style: TextStyle(
+              color: read ? c.primary : c.textDim, fontSize: 11),
+        ),
       ),
     );
   }
@@ -1043,13 +1178,14 @@ class _InputRowState extends ConsumerState<_InputRow> {
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(
                         horizontal: 10, vertical: 8),
+                    // `.call-chat-input` border = `var(--border)` (primary@0.20).
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(color: c.glassBorder),
+                      borderSide: BorderSide(color: c.border),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide(color: c.glassBorder),
+                      borderSide: BorderSide(color: c.border),
                     ),
                   ),
                   onSubmitted: (t) {
@@ -1111,7 +1247,8 @@ class _MentionAutocomplete extends StatelessWidget {
         constraints: const BoxConstraints(maxHeight: 200),
         decoration: BoxDecoration(
           color: c.bgSecondary,
-          border: Border.all(color: c.glassBorder),
+          // `.call-mention-autocomplete` border = `var(--border)` (primary@0.20).
+          border: Border.all(color: c.border),
           borderRadius: BorderRadius.circular(10),
           boxShadow: const [
             BoxShadow(color: Color(0x59000000), blurRadius: 16, offset: Offset(0, -4)),
@@ -1212,7 +1349,8 @@ class _PresenterMenu extends ConsumerWidget {
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: c.bgTertiary,
-          border: Border.all(color: c.glassBorder),
+          // `.call-presenter-menu` border = `var(--border)` (primary@0.20).
+          border: Border.all(color: c.border),
           borderRadius: BorderRadius.circular(14),
           boxShadow: const [
             BoxShadow(color: Color(0x66000000), blurRadius: 30, offset: Offset(0, 8)),
@@ -1391,7 +1529,8 @@ class _SwitchCamButton extends StatelessWidget {
         opacity: disabled ? 0.5 : 1,
         child: Material(
           color: Colors.black.withValues(alpha: 0.6),
-          shape: CircleBorder(side: BorderSide(color: c.glassBorder)),
+          // `.call-switch-cam-btn` border = `var(--border)` (primary@0.20).
+          shape: CircleBorder(side: BorderSide(color: c.border)),
           child: InkWell(
             customBorder: const CircleBorder(),
             onTap: disabled ? null : onTap,
@@ -1442,12 +1581,13 @@ class _Controls extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.nym;
     final isVideo = call.kind == CallKind.video;
+    // `.call-controls`: no background (transparent over the overlay backdrop),
+    // gap 20.
     return Container(
-      color: c.bgSecondary,
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
       child: Wrap(
         alignment: WrapAlignment.center,
-        spacing: 14,
+        spacing: 20,
         runSpacing: 10,
         children: [
           _CtrlBtn(
@@ -1534,7 +1674,9 @@ class _CtrlBtn extends StatelessWidget {
     final c = context.nym;
     final bg = background ?? (active ? c.danger : c.bgTertiary);
     final fg = foreground ?? (active ? Colors.white : c.textBright);
-    final borderColor = requestMode ? c.primary : c.glassBorder;
+    // `.call-control-btn` border = `var(--border)` (primary@0.20); request-mode
+    // gets the solid primary outline.
+    final borderColor = requestMode ? c.primary : c.border;
     final iconColor = requestMode ? c.primary : fg;
     return Tooltip(
       message: tooltip,

@@ -79,6 +79,10 @@ List<GeohashChannelPoint> buildGeohashChannels(
 
   final out = <GeohashChannelPoint>[];
   counts.forEach((gh, n) {
+    // PWA `updateGeohashChannels` (channels.js:98): `if (recentCount < 1) return;`
+    // — only geohashes with ≥1 message inside the active window are plotted, so
+    // registered-but-silent channels (n == 0) are NOT drawn as dots.
+    if (n < 1) return;
     final center = decodeGeohash(gh);
     out.add(GeohashChannelPoint(
       geohash: gh,

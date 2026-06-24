@@ -6,6 +6,8 @@
 /// `BotChatScreen` for the private bot PM.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'bot_commands.dart';
@@ -167,14 +169,34 @@ class BotChatController extends StateNotifier<BotChatState> {
 
   String? _pubkey;
   Map<String, dynamic>? _auth;
+  Uint8List? _privkey;
 
-  /// Wires in the user's identity for paid requests. Called by the parent app.
-  void bind({required String pubkey, Map<String, dynamic>? auth}) {
+  /// Wires in the user's identity for paid requests. Called by the parent app
+  /// (`bindBotChat`). Pass [privkey] so per-request NIP-98 `auth` is built for
+  /// each mutating action (matching the PWA's `_signBotAuth`); [auth] remains an
+  /// override hook for tests / delegated signers that pre-sign.
+  void bind({
+    required String pubkey,
+    Map<String, dynamic>? auth,
+    Uint8List? privkey,
+  }) {
     _pubkey = pubkey;
     _auth = auth;
+    _privkey = privkey;
   }
 
   bool get isBound => _pubkey != null;
+
+  /// Per-action NIP-98 auth for [action], built fresh from the bound privkey
+  /// (the PWA signs each bot money/PM request separately). Falls back to a
+  /// pre-supplied [_auth] blob when no privkey is bound.
+  Map<String, dynamic>? _authFor(String action) {
+    final pk = _pubkey;
+    if (pk != null && _privkey != null) {
+      return _service.buildAuth(action: action, pubkey: pk, privkey: _privkey);
+    }
+    return _auth;
+  }
 
   // --- Local controls --------------------------------------------------------
 
@@ -257,7 +279,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       final reply = await _service.sendBotMessage(
         text,
         pubkey: _pubkey!,
-        auth: _auth,
+        auth: _authFor('pm'),
         eventId: eventId,
         proModel: state.proModel?.key,
         fresh: fresh,
@@ -310,10 +332,12 @@ class BotChatController extends StateNotifier<BotChatState> {
       state = state.copyWith(sending: false);
       return null;
     } catch (_) {
+      // PWA surfaces failures as a system line ("Failed to reach Nymbot…"),
+      // not a tappable retry affordance — so don't promise a retry we can't run.
       _replacePending(
         pendingId,
         (m) => m.copyWith(
-          text: 'Failed to reach Nymbot. Tap to retry.',
+          text: 'Failed to reach Nymbot. Please try again.',
           pending: false,
           error: true,
         ),
@@ -327,7 +351,7 @@ class BotChatController extends StateNotifier<BotChatState> {
   Future<void> refreshBalance() async {
     if (_pubkey == null) return;
     try {
-      final b = await _service.balance(pubkey: _pubkey!, auth: _auth);
+      final b = await _service.balance(pubkey: _pubkey!, auth: _authFor('balance'));
       state = state.copyWith(balance: b);
     } catch (_) {
       // Lazy/best-effort; leave existing balance in place.
@@ -355,10 +379,40 @@ class BotChatController extends StateNotifier<BotChatState> {
       amountSats: amountSats,
       tier: tier,
       pubkey: _pubkey!,
-      auth: _auth,
+      auth: _authFor('create-invoice'),
       recipientPubkey: recip,
       comment: comment,
     );
+  }
+
+  /// One settlement check for [invoice]: asks the worker whether the invoice is
+  /// paid (`check-invoice`) and, once paid, claims the credits (`claim-credits`)
+  /// and refreshes the balance. Returns true when the credits have been
+  /// claimed. Mirrors the PWA's `_checkBotInvoicePaid` + `_claimBotCredits`
+  /// (zaps.js:697-736). Returns false (never throws) when not bound or on a
+  /// transient error, so the caller can keep polling.
+  Future<bool> checkInvoicePaid(BotInvoice invoice) async {
+    if (_pubkey == null || invoice.invoiceId.isEmpty) return false;
+    try {
+      final check = await _service.checkInvoice(
+        invoiceId: invoice.invoiceId,
+        pubkey: _pubkey!,
+        auth: _authFor('check-invoice'),
+      );
+      if (check['paid'] != true) return false;
+      // Paid → claim the credits (idempotent server-side).
+      final claim = await _service.claimCredits(
+        invoiceId: invoice.invoiceId,
+        pubkey: _pubkey!,
+        auth: _authFor('claim-credits'),
+      );
+      if (claim['error'] != null) return false;
+      // Reflect the new balance.
+      await refreshBalance();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Transfers ALL of the user's credits (standard + Pro) to [targetPubkey]
@@ -367,8 +421,10 @@ class BotChatController extends StateNotifier<BotChatState> {
   /// `transferred`/`proTransferred`) is returned. Returns null if not bound.
   Future<Map<String, dynamic>?> transferCredits(String targetPubkey) async {
     if (_pubkey == null) return null;
-    final res =
-        await _service.transfer(pubkey: _pubkey!, targetPubkey: targetPubkey, auth: _auth);
+    final res = await _service.transfer(
+        pubkey: _pubkey!,
+        targetPubkey: targetPubkey,
+        auth: _authFor('transfer-credits'));
     // Mirror the PWA: zero the displayed balances once the transfer succeeds.
     if (res['error'] == null) {
       final b = state.balance;

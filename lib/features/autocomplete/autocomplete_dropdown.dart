@@ -12,6 +12,7 @@ import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/profile_badges.dart';
 import '../emoji/custom_emoji.dart';
 import '../shop/cosmetics.dart';
+import '../shop/shop_widgets.dart';
 import 'autocomplete_queries.dart';
 
 /// Per-pubkey badge flags resolved by the host (the composer holds `ref`):
@@ -108,16 +109,22 @@ class AutocompleteDropdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // The kaomoji palette (`.command-palette.kaomoji-autocomplete`) is taller and
+    // padded (max-height 200, padding 6); the mention/channel/emoji dropdowns are
+    // max-height 150 with no padding (styles-components.css:849-863).
+    final isKaomoji = view.kind == AutocompleteKind.kaomoji;
     return Container(
-      constraints: const BoxConstraints(maxHeight: 150),
+      constraints: BoxConstraints(maxHeight: isKaomoji ? 200 : 150),
       margin: const EdgeInsets.only(bottom: 8),
+      padding: isKaomoji ? const EdgeInsets.all(6) : null,
       decoration: BoxDecoration(
         // `.autocomplete-dropdown`: bg-tertiary, glass border, top-rounded.
         color: c.bgTertiary,
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
         boxShadow: const [
-          BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: SingleChildScrollView(
@@ -196,14 +203,15 @@ class AutocompleteDropdown extends StatelessWidget {
             Positioned(
               right: -1,
               bottom: -1,
+              // `.user-status-dot`: 8×8, `border: 2px solid #0a0a0f` (=--bg)
+              // (styles-features.css:2346-2369).
               child: Container(
-                width: 7,
-                height: 7,
+                width: 8,
+                height: 8,
                 decoration: BoxDecoration(
                   color: statusColor(m.status),
                   shape: BoxShape.circle,
-                  // Hairline ring so the dot reads against the avatar.
-                  border: Border.all(color: c.bgTertiary, width: 1),
+                  border: Border.all(color: c.bg, width: 2),
                 ),
               ),
             ),
@@ -215,9 +223,13 @@ class AutocompleteDropdown extends StatelessWidget {
   Widget _mentionRow(NymColors c, MentionResult m, bool selected) {
     final badges = badgesFor?.call(m.pubkey);
     final cosmetics = cosmeticsFor?.call(m.pubkey);
-    final hasFlair = cosmetics != null &&
-        ((cosmetics.flairId != null && cosmetics.flairId!.isNotEmpty) ||
-            cosmetics.supporter);
+    // FLAIR ONLY. The dropdown row's `<strong>` is built from flair
+    // (`getFlairForUser`) + verified + friend — it NEVER reads
+    // `getUserShopItems().supporter` (autocomplete.js:404-438). The supporter
+    // pill appears only on other surfaces (context menu / PM rows). Rendering it
+    // here is the `.std-badge`-class over-render; emit the flair glyph only.
+    final flairId = cosmetics?.flairId;
+    final hasFlair = flairId != null && flairId.isNotEmpty;
     return _selectable(
       c,
       selected: selected,
@@ -245,23 +257,25 @@ class AutocompleteDropdown extends StatelessWidget {
               ),
             ),
           ),
-          // Shop flair glyph + supporter badge after the nym (before verified),
-          // matching the PWA's `getFlairForUser` insertion (autocomplete.js:407).
+          // Shop flair glyph after the nym (before verified), matching the PWA's
+          // `getFlairForUser` insertion (autocomplete.js:407). `.flair-badge` is
+          // 20px (styles-features.css:316). No supporter pill here.
           if (hasFlair) ...[
             const SizedBox(width: 4),
-            CosmeticNymBadges(
-              cosmetics: cosmetics,
-              flairSize: 14,
-              supporterHeight: 14,
+            FlairBadge(
+              flairId: flairId,
+              edition: cosmetics?.genesisEdition,
+              size: 20,
             ),
           ],
+          // `.verified-badge` / `.friend-badge svg` are 20×20 in this dropdown.
           if (badges != null && badges.verified) ...[
             const SizedBox(width: 4),
-            const VerifiedBadge(size: 14),
+            const VerifiedBadge(size: 20),
           ],
           if (badges != null && badges.friend) ...[
             const SizedBox(width: 2),
-            const FriendBadge(size: 14),
+            const FriendBadge(size: 20),
           ],
         ],
       ),
@@ -288,7 +302,8 @@ class AutocompleteDropdown extends StatelessWidget {
                           color: c.primary, fontWeight: FontWeight.bold)),
                 ),
                 if (ch.isCurrent) ...[
-                  const SizedBox(width: 6),
+                  // `.channel-ac-badge`: margin-left 4px.
+                  const SizedBox(width: 4),
                   // `.channel-ac-badge`: 0.7em, primary bg, bg text, radius-xs.
                   Container(
                     padding:
@@ -344,9 +359,7 @@ class AutocompleteDropdown extends StatelessWidget {
             errorBuilder: (_, __, ___) => const SizedBox(width: 23, height: 23),
           )
         : Text(e.emoji, style: const TextStyle(fontSize: 23));
-    // For custom emoji the label strips wrapping colons (the PWA shows
-    // `:shortcode:` once).
-    final label = e.isCustom ? e.name : e.name;
+    final label = e.name;
     return _selectable(
       c,
       selected: selected,
@@ -356,8 +369,11 @@ class AutocompleteDropdown extends StatelessWidget {
           SizedBox(width: 23, height: 23, child: Center(child: glyph)),
           const SizedBox(width: 10),
           Flexible(
+            // `.emoji-item` is dim; `.selected/:hover` brightens to `--text`
+            // (styles-components.css:760-802).
             child: Text(':$label:',
-                style: TextStyle(color: c.textDim, fontSize: 12),
+                style: TextStyle(
+                    color: selected ? c.text : c.textDim, fontSize: 12),
                 overflow: TextOverflow.ellipsis),
           ),
         ],

@@ -228,8 +228,9 @@ const List<TutorialStep> kTutorialSteps = [
 ///
 /// For each step with a [TutorialStep.target] it measures the target widget's
 /// global rect (via [TutorialTargets]), inflates it 8px, paints a dim
-/// `rgba(0,0,0,0.5)` cut-out around it with a 2px `--secondary` (#4DA3FF)
-/// highlight ring + 30px glow, and anchors the step card below (or above) the
+/// `rgba(0,0,0,0.5)` cut-out around it with a 2px `--secondary` (#00ffff
+/// default) highlight ring + 30px glow, and anchors the step card below (or
+/// above) the
 /// target — mirroring `positionStep` (app.js:206-283). Welcome + "All set!"
 /// steps (no target) show the card centered.
 ///

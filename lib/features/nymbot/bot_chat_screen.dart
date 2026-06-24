@@ -671,7 +671,8 @@ class _TierSwitch extends StatelessWidget {
             color: active
                 ? c.lightning.withValues(alpha: 0.12)
                 : Colors.white.withValues(alpha: 0.04),
-            borderRadius: BorderRadius.circular(8),
+            // `.bot-credit-tier-btn`: radius --radius-sm (12).
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: active ? c.lightning.withValues(alpha: 0.5) : c.border,
               width: 1,
@@ -743,18 +744,9 @@ class _MessageBubble extends StatelessWidget {
                       ),
                     ),
             ),
-            if (!fromUser && (message.taskType != null || message.cost != null))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6, left: 4),
-                child: Text(
-                  [
-                    if (message.proModel != null) message.proModel,
-                    if (message.taskType != null) message.taskType,
-                    if (message.cost != null) '${message.cost} cr',
-                  ].join(' · '),
-                  style: TextStyle(color: c.textDim, fontSize: 10),
-                ),
-              ),
+            // NOTE: the PWA does NOT paint a per-reply model/task/cost footer.
+            // Cost is reported only conditionally via a separate system line
+            // (pms.js:2502-2515), so no inline footer is rendered here.
           ],
         ),
       ),
@@ -1040,7 +1032,8 @@ class _TypingDots extends StatelessWidget {
           child: CircularProgressIndicator(strokeWidth: 2, color: color),
         ),
         const SizedBox(width: 8),
-        Text('Nymbot is thinking…',
+        // PWA shared typing indicator labels in-flight replies "is typing…".
+        Text('Nymbot is typing…',
             style: TextStyle(color: color, fontSize: 13)),
       ],
     );
@@ -1179,12 +1172,22 @@ class _ComposerState extends State<_Composer> {
   /// the first row highlighted (`.command-item.selected`), bgTertiary surface.
   Widget _palette(NymColors c) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-      constraints: const BoxConstraints(maxHeight: 240),
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+      // `.command-palette`: bg rgba(20,20,35,0.9), radius 16/16/0/0, padding 6,
+      // max-height 200, shadow-lg.
+      constraints: const BoxConstraints(maxHeight: 200),
+      padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: c.bgTertiary,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: c.border),
+        color: const Color(0xE6141423),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        border: Border.all(color: c.glassBorder),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.5),
+            blurRadius: 32,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       clipBehavior: Clip.antiAlias,
       child: ListView.builder(
@@ -1197,23 +1200,34 @@ class _ComposerState extends State<_Composer> {
           return InkWell(
             onTap: () => _pick(cmd),
             child: Container(
-              color: selected ? c.primary.withValues(alpha: 0.12) : null,
+              decoration: BoxDecoration(
+                // `.command-item.selected`: background white@0.08, radius xs (8).
+                color: selected ? Colors.white.withValues(alpha: 0.08) : null,
+                borderRadius: BorderRadius.circular(8),
+              ),
               padding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(cmd.name,
-                      style: TextStyle(
-                          color: c.text,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          fontFamily: 'monospace')),
+                  // `.command-name`: --primary, bold (not monospace).
+                  Flexible(
+                    child: Text(cmd.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: c.primary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold)),
+                  ),
                   const SizedBox(width: 10),
-                  Expanded(
+                  // `.command-desc`: 12px; brightens to --text when selected.
+                  Flexible(
                     child: Text(
                       cmd.desc,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: c.textDim, fontSize: 12),
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                          color: selected ? c.text : c.textDim, fontSize: 12),
                     ),
                   ),
                 ],

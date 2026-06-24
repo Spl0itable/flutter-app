@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/crypto/bech32_codec.dart';
 import '../../core/crypto/keys.dart';
 import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
+import 'modal_chrome.dart';
 
 /// The reserved developer pubkey ("Luxas"), `verifiedDeveloper.pubkey`
 /// (app.js:1092). Picking a reserved nickname requires proving ownership of the
@@ -62,6 +62,8 @@ class DevNsecModal extends StatefulWidget {
     return showDialog<DevNsecResult>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.7),
+      // `.modal` has no backdrop close-action — only Cancel / ✕ dismiss it.
+      barrierDismissible: false,
       builder: (_) => const DevNsecModal(),
     );
   }
@@ -96,132 +98,82 @@ class _DevNsecModalState extends State<DevNsecModal> {
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 460),
+          // `.modal-content`: default max-width 500.
+          constraints: const BoxConstraints(maxWidth: 500),
           child: Material(
             color: Colors.transparent,
-            child: Container(
-              decoration: BoxDecoration(
-                color: c.bgSecondary,
-                borderRadius: NymRadius.rxl,
-                border: Border.all(color: c.glassBorder),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 40,
-                    offset: const Offset(0, 20),
-                  ),
-                ],
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // `.modal-header`.
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 20, 16, 12),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Reserved Nickname',
-                            style: TextStyle(
-                              color: c.text,
-                              fontSize: 18,
-                              fontWeight: FontWeight.w700,
+            child: Stack(
+              children: [
+                ModalChrome.box(
+                  c,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      ModalChrome.header(c, 'Reserved Nickname'),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(32, 0, 32, 0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // `.form-label`.
+                            Text(
+                              '"Luxas" is reserved for the Nymchat developer.',
+                              style: TextStyle(
+                                color: c.textDim,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 1.2,
+                              ),
                             ),
-                          ),
-                        ),
-                        IconButton(
-                          icon: Icon(Icons.close, color: c.textDim),
-                          onPressed: () => Navigator.of(context).pop(),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 0, 24, 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '"Luxas" is reserved for the Nymchat developer.',
-                          style: TextStyle(
-                            color: c.text,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Paste your nsec to verify your identity:',
-                          style: TextStyle(color: c.textDim, fontSize: 12),
-                        ),
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _nsec,
-                          obscureText: true,
-                          autofocus: true,
-                          onChanged: (_) {
-                            if (_error) setState(() => _error = false);
-                          },
-                          onSubmitted: (_) => _verify(),
-                          style: TextStyle(color: c.text, fontSize: 13),
-                          decoration: InputDecoration(
-                            isDense: true,
-                            hintText: 'nsec1...',
-                            hintStyle: TextStyle(color: c.textDim),
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 11),
-                            filled: true,
-                            fillColor: Colors.white.withValues(alpha: 0.05),
-                            border: OutlineInputBorder(
-                              borderRadius: NymRadius.rxs,
-                              borderSide: BorderSide(color: c.glassBorder),
+                            const SizedBox(height: 8),
+                            // `.nm-h-19` hint.
+                            Text(
+                              'Paste your nsec to verify your identity:',
+                              style:
+                                  TextStyle(color: c.textDim, fontSize: 11),
                             ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: NymRadius.rxs,
-                              borderSide: BorderSide(color: c.glassBorder),
+                            const SizedBox(height: 8),
+                            TextField(
+                              controller: _nsec,
+                              obscureText: true,
+                              style:
+                                  TextStyle(color: c.textBright, fontSize: 15),
+                              decoration:
+                                  ModalChrome.inputDecoration(c, 'nsec1...'),
                             ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: NymRadius.rxs,
-                              borderSide: BorderSide(color: c.primaryA(0.3)),
-                            ),
-                          ),
+                            if (_error) ...[
+                              const SizedBox(height: 6),
+                              // `.nm-h-20` error.
+                              Text(
+                                'Invalid nsec - does not match the developer '
+                                'pubkey.',
+                                style:
+                                    TextStyle(color: c.danger, fontSize: 12),
+                              ),
+                            ],
+                          ],
                         ),
-                        if (_error) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            'Invalid nsec - does not match the developer pubkey.',
-                            style: TextStyle(color: c.danger, fontSize: 12),
-                          ),
-                        ],
-                      ],
-                    ),
+                      ),
+                      // `.modal-actions`: center, gap 10.
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(32, 24, 32, 32),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            ModalChrome.iconButton(c, 'Cancel',
+                                () => Navigator.of(context).pop()),
+                            const SizedBox(width: 10),
+                            ModalChrome.sendButton(c, 'Verify', _verify),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
-                  // `.modal-actions`.
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 12, 16, 16),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: Text('Cancel',
-                              style: TextStyle(color: c.textDim)),
-                        ),
-                        const SizedBox(width: 8),
-                        FilledButton(
-                          style:
-                              FilledButton.styleFrom(backgroundColor: c.primary),
-                          onPressed: _verify,
-                          child: const Text('Verify'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
+                ),
+                ModalChrome.closeChip(
+                    c, () => Navigator.of(context).pop()),
+              ],
             ),
           ),
         ),

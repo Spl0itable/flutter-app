@@ -237,12 +237,16 @@ class SettingsController extends StateNotifier<Settings> {
     _syncedChanged();
   }
 
+  /// Hide-all-non-favorited toggle. Device-local-only (the PWA never syncs it,
+  /// so this deliberately does NOT call [_syncedChanged]), but it now lives in
+  /// the [Settings] state so the sidebar can react via
+  /// `ref.watch(settingsProvider.select((s) => s.hideNonPinned))`.
   void setHideNonPinned(bool v) {
     _kv.setBool(StorageKeys.hideNonPinned, v);
+    state = state.copyWith(hideNonPinned: v);
   }
 
-  bool get hideNonPinned =>
-      _kv.getBool(StorageKeys.hideNonPinned, defaultValue: false);
+  bool get hideNonPinned => state.hideNonPinned;
 
   // --- Mobile Gestures ------------------------------------------------------
 

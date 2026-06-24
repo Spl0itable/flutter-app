@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
 import 'call_nym.dart';
 import 'call_providers.dart';
@@ -25,6 +26,10 @@ class IncomingCallModal extends ConsumerWidget {
     final c = context.nym;
     final service = ref.read(callServiceProvider);
     final nym = call.peerNym ?? 'Someone';
+    // Real caller avatar (Rule 4).
+    final picture = (call.peerPubkey != null && call.peerPubkey!.isNotEmpty)
+        ? ref.watch(usersProvider)[call.peerPubkey!]?.profile?.picture
+        : null;
     final label =
         'Incoming ${call.kind == CallKind.video ? 'video' : 'audio'} call'
         '${call.isGroup ? ' (group)' : ''}';
@@ -33,19 +38,36 @@ class IncomingCallModal extends ConsumerWidget {
       color: Colors.black.withValues(alpha: 0.75),
       child: Center(
         child: Container(
+          // `.incoming-call-content`: max-width 320, padding 28/24, over
+          // `.modal-content` (radius 24 + shadow-lg + shadow-glow + 1px ring).
           width: 320,
-          padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+          padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 24),
           decoration: BoxDecoration(
             color: c.bgSecondary,
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(24),
             border: Border.all(color: c.glassBorder),
+            boxShadow: [
+              const BoxShadow(
+                color: Color(0x80000000), // shadow-lg 0 8 32 black/0.5
+                blurRadius: 32,
+                offset: Offset(0, 8),
+              ),
+              BoxShadow(
+                color: c.primary.withValues(alpha: 0.1), // shadow-glow
+                blurRadius: 20,
+              ),
+              BoxShadow(
+                color: Colors.white.withValues(alpha: 0.05), // 1px white ring
+                spreadRadius: 1,
+              ),
+            ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               // Pulsing avatar ring (`.incoming-call-avatar` incomingCallPulse:
               // a 1.6s primary box-shadow ring expanding 0→12px).
-              _PulsingAvatar(seed: nym, primary: c.primary),
+              _PulsingAvatar(seed: nym, primary: c.primary, imageUrl: picture),
               const SizedBox(height: 16),
               // Decorated caller name (#suffix + badges/flair), `_callNymHtml`.
               DefaultTextStyle(
@@ -108,9 +130,14 @@ class IncomingCallModal extends ConsumerWidget {
 /// The 88px avatar wrapped in a repeating primary box-shadow ring that expands
 /// 0→12px and fades over 1.6s (`@keyframes incomingCallPulse`).
 class _PulsingAvatar extends StatefulWidget {
-  const _PulsingAvatar({required this.seed, required this.primary});
+  const _PulsingAvatar({
+    required this.seed,
+    required this.primary,
+    this.imageUrl,
+  });
   final String seed;
   final Color primary;
+  final String? imageUrl;
 
   @override
   State<_PulsingAvatar> createState() => _PulsingAvatarState();
@@ -155,7 +182,7 @@ class _PulsingAvatarState extends State<_PulsingAvatar>
           child: child,
         );
       },
-      child: NymAvatar(seed: widget.seed, size: 88),
+      child: NymAvatar(seed: widget.seed, size: 88, imageUrl: widget.imageUrl),
     );
   }
 }

@@ -66,14 +66,14 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
         future: _future,
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
-            return _TranslatePulse(
-              child: Text(
-                'Translating...',
-                style: TextStyle(
-                  color: c.textDim.withValues(alpha: 0.6),
-                  fontStyle: FontStyle.italic,
-                  fontSize: 13,
-                ),
+            // `.translation-loading`: STATIC italic dim@0.6 — the PWA has NO
+            // pulse on the inline message translation (styles-features.css:4333).
+            return Text(
+              'Translating...',
+              style: TextStyle(
+                color: c.textDim.withValues(alpha: 0.6),
+                fontStyle: FontStyle.italic,
+                fontSize: 13,
               ),
             );
           }
@@ -94,7 +94,8 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
                 TextSpan(
                   text:
                       'Already in ${languageName(_target)} (nothing to translate)',
-                  style: TextStyle(color: c.danger, fontSize: 12),
+                  // `.translation-error`: 0.85em of the 0.9em (=13) base ≈ 11.
+                  style: TextStyle(color: c.danger, fontSize: 13 * 0.85),
                 ),
               ]),
             );
@@ -125,33 +126,3 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
   }
 }
 
-/// A subtle pulse used while a translation is in flight (the PWA's
-/// `.translating` / translate-pulse affordance).
-class _TranslatePulse extends StatefulWidget {
-  const _TranslatePulse({required this.child});
-  final Widget child;
-  @override
-  State<_TranslatePulse> createState() => _TranslatePulseState();
-}
-
-class _TranslatePulseState extends State<_TranslatePulse>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: Tween<double>(begin: 0.45, end: 1.0).animate(_c),
-      child: widget.child,
-    );
-  }
-}
