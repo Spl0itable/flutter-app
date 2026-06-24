@@ -747,6 +747,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _leftGroups.clear();
     _reactors.clear();
     _reactionLastAction.clear();
+    _channelMessageReaders.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     state = AppState.live(pubkey, nym);
@@ -765,6 +766,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _leftGroups.clear();
     _reactors.clear();
     _reactionLastAction.clear();
+    _channelMessageReaders.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     state = AppState.seed();
@@ -788,6 +790,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// `messageId:emoji:pubkey` → last action ts (sec). Latest action wins on
   /// out-of-order relay delivery (`reactionLastAction`, reactions.js).
   final Map<String, int> _reactionLastAction = {};
+
+  /// Public channel read receipts (kind 24421): channel-message id → reader
+  /// pubkey → display nym. Mirrors the PWA's `channelMessageReaders`
+  /// (nostr-core.js `handleChannelReadReceipt`). Kept off the [Message] so a
+  /// receipt that arrives before its message can be replayed once the message
+  /// lands; [applyChannelReader] copies the live set onto `message.readers`
+  /// (the avatar-row consumer) whenever either side updates.
+  final Map<String, Map<String, String>> _channelMessageReaders = {};
 
   /// Dedup set for poll-vote events (`processedPollVoteIds`, cap 3000).
   final Set<String> _processedPollVoteIds = {};
@@ -866,6 +876,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
+
+    // Replay any channel read receipts (kind 24421) that arrived before this
+    // message landed (the receipt and its message race across relays). Mirrors
+    // the PWA keeping `channelMessageReaders` keyed independently of the message.
+    if (m.isOwn && _channelMessageReaders.containsKey(m.id)) {
+      _mirrorChannelReaders(m.id);
+    }
+
     state = state.copyWith();
   }
 
@@ -1260,6 +1278,49 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
     if (changed) state = state.copyWith();
+  }
+
+  /// Records a public channel read receipt (kind 24421): [readerPubkey] (shown
+  /// as [readerNym]) has seen the channel message [messageId]. Mirrors the PWA's
+  /// `handleChannelReadReceipt` (nostr-core.js): the reader is stored in
+  /// [_channelMessageReaders] and mirrored onto the matching OWN channel
+  /// message's `readers` map so the stacked reader avatars render
+  /// (`message_row.dart` `_readerAvatars`). The store survives a receipt that
+  /// arrives before its message — [_ingestChannelMessage] replays it on landing.
+  void applyChannelReader({
+    required String messageId,
+    required String readerPubkey,
+    required String readerNym,
+  }) {
+    if (messageId.isEmpty || readerPubkey.isEmpty) return;
+    if (readerPubkey == state.selfPubkey) return;
+    if (state.blockedUsers.contains(readerPubkey)) return;
+    final readers =
+        _channelMessageReaders.putIfAbsent(messageId, () => <String, String>{});
+    // newest receipt wins for the display name; no-op if nothing changes.
+    if (readers[readerPubkey] == readerNym) return;
+    readers[readerPubkey] = readerNym;
+    if (_mirrorChannelReaders(messageId)) state = state.copyWith();
+  }
+
+  /// Copies the stored reader set for [messageId] onto the matching own channel
+  /// message's `readers` map (the avatar-row consumer). Returns true when a
+  /// message was found and updated. Only OWN messages carry reader avatars in
+  /// the UI, so non-own matches are skipped.
+  bool _mirrorChannelReaders(String messageId) {
+    final readers = _channelMessageReaders[messageId];
+    if (readers == null) return false;
+    for (final list in state.messages.values) {
+      for (final m in list) {
+        if (m.id == messageId && m.isOwn) {
+          m.readers
+            ..clear()
+            ..addAll(readers);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /// Marks [pubkey] as typing (or not) within [storageKey]. [expiresAtMs] is

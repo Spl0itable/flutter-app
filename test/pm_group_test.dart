@@ -8,6 +8,7 @@ import 'package:nym_bar/features/groups/group_logic.dart';
 import 'package:nym_bar/features/pms/pm_logic.dart';
 import 'package:nym_bar/models/group.dart';
 import 'package:nym_bar/models/message.dart';
+import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/state/app_state.dart';
 
 void main() {
@@ -451,6 +452,104 @@ void main() {
       expect(GroupLogic.tagValue(tags, 'x'), 'nmid2');
       // Confirm the seal JSON serialized cleanly.
       expect(jsonEncode(res.seal.toJson()), isA<String>());
+    });
+  });
+
+  group('Channel read receipts (kind 24421)', () {
+    const selfPk =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+    const readerPk =
+        '2222222222222222222222222222222222222222222222222222222222222222';
+    const msgId =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const geohash = '9q8y';
+
+    // Ingests one OWN channel message (kind 20000) so it carries reader avatars.
+    void ingestOwnChannelMessage(AppStateNotifier n, {String id = msgId}) {
+      n.ingestEvent(NostrEvent(
+        id: id,
+        pubkey: selfPk,
+        createdAt: 1700000000,
+        kind: EventKind.geoChannel,
+        tags: [
+          ['g', geohash],
+          ['n', 'me'],
+        ],
+        content: 'hello channel',
+      ));
+    }
+
+    test('applyChannelReader populates an own message readers map', () {
+      final n = AppStateNotifier()..goLive(selfPk, 'me#1111');
+      ingestOwnChannelMessage(n);
+      n.applyChannelReader(
+        messageId: msgId,
+        readerPubkey: readerPk,
+        readerNym: 'neo#2222',
+      );
+      final msg = n.state.messages['#$geohash']!
+          .firstWhere((m) => m.id == msgId);
+      expect(msg.readers[readerPk], 'neo#2222');
+      expect(msg.readers.length, 1);
+    });
+
+    test('a receipt that arrives before its message is replayed on landing', () {
+      final n = AppStateNotifier()..goLive(selfPk, 'me#1111');
+      // Receipt first — no message yet, so nothing to mirror onto.
+      n.applyChannelReader(
+        messageId: msgId,
+        readerPubkey: readerPk,
+        readerNym: 'neo#2222',
+      );
+      // Message lands afterwards → readers get attached.
+      ingestOwnChannelMessage(n);
+      final msg = n.state.messages['#$geohash']!
+          .firstWhere((m) => m.id == msgId);
+      expect(msg.readers[readerPk], 'neo#2222');
+    });
+
+    test('self and blocked readers are ignored', () {
+      final n = AppStateNotifier()..goLive(selfPk, 'me#1111');
+      ingestOwnChannelMessage(n);
+      // Our own receipt is dropped.
+      n.applyChannelReader(
+        messageId: msgId,
+        readerPubkey: selfPk,
+        readerNym: 'me#1111',
+      );
+      // A blocked reader is dropped.
+      n.hydrateSocialState(
+        friends: const {},
+        blockedUsers: const {readerPk},
+        blockedKeywords: const {},
+      );
+      n.applyChannelReader(
+        messageId: msgId,
+        readerPubkey: readerPk,
+        readerNym: 'neo#2222',
+      );
+      final msg = n.state.messages['#$geohash']!
+          .firstWhere((m) => m.id == msgId);
+      expect(msg.readers, isEmpty);
+    });
+
+    test('multiple readers accumulate; newest nym wins per reader', () {
+      final n = AppStateNotifier()..goLive(selfPk, 'me#1111');
+      ingestOwnChannelMessage(n);
+      const readerPk2 =
+          '3333333333333333333333333333333333333333333333333333333333333333';
+      n.applyChannelReader(
+          messageId: msgId, readerPubkey: readerPk, readerNym: 'neo#2222');
+      n.applyChannelReader(
+          messageId: msgId, readerPubkey: readerPk2, readerNym: 'trin#3333');
+      // Same reader sends an updated display name.
+      n.applyChannelReader(
+          messageId: msgId, readerPubkey: readerPk, readerNym: 'neo2#2222');
+      final msg = n.state.messages['#$geohash']!
+          .firstWhere((m) => m.id == msgId);
+      expect(msg.readers.length, 2);
+      expect(msg.readers[readerPk], 'neo2#2222');
+      expect(msg.readers[readerPk2], 'trin#3333');
     });
   });
 }

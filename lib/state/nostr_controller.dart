@@ -367,6 +367,7 @@ class NostrController {
     _lastPresenceBroadcast = 0;
     _presenceTimestamps.clear();
     _typingThrottle.clear();
+    _sentChannelReadReceipts.clear();
     _reactionToggleTracker.clear();
 
     // 3) Stop syncing settings on change (the binding captured the old signer).
@@ -461,6 +462,13 @@ class NostrController {
       _ingestUserEmojiList(event);
       return;
     }
+    // Public channel read receipt (kind 24421) — someone saw one of our channel
+    // messages. Ephemeral; routed here from the active channel's typing/receipt
+    // sub. Channel typing (24420) inbound is handled elsewhere.
+    if (event.kind == EventKind.channelReceipt) {
+      _onChannelReadReceipt(event);
+      return;
+    }
     // A live kind-0 from relays refreshes the D1 profile cache so we don't
     // re-issue a `profile-get` for a profile we just received (mirrors the PWA's
     // `profileFetchedAt` freshness gate).
@@ -516,6 +524,24 @@ class NostrController {
       // a profile fetch for every message author it lacks a profile for —
       // `queueProfileFetch`, nostr-core.js:1767). Debounced/batched.
       _maybeBackfillProfiles(event.pubkey);
+
+      // Send a public read receipt (kind 24421) for a fresh, visible, non-own
+      // channel message in the channel we currently have open — the native
+      // analogue of the PWA's `addMessageToUI` send (gated on `canBeSeen &&
+      // !isOwn && !isHistorical && geohash && id matches`). The open channel is
+      // our visibility proxy (no scroll-position tracking on native).
+      final self = _identity?.pubkey ?? '';
+      final geohash = event.tagValue('g');
+      final key = EventMapper.channelKeyOf(event);
+      if (event.pubkey != self &&
+          geohash != null &&
+          geohash.isNotEmpty &&
+          _isChannelMessageId(event.id) &&
+          !_isHistorical(event.createdAt) &&
+          key != null &&
+          _isActiveView(key)) {
+        unawaited(sendChannelReadReceipt(event.id, event.pubkey, geohash));
+      }
     }
   }
 
@@ -2751,6 +2777,117 @@ class NostrController {
     );
   }
 
+  // --- Public channel read receipts (kind 24421) -----------------------------
+  // Mirrors the PWA's channel read-receipt path (nostr-core.js
+  // `sendChannelReadReceipt` / `markVisibleChannelMessagesRead` /
+  // `handleChannelReadReceipt`). Geohash channels only, like channel typing.
+
+  /// Message ids we've already published a 24421 read receipt for, so we never
+  /// re-announce the same channel message (PWA `_sentChannelReadReceipts`,
+  /// capped 2000 → trimmed to the most recent 1500).
+  final Set<String> _sentChannelReadReceipts = <String>{};
+
+  bool _channelReceiptAllowed() =>
+      _indicatorScopeAllows(
+          _ref.read(settingsProvider).readReceiptsScope, 'channel');
+
+  /// Publishes a public channel read receipt (kind 24421) for [messageId] by
+  /// [authorPubkey] in [geohash], once per message. Scope-gated to the channel
+  /// context and geohash channels only (PWA `sendChannelReadReceipt`): never
+  /// receipts our own message, and dedupes via [_sentChannelReadReceipts].
+  Future<void> sendChannelReadReceipt(
+      String messageId, String authorPubkey, String geohash) async {
+    if (!_channelReceiptAllowed()) return;
+    if (messageId.isEmpty || authorPubkey.isEmpty || geohash.isEmpty) return;
+    final identity = _identity;
+    final service = _service;
+    if (identity == null || service == null) return;
+    if (authorPubkey == identity.pubkey) return;
+    if (_sentChannelReadReceipts.contains(messageId)) return;
+    _sentChannelReadReceipts.add(messageId);
+    if (_sentChannelReadReceipts.length > 2000) {
+      final keep = _sentChannelReadReceipts.toList().sublist(
+          _sentChannelReadReceipts.length - 1500);
+      _sentChannelReadReceipts
+        ..clear()
+        ..addAll(keep);
+    }
+    await service.publishChannelReceipt(
+      messageId: messageId,
+      authorPubkey: authorPubkey,
+      geohash: geohash,
+      nym: identity.nym,
+    );
+  }
+
+  /// Catch-up: receipts every visible, fresh, non-own message in the currently
+  /// open geohash channel (PWA `markVisibleChannelMessagesRead`). Called when
+  /// the user opens / returns to a channel and on inbound messages, so receipts
+  /// fire for messages that piled up while away. Per-message dedup lives in
+  /// [sendChannelReadReceipt].
+  void markVisibleChannelMessagesRead() {
+    if (!_channelReceiptAllowed()) return;
+    final identity = _identity;
+    if (identity == null) return;
+    final state = _ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return;
+    final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
+    if (entry.isEmpty || !entry.first.isGeohash) return;
+    final geohash = entry.first.geohash;
+    final messages = state.messages[view.storageKey];
+    if (messages == null || messages.isEmpty) return;
+    // Mirror the PWA's tail window (`messages.slice(-channelPageSize)`); 100 is
+    // the runtime channel page size used elsewhere.
+    final tail = messages.length > 100
+        ? messages.sublist(messages.length - 100)
+        : messages;
+    for (final m in tail) {
+      if (m.isOwn || m.isHistorical) continue;
+      if (!_isChannelMessageId(m.id)) continue;
+      final gh = (m.geohash ?? '').isNotEmpty ? m.geohash! : geohash;
+      unawaited(sendChannelReadReceipt(m.id, m.pubkey, gh));
+    }
+  }
+
+  /// True for a 64-hex channel-message id (PWA `/^[0-9a-f]{64}$/i` gate before
+  /// a channel read receipt is sent).
+  static final RegExp _channelMessageIdRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+  bool _isChannelMessageId(String id) => _channelMessageIdRe.hasMatch(id);
+
+  /// Routes an inbound public channel read receipt (kind 24421): someone saw a
+  /// channel message. Mirrors the PWA's `handleChannelReadReceipt`: skips our
+  /// own + stale (>5 min) receipts, parses the `['e', id]` / `['g'|'d', geo]` /
+  /// `['n', nym]` tags, resolves the reader's display nym, and records it so the
+  /// matching own message's reader avatars render.
+  void _onChannelReadReceipt(NostrEvent event) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (event.pubkey == self) return;
+    final ageMs = DateTime.now().millisecondsSinceEpoch - event.createdAt * 1000;
+    if (ageMs > 5 * 60 * 1000) return;
+
+    final messageId = event.tagValue('e');
+    final geohash = event.tagValue('g') ?? event.tagValue('d');
+    if (messageId == null || messageId.isEmpty || geohash == null) return;
+
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(event.pubkey)) return;
+
+    // Reader display name: the receipt's `['n', nym]` (base), else the known
+    // user nym, decorated with the pubkey suffix (PWA `stripPubkeySuffix(rawNym
+    // || getNymFromPubkey(pubkey))`).
+    final rawNym = event.tagValue('n');
+    final base = stripPubkeySuffix(
+        rawNym ?? appState.users[event.pubkey]?.nym ?? 'anon');
+    final readerNym = '$base#${getPubkeySuffix(event.pubkey)}';
+
+    _ref.read(appStateProvider.notifier).applyChannelReader(
+          messageId: messageId,
+          readerPubkey: event.pubkey,
+          readerNym: readerNym,
+        );
+  }
+
   // ---------------------------------------------------------------------------
   // Reactions (kind 7 public / gift-wrapped private)
   // ---------------------------------------------------------------------------
@@ -3148,6 +3285,9 @@ class NostrController {
         state.channels.where((c) => c.key == state.view.id.toLowerCase());
     if (entry.isEmpty || !entry.first.isGeohash) return;
     _service?.subscribeChannelTyping(entry.first.geohash);
+    // Receipt the messages that piled up here while we were away (PWA
+    // `openChannel` → `markVisibleChannelMessagesRead`).
+    markVisibleChannelMessagesRead();
   }
 
   // ---------------------------------------------------------------------------
@@ -3324,6 +3464,10 @@ class NostrController {
     switch (view.kind) {
       case ViewKind.channel:
         unawaited(_backfillChannelArchive(view.id));
+        // Catch up read receipts for messages already loaded in this channel
+        // (PWA `openChannel` → `markVisibleChannelMessagesRead`). Newly
+        // backfilled messages are receipted as they ingest in `_onEvent`.
+        markVisibleChannelMessagesRead();
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
       case ViewKind.pm:

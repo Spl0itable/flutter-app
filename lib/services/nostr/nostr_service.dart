@@ -1170,6 +1170,39 @@ class NostrService {
     return signed;
   }
 
+  /// Publishes a public channel read receipt (kind 24421) for [messageId] by
+  /// [authorPubkey] in the geohash [geohash]. Mirrors the PWA's
+  /// `sendChannelReadReceipt` (nostr-core.js): tags are
+  /// `['e', messageId]`, `['p', authorPubkey]`, `['g', geohash]`, `['n', nym]`.
+  /// Ephemeral kind — relays don't store it, so it's fire-and-forget. Returns
+  /// the signed event (null when there is no signer).
+  Future<NostrEvent?> publishChannelReceipt({
+    required String messageId,
+    required String authorPubkey,
+    required String geohash,
+    required String nym,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.channelReceipt,
+        tags: [
+          ['e', messageId],
+          ['p', authorPubkey],
+          ['g', geohash],
+          ['n', nym],
+        ],
+        content: '',
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
   /// Publishes a kind-30078 nym-presence event. (docs/specs/03 §2.5,
   /// nostr-core.js `publishPresence`).
   ///
