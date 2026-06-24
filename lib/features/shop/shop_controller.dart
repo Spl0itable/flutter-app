@@ -516,6 +516,42 @@ class ShopController extends StateNotifier<ShopState> {
     }
   }
 
+  /// Pushes the user's current active items to D1 (`shop-set-active`,
+  /// storage.js:288) so OTHER clients can read them via `shop-status` and render
+  /// the user's flair/style/cosmetics on their messages. Mirrors shop.js
+  /// `publishActiveShopItems` (shop.js:423) — call it after any activation
+  /// toggle. The server filters the payload to owned items and echoes the
+  /// authoritative `{active, updatedAt}`, which is re-applied locally. The PWA
+  /// then also broadcasts a presence `shop-update` so others bust their cache
+  /// (wire that in the controller, see the task report). AUTHENTICATED; no-ops
+  /// without a signable [identity]. Best-effort.
+  Future<void> publishActiveItems(ShopIdentity identity) async {
+    final auth = _auth('shop-set-active', identity);
+    if (auth == null) return;
+    final a = state.active;
+    final payload = <String, dynamic>{
+      'style': a.style,
+      'flair': a.flair,
+      'cosmetics': a.cosmetics,
+      // supporter only counts when owned (server re-checks; mirrors shop.js:418).
+      'supporter': state.owns('supporter-badge') && a.supporter,
+    };
+    try {
+      final data = await _api.storageAction({
+        'action': 'shop-set-active',
+        'pubkey': identity.pubkey,
+        'active': payload,
+        'auth': auth,
+      });
+      // Re-apply the server's authoritative active record (with edition numbers).
+      if (data['active'] is Map) {
+        await applyOwnRecord({'active': data['active']});
+      }
+    } catch (_) {
+      // Best-effort (shop.js swallows).
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Other users' active cosmetics (shop-status, public/no-auth; shop.js:445-483)
   // ---------------------------------------------------------------------------

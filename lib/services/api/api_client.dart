@@ -530,9 +530,14 @@ class ApiClient {
     if (authed && authBuilder == null) return null;
     try {
       final socket = _ensureSocketObject();
-      final authEvent = authed && authBuilder != null ? await authBuilder() : null;
-      // An authed request with no signable identity can't use the socket.
-      if (authed && authEvent == null) return null;
+      // Only sign the api-ws AUTH event when the socket isn't already
+      // authenticated (the PWA signs it once per connection, shop.js:30).
+      Map<String, dynamic>? authEvent;
+      if (authed && !socket.isAuthenticated) {
+        authEvent = await authBuilder!();
+        // An authed request with no signable identity can't use the socket.
+        if (authEvent == null) return null;
+      }
       await socket.ensureConnected(authEvent: authEvent);
       // The socket is authenticated once; per-request bodies drop pubkey/auth
       // (the worker pins the socket's pubkey — shop.js comment at :273). Public

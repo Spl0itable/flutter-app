@@ -12,6 +12,7 @@ import 'package:nym_bar/features/shop/shop_widgets.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/models/settings.dart';
 import 'package:nym_bar/models/user.dart';
+import 'package:nym_bar/services/api/storage_sync.dart' show ShopStatusActive;
 import 'package:nym_bar/services/nostr/identity_service.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:nym_bar/state/app_state.dart';
@@ -35,6 +36,14 @@ class _IdentityController extends NostrController {
 class _FakeShopController extends ShopController {
   _FakeShopController(super.kv, ActiveItems active) {
     state = ShopState(active: active);
+  }
+}
+
+/// An other-users shop controller seeded with known D1 shop-status records (no
+/// network), so `resolveCosmetics` resolves the non-self branch deterministically.
+class _SeededOtherUsersShop extends OtherUsersShopController {
+  _SeededOtherUsersShop(super.kv, Map<String, ShopStatusActive> seed) {
+    state = seed;
   }
 }
 
@@ -126,6 +135,57 @@ void main() {
         userCosmeticsFromUser(User(pubkey: 'x')).isEmpty,
         isTrue,
       );
+    });
+
+    test('prefers the authoritative D1 shop-status over presence User fields',
+        () async {
+      const otherPk = 'pkother';
+      final kv = await () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        return KeyValueStore.open();
+      }();
+      final container = ProviderContainer(overrides: [
+        keyValueStoreProvider.overrideWithValue(kv),
+        nostrControllerProvider
+            .overrideWith((ref) => _IdentityController(ref, selfPubkey)),
+        // Presence said neon/diamond, but the D1 record (authoritative) says
+        // satoshi/crown — the D1 record must win (matches the PWA).
+        usersProvider.overrideWithValue({
+          otherPk: User(
+            pubkey: otherPk,
+            nym: 'bob',
+            shopStyle: 'style-neon',
+            shopFlair: 'flair-diamond',
+          ),
+        }),
+        otherUsersShopProvider.overrideWith(
+          (ref) => _SeededOtherUsersShop(kv, {
+            otherPk: const ShopStatusActive(
+              style: 'style-satoshi',
+              flair: ['flair-crown'],
+              supporter: true,
+              cosmetics: ['cosmetic-frost'],
+              editions: {'flair-genesis': 7},
+            ),
+          }),
+        ),
+      ]);
+      addTearDown(container.dispose);
+
+      final cos = resolveCosmetics(_WidgetRefShim(container), otherPk);
+      expect(cos.styleId, 'style-satoshi', reason: 'D1 record wins');
+      expect(cos.flairId, 'flair-crown');
+      expect(cos.supporter, isTrue);
+      expect(cos.cosmetics, ['cosmetic-frost']);
+    });
+
+    test('userCosmeticsFromStatus keeps the last flair + genesis edition', () {
+      final cos = userCosmeticsFromStatus(const ShopStatusActive(
+        flair: ['flair-crown', 'flair-genesis'],
+        editions: {'flair-genesis': 42},
+      ));
+      expect(cos.flairId, 'flair-genesis');
+      expect(cos.genesisEdition, 42);
     });
   });
 

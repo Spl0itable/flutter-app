@@ -521,6 +521,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       case 'supporter':
         await ctrl.toggleSupporter();
     }
+    // Push the new active set to D1 so other clients render it via shop-status
+    // (shop.js `publishActiveShopItems`). Best-effort; no-ops without a signer.
+    final identity = _shopIdentity(ref);
+    if (identity != null) await ctrl.publishActiveItems(identity);
   }
 
   Future<void> _buy(ShopItem item) async {
