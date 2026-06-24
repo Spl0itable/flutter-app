@@ -11,6 +11,7 @@ import '../../core/theme/nym_metrics.dart';
 import '../../services/nostr/nym_generator.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/common/app_dialog.dart';
 import '../../widgets/common/nym_avatar.dart';
 import 'dev_nsec_modal.dart';
 import 'modal_chrome.dart';
@@ -50,16 +51,51 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
 
   /// The current avatar / banner URLs (kind-0 is a full replacement, so these
   /// must be re-published when the user only edits bio/lightning, or the
-  /// existing avatar/banner would be dropped).
+  /// existing avatar/banner would be dropped). When the user picks a new image
+  /// it is uploaded at pick-time (Blossom) and the HOSTED URL replaces the value
+  /// here — so `_persist` always publishes a real http(s) URL, never `file://`.
   String? _currentAvatarUrl;
   String? _currentBannerUrl;
 
+  /// The avatar / banner URLs loaded from the profile at open, so "Remove"
+  /// reverts a freshly-picked image back to the pre-edit value (never blanking
+  /// an existing avatar just because a new pick was abandoned).
+  String? _origAvatarUrl;
+  String? _origBannerUrl;
+
+  /// Local preview paths shown while/after a pick (the picked file), purely for
+  /// the on-screen thumbnail. The published value is always the hosted URL above.
   String? _avatarPath;
   String? _bannerPath;
+
+  /// `.upload-progress` affordance state, mirroring new_pm_modal: `_uploading`
+  /// toggles the bar, `_uploadLabel` is the "Uploading avatar…"/"Uploading
+  /// banner…" line, `_uploadProgress` drives the fill (15%→55%→100%, users.js
+  /// `_uploadFileWithProgress`).
+  bool _uploading = false;
+  String _uploadLabel = 'Uploading…';
+  double _uploadProgress = 0;
+
   bool _revealOpen = false;
   bool _nsecVisible = false;
   bool _pubkeyOpen = false; // full-hex pubkey slideout
   bool _saving = false;
+
+  /// Per-surface upload caps, mirroring the PWA nick-edit avatar/banner guards
+  /// (`handleNickEditAvatarSelect` rejects >5MB, `handleNickEditBannerSelect`
+  /// >10MB). Avatar 5MB, banner 10MB.
+  static const int _avatarMaxBytes = 5 * 1024 * 1024;
+  static const int _bannerMaxBytes = 10 * 1024 * 1024;
+
+  /// Best-effort MIME from the picked file's extension (BUD-02 `Content-Type`),
+  /// mirroring `_contentTypeFor` in new_pm_modal.dart.
+  static String _contentTypeFor(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return 'image/jpeg';
+  }
 
   @override
   void initState() {
@@ -80,6 +116,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     _originalLightning = profile?.lightningAddress ?? '';
     _currentAvatarUrl = profile?.picture;
     _currentBannerUrl = profile?.banner;
+    _origAvatarUrl = _currentAvatarUrl;
+    _origBannerUrl = _currentBannerUrl;
     _bio = TextEditingController(text: _originalBio);
     _lightning = TextEditingController(text: _originalLightning);
   }
@@ -355,12 +393,17 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                         _smallButton(
                           c,
                           'Remove',
-                          () => setState(() => _avatarPath = null),
+                          () => setState(() {
+                            _avatarPath = null;
+                            _currentAvatarUrl = _origAvatarUrl;
+                          }),
                           danger: true,
                         ),
                       ],
                     ],
                   ),
+                  if (_uploading && _uploadLabel == 'Uploading avatar…')
+                    _uploadProgressBar(c),
                 ],
               ),
             ),
@@ -406,12 +449,57 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             _smallButton(c, 'Choose banner', () => _pickImage(false)),
             if (_bannerPath != null) ...[
               const SizedBox(width: 8),
-              _smallButton(c, 'Remove', () => setState(() => _bannerPath = null),
+              _smallButton(
+                  c,
+                  'Remove',
+                  () => setState(() {
+                        _bannerPath = null;
+                        _currentBannerUrl = _origBannerUrl;
+                      }),
                   danger: true),
             ],
           ],
         ),
+        if (_uploading && _uploadLabel == 'Uploading banner…')
+          _uploadProgressBar(c),
       ],
+    );
+  }
+
+  /// `.upload-progress` body: an "Uploading …" label over the `.progress-bar`
+  /// (height 6, bg white/0.05, radius 10) with the `.progress-fill` (90°
+  /// primary→secondary gradient) at the live progress width (mirrors
+  /// new_pm_modal's `_uploadProgressBar`).
+  Widget _uploadProgressBar(NymColors c) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(_uploadLabel, style: TextStyle(color: c.textDim, fontSize: 12)),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: Container(
+              height: 6,
+              color: Colors.white.withValues(alpha: 0.05),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: _uploadProgress.clamp(0.0, 1.0),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: const BorderRadius.all(Radius.circular(10)),
+                      gradient:
+                          LinearGradient(colors: [c.primary, c.secondary]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -656,20 +744,89 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     );
   }
 
+  /// Pick an avatar/banner, then UPLOAD it (Blossom) before saving — the kind-0
+  /// `picture`/`banner` must carry a hosted URL, never a `file://` path. Mirrors
+  /// the PWA `handleNickEdit{Avatar,Banner}Select` → `uploadImage` flow: enforce
+  /// the per-surface cap (avatar 5MB / banner 10MB), show the progress
+  /// affordance, then store the returned URL. On failure the old image is kept
+  /// (nothing published) and the PWA failure alert is shown.
   Future<void> _pickImage(bool avatar) async {
+    if (_uploading) return; // one upload at a time
+    final Uint8List bytes;
+    final String contentType;
+    final String path;
     try {
       final picker = ImagePicker();
       final file = await picker.pickImage(source: ImageSource.gallery);
       if (file == null || !mounted) return;
-      setState(() {
-        if (avatar) {
-          _avatarPath = file.path;
-        } else {
-          _bannerPath = file.path;
-        }
-      });
+      bytes = await file.readAsBytes();
+      contentType = _contentTypeFor(file.path);
+      path = file.path;
     } catch (_) {
       // Picker unavailable (e.g. tests / desktop) — silently ignore.
+      return;
+    }
+    if (!mounted) return; // readAsBytes awaited above
+
+    // Enforce the per-surface size cap before uploading (PWA rejects oversize
+    // files with a system message and aborts the upload).
+    final cap = avatar ? _avatarMaxBytes : _bannerMaxBytes;
+    if (bytes.length > cap) {
+      final capMb = avatar ? 5 : 10;
+      final actualMb = (bytes.length / (1024 * 1024)).toStringAsFixed(1);
+      await showAppAlert(
+        context,
+        '${avatar ? 'Avatar' : 'Banner'} must be under ${capMb}MB '
+        '(this image is ${actualMb}MB).',
+      );
+      return;
+    }
+
+    setState(() {
+      _uploading = true;
+      _uploadProgress = 0.15; // PWA seeds the fill at 15%.
+      _uploadLabel = avatar ? 'Uploading avatar…' : 'Uploading banner…';
+    });
+
+    String? url;
+    try {
+      url = await ref.read(nostrControllerProvider).uploadImage(
+            bytes,
+            contentType: contentType,
+            onProgress: (p) {
+              if (mounted) setState(() => _uploadProgress = p);
+            },
+          );
+    } catch (_) {
+      url = null;
+    }
+    if (!mounted) return;
+
+    if (url == null || url.isEmpty) {
+      // Keep the old image — never publish a broken/local value (PWA shows
+      // "Upload failed — try again").
+      setState(() {
+        _uploading = false;
+        _uploadProgress = 0;
+      });
+      await showAppAlert(context, 'Upload failed — try again.');
+      return;
+    }
+
+    setState(() {
+      _uploading = false;
+      _uploadProgress = 1;
+      if (avatar) {
+        _currentAvatarUrl = url;
+        _avatarPath = path; // local preview thumbnail
+      } else {
+        _currentBannerUrl = url;
+        _bannerPath = path;
+      }
+    });
+    // PWA confirms the avatar swap with "Avatar updated successfully".
+    if (avatar && mounted) {
+      await showAppAlert(context, 'Avatar updated successfully');
     }
   }
 
@@ -707,14 +864,14 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       ok = await ref.read(nostrControllerProvider).saveProfile(
             name: includeName ? _nick.text.trim() : null,
             about: bio,
-            // Re-publish the EXISTING avatar/banner URLs so editing only the
-            // bio doesn't drop them from the replaced kind-0. A locally-picked
-            // file is NOT sent: a `file://` path is not a valid kind-0
-            // `picture`/`banner`, and the host-upload→URL step is cross-file
-            // (NostrController.uploadAvatar/uploadBanner — see CROSS_FILE_NEEDS).
-            // We render the local preview honestly but never publish it.
-            picture: _httpUrlOrCurrent(_avatarPath, _currentAvatarUrl),
-            banner: _httpUrlOrCurrent(_bannerPath, _currentBannerUrl),
+            // `_currentAvatarUrl`/`_currentBannerUrl` are always hosted http(s)
+            // URLs: either the value loaded from the existing profile or the URL
+            // returned by `uploadImage` at pick-time. A locally-picked file is
+            // NEVER published — only its uploaded URL is. Re-publishing the
+            // existing URLs also keeps them on the replaced kind-0 when only the
+            // bio/lightning changed.
+            picture: _currentAvatarUrl,
+            banner: _currentBannerUrl,
             lud16: lightning,
           );
     } catch (_) {
@@ -727,19 +884,6 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       SnackBar(
           content: Text(ok ? 'Profile updated' : 'Could not save profile')),
     );
-  }
-
-  /// Returns [picked] only when it is already a hosted http(s) URL (it never is
-  /// for a gallery pick), else the [current] URL — so a `file://` path from the
-  /// picker is never published as a kind-0 image. Once a real host-upload step
-  /// lands ([CROSS_FILE_NEEDS]: NostrController.uploadAvatar/uploadBanner), the
-  /// uploaded URL flows through here.
-  String? _httpUrlOrCurrent(String? picked, String? current) {
-    if (picked != null &&
-        (picked.startsWith('http://') || picked.startsWith('https://'))) {
-      return picked;
-    }
-    return current;
   }
 
   /// Fills the nick field with a freshly generated random nym (Randomize,

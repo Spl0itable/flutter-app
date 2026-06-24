@@ -477,12 +477,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// Notification-sound change: persist the choice, then play it as an audible
   /// preview (the PWA's `soundSelect.onchange` → `nym.playSound(value)`,
-  /// app.js:3480-3484). `'none'`/unknown is silent. (The PWA also zeroes its 2s
-  /// replay-dedupe so back-to-back previews always sound; see CROSS_FILE_NEEDS
-  /// — without it a second change within 2s is swallowed by the guard.)
+  /// app.js:3480-3484). `'none'`/unknown is silent. The PWA zeroes its 2s
+  /// replay-dedupe before the preview (app.js:3481-3483) so back-to-back
+  /// previews always sound — without it a second change within 2s is swallowed
+  /// by the guard.
   void _onSoundChanged(SettingsController ctrl, String value) {
     ctrl.setSound(value);
-    ref.read(notificationsServiceProvider).playSound(value);
+    final svc = ref.read(notificationsServiceProvider);
+    svc.resetSoundDedupe();
+    svc.playSound(value);
   }
 
   /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, wipe the

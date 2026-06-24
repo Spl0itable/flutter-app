@@ -2061,6 +2061,7 @@ class NotificationEntry {
     this.route,
     this.eventId,
     this.senderPubkey,
+    this.contextLabel,
     this.viewed = false,
   });
 
@@ -2083,6 +2084,12 @@ class NotificationEntry {
   /// The sender's pubkey (notifications.js `senderPubkey`), used in the
   /// no-eventId dedup fallback.
   final String? senderPubkey;
+
+  /// The PWA footer context label derived from `channelInfo` — `in #<geohash>`
+  /// for a channel/geohash source or `in <GroupName>` for a group (notifications
+  /// .js:519-533). Null for PM/mention sources, which the panel labels from the
+  /// type. Preferred by the panel over the type-derived label when present.
+  final String? contextLabel;
   bool viewed;
 }
 
@@ -2124,6 +2131,7 @@ class NotificationHistoryNotifier
     int? ts,
     String? eventId,
     String? senderPubkey,
+    String? contextLabel,
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
     final stamp = ts ?? now;
@@ -2151,6 +2159,7 @@ class NotificationHistoryNotifier
       route: route,
       eventId: eventId,
       senderPubkey: senderPubkey,
+      contextLabel: contextLabel,
     );
     final kept = [
       entry,

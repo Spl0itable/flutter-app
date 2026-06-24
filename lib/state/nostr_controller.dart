@@ -587,6 +587,10 @@ class NostrController {
       friendsOnly: _notifyFriendsOnly,
     );
     if (!notify) return;
+    // PWA footer context label for a channel source is `in #<geohash>`
+    // (notifications.js, derived from `channelInfo`). `channelKeyOf` already
+    // returns the `#`-prefixed key (geohash `g` tag / named `d` tag), so reuse
+    // it directly; null for an unkeyed event leaves the label off.
     _dispatchNotification(
       title: _nymDisplayFor(e.pubkey),
       body: e.content,
@@ -599,6 +603,7 @@ class NostrController {
       route: e.pubkey,
       eventId: e.id,
       tsMs: e.createdAt * 1000,
+      contextLabel: key != null ? 'in $key' : null,
     );
   }
 
@@ -640,6 +645,9 @@ class NostrController {
       route: isGroup ? (m.groupId ?? '') : m.pubkey,
       eventId: m.nymMessageId ?? m.id,
       tsMs: m.timestamp,
+      // Group footer label `in <GroupName>` (PWA `channelInfo`); PMs leave it
+      // null so the panel labels them 'PM' from the type.
+      contextLabel: isGroup ? 'in ${_groupNameFor(m.groupId)}' : null,
     );
   }
 
@@ -667,6 +675,7 @@ class NostrController {
     String? route,
     String? eventId,
     int? tsMs,
+    String? contextLabel,
   }) {
     unawaited(_ref.read(notificationsServiceProvider).notify(
           title: title,
@@ -691,6 +700,7 @@ class NostrController {
             ts: tsMs,
             eventId: eventId,
             senderPubkey: senderPubkey,
+            contextLabel: contextLabel,
           );
     } catch (_) {
       // History store may be unavailable in teardown; alerting still happened.
@@ -1019,6 +1029,8 @@ class NostrController {
           tsMs: (rumor['created_at'] as num?)?.toInt() != null
               ? (rumor['created_at'] as num).toInt() * 1000
               : null,
+          // Group source → footer label `in <GroupName>` (PWA `channelInfo`).
+          contextLabel: 'in ${name.isNotEmpty ? name : 'a group'}',
         );
       }
       return;

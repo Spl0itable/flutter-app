@@ -160,6 +160,12 @@ class NotificationsService {
   /// Dedup: don't replay the same tone within 2s (notifications.js `playSound`).
   int _lastSoundPlayedAt = 0;
 
+  /// Resets the 2s replay-dedup window so the next [playSound] always sounds.
+  /// The PWA zeroes `_lastSoundPlayedAt` before a settings sound preview
+  /// (`soundSelect.onchange`, app.js:3481-3483) so rapid consecutive previews
+  /// always play instead of being swallowed by the guard.
+  void resetSoundDedupe() => _lastSoundPlayedAt = 0;
+
   /// Plays the tone for [name] (a `settings.sound` value). Silent for `'none'`
   /// or an unknown key. The 2-second replay guard mirrors the PWA.
   Future<void> playSound(String name) async {

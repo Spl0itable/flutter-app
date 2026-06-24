@@ -14,6 +14,7 @@ import '../../features/groups/group_logic.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
 import '../../features/identity/panic_wipe.dart';
+import '../../features/nymbot/bot_chat_screen.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/relays/relay_stats_modal.dart';
@@ -385,6 +386,28 @@ class _SidebarState extends ConsumerState<Sidebar> {
             ),
             searchHint: 'Search messages…',
             children: [
+              // Nymbot: a pinned PM row at the top of Private Messages — the
+              // entry point to the dedicated bot chat (the PWA surfaces the bot
+              // as a highlighted PM conversation). `PMListItem` renders its
+              // avatar + verified ✓ from the pubkey; tap binds the paid session
+              // then opens `BotChatScreen`.
+              if (term.isEmpty || 'nymbot'.contains(term))
+                PMListItem(
+                  nym: 'Nymbot',
+                  pubkey: NostrController.nymbotPubkey,
+                  active: false,
+                  unread: 0,
+                  textSize: textSize,
+                  onTap: () {
+                    widget.onItemSelected?.call();
+                    ref.read(nostrControllerProvider).bindBotChat();
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const BotChatScreen(),
+                      ),
+                    );
+                  },
+                ),
               for (final e in r.rows)
                 if (e.group != null)
                   _GroupListItem(
