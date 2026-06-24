@@ -5,6 +5,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/globe/geohash_explorer.dart';
+import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/polls/poll_create_modal.dart';
@@ -387,11 +388,8 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   /// owned by the calls/notifications slice; until it lands this clears the
   /// unread badge and surfaces a lightweight summary so the bell is functional.
   void _openNotifications() {
-    final notifier = ref.read(notificationHistoryProvider.notifier);
-    notifier.markAllViewed();
-    // TODO(ui-parity): open the full notifications-history modal once the
-    // notifications slice ships it (`openNotificationsModal`). The badge +
-    // mark-as-viewed wiring (gap F22) is complete here.
+    showNotificationsPanel(context);
+    ref.read(notificationHistoryProvider.notifier).markAllViewed();
   }
 
   Future<void> _openDiscover() async {

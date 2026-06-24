@@ -3,10 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/autocomplete/pending_edit.dart';
 import '../../features/messages/format/message_content.dart';
 import '../../features/p2p/p2p_models.dart';
 import '../../features/p2p/p2p_service.dart';
 import '../../features/shop/cosmetics.dart';
+import '../../features/reactions/quick_context_items.dart';
 import '../../features/reactions/quick_react_popup.dart';
 import '../../features/reactions/reaction_burst.dart';
 import '../../features/reactions/reactors_modal.dart';
@@ -775,6 +777,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
       onMenu: message.isOwn ? null : () => _openContextMenu(context),
+      // The PWA long-press surface also carries the labelled quick actions
+      // (Slap/Hug/Zap/Quote/Copy/Translate/Edit/Delete) below the emoji pill.
+      contextItems: buildQuickContextItems(
+        context,
+        ref,
+        message,
+        onTranslate: () => setState(() => _showTranslation = true),
+        onEdit: () => ref.read(pendingEditProvider.notifier).request(
+              messageId: message.id,
+              content: message.content,
+            ),
+      ),
     );
   }
 
