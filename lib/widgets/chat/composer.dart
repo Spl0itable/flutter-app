@@ -122,6 +122,7 @@ class _ComposerState extends ConsumerState<Composer> {
 
   @override
   void dispose() {
+    _focus.removeListener(_onFocusChanged);
     _controller.dispose();
     _focus.dispose();
     _translateSearchController.dispose();
@@ -209,6 +210,9 @@ class _ComposerState extends ConsumerState<Composer> {
   @override
   void initState() {
     super.initState();
+    // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
+    // rebuild on focus change to swap those in/out.
+    _focus.addListener(_onFocusChanged);
     // Register the system-message sink so command feedback surfaces somewhere.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -216,6 +220,10 @@ class _ComposerState extends ConsumerState<Composer> {
             onSystemMessage: _onSystemMessage,
           );
     });
+  }
+
+  void _onFocusChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onSystemMessage(String text) {
@@ -1080,8 +1088,12 @@ class _ComposerState extends ConsumerState<Composer> {
   Widget _textField(BuildContext context) {
     final c = context.nym;
     final hasText = _controller.text.trim().isNotEmpty;
+    final focused = _focus.hasFocus;
     // `.composer-popout .message-input`: elevated rounded box vs the flat field.
-    final fill = _popout ? c.bgTertiary : Colors.white.withValues(alpha: 0.05);
+    // `.message-input:focus` lifts the flat fill from white@0.05 → white@0.07.
+    final fill = _popout
+        ? c.bgTertiary
+        : Colors.white.withValues(alpha: focused ? 0.07 : 0.05);
     // `.message-input` rounds ONLY the bottom corners when flat (chips/dropdowns
     // sit `bottom:100%` flush above it — styles-chat.css:1666); the popout box
     // uses full radius-md (styles-chat.css:1737).
@@ -1148,7 +1160,24 @@ class _ComposerState extends ConsumerState<Composer> {
       ],
     );
 
-    if (!_popout) return stack;
+    if (!_popout) {
+      // `.message-input:focus`: a 3px primary@0.06 focus ring (spread, no blur)
+      // hugging the field's rounded-bottom shape.
+      if (!focused) return stack;
+      return DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          boxShadow: [
+            BoxShadow(
+              color: c.primaryA(0.06),
+              spreadRadius: 3,
+              blurRadius: 0,
+            ),
+          ],
+        ),
+        child: stack,
+      );
+    }
     // The popout box is elevated (shadow-lg) and height-capped (min 40vh,360).
     return Container(
       constraints: BoxConstraints(

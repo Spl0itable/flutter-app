@@ -158,7 +158,13 @@ class ContextMenuPanel extends ConsumerWidget {
     final about = user?.profile?.about ?? '';
 
     final panel = Material(
-      color: c.bgTertiary,
+      // `.context-menu` is `var(--bg-tertiary)` by default, but `body.solid-ui`
+      // (default ON) overrides it to `var(--glass-bg)` — the same opaque surface
+      // as the sidebar / chat-header (#14141e dark, #ffffff light). The bg is
+      // painted on the full-height outer Container below so it fills the whole
+      // viewport (`.context-menu { height: 100vh }`); the Material itself stays
+      // transparent and only provides ink/scroll for the (content-height) body.
+      type: MaterialType.transparency,
       child: SafeArea(
         child: SingleChildScrollView(
           child: Column(
@@ -241,6 +247,9 @@ class ContextMenuPanel extends ConsumerWidget {
         height: double.infinity,
         child: Container(
           decoration: BoxDecoration(
+            // Opaque solid-ui surface filling the FULL viewport height (not just
+            // the content), matching `.context-menu` + the normal sidebar.
+            color: c.glassBg,
             border: Border(left: BorderSide(color: c.glassBorder)),
             boxShadow: const [
               BoxShadow(
