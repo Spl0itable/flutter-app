@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/crypto/keys.dart' as keys;
+import '../core/crypto/pow.dart' as pow;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
@@ -16,6 +17,7 @@ import '../features/commands/command_registry.dart';
 import '../features/emoji/custom_emoji.dart';
 import '../features/groups/group_logic.dart';
 import '../features/groups/group_manager.dart';
+import '../features/messages/trust_graph.dart';
 import '../features/notifications/notifications_service.dart';
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
@@ -243,6 +245,11 @@ class NostrController {
       // `discoverChannels`, called on connect from relays.js).
       discoverChannels();
 
+      // Subscribe to peers' `nym-vouches` lists (web of trust). On boot the only
+      // trusted authors are the seeded dev/bot roots; the graph then expands one
+      // hop at a time as their vouches arrive (relays.js:2536-2542).
+      _subscribeVouches();
+
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
       // not only on a later view switch (`_onViewOpened`).
@@ -333,6 +340,11 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _vouchPublishTimer?.cancel();
+    _vouchPublishTimer = null;
+    _vouchExpansionTimer?.cancel();
+    _vouchExpansionTimer = null;
+    _lastVouchPublishAt = 0;
     _profileBackfillTimer?.cancel();
     _profileBackfillTimer = null;
     _profileBackfillQueue.clear();
@@ -450,7 +462,14 @@ class NostrController {
   void _onEvent(NostrEvent event) {
     final appState = _ref.read(appStateProvider.notifier);
     if (event.kind == EventKind.appData) {
-      _ingestPresence(event);
+      // Kind 30078 is multiplexed by the `['t', ...]` topic (nostr-core.js:
+      // 570-577 dispatches on `tTag[1]`): presence / poll / poll-vote / vouches.
+      final topic = event.tagValue('t');
+      if (topic == AppDataTopic.vouches) {
+        _ingestVouch(event);
+      } else {
+        _ingestPresence(event);
+      }
       return;
     }
     // NIP-30 custom emoji packs / the user's emoji-pack list (nostr-core.js:595).
@@ -520,6 +539,24 @@ class NostrController {
         }
       }
       _maybeNotifyChannel(event);
+
+      // Web-of-trust observation for a non-own channel message (nostr-core.js:
+      // 383-392). Two effects:
+      //  (1) ≥2 distinct messages from a sender earns them session trust
+      //      (`_trackPubkeyMessage`), exempting them from the spam gate.
+      //  (2) NIP-13 PoW meeting the Nymchat floor (16 bits) is a self-attestation
+      //      that the sender runs Nymchat → add to the trust graph + our vouch
+      //      list (`_markNymchatPubkey` + `_observeNymchatPubkey`).
+      final selfPk = _identity?.pubkey ?? '';
+      if (event.pubkey != selfPk) {
+        _ref
+            .read(appStateProvider.notifier)
+            .trackPubkeyMessage(event.pubkey, event.id);
+        if (pow.validatePow(event, _nymchatPowFloor)) {
+          _observeNymchatPubkey(event.pubkey);
+        }
+      }
+
       // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
       // a profile fetch for every message author it lacks a profile for —
       // `queueProfileFetch`, nostr-core.js:1767). Debounced/batched.
@@ -934,6 +971,112 @@ class NostrController {
   /// Per-pubkey newest presence timestamp (users.js `presenceTimestamps`) so a
   /// redelivered/older replaceable presence event can't clobber a newer one.
   final Map<String, int> _presenceTimestamps = {};
+
+  // ---------------------------------------------------------------------------
+  // Web of trust ("nym-vouch") — kind 30078, `['t','nym-vouches']`. Ported from
+  // nostr-core.js (`handleVouchEvent`, `_observeNymchatPubkey`,
+  // `publishNymchatVouches`, `_scheduleVouchExpansion`). The trust graph gates
+  // channel/PM spam (app_state `isSpamGated`); observing PoW-valid Nymchat
+  // activity grows OUR vouch list (published so peers expand through us), and
+  // ingesting a trusted peer's vouch list grows the graph (and triggers a
+  // one-hop resubscribe so the web of trust expands and then goes quiet).
+  // ---------------------------------------------------------------------------
+
+  /// Ingests a peer's kind-30078 `nym-vouches` event (nostr-core.js
+  /// `handleVouchEvent`, line 2663). The content is a JSON array of pubkeys the
+  /// author vouches for. Only honored when the author is already trusted
+  /// (rooted at dev/bot); each valid pubkey is added to the graph. When new
+  /// pubkeys appear, schedule a one-hop expansion (resubscribe to the now-larger
+  /// author set).
+  void _ingestVouch(NostrEvent e) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (e.pubkey.isEmpty || e.pubkey == self) return;
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(e.content.isEmpty ? '[]' : e.content);
+    } catch (_) {
+      return;
+    }
+    final list = TrustGraph.parseVouchList(decoded, selfPubkey: self);
+    final added = _ref.read(appStateProvider.notifier).ingestVouchList(
+          authorPubkey: e.pubkey,
+          vouchedPubkeys: list,
+        );
+    // Newly trusted pubkeys are new vouch authors to fetch — expand one hop via
+    // a heavily debounced resubscribe (converges, then goes quiet).
+    if (added) _scheduleVouchExpansion();
+  }
+
+  /// Records an observation that [pubkey] is running Nymchat (valid PoW channel
+  /// message or read receipt) — nostr-core.js `_observeNymchatPubkey` (line
+  /// 2623). Marks them in the graph AND in our own vouch list, then schedules a
+  /// debounced publish of the updated list.
+  void _observeNymchatPubkey(String pubkey) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (pubkey.isEmpty || pubkey == self) return;
+    final notifier = _ref.read(appStateProvider.notifier);
+    notifier.markNymchatPubkey(pubkey);
+    final added = notifier.observeNymchatPubkey(pubkey);
+    if (added) _scheduleVouchPublish();
+  }
+
+  /// NIP-13 PoW floor (leading zero bits) a channel message must meet to be
+  /// treated as a Nymchat-client self-attestation (`this.nymchatPowFloor = 16`,
+  /// app.js:556).
+  static const int _nymchatPowFloor = 16;
+
+  /// Debounce for the vouch-list publish (nostr-core.js `_scheduleVouchPublish`,
+  /// line 2635): at most one publish per 60s, else a 5s coalescing delay.
+  Timer? _vouchPublishTimer;
+  int _lastVouchPublishAt = 0;
+
+  void _scheduleVouchPublish() {
+    if (_vouchPublishTimer != null) return;
+    final sinceLast = DateTime.now().millisecondsSinceEpoch - _lastVouchPublishAt;
+    final delayMs = sinceLast < 60000 ? 60000 - sinceLast : 5000;
+    _vouchPublishTimer = Timer(Duration(milliseconds: delayMs), () {
+      _vouchPublishTimer = null;
+      unawaited(_publishVouches());
+    });
+  }
+
+  /// Signs + publishes our `nym-vouches` list (nostr-core.js
+  /// `publishNymchatVouches`, line 2645). Best-effort.
+  Future<void> _publishVouches() async {
+    final service = _service;
+    if (service == null) return;
+    if (service.pool.connectedCount == 0) return;
+    final list = _ref.read(appStateProvider).nymchatVouches.toList();
+    if (list.isEmpty) return;
+    try {
+      await service.publishVouches(list);
+      _lastVouchPublishAt = DateTime.now().millisecondsSinceEpoch;
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// Debounce for the one-hop graph expansion (nostr-core.js
+  /// `_scheduleVouchExpansion`, line 2685): 15s after new trusted pubkeys
+  /// appear, resubscribe to vouches authored by the now-larger trust set.
+  Timer? _vouchExpansionTimer;
+
+  void _scheduleVouchExpansion() {
+    if (_vouchExpansionTimer != null) return;
+    _vouchExpansionTimer = Timer(const Duration(seconds: 15), () {
+      _vouchExpansionTimer = null;
+      _subscribeVouches();
+    });
+  }
+
+  /// (Re)subscribes to peers' `nym-vouches` lists authored by our current trust
+  /// graph (relays.js:2538-2542). Called on connect and on each expansion hop.
+  void _subscribeVouches() {
+    final service = _service;
+    if (service == null) return;
+    final authors = _ref.read(appStateProvider).nymchatPubkeys;
+    service.subscribeVouches(authors);
+  }
 
   void _onGiftWrap(GiftWrapUnwrapped u) {
     final appState = _ref.read(appStateProvider.notifier);
@@ -2872,6 +3015,10 @@ class NostrController {
 
     final appState = _ref.read(appStateProvider);
     if (appState.blockedUsers.contains(event.pubkey)) return;
+
+    // A read receipt is a self-attestation that the reader runs Nymchat — add
+    // them to the trust graph + our vouch list (nostr-core.js:1647-1650).
+    _observeNymchatPubkey(event.pubkey);
 
     // Reader display name: the receipt's `['n', nym]` (base), else the known
     // user nym, decorated with the pubkey suffix (PWA `stripPubkeySuffix(rawNym

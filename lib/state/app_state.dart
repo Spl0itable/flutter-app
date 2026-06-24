@@ -16,6 +16,7 @@ import '../features/emoji/custom_emoji.dart'
         loadCustomEmojiState;
 import '../features/emoji/emoji_data.dart';
 import '../features/groups/group_logic.dart';
+import '../features/messages/trust_graph.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
 import '../features/zaps/zap_logic.dart';
@@ -28,6 +29,44 @@ import '../models/poll.dart';
 import '../models/user.dart';
 import '../services/nostr/event_mapper.dart';
 import 'settings_provider.dart';
+
+/// The verified Nymchat developer pubkey (`verifiedDeveloper.pubkey`,
+/// app.js:1092) — a root of the web-of-trust graph (app.js:1100) and exempt
+/// from spam-gating. Mirrored by `NostrController.verifiedDeveloperPubkey`.
+const String kVerifiedDeveloperPubkey =
+    'd49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df';
+
+/// The verified Nymbot pubkey (`verifiedBot.pubkey`, app.js:1096) — the second
+/// trust-graph root (app.js:1101) and exempt from spam-gating. Mirrored by
+/// `NostrController.nymbotPubkey`.
+const String kNymbotPubkey =
+    'fb242a282d605f5f8141da8087a3ff0c16b255935306b324b578b43c6cf54bb2';
+
+/// The verified-bot set (`this.verifiedBotPubkeys`, app.js:1099). Currently the
+/// single Nymbot; kept as a set to match the PWA shape and `_isPubkeyGated`.
+const Set<String> kVerifiedBotPubkeys = {kNymbotPubkey};
+
+/// The web-of-trust roots seeded into `nymchatPubkeys` on go-live
+/// (app.js:1100-1101): the verified developer + Nymbot. Every transitive vouch
+/// chain is anchored here.
+const Set<String> kTrustRootPubkeys = {
+  kVerifiedDeveloperPubkey,
+  kNymbotPubkey,
+};
+
+/// Master switch for the web-of-trust SPAM GATE (the [AppState.isMessageFiltered]
+/// → [AppState.isSpamGated] visibility cut). HELD OFF until two prerequisites
+/// land, or it would hide legitimate messages:
+///   1. Flutter must mine the NIP-13 PoW floor on channel SENDS (it currently
+///      does not — `minePow` is never called), so Flutter-origin messages count
+///      as a Nymchat-client self-attestation the way every PWA message does;
+///      otherwise the gate hides them. (Off-thread PoW mining is part of the
+///      isolate-offload work.)
+///   2. The trust graph must persist + rebuild from D1, so a fresh session isn't
+///      gating off an almost-empty graph.
+/// The trust graph still OBSERVES / PUBLISHES / INGESTS vouches live regardless;
+/// only the message-hiding is gated behind this flag (default off).
+bool nymVouchSpamGateEnabled = false;
 
 /// Identifies what the chat pane is currently showing. Mirrors the PWA's
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
@@ -127,6 +166,9 @@ class AppState {
     Set<String>? friends,
     Set<String>? blockedUsers,
     Set<String>? blockedKeywords,
+    Set<String>? nymchatPubkeys,
+    Set<String>? nymchatVouches,
+    Set<String>? trustedPubkeys,
   })  : typing = typing ?? <String, int>{},
         polls = polls ?? <String, Poll>{},
         zaps = zaps ?? <String, MessageZaps>{},
@@ -136,7 +178,10 @@ class AppState {
         channelLastActivity = channelLastActivity ?? <String, int>{},
         friends = friends ?? <String>{},
         blockedUsers = blockedUsers ?? <String>{},
-        blockedKeywords = blockedKeywords ?? <String>{};
+        blockedKeywords = blockedKeywords ?? <String>{},
+        nymchatPubkeys = nymchatPubkeys ?? <String>{},
+        nymchatVouches = nymchatVouches ?? <String>{},
+        trustedPubkeys = trustedPubkeys ?? <String>{};
 
   /// The current user's identity.
   final String selfPubkey;
@@ -194,6 +239,25 @@ class AppState {
   /// `this.blockedKeywords` (hasBlockedKeyword — matches content OR author nym).
   final Set<String> blockedKeywords;
 
+  /// Web-of-trust GRAPH: pubkeys believed to be running a Nymchat client
+  /// (`this.nymchatPubkeys`, app.js:697). Seeded with the verified developer +
+  /// Nymbot roots (app.js:1100-1101), grown by observing PoW-valid channel
+  /// activity (`_markNymchatPubkey`) and by ingesting trusted peers' kind-30078
+  /// `nym-vouches` lists (`handleVouchEvent`). A sender in this set is never
+  /// spam-gated. Capped at [TrustGraph.maxEntries].
+  final Set<String> nymchatPubkeys;
+
+  /// OUR OWN vouch list: pubkeys we've personally observed running Nymchat
+  /// (`this.nymchatVouches`, app.js:557). Published as our kind-30078
+  /// `nym-vouches` event so other clients can expand their graph through us.
+  /// Capped at [TrustGraph.maxEntries].
+  final Set<String> nymchatVouches;
+
+  /// Pubkeys earned into trust by sending ≥2 messages this session
+  /// (`this.trustedPubkeys`, app.js:699; `_trackPubkeyMessage`, messages.js:324).
+  /// Exempts a sender from spam-gating even when not yet in [nymchatPubkeys].
+  final Set<String> trustedPubkeys;
+
   final ChatView view;
 
   /// True when [pubkey] is a friend (users.js `isFriend`).
@@ -221,12 +285,60 @@ class AppState {
     return false;
   }
 
-  /// True when [m] should be hidden from message lists: blocked author, or a
+  /// True when the kind-30078 spam gate (`nym-vouch` web-of-trust) hides a
+  /// channel/PM message from a low-trust sender. Mirrors messages.js:481-483:
+  ///
+  /// ```js
+  /// const isGated = !message.isOwn && !this.isFriend(message.pubkey) &&
+  ///   !this.nymchatPubkeys.has(message.pubkey) &&
+  ///   this._isPubkeyGated(message.pubkey);
+  /// ```
+  ///
+  /// where `_isPubkeyGated(pubkey)` (messages.js:347) returns false for the
+  /// verified developer, any verified bot, or a sender already earned into
+  /// [trustedPubkeys] (≥2 messages this session). The dev + bot roots are also
+  /// seeded into [nymchatPubkeys] on go-live, so the `nymchatPubkeys.has` check
+  /// alone already exempts them; [verifiedDeveloper]/[verifiedBots] keep the
+  /// predicate faithful to the PWA even if the roots haven't been seeded.
+  ///
+  /// A gated sender's messages are stored but kept out of the visible list,
+  /// unread counts, notifications, and presence (the PWA's `_spamGated` flag) —
+  /// they "reveal" retroactively once the sender becomes trusted
+  /// (`_revealGatedPubkey`).
+  bool isSpamGated(
+    Message m, {
+    String? verifiedDeveloper,
+    Set<String> verifiedBots = const {},
+  }) {
+    if (m.isOwn) return false;
+    if (isFriend(m.pubkey)) return false;
+    if (nymchatPubkeys.contains(m.pubkey)) return false;
+    // _isPubkeyGated: trusted via dev/bot identity or earned trust.
+    if (verifiedDeveloper != null && m.pubkey == verifiedDeveloper) return false;
+    if (verifiedBots.contains(m.pubkey)) return false;
+    if (trustedPubkeys.contains(m.pubkey)) return false;
+    return true;
+  }
+
+  /// True when [m] should be hidden from message lists: blocked author, a
   /// keyword match on its content / author (own messages are never filtered by
-  /// keyword — messages.js `if (!msg.isOwn && this.hasBlockedKeyword(...))`).
+  /// keyword — messages.js `if (!msg.isOwn && this.hasBlockedKeyword(...))`), or
+  /// spam-gated by the web-of-trust ([isSpamGated]). The PWA folds the
+  /// `_spamGated` flag into every visibility/unread filter (messages.js:2942,
+  /// persistence.js:443) so an un-vouched stranger's channel messages stay
+  /// hidden until trust is established.
   bool isMessageFiltered(Message m) {
     if (blockedUsers.contains(m.pubkey)) return true;
     if (!m.isOwn && hasBlockedKeyword(m.content, m.author)) return true;
+    // Web-of-trust spam gate — only applied when explicitly enabled (see
+    // [nymVouchSpamGateEnabled]); held off until PoW-on-send + graph persistence
+    // exist so it can't hide legitimate messages on a fresh session.
+    if (nymVouchSpamGateEnabled &&
+        isSpamGated(m,
+            verifiedDeveloper: kVerifiedDeveloperPubkey,
+            verifiedBots: kVerifiedBotPubkeys)) {
+      return true;
+    }
     return false;
   }
 
@@ -258,6 +370,9 @@ class AppState {
         friends: friends,
         blockedUsers: blockedUsers,
         blockedKeywords: blockedKeywords,
+        nymchatPubkeys: nymchatPubkeys,
+        nymchatVouches: nymchatVouches,
+        trustedPubkeys: trustedPubkeys,
       );
 
   /// Builds the seeded demo store (used until a live identity boots).
@@ -693,6 +808,18 @@ AppState _seedAppState() {
     reactions: reactions,
     unreadCounts: unread,
     view: const ChatView.channel('nymchat'),
+    // The demo authors represent established, trusted conversations, so seed
+    // them into the web-of-trust graph — otherwise the spam gate ([isSpamGated],
+    // folded into [isMessageFiltered]) would hide all sample messages in the
+    // pre-login demo store.
+    nymchatPubkeys: {
+      ...kTrustRootPubkeys,
+      _pkSatoshi,
+      _pkNeo,
+      _pkTrinity,
+      _pkOracle,
+      _pkBot,
+    },
   );
 }
 
@@ -751,6 +878,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     state = AppState.live(pubkey, nym);
+    // Seed the web-of-trust roots (app.js:1100-1101): the verified developer +
+    // Nymbot anchor every transitive vouch chain.
+    state.nymchatPubkeys.addAll(kTrustRootPubkeys);
   }
 
   /// Resets the store to its pre-login state on sign-out (app.js `signOut` →
@@ -780,6 +910,100 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (count == state.connectedRelays) return;
     state = state.copyWith(connectedRelays: count);
   }
+
+  // ---------------------------------------------------------------------------
+  // Web of trust ("nym-vouch") — spam gating store + ingest (messages.js /
+  // nostr-core.js). The trust graph ([AppState.nymchatPubkeys]) gates channel/PM
+  // spam; growing it reveals previously-gated senders' messages. Unlike the PWA
+  // (which flips a per-message `_spamGated` flag and calls `_revealGatedPubkey`),
+  // the native gate is computed live by [AppState.isSpamGated] inside
+  // [AppState.isMessageFiltered], so a single `copyWith()` after a trust mutation
+  // re-runs every visibility/unread filter and reveals the newly-trusted sender.
+  // ---------------------------------------------------------------------------
+
+  /// Adds [pubkey] to the trust GRAPH ([AppState.nymchatPubkeys]). Mirrors
+  /// messages.js `_markNymchatPubkey` (line 353): once a sender is known to run
+  /// Nymchat, their channel messages are no longer spam-gated. Returns true when
+  /// newly added (so callers can decide whether to expand the graph). Notifies
+  /// listeners so any of the sender's gated messages reveal.
+  bool markNymchatPubkey(String pubkey) {
+    final added = TrustGraph.add(
+      state.nymchatPubkeys,
+      pubkey,
+      selfPubkey: state.selfPubkey,
+    );
+    if (added) state = state.copyWith();
+    return added;
+  }
+
+  /// Records an observation that [pubkey] is running Nymchat into OUR OWN vouch
+  /// list ([AppState.nymchatVouches]) — the list we later publish. Mirrors
+  /// nostr-core.js `_observeNymchatPubkey` (line 2623). Returns true when newly
+  /// added (the controller then schedules a debounced vouch publish). Does NOT
+  /// notify listeners (our vouch list isn't UI state).
+  bool observeNymchatPubkey(String pubkey) {
+    return TrustGraph.add(
+      state.nymchatVouches,
+      pubkey,
+      selfPubkey: state.selfPubkey,
+    );
+  }
+
+  /// Ingests a peer's kind-30078 `nym-vouches` list into the trust graph,
+  /// mirroring nostr-core.js `handleVouchEvent` (line 2663). The vouch is only
+  /// honored when [authorPubkey] is ALREADY in [AppState.nymchatPubkeys] — this
+  /// keeps the graph rooted in the seeded dev/bot pubkeys so a stranger can't
+  /// inject trust. Every valid (hex64, non-self) pubkey in [vouchedPubkeys] is
+  /// marked. Returns true when at least one NEW pubkey was added (the controller
+  /// then schedules a one-hop expansion / resubscribe). Skips our own vouches.
+  bool ingestVouchList({
+    required String authorPubkey,
+    required List<String> vouchedPubkeys,
+  }) {
+    if (authorPubkey.isEmpty || authorPubkey == state.selfPubkey) return false;
+    // Rooted-trust gate: only accept vouches from peers we already trust.
+    if (!state.nymchatPubkeys.contains(authorPubkey)) return false;
+    var added = false;
+    for (final pk in vouchedPubkeys) {
+      if (pk == state.selfPubkey) continue;
+      if (TrustGraph.add(state.nymchatPubkeys, pk, selfPubkey: state.selfPubkey)) {
+        added = true;
+      }
+    }
+    if (added) state = state.copyWith();
+    return added;
+  }
+
+  /// Tracks a message from [pubkey] toward earned trust ([AppState.trustedPubkeys]).
+  /// Mirrors messages.js `_trackPubkeyMessage` (line 324): after a sender posts
+  /// ≥2 distinct messages this session they're trusted (exempt from spam-gating
+  /// via `_isPubkeyGated`). Already-trusted senders are a no-op. Returns true
+  /// when [pubkey] crossed into trust on this call (so their gated messages
+  /// reveal).
+  bool trackPubkeyMessage(String pubkey, String eventId) {
+    if (pubkey.isEmpty || eventId.isEmpty) return false;
+    if (state.trustedPubkeys.contains(pubkey)) return false;
+    final ids = _pubkeyMsgIds.putIfAbsent(pubkey, () => <String>{});
+    if (_pubkeyMsgIds.length > 20000) {
+      _pubkeyMsgIds.remove(_pubkeyMsgIds.keys.first);
+    }
+    ids.add(eventId);
+    if (ids.length >= 2) {
+      _pubkeyMsgIds.remove(pubkey);
+      state.trustedPubkeys.add(pubkey);
+      if (state.trustedPubkeys.length > 50000) {
+        state.trustedPubkeys.remove(state.trustedPubkeys.first);
+      }
+      state = state.copyWith();
+      return true;
+    }
+    return false;
+  }
+
+  /// pubkey → distinct message ids seen this session, until the sender crosses
+  /// the ≥2 trust threshold (messages.js `pubkeyMsgIds`, line 326). Pruned once
+  /// trust is earned. Capped at 20000 senders (oldest dropped).
+  final Map<String, Set<String>> _pubkeyMsgIds = {};
 
   /// Per-message reactor map: messageId → emoji → reactor pubkey → nym.
   /// Mirrors the PWA's `reactions: Map<msgId, Map<emoji, Map<pubkey,nym>>>`

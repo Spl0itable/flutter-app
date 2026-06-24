@@ -27,6 +27,11 @@ Future<ProviderContainer> _container() async {
 }
 
 /// Seeds a channel message from [pubkey] into the active channel view.
+///
+/// Marks [pubkey] into the web-of-trust graph so the message isn't hidden by the
+/// `nym-vouch` spam gate ([AppState.isSpamGated], folded into
+/// [AppState.isMessageFiltered]); these tests exercise keyword/block filtering,
+/// not the spam gate, so the senders stand in for already-trusted participants.
 void _seedChannelMessage(
   ProviderContainer c, {
   required String id,
@@ -36,6 +41,7 @@ void _seedChannelMessage(
   bool isOwn = false,
 }) {
   final notifier = c.read(appStateProvider.notifier);
+  if (!isOwn) notifier.markNymchatPubkey(pubkey);
   final state = c.read(appStateProvider);
   final list = state.messages.putIfAbsent(state.view.storageKey, () => []);
   list.add(Message(

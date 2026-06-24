@@ -10,6 +10,7 @@ import '../../core/crypto/bitchat.dart' as bitchat;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/schnorr.dart' as schnorr;
+import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
 import '../../models/nostr_event.dart';
 import '../api/api_client.dart';
@@ -968,6 +969,67 @@ class NostrService {
     return signed;
   }
 
+  /// Publishes our kind-30078 `nym-vouches` list (web-of-trust). Mirrors
+  /// nostr-core.js `publishNymchatVouches` (line 2645): a parameterized
+  /// replaceable event tagged `['d','nym-vouches'],['t','nym-vouches']` whose
+  /// content is the JSON array of pubkeys we've observed running Nymchat, so
+  /// other clients can expand their trust graph through us. No-op for an empty
+  /// list (the PWA returns early when `list.length === 0`). Returns the signed
+  /// event, or null when there's nothing to publish / no signer.
+  Future<NostrEvent?> publishVouches(List<String> vouchedPubkeys) async {
+    final sig = signer;
+    if (sig == null || vouchedPubkeys.isEmpty) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.appData,
+        tags: const [
+          ['d', AppDataTopic.vouches],
+          ['t', AppDataTopic.vouches],
+        ],
+        content: jsonEncode(vouchedPubkeys),
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
+  /// (Re)subscribes to peers' kind-30078 `nym-vouches` lists, authored by the
+  /// pubkeys currently in our trust graph ([nymchatPubkeys]). Mirrors the PWA's
+  /// REQ (relays.js:2538-2542): `{ kinds:[30078], "#t":["nym-vouches"], authors:
+  /// trusted-pubkeys-intersect-hex64-capped-500, limit: authors.length }`.
+  /// Ingesting a trusted peer's vouches grows the graph one hop; the controller
+  /// calls this again (debounced) when new authors appear, so the web of trust
+  /// expands and then goes quiet. Returns null when there are no valid authors.
+  Subscription? subscribeVouches(Iterable<String> nymchatPubkeys) {
+    final authors = nymchatPubkeys
+        .where(TrustGraph.isHex64)
+        .take(_vouchAuthorCap)
+        .toList();
+    if (authors.isEmpty) return null;
+    _vouchSub?.close();
+    final sub = pool.subscribe([
+      NostrFilter(
+        kinds: [EventKind.appData],
+        authors: authors,
+        tags: {
+          't': [AppDataTopic.vouches],
+        },
+        limit: authors.length,
+      ),
+    ]);
+    _vouchSub = sub;
+    sub.events.listen(_routeInbound);
+    return sub;
+  }
+
+  /// Author cap on the vouch REQ (relays.js:2539 `.slice(0, 500)`).
+  static const int _vouchAuthorCap = 500;
+
+  Subscription? _vouchSub;
+
   /// Publishes a kind-0 profile metadata event with [content] (the JSON-encoded
   /// profile object). Returns the signed event. (docs/specs/03 §Appendix A)
   Future<NostrEvent?> publishProfile(String content) async {
@@ -1430,6 +1492,7 @@ class NostrService {
     }
     await _eventSub?.cancel();
     await _channelTypingSub?.close();
+    await _vouchSub?.close();
     await _mainSub?.close();
     await pool.disconnectAll();
   }
