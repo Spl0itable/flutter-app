@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
 import '../../models/channel.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/sidebar/pm_context_menu.dart';
 
 /// One entry in the channel `.quick-context-menu` (sidebar-sections.js
 /// `_buildSidebarMenuItems`).
@@ -70,8 +69,10 @@ List<ChannelMenuAction> buildChannelMenuActions(
   ];
 }
 
-/// Shows the `.quick-context-menu` for [entry] at [globalPosition] (a small
-/// popup of [ChannelMenuAction]s). Mirrors the PWA's floating action menu.
+/// Shows the channel `.quick-context-menu` for [entry] at [globalPosition],
+/// reusing the shared sidebar overlay ([showSidebarQuickMenu]) so the channel
+/// rows match the PM / group rows' look + entrance animation exactly. Mirrors
+/// the PWA's floating action menu (`_showSidebarActionMenu`).
 Future<void> showChannelContextMenu(
   BuildContext context,
   WidgetRef ref,
@@ -80,46 +81,16 @@ Future<void> showChannelContextMenu(
 ) async {
   final actions = buildChannelMenuActions(context, ref, entry);
   if (actions.isEmpty) return;
-  final c = context.nym;
-  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-  if (overlay == null) return;
 
-  final selected = await showMenu<ChannelMenuAction>(
-    context: context,
-    color: c.bgTertiary,
-    elevation: 8,
-    shape: RoundedRectangleBorder(
-      borderRadius: NymRadius.rsm,
-      side: BorderSide(color: c.glassBorder),
-    ),
-    position: RelativeRect.fromRect(
-      globalPosition & const Size(1, 1),
-      Offset.zero & overlay.size,
-    ),
-    items: [
-      for (final a in actions)
-        PopupMenuItem<ChannelMenuAction>(
-          value: a,
-          height: 40,
-          child: Row(
-            children: [
-              Icon(
-                a.icon,
-                size: 16,
-                color: a.danger ? c.danger : c.textDim,
-              ),
-              const SizedBox(width: 12),
-              Text(
-                a.label,
-                style: TextStyle(
-                  color: a.danger ? c.danger : c.text,
-                  fontSize: 13,
-                ),
-              ),
-            ],
-          ),
-        ),
-    ],
-  );
-  selected?.onSelected();
+  final items = <SidebarQuickMenuItem>[
+    for (final a in actions)
+      SidebarQuickMenuItem(
+        label: a.label,
+        icon: a.icon,
+        danger: a.danger,
+        onSelected: a.onSelected,
+      ),
+  ];
+
+  await showSidebarQuickMenu(context, globalPosition, items);
 }

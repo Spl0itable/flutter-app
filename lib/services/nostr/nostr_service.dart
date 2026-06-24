@@ -15,6 +15,7 @@ import '../api/api_client.dart';
 import '../relay/relay_message.dart';
 import '../relay/relay_pool.dart';
 import '../relay/relay_pool_proxy.dart';
+import '../relay/relay_stats.dart';
 import 'event_mapper.dart';
 import 'event_signer.dart';
 import 'identity_service.dart';
@@ -259,7 +260,22 @@ class NostrService {
                     relays: relays ?? RelayConfig.defaultRelays,
                     writeOnlyRelays: RelayConfig.writeOnlyRelays,
                     verify: (e) async => schnorr.verifyEvent(e),
-                  ));
+                  )) {
+    // Route every ApiClient's /api traffic into our persistent api-stats object
+    // so the Network Stats "App data" section is populated (mirrors the PWA's
+    // single shared `nym.relayStats` that `_trackApiData` writes to). This is
+    // process-wide (the PWA has one global); only the production proxy-default
+    // path arms it — an injected pool / `useProxy:false` (tests) leaves the sink
+    // untouched so unit tests stay isolated.
+    if (_autoFallback) {
+      ApiClient.apiStatsSink = _apiStats;
+    }
+  }
+
+  /// Persistent /api traffic counters, kept on the service (NOT the pool) so the
+  /// App-data tallies survive a proxy↔direct pool swap. Folded into the live
+  /// relay stats by [relayStats]. Mirrors the PWA's `nym.relayStats` api fields.
+  final RelayStats _apiStats = RelayStats();
 
   /// Factory: force the direct-WebSocket transport. Mirrors the PWA's
   /// `_poolFallbackActive` direct path — used when the relay pool fails.
@@ -305,6 +321,27 @@ class NostrService {
 
   /// The active transport (current pool after any swap).
   PoolTransport get pool => _pool;
+
+  /// Live relay stats for the Network Stats modal, with the persistent /api
+  /// "App data" counters folded in. The pool tracks relay traffic + shard info;
+  /// the service-owned [_apiStats] tracks the backend traffic (so it survives
+  /// pool swaps). Mirrors the PWA's single `nym.relayStats` (which holds both).
+  /// Read a fresh merged snapshot each call.
+  RelayStats get relayStats {
+    final s = _pool.stats; // already a snapshot
+    final api = _apiStats;
+    if (!api.hasApiData) return s;
+    // Fold the API byte totals + per-action breakdown into the relay snapshot.
+    // (The pool's bytesSent/Received already excludes API traffic, so add it.)
+    s.bytesReceived += api.apiBytesReceived;
+    s.bytesSent += api.apiBytesSent;
+    s.apiBytesReceived += api.apiBytesReceived;
+    s.apiBytesSent += api.apiBytesSent;
+    api.apiActionStats.forEach((action, st) {
+      s.apiActionStats[action] = st.copy();
+    });
+    return s;
+  }
 
   /// True when the active transport is the multiplexed proxy pool. Reflects the
   /// CURRENT pool, so it flips to false after a fallback to direct and back to
@@ -382,6 +419,15 @@ class NostrService {
       handlers.onConnectionChanged?.call(pool.connectedCount);
     });
     handlers.onConnectionChanged?.call(pool.connectedCount);
+
+    // Fetch the geo-relay list and shard it onto the pool so geohash channels
+    // connect to the closest geo relays (the P0 fix: without this the proxy is
+    // built with NO geo shards and geohash subscriptions are never delivered).
+    // Fire-and-forget — boot must not block on the proxy `geo-relays` round-trip;
+    // a slow/failed fetch just leaves the pool on its default+critical shards
+    // until the next channel entry retries. Mirrors the PWA's `_geoRelaysReady`
+    // → `_poolSendRelayConfig` once the list arrives.
+    unawaited(loadAndApplyGeoRelays().catchError((_) {}));
   }
 
   // ---------------------------------------------------------------------------
@@ -450,6 +496,11 @@ class NostrService {
       for (final entry in live.values) {
         direct.replaySubscription(entry.sub, entry.filters);
       }
+
+      // Re-establish geo-relay coverage on the new transport (direct mode opens
+      // a direct socket per geo url) so geohash channels keep working across the
+      // swap.
+      applyGeoRelays();
 
       // The mainSub object is unchanged, so _eventSub keeps routing inbound.
       debugPrint('[NostrService] proxy unreachable; swapped proxy → direct '
@@ -564,6 +615,9 @@ class NostrService {
       }
       _poolFallbackActive = false;
       _stopBgRestore();
+      // Re-shard the geo relays onto the restored proxy so geohash channels
+      // keep their geo coverage after swapping back.
+      applyGeoRelays();
       debugPrint('[NostrService] proxy restored; swapped direct → proxy '
           '(${live.length} subs replayed)');
       _handlers?.onConnectionChanged?.call(_pool.connectedCount);
@@ -1162,6 +1216,19 @@ class NostrService {
   /// All geo relays loaded so far (lazily fetched).
   final List<GeoRelay> geoRelays = [];
 
+  /// Geo relays for the geohash channels the user has actually entered. In
+  /// low-data mode these are the ONLY geo relays sharded onto the pool (the full
+  /// list is skipped); otherwise they're prepended to the full list for priority.
+  /// Mirrors the PWA's `currentGeoRelays` (relays.js:205).
+  final Set<String> currentGeoRelays = <String>{};
+
+  /// Low-Data Mode: when true the pool only carries defaults + DM relays + the
+  /// [currentGeoRelays] for entered channels (geo relays load on demand);
+  /// otherwise every geo relay is sharded onto the pool up front. Mirrors
+  /// `settings.lowDataMode` (relays.js:1907/1978). Set by the controller from
+  /// the live setting; defaults to false (the PWA default).
+  bool lowDataMode = false;
+
   /// Fetches the geo relay list via the API proxy (`action=geo-relays`),
   /// falling back to a direct CSV fetch+parse. Caches into [geoRelays].
   Future<List<GeoRelay>> fetchGeoRelays({
@@ -1182,6 +1249,67 @@ class NostrService {
         ..addAll(relays);
     }
     return geoRelays;
+  }
+
+  /// The geo-relay url list to shard onto the pool right now, mirroring
+  /// `_computeExpectedShards` (relays.js:1905): in low-data mode only the
+  /// [currentGeoRelays] for entered channels; otherwise every fetched geo relay
+  /// with the current ones prepended for priority.
+  List<String> _geoRelayUrlsForPool() {
+    if (lowDataMode) return currentGeoRelays.toList();
+    final urls = <String>[
+      for (final r in geoRelays) r.url,
+    ];
+    final seen = urls.toSet();
+    // Prepend the entered-channel geo relays (priority), de-duped.
+    for (final url in currentGeoRelays) {
+      if (!seen.contains(url)) {
+        urls.insert(0, url);
+        seen.add(url);
+      }
+    }
+    return urls;
+  }
+
+  /// Push the current geo-relay set onto the live pool so geohash-channel
+  /// subscriptions reach the closest geo relays (proxy: geo shards; direct:
+  /// direct geo sockets). Safe to call repeatedly — the pool reconciles only
+  /// the delta. Mirrors `_poolSendRelayConfig()` (relays.js:212/355).
+  void applyGeoRelays() => pool.updateGeoRelays(_geoRelayUrlsForPool());
+
+  /// Fetch the geo-relay list (if not already loaded) and shard it onto the
+  /// live pool. Call once after [start] connects so geohash channels work from
+  /// the first entry. No-op in low-data mode (geo relays load on channel entry
+  /// via [connectGeoRelaysForGeohash]). Mirrors the PWA loading `_geoRelaysReady`
+  /// then `_poolSendRelayConfig` once the list arrives.
+  Future<void> loadAndApplyGeoRelays({
+    Future<String> Function(Uri url)? csvFetcher,
+  }) async {
+    if (geoRelays.isEmpty) {
+      await fetchGeoRelays(csvFetcher: csvFetcher);
+    }
+    if (!lowDataMode) applyGeoRelays();
+  }
+
+  /// Entering a geohash channel: pick the [RelayConfig.geoRelayCount] closest
+  /// geo relays, mark them current, and shard them onto the live pool so the
+  /// channel's subscription is delivered to them. Fetches the geo-relay list
+  /// first if needed. Faithful port of `connectToGeoRelays` (relays.js:179).
+  Future<void> connectGeoRelaysForGeohash(String geohash,
+      {Future<String> Function(Uri url)? csvFetcher}) async {
+    if (geohash.isEmpty) return;
+    if (geoRelays.isEmpty) {
+      await fetchGeoRelays(csvFetcher: csvFetcher);
+    }
+    final closest = closestGeoRelays(geohash);
+    if (closest.isEmpty) return;
+    var changed = false;
+    for (final r in closest) {
+      if (currentGeoRelays.add(r.url)) changed = true;
+    }
+    // Re-shard whenever the channel introduced a new geo relay (or always in
+    // low-data mode, where the pool otherwise carries no geo relays).
+    if (changed || lowDataMode) applyGeoRelays();
   }
 
   /// Picks the [count] geo relays closest to [geohash]'s center using the
@@ -1218,6 +1346,11 @@ class NostrService {
     _statusTimer?.cancel();
     _stopBgRestore();
     _poolFallbackActive = false;
+    // Detach our api-stats sink if it's still the active one (avoid a stale
+    // disposed-service object catching later ApiClient traffic).
+    if (identical(ApiClient.apiStatsSink, _apiStats)) {
+      ApiClient.apiStatsSink = null;
+    }
     await _eventSub?.cancel();
     await _channelTypingSub?.close();
     await _mainSub?.close();

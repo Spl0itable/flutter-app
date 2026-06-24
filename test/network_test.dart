@@ -608,6 +608,8 @@ class _NoopTransport implements PoolTransport {
   @override
   void connectAll() {}
   @override
+  void updateGeoRelays(List<String> geoRelayUrls) {}
+  @override
   Future<void> disconnectAll() async {}
   @override
   int get connectedCount => 0;
@@ -633,9 +635,13 @@ class _RecordingTransport implements PoolTransport {
   final List<NostrEvent> plainCalls = [];
   final List<NostrEvent> dmCalls = [];
   final List<(NostrEvent, List<String>)> geoCalls = [];
+  final List<List<String>> geoUpdates = [];
 
   @override
   void connectAll() {}
+  @override
+  void updateGeoRelays(List<String> geoRelayUrls) =>
+      geoUpdates.add(geoRelayUrls);
   @override
   Future<void> disconnectAll() async {}
   @override

@@ -71,6 +71,48 @@ class NymColors extends ThemeExtension<NymColors> {
   Color primaryA(double alpha) => primary.withValues(alpha: alpha);
   Color secondaryA(double alpha) => secondary.withValues(alpha: alpha);
 
+  // --- Mode-aware "overlay" tokens -----------------------------------------
+  // The PWA layers translucent WHITE surfaces over the dark UI (hover fills,
+  // hairlines, inset blocks). In light mode those same surfaces flip to
+  // translucent BLACK (e.g. `body.light-mode .quick-context-item:hover`,
+  // `.context-menu-copy-pubkey:hover`, `.ctx-full-pubkey`, `.icon-btn`). These
+  // helpers return the correct value per mode so widgets stop hardcoding
+  // `Colors.white.withValues(...)` (which is invisible on a light surface).
+
+  /// Hover / selected fill for menu rows & list items
+  /// (dark `white@0.08` → light `black@0.06`).
+  Color get hoverOverlay => isLight
+      ? const Color(0x0F000000) // black @ 0.06
+      : const Color(0x14FFFFFF); // white @ 0.08
+
+  /// Danger hover fill — `rgba(255,68,68,0.12)` in both modes
+  /// (`.context-menu-item.danger:hover`).
+  Color get dangerHoverOverlay => const Color(0x1FFF4444);
+
+  /// A 1px hairline separator inside menus/cards
+  /// (dark `white@0.06` → light `black@0.06`).
+  Color get hairline => isLight
+      ? const Color(0x0F000000) // black @ 0.06
+      : const Color(0x0FFFFFFF); // white @ 0.06
+
+  /// Fill of an inset read-only block (pubkey / invite-link / file-offer)
+  /// (dark `white@0.04` → light `black@0.04`; `.ctx-full-pubkey`).
+  Color get insetFill => isLight
+      ? const Color(0x0A000000) // black @ 0.04
+      : const Color(0x0AFFFFFF); // white @ 0.04
+
+  /// Border of an inset read-only block
+  /// (dark `white@0.08` → light `black@0.1`; `.ctx-full-pubkey`).
+  Color get insetBorder => isLight
+      ? const Color(0x1A000000) // black @ 0.1
+      : const Color(0x14FFFFFF); // white @ 0.08
+
+  /// Subtle control surface fill (`.icon-btn` / `.file-offer-icon`)
+  /// (dark `white@0.05` → light `black@0.03`).
+  Color get subtleFill => isLight
+      ? const Color(0x08000000) // black @ 0.03
+      : const Color(0x0DFFFFFF); // white @ 0.05
+
   @override
   NymColors copyWith({
     Color? primary,

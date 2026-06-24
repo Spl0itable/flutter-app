@@ -9,6 +9,8 @@ import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../common/nym_avatar.dart';
+import '../context_menu/context_menu_actions.dart';
+import '../context_menu/context_menu_panel.dart';
 import '../context_menu/profile_badges.dart';
 
 /// A single ONLINE NYMS row (`.user-item`, users.js `_createUserItem` /
@@ -16,6 +18,13 @@ import '../context_menu/profile_badges.dart';
 /// `calc(--user-text-size - 3px)`, gap 8, a 20px avatar wrapped in
 /// `.user-avatar-wrap` with the live `.user-status-dot` (8px, ring) overlaid on
 /// its bottom-right, then `nym` + `#suffix` + flair + verified ✓ + friend badge.
+///
+/// A long-press (mobile) or secondary-tap / right-click (desktop) opens the
+/// profile `#contextMenu` panel in profile-only mode (PM / Create Group Chat /
+/// Gift Credits / Add-Remove Friend / Report / Block, plus the Copy Pubkey
+/// header) — see [showUserContextMenu]. This mirrors the PWA, where a
+/// nyms-list click/contextmenu calls `showContextMenu(..., profileOnly=true)`
+/// (users.js:1513).
 class UserListItem extends ConsumerWidget {
   const UserListItem({
     super.key,
@@ -47,7 +56,13 @@ class UserListItem extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: InkWell(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onLongPressStart: (d) =>
+              showUserContextMenu(context, ref, user, d.globalPosition),
+          onSecondaryTapDown: (d) =>
+              showUserContextMenu(context, ref, user, d.globalPosition),
+          child: InkWell(
           onTap: onTap,
           borderRadius: NymRadius.rxs,
           child: Container(
@@ -106,10 +121,38 @@ class UserListItem extends ConsumerWidget {
               ],
             ),
           ),
+          ),
         ),
       ),
     );
   }
+}
+
+/// Opens the profile `#contextMenu` panel for [user] in profile-only mode at
+/// [globalPosition] (the anchor is unused — the panel slides in from the right
+/// like every other profile menu). Mirrors `call_overlay.showCallUserMenu` /
+/// the PWA `showContextMenu(..., profileOnly=true)` for the nyms list. Self is
+/// derived from `appState.selfPubkey`; bot status from the controller so the
+/// "Create Group Chat" / "Gift Credits" gates match the PWA.
+void showUserContextMenu(
+  BuildContext context,
+  WidgetRef ref,
+  User user,
+  Offset globalPosition,
+) {
+  if (user.pubkey.isEmpty) return;
+  final state = ref.read(appStateProvider);
+  final isBot = ref.read(nostrControllerProvider).isVerifiedBot(user.pubkey);
+  ContextMenuPanel.show(
+    context,
+    target: CtxTarget(
+      pubkey: user.pubkey,
+      nym: stripPubkeySuffix(user.nym),
+      isSelf: user.pubkey == state.selfPubkey,
+      isBot: isBot,
+      profileOnly: true,
+    ),
+  );
 }
 
 /// `.user-avatar-wrap` + `.user-status-dot`: a 20px [NymAvatar] with an 8px
@@ -129,6 +172,7 @@ class _AvatarWithStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.nym;
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -143,8 +187,9 @@ class _AvatarWithStatus extends StatelessWidget {
               decoration: BoxDecoration(
                 color: statusColor(status),
                 shape: BoxShape.circle,
-                // `border: 2px solid #0a0a0f` (the PWA hardcodes `--bg`).
-                border: Border.all(color: const Color(0xFF0A0A0F), width: 2),
+                // `.user-status-dot` ring = `--bg` (#0a0a0f dark; light-mode
+                // override `#f5f5f2`). Use the theme bg so it's correct in both.
+                border: Border.all(color: c.bg, width: 2),
               ),
             ),
           ),
