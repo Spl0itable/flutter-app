@@ -24,6 +24,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
+import 'crypto_verified_badge.dart';
 import '../context_menu/context_menu_actions.dart';
 import '../context_menu/context_menu_panel.dart';
 import '../context_menu/interaction_hooks.dart';
@@ -158,6 +159,24 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   bool get _isFriendAuthor =>
       !message.isOwn && ref.watch(appStateProvider).isFriend(message.pubkey);
 
+  /// The cryptographic-verification lock state for this message, or null when no
+  /// lock should render. The PWA only shows the `.crypto-verified-badge` on
+  /// sealed (NIP-17/NIP-59) PM/group messages (`messages.js:752` gates on
+  /// `message.isPM`); public channel messages carry no seal and show nothing.
+  /// Within sealed messages: `senderVerified == true` → verified, `false` →
+  /// unverified, `null` → unknown (seal unavailable, e.g. restored history).
+  CryptoVerifyState? get _cryptoState {
+    if (!message.isPM && !message.isGroup) return null;
+    switch (message.senderVerified) {
+      case true:
+        return CryptoVerifyState.verified;
+      case false:
+        return CryptoVerifyState.unverified;
+      case null:
+        return CryptoVerifyState.unknown;
+    }
+  }
+
   /// True when this message has accrued zaps (`zapsProvider`), so the reactions
   /// row must render to host the `⚡ N` zap badge even without reactions.
   bool get _hasZaps {
@@ -218,6 +237,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final style = _authorStyle(c, self: self, size: size);
     final bracketColor = style.color;
     final suffix = getPubkeySuffix(message.pubkey);
+    // `message.author` carries the stored nym which already includes its
+    // `#suffix` (User.nym / the `anon#xxxx` fallback). Strip it so the canonical
+    // suffix below isn't appended twice (PWA renders the base nym + a separate
+    // `.nym-suffix` span — `parseNymFromDisplay`, `messages.js:1781`).
+    final baseNym = stripPubkeySuffix(message.author);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -226,7 +250,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         Flexible(
           child: Text.rich(
             TextSpan(children: [
-              TextSpan(text: message.author, style: style),
+              TextSpan(text: baseNym, style: style),
               if (suffix.isNotEmpty)
                 TextSpan(
                   text: '#$suffix',
@@ -394,7 +418,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               children: [
                 const Text('* '),
                 NymAvatar(
-                    seed: message.author,
+                    seed: message.pubkey,
                     size: fontSize + 2,
                     imageUrl: _authorPicture),
                 const SizedBox(width: 4),
@@ -405,7 +429,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   // author keeps secondary/600 but inherits the italic.
                   child: Text.rich(TextSpan(children: [
                     TextSpan(
-                      text: message.author,
+                      text: stripPubkeySuffix(message.author),
                       style: TextStyle(
                         color: c.secondary,
                         fontWeight: FontWeight.w600,
@@ -488,7 +512,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 // IRC author leads with an 18px inline avatar (`.avatar-message`,
                 // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
                 NymAvatar(
-                    seed: message.author, size: 18, imageUrl: _authorPicture),
+                    seed: message.pubkey, size: 18, imageUrl: _authorPicture),
                 const SizedBox(width: 4),
                 Flexible(
                   child: _authorLine(
@@ -505,12 +529,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           ),
         ),
         if (settings.showTimestamps)
-          SizedBox(
-            width: 50,
-            child: Text(
-              formatTime(message.dateTime, settings.timeFormat),
-              style: TextStyle(color: c.textDim, fontSize: 12),
-            ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                formatTime(message.dateTime, settings.timeFormat),
+                style: TextStyle(color: c.textDim, fontSize: 12),
+              ),
+              // `.crypto-lock-irc`: the verification lock sits inside
+              // `.message-time` after the clock (PM/group only).
+              if (_cryptoState != null)
+                CryptoVerifiedBadge(state: _cryptoState!),
+            ],
           ),
         ConstrainedBox(
           constraints: BoxConstraints(
@@ -662,6 +692,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               formatRelativeTime(message.dateTime),
               style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
             ),
+            // `.crypto-lock-bubble`: the verification lock follows the in-bubble
+            // time (PM/group only).
+            if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
             if (self && message.isPM && !message.isGroup) ...[
               const SizedBox(width: 4),
               _ticksGlyph(context),
@@ -743,7 +776,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 ? GestureDetector(
                     onTap: () => _openContextMenu(context),
                     child: NymAvatar(
-                        seed: message.author,
+                        seed: message.pubkey,
                         size: 32,
                         imageUrl: _authorPicture),
                   )
@@ -896,7 +929,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   child: Opacity(
                     opacity: 0.85,
                     child: NymAvatar(
-                      seed: visible[i].value,
+                      seed: visible[i].key,
                       size: 14,
                       imageUrl: users[visible[i].key]?.profile?.picture,
                     ),
