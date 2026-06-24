@@ -172,6 +172,7 @@ class _AvatarWithStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.nym;
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -186,8 +187,9 @@ class _AvatarWithStatus extends StatelessWidget {
               decoration: BoxDecoration(
                 color: statusColor(status),
                 shape: BoxShape.circle,
-                // `border: 2px solid #0a0a0f` (the PWA hardcodes `--bg`).
-                border: Border.all(color: const Color(0xFF0A0A0F), width: 2),
+                // `.user-status-dot` ring = `--bg` (#0a0a0f dark; light-mode
+                // override `#f5f5f2`). Use the theme bg so it's correct in both.
+                border: Border.all(color: c.bg, width: 2),
               ),
             ),
           ),

@@ -21,9 +21,6 @@ class SidebarQuickMenuItem {
   final bool danger;
 }
 
-/// `.quick-context-menu` background `rgba(20,20,35,0.92)`.
-const Color _menuBg = Color(0xE5141423);
-
 /// Shows the PWA `.quick-context-menu` at [globalPosition] with [items], styled
 /// exactly per `styles-features.css:2778-2846`: bg `rgba(20,20,35,0.92)`, radius
 /// 14, padding 4, min-width 200, shadow `0 8 32 rgba(0,0,0,.4)`; items padding
@@ -151,7 +148,10 @@ class _QuickMenu extends StatelessWidget {
           constraints: const BoxConstraints(minWidth: 200),
           padding: const EdgeInsets.all(4),
           decoration: BoxDecoration(
-            color: _menuBg,
+            // `.quick-context-menu` bg: solid-ui (default) → `var(--glass-bg)`
+            // (#14141e dark / #ffffff light), so the menu is opaque + correct in
+            // both modes instead of a hardcoded dark fill.
+            color: c.glassBg,
             borderRadius: BorderRadius.circular(14),
             border: Border.all(color: c.glassBorder),
             boxShadow: const [
@@ -193,10 +193,9 @@ class _QuickMenuRowState extends State<_QuickMenuRow> {
     final a = widget.item;
     final fg = a.danger ? c.danger : c.text;
     final iconColor = a.danger ? c.danger : c.textDim;
-    // hover bg rgba(255,255,255,0.08); danger hover rgba(255,68,68,0.12).
-    final hoverBg = a.danger
-        ? const Color(0x1FFF4444)
-        : const Color(0x14FFFFFF);
+    // hover bg rgba(255,255,255,0.08) → mode-aware (black@0.06 light); danger
+    // hover rgba(255,68,68,0.12) in both modes.
+    final hoverBg = a.danger ? c.dangerHoverOverlay : c.hoverOverlay;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
