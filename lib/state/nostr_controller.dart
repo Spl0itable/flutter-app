@@ -3277,6 +3277,12 @@ class NostrController {
       final newestSec = result.newestTs ~/ 1000;
       if (newestSec <= lastTs) return;
       _applySyncedSettings(result.payload);
+      // Cross-device "encryption at rest preferred" hint (app.js:6101): persist
+      // it so the encrypt-at-rest prompt only offers to protect this device when
+      // the user already uses encryption elsewhere (key-vault.js:419 gate).
+      if (result.payload['encryptAtRestPreferred'] == true) {
+        await kv.setBool(StorageKeys.encryptAtRestPref, true);
+      }
       kv.setString(StorageKeys.lastSettingsSyncTs, '$newestSec');
     } catch (_) {
       // Best-effort.

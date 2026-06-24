@@ -249,17 +249,19 @@ class IdentityVault {
   bool get encryptAtRestPromptDismissed =>
       _kv.getBool(StorageKeys.encryptAtRestPromptDismissed);
 
-  /// True when the boot/setup flow should offer to enable encryption-at-rest:
+  /// True when the boot/setup flow should offer to enable encryption-at-rest.
+  /// Mirrors key-vault.js `maybePromptEncryptAtRest` EXACTLY (lines 415-421):
   /// the vault is **not** already enabled, the user hasn't dismissed the prompt,
-  /// and an identity secret is sitting in storage unencrypted (so enabling the
-  /// vault would actually protect something). Mirrors key-vault.js
-  /// `maybePromptEncryptAtRest`'s gates (vault-off + not-dismissed +
-  /// has-persisted-secret); the cross-device `encryptAtRestPreferred` hint is an
-  /// *additional* reason the PWA prompts, but a locally-stored plaintext nsec is
-  /// sufficient on its own to warrant the offer.
+  /// the cross-device `encryptAtRestPreferred` hint is set (line 419 hard-requires
+  /// `nym_encrypt_at_rest_pref === '1'`), and an identity secret is sitting in
+  /// storage unencrypted. The flag is set when the user enables the vault on this
+  /// device (so it persists across a reset) OR when it arrives via settings sync
+  /// from another device — so the "protect your identity here too" offer only
+  /// appears when the user already uses encryption-at-rest somewhere.
   Future<bool> shouldPromptEncryptAtRest() async {
     if (isEnabled) return false;
     if (encryptAtRestPromptDismissed) return false;
+    if (!_kv.getBool(StorageKeys.encryptAtRestPref)) return false;
     return hasUnencryptedSecret();
   }
 
