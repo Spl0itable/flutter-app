@@ -187,8 +187,41 @@ void main() {
       expect(stream.items.length, 1);
     });
 
-    test('a RES error status surfaces as an ApiException', () async {
-      final client = MockClient((req) async => http.Response('', 200));
+    test('a RES error frame falls back to HTTP (PWA reject→retry), not throw',
+        () async {
+      // SAFETY: a socket error frame is a fallback trigger. The PWA's non-raw
+      // `_apiSocketSend` rejects on `status>=400 || data.error`, and the caller
+      // retries over HTTP — HTTP's response is authoritative. So a socket 402
+      // must NOT surface directly; HTTP must get a turn. Here HTTP succeeds, so
+      // the caller sees the HTTP result (the socket error is swallowed).
+      var httpCalls = 0;
+      final client = MockClient((req) async {
+        httpCalls++;
+        final body = jsonDecode(req.body) as Map<String, dynamic>;
+        expect(body['action'], 'channel-active');
+        return http.Response(jsonEncode({'activity': {}, 'last': {}}), 200);
+      });
+      final api = ApiClient(client: client);
+      api.setApiSocketAuthBuilder(() async => {'kind': 27235, 'id': 'x'});
+      api.activateApiSocket(factory: (url) {
+        return _makeChannel((ch, frame) {
+          // Public read → no AUTH; reply with a server error frame.
+          if (frame[0] == 'REQ') {
+            ch.inject(['RES', frame[1], 500, {'error': 'Internal server error'}]);
+          }
+        });
+      });
+
+      final data = await api.storageAction({'action': 'channel-active'});
+      expect(httpCalls, 1, reason: 'socket error frame fell back to HTTP');
+      expect(data['activity'], isA<Map>());
+    });
+
+    test('socket error frame + HTTP error → ApiException from HTTP', () async {
+      // When BOTH transports fail, the caller still sees a thrown ApiException
+      // (the HTTP error), so mutating callers can surface the server message.
+      final client = MockClient((req) async =>
+          http.Response(jsonEncode({'error': 'Payment not confirmed yet.'}), 402));
       final api = ApiClient(client: client);
       api.setApiSocketAuthBuilder(() async => {'kind': 27235, 'id': 'x'});
       api.activateApiSocket(factory: (url) {

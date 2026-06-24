@@ -3625,6 +3625,30 @@ class NostrController {
         pubkey: identity.pubkey,
       );
     });
+
+    // Activate the WS-first storage transport (the PWA's persistent `/api`
+    // socket). Reads in [StorageSync] now try `wss://<host>/api` FIRST and fall
+    // back to HTTP on ANY socket failure (no socket, auth failure, timeout,
+    // error frame, disconnect — all routed to null inside [ApiClient._trySocket]).
+    // The HTTP path is untouched, so data loading is never lost to the socket.
+    //
+    // The socket's one-time AUTH handshake signs a kind-27235 `api-ws` event
+    // bound to `https://<host>/api/WS` — the PWA's `_signBotAuth('api-ws','WS')`
+    // (endpoint 'WS' → `/api/WS`), distinct from the storage `/api/storage`
+    // `u`-tag. Only the local-key path can sign it; a NIP-46 remote signer
+    // returns null, so the socket simply opens UNAUTHENTICATED and carries only
+    // public reads (channel/profile/shop-status), exactly like a logged-out PWA.
+    api.setApiSocketAuthBuilder(() async {
+      final l = local;
+      if (l == null) return null;
+      return Nip98Auth.build(
+        action: 'api-ws',
+        url: _apiWsAuthUrl(),
+        privkey: l.privkey,
+        pubkey: identity.pubkey,
+      );
+    });
+    api.activateApiSocket();
     _storageSync = sync;
 
     // The other-users shop-status fetcher (cosmetics for OTHER pubkeys) must
@@ -3640,6 +3664,26 @@ class NostrController {
     // per-open `channelRestoreFromD1` in `switchChannel`, plus the ephemeral
     // group inbox). Best-effort; gated/idempotent inside the handler.
     _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
+  }
+
+  /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
+  /// `https://<host>/api/WS`. Mirrors the PWA's `_signBotAuth('api-ws', 'WS')`
+  /// (endpoint 'WS' → `https://${apiHost}/api/WS`, pms.js:1652). Derived from the
+  /// storage URL so it tracks the same fixed host without an extra import.
+  static String _apiWsAuthUrl() {
+    final u = Uri.parse(StorageSync.storageUrl()); // …/api/storage
+    final segs = List<String>.from(u.pathSegments);
+    if (segs.isNotEmpty) {
+      segs[segs.length - 1] = 'WS';
+    } else {
+      segs.add('WS');
+    }
+    return Uri(
+      scheme: u.scheme,
+      host: u.host,
+      port: u.hasPort ? u.port : null,
+      pathSegments: segs,
+    ).toString();
   }
 
   /// Reacts to a conversation being opened ([AppStateNotifier.switchView]) by

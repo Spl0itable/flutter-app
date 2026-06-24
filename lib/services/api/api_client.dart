@@ -516,7 +516,9 @@ class ApiClient {
   /// skipped/unavailable so the caller falls back to HTTP. Gating mirrors the
   /// PWA exactly (`if (this.pubkey || !withAuth)`, shop.js:181/215): the socket
   /// is tried when the request is authenticated ([authed]) OR is a public read
-  /// (`withAuth === false`). Any connect/auth/request failure resolves to null.
+  /// (`withAuth === false`). Any connect/auth/request failure — including a
+  /// server *error frame* (a non-2xx single RES or a `data.error`) — resolves to
+  /// null so the caller transparently falls back to HTTP (the PWA reject→retry).
   Future<ApiSocketResult?> _trySocket(
     String action,
     Map<String, dynamic> body, {
@@ -547,7 +549,23 @@ class ApiClient {
           if (e.key != 'action' && e.key != 'auth' && e.key != 'pubkey')
             e.key: e.value,
       };
-      return await socket.request(action, extra, stream: stream);
+      final result = await socket.request(action, extra, stream: stream);
+      // SAFETY/parity: a server *error frame* (non-2xx RES, or a `data.error`)
+      // is a fallback trigger too. The PWA's non-`raw` `_apiSocketSend` REJECTS
+      // on `status >= 400 || data.error` (shop.js:89), which its callers'
+      // try/catch turns into an HTTP retry (`_storageApiRequest`/`_storageApiStream`
+      // shop.js:182-185/216-219). So we return null here to make the caller fall
+      // back to HTTP rather than surfacing the socket's error — HTTP always gets
+      // a turn, and its (re-signed) response is the authoritative one the caller
+      // sees. Streaming reads don't carry an error status (status is always 200
+      // on END), so this only gates single-response actions.
+      if (!stream &&
+          (result.status < 200 ||
+              result.status >= 300 ||
+              result.data['error'] != null)) {
+        return null;
+      }
+      return result;
     } catch (_) {
       return null; // fall back to HTTP
     }
@@ -815,17 +833,10 @@ class ApiClient {
   Future<Map<String, dynamic>> storageAction(Map<String, dynamic> body) async {
     final action = (body['action'] ?? 'other').toString();
     // WS-first (PWA `_storageApiRequest`): ride the socket when authed OR public.
+    // A non-null result here is already a 2xx with no `error` — [_trySocket]
+    // converts an error frame into a null so we fall through to HTTP below.
     final ws = await _trySocket(action, body, stream: false);
-    if (ws != null) {
-      if (ws.status < 200 || ws.status >= 300 || ws.data['error'] != null) {
-        throw ApiException(
-          (body['action'] ?? 'storage').toString(),
-          ws.status,
-          ws.data['error']?.toString() ?? 'Request failed (${ws.status})',
-        );
-      }
-      return ws.data;
-    }
+    if (ws != null) return ws.data;
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
