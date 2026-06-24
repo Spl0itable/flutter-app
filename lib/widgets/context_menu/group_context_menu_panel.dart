@@ -161,8 +161,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               decoration: BoxDecoration(
                 border: Border(
-                  bottom:
-                      BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                  bottom: BorderSide(color: c.hairline),
                 ),
               ),
               child: Text(
@@ -176,7 +175,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
             padding: const EdgeInsets.all(6),
             decoration: BoxDecoration(
               border: Border(
-                top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                top: BorderSide(color: c.hairline),
               ),
             ),
             child: Column(
@@ -191,7 +190,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
             padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
             decoration: BoxDecoration(
               border: Border(
-                top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                top: BorderSide(color: c.hairline),
               ),
             ),
             child: Text(
@@ -259,7 +258,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
       padding: const EdgeInsets.fromLTRB(14, 16, 14, 14),
       decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+          bottom: BorderSide(color: c.hairline),
         ),
       ),
       child: Column(
@@ -304,11 +303,13 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
           right: 0,
           child: Center(
             child: Container(
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Color(0xF2141423),
+                // `.has-banner .group-ctx-icon` ring/disc: rgba(20,20,35,0.95)
+                // dark; light-mode flips it to rgba(255,255,255,0.95).
+                color: _bannerRing(c),
                 border: Border.fromBorderSide(
-                  BorderSide(color: Color(0xF2141423), width: 3),
+                  BorderSide(color: _bannerRing(c), width: 3),
                 ),
               ),
               child: icon,
@@ -318,6 +319,12 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
       ],
     );
   }
+
+  /// The banner-avatar ring/disc colour (`.has-banner .group-ctx-icon`):
+  /// `rgba(20,20,35,0.95)` dark; `rgba(255,255,255,0.95)` light.
+  Color _bannerRing(NymColors c) => c.isLight
+      ? const Color(0xF2FFFFFF)
+      : const Color(0xF2141423);
 
   /// The `.group-ctx-default-banner`: a 135° gradient from `--primary`@0.45 to
   /// `--secondary`@0.45.
@@ -349,8 +356,8 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
         margin: const EdgeInsets.fromLTRB(12, 8, 12, 6),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.04),
-          border: Border.all(color: c.glassBorder),
+          color: c.insetFill,
+          border: Border.all(color: c.insetBorder),
           borderRadius: const BorderRadius.all(Radius.circular(6)),
         ),
         child: SelectableText(
@@ -805,7 +812,9 @@ class _ActionRowState extends State<_ActionRow> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            color: _hover
+                ? (widget.color == c.danger ? c.dangerHoverOverlay : c.hoverOverlay)
+                : null,
             borderRadius: const BorderRadius.all(Radius.circular(8)),
           ),
           child: Row(
@@ -859,7 +868,7 @@ class _CopyInviteRowState extends State<_CopyInviteRow> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            color: _hover ? c.hoverOverlay : null,
             borderRadius: const BorderRadius.all(Radius.circular(6)),
           ),
           child: Row(
@@ -917,7 +926,7 @@ class _MemberTileState extends State<_MemberTile> {
         child: Container(
           // `.group-ctx-member`: padding 7px 16px, gap 10px.
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-          color: _hover ? Colors.white.withValues(alpha: 0.06) : null,
+          color: _hover ? c.hoverOverlay : null,
           child: Row(
             children: [
               widget.avatar,
@@ -977,9 +986,11 @@ class _RoleBadge extends StatelessWidget {
     final c = colors;
     final isOwner = label == 'Owner';
     final Color fg = isOwner ? c.lightning : c.secondary;
+    // Owner chip: lightning on rgba(247,147,26,0.12). Mod chip: secondary on a
+    // subtle fill (white@0.08 dark; mode-aware so it stays visible in light).
     final Color bg = isOwner
         ? const Color(0x1FF7931A) // rgba(247,147,26,0.12)
-        : Colors.white.withValues(alpha: 0.08);
+        : c.hoverOverlay;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
@@ -1119,8 +1130,7 @@ class _AddMembersDialogState extends ConsumerState<_AddMembersDialog> {
                                   contentPadding: const EdgeInsets.symmetric(
                                       horizontal: 12, vertical: 11),
                                   filled: true,
-                                  fillColor:
-                                      Colors.white.withValues(alpha: 0.05),
+                                  fillColor: c.subtleFill,
                                   border: OutlineInputBorder(
                                     borderRadius: NymRadius.rxs,
                                     borderSide:

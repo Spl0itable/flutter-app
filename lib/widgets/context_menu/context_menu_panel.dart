@@ -184,8 +184,7 @@ class ContextMenuPanel extends ConsumerWidget {
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                   decoration: BoxDecoration(
                     border: Border(
-                      bottom: BorderSide(
-                          color: Colors.white.withValues(alpha: 0.06)),
+                      bottom: BorderSide(color: c.hairline),
                     ),
                   ),
                   child: Text(
@@ -203,7 +202,7 @@ class ContextMenuPanel extends ConsumerWidget {
                 padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
                   border: Border(
-                    top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                    top: BorderSide(color: c.hairline),
                   ),
                 ),
                 child: Column(
@@ -306,12 +305,18 @@ class ContextMenuPanel extends ConsumerWidget {
     // .avatar-context`). Without a banner: a 2px `--glass-border` ring + a cyan
     // glow `0 0 15px rgba(0,255,255,0.15)` (`.avatar-context`,
     // styles-features.css:2621-2628).
+    // With a banner: a 3px ring matching the surface (`rgba(20,20,35,0.95)`
+    // dark; `body.light-mode .has-banner .avatar-context` → `rgba(255,255,255,
+    // 0.95)`).
+    final bannerRing = c.isLight
+        ? const Color(0xF2FFFFFF) // rgba(255,255,255,0.95)
+        : const Color(0xF2141423); // rgba(20,20,35,0.95)
     final avatar = Container(
       decoration: hasBanner
-          ? const BoxDecoration(
+          ? BoxDecoration(
               shape: BoxShape.circle,
               border: Border.fromBorderSide(
-                BorderSide(color: Color(0xF2141423), width: 3),
+                BorderSide(color: bannerRing, width: 3),
               ),
             )
           : BoxDecoration(
@@ -331,7 +336,7 @@ class ContextMenuPanel extends ConsumerWidget {
       padding: const EdgeInsets.fromLTRB(14, 16, 14, 14),
       decoration: BoxDecoration(
         border: Border(
-          bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+          bottom: BorderSide(color: c.hairline),
         ),
       ),
       child: Column(
@@ -443,8 +448,8 @@ class ContextMenuPanel extends ConsumerWidget {
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.04),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              color: c.insetFill,
+              border: Border.all(color: c.insetBorder),
               borderRadius: const BorderRadius.all(Radius.circular(6)),
             ),
             child: SelectableText(
@@ -891,7 +896,7 @@ class _CopyPubkeyRowState extends State<_CopyPubkeyRow> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            color: _hover ? c.hoverOverlay : null,
             borderRadius: const BorderRadius.all(Radius.circular(6)),
           ),
           child: Row(
@@ -950,7 +955,9 @@ class _ActionItemState extends State<_ActionItem> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            color: _hover
+                ? (widget.color == c.danger ? c.dangerHoverOverlay : c.hoverOverlay)
+                : null,
             borderRadius: NymRadius.rxs,
           ),
           child: Row(
@@ -1007,16 +1014,24 @@ class _CtxCloseButtonState extends State<CtxCloseButton> {
           alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
+            // Light: `body.light-mode .context-menu-close` → black@0.05 fill,
+            // black@0.08 border, black@0.5 icon. Hover (both modes) → danger red.
             color: _hover
                 ? const Color(0x1FFF4444) // rgba(255,68,68,0.12)
-                : Colors.white.withValues(alpha: 0.05),
+                : (c.isLight
+                    ? const Color(0x0D000000) // black @ 0.05
+                    : Colors.white.withValues(alpha: 0.05)),
             border: Border.all(
               color: _hover
                   ? const Color(0x4DFF4444) // rgba(255,68,68,0.3)
-                  : c.glassBorder,
+                  : (c.isLight ? const Color(0x14000000) : c.glassBorder),
             ),
           ),
-          child: Icon(Icons.close, size: 16, color: _hover ? c.danger : c.textDim),
+          child: Icon(Icons.close,
+              size: 16,
+              color: _hover
+                  ? c.danger
+                  : (c.isLight ? const Color(0x80000000) : c.textDim)),
         ),
       ),
     );

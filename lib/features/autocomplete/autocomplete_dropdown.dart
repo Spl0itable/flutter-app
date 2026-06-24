@@ -178,7 +178,9 @@ class AutocompleteDropdown extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
           decoration: BoxDecoration(
-            color: selected ? Colors.white.withValues(alpha: 0.08) : null,
+            // `.autocomplete-item.selected` highlight (white@0.08 dark;
+            // mode-aware so the selected row stays visible in light mode).
+            color: selected ? c.hoverOverlay : null,
             borderRadius: const BorderRadius.all(Radius.circular(8)),
           ),
           child: child,
@@ -287,20 +289,19 @@ class AutocompleteDropdown extends StatelessWidget {
       c,
       selected: selected,
       onTap: () => onSelectChannel(ch),
-      // Flat `.channel-ac-item` row (gap 8). The name takes priority and
-      // ellipsizes (`Expanded`); the location shrinks-then-ellipsizes
-      // (`Flexible`); the badge + count are fixed, with the count pinned right
-      // (`.channel-ac-count { margin-left:auto }`).
+      // Flat `.channel-ac-item` row (gap 8). The name + location + count are all
+      // tight `Expanded` (weighted) so they ellipsize within their share and the
+      // row can never overflow at a tight width; the count is right-aligned so it
+      // hugs the right edge (`.channel-ac-count { margin-left:auto }`). The badge
+      // is the only fixed child.
       child: Row(
         children: [
-          // Name + location share the flexible space (both tight `Expanded`
-          // so neither can overflow at a tight width); the name gets the
-          // larger share and both ellipsize.
           Expanded(
-            flex: 2,
+            flex: 3,
             child: Text('#${ch.name}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                softWrap: false,
                 style:
                     TextStyle(color: c.primary, fontWeight: FontWeight.bold)),
           ),
@@ -317,6 +318,7 @@ class AutocompleteDropdown extends StatelessWidget {
               child: Text('current',
                   maxLines: 1,
                   overflow: TextOverflow.clip,
+                  softWrap: false,
                   style: TextStyle(color: c.bg, fontSize: 10)),
             ),
           ],
@@ -324,11 +326,12 @@ class AutocompleteDropdown extends StatelessWidget {
           if (ch.location.isNotEmpty) ...[
             const SizedBox(width: 8),
             Expanded(
-              flex: 1,
+              flex: 2,
               child: Text(
                 ch.location,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                softWrap: false,
                 style: TextStyle(
                   color: c.textDim.withValues(alpha: 0.5),
                   fontSize: 12,
@@ -336,18 +339,17 @@ class AutocompleteDropdown extends StatelessWidget {
               ),
             ),
           ],
-          // `.channel-ac-count`: 0.75em, opacity 0.4, pushed to the right edge
-          // (`margin-left:auto`). Tight `Expanded` so even the count yields at
-          // an extreme width rather than forcing an overflow.
+          // `.channel-ac-count { margin-left:auto }` — right-aligned in its share.
           if (ch.messageCount > 0) ...[
             const SizedBox(width: 8),
             Expanded(
-              flex: 1,
+              flex: 2,
               child: Text(
                 '${ch.messageCount} msg${ch.messageCount != 1 ? 's' : ''}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.right,
+                softWrap: false,
                 style: TextStyle(
                   color: c.textDim.withValues(alpha: 0.4),
                   fontSize: 11,
