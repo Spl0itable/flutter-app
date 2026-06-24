@@ -86,12 +86,64 @@ class NotifyContext {
 /// gating (channel = public geohash/named; pm; group).
 enum NotifyKind { channel, pm, group }
 
+/// Pure decision: should an inbound message be RECORDED into the in-app
+/// notification history? Mirrors the PWA, where every qualifying message is
+/// pushed to history regardless of age — a live one loudly (`showNotification`)
+/// and a backlog/replayed one silently (`_addNotificationToHistory`, pms.js
+/// 1383 / groups.js 1347 / nostr-core.js 548). So this is the [shouldNotify]
+/// gate MINUS the historical condition: an old gift-wrapped PM/group backlog
+/// still belongs in the bell history, it just doesn't alert.
+///
+/// Gates, in order (any failing → false):
+/// * [notificationsEnabled] off → false (notifications.js line 6).
+/// * [isOwn] → false (don't surface our own messages).
+/// * [isBlocked] → false; [isBot] → false (notifications.js lines 11/14).
+/// * [isActiveView] → false (PWA records only in the not-viewing `else` branch).
+/// * [friendsOnly] + not [isFriend] → false (notifications.js line 12).
+/// * channel: only an @-mention is recorded (PWA channel gate).
+/// * group + [groupMentionsOnly]: only a mention is recorded.
+/// * pm: always recorded (subject to the gates above).
+bool shouldRecordNotification({
+  required NotifyKind kind,
+  required bool isOwn,
+  required bool notificationsEnabled,
+  bool isMention = false,
+  bool isFriend = false,
+  bool isBlocked = false,
+  bool isBot = false,
+  bool isActiveView = false,
+  bool friendsOnly = false,
+  bool groupMentionsOnly = false,
+}) {
+  if (!notificationsEnabled) return false;
+  if (isOwn) return false;
+  if (isBlocked) return false;
+  if (isBot) return false;
+  if (isActiveView) return false;
+  if (friendsOnly && !isFriend) return false;
+
+  switch (kind) {
+    case NotifyKind.channel:
+      // Public channels only notify/record on an @-mention (PWA channel gate).
+      return isMention;
+    case NotifyKind.group:
+      // Mentions-only mode suppresses non-mention group messages.
+      if (groupMentionsOnly && !isMention) return false;
+      return true;
+    case NotifyKind.pm:
+      // Any PM from another user qualifies.
+      return true;
+  }
+}
+
 /// Pure notification-gate decision for an inbound message, mirroring the PWA's
 /// `showNotification` gate (notifications.js) plus the inbound `handleEvent`
 /// pre-checks (nostr-core.js: own/historical/mention/active-view).
 ///
-/// Returns true when this message should raise a notification (sound + local
-/// notification). All inputs are explicit so this is unit-testable without any
+/// Returns true when this message should raise a LOUD notification (sound +
+/// local popup). This is exactly [shouldRecordNotification] AND `!isHistorical`
+/// — a historical message is still recorded to history (silently) but never
+/// alerts. All inputs are explicit so this is unit-testable without any
 /// providers or IO.
 ///
 /// Gates, in order (any failing → false):
@@ -117,26 +169,19 @@ bool shouldNotify({
   bool friendsOnly = false,
   bool groupMentionsOnly = false,
 }) {
-  if (!notificationsEnabled) return false;
-  if (isOwn) return false;
   if (isHistorical) return false;
-  if (isBlocked) return false;
-  if (isBot) return false;
-  if (isActiveView) return false;
-  if (friendsOnly && !isFriend) return false;
-
-  switch (kind) {
-    case NotifyKind.channel:
-      // Public channels only notify on an @-mention (PWA channel gate).
-      return isMention;
-    case NotifyKind.group:
-      // Mentions-only mode suppresses non-mention group messages.
-      if (groupMentionsOnly && !isMention) return false;
-      return true;
-    case NotifyKind.pm:
-      // Any PM from another user notifies.
-      return true;
-  }
+  return shouldRecordNotification(
+    kind: kind,
+    isOwn: isOwn,
+    notificationsEnabled: notificationsEnabled,
+    isMention: isMention,
+    isFriend: isFriend,
+    isBlocked: isBlocked,
+    isBot: isBot,
+    isActiveView: isActiveView,
+    friendsOnly: friendsOnly,
+    groupMentionsOnly: groupMentionsOnly,
+  );
 }
 
 class NotificationsService {

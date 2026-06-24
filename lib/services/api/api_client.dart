@@ -1,13 +1,31 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/io.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../models/nostr_event.dart';
 import '../relay/relay_stats.dart';
 import 'api_config.dart';
+
+/// Factory that opens a [WebSocketChannel] to the `/api` socket. Overridable in
+/// tests so no real socket is opened (mirrors `WebSocketChannelFactory` in
+/// relay_connection.dart). The native factory attaches the `User-Agent` header
+/// the backend `isNymchatClient` gate recognizes — the headers-less
+/// `WebSocketChannel.connect` would send a default Dart UA.
+typedef ApiSocketFactory = WebSocketChannel Function(Uri url);
+
+/// The real native `/api` socket factory: an [IOWebSocketChannel] carrying the
+/// `NymchatApp/<ver>` UA (same gate the relay sockets pass).
+WebSocketChannel defaultApiSocketFactory(Uri url) =>
+    IOWebSocketChannel.connect(
+      url,
+      headers: {'User-Agent': ApiConfig.userAgent},
+    );
 
 /// Default Giphy API key (PWA `this.giphyApiKey`, app.js:679). Mirrors the
 /// existing `kGiphyApiKey` in features/emoji/gif_picker.dart.
@@ -150,20 +168,390 @@ class Nip98Auth {
   }
 }
 
+/// The parsed result of a single `/api` socket request: the HTTP-equivalent
+/// [status] code, the decoded JSON [data] (single-response actions), and the
+/// per-line [items] for a streaming (NDJSON) action with the `X-Has-More` flag
+/// recovered from the `END` frame headers.
+class ApiSocketResult {
+  ApiSocketResult({
+    required this.status,
+    required this.data,
+    required this.items,
+    required this.hasMore,
+  });
+  final int status;
+  final Map<String, dynamic> data;
+  final List<dynamic> items;
+  final bool hasMore;
+}
+
+/// One persistent, multiplexed `/api` WebSocket that carries every D1 storage op
+/// so the client doesn't open an HTTP request (and sign an auth event) per
+/// fetch/put — the native port of the PWA's `_ensureApiSocket` / `_apiSocketSend`
+/// (shop.js:12-151).
+///
+/// Framing matches the worker byte-for-byte:
+///   * client → `['AUTH', authEvent]` on open (only when authenticated), then
+///     `['REQ', id, action, extra]` per request;
+///   * server → `['AUTH_OK']` / `['AUTH_ERR', msg]`, `['RES', id, status, data]`
+///     (single), or `['ITEM', id, item]…['END', id, headers]` (streaming).
+///
+/// Logged-in callers authenticate the socket once (so per-request signatures are
+/// skipped — the worker pins `context._wsAuthedPubkey`); logged-out callers open
+/// an unauthenticated socket usable for public reads (channel/profile/shop-status).
+/// A connect/auth failure trips a short cooldown so a broken endpoint doesn't add
+/// a connect-timeout to every call (shop.js `_apiSockFailedUntil`); the caller
+/// then falls back to HTTP.
+class ApiSocket {
+  ApiSocket({
+    required Uri url,
+    ApiSocketFactory factory = defaultApiSocketFactory,
+    Duration connectTimeout = const Duration(seconds: 12),
+    Duration requestTimeout = const Duration(seconds: 45),
+    Duration failureCooldown = const Duration(seconds: 5),
+  })  : _url = url,
+        _factory = factory,
+        _connectTimeout = connectTimeout,
+        _requestTimeout = requestTimeout,
+        _failureCooldown = failureCooldown;
+
+  final Uri _url;
+  final ApiSocketFactory _factory;
+  final Duration _connectTimeout;
+  final Duration _requestTimeout;
+  final Duration _failureCooldown;
+
+  WebSocketChannel? _channel;
+  StreamSubscription<dynamic>? _sub;
+  bool _open = false;
+  bool _authed = false;
+  int _nextId = 1;
+  Completer<void>? _connecting;
+  DateTime _failedUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  final Map<int, _Pending> _pending = {};
+
+  bool get isOpen => _open;
+  bool get isAuthenticated => _authed;
+
+  /// Ensures the socket is connected (and authenticated when [authEvent] is
+  /// non-null). Resolves when ready; throws on connect/auth failure (and trips
+  /// the cooldown). [authEvent] is the signed `api-ws` kind-27235 event the
+  /// worker's `AUTH` handler verifies (built by the caller exactly like the
+  /// other storage auth, but bound to the `…/api` WS URL).
+  Future<void> ensureConnected({Map<String, dynamic>? authEvent}) async {
+    final needAuth = authEvent != null;
+    if (_open && (_authed || !needAuth)) return;
+    if (_connecting != null) return _connecting!.future;
+    if (DateTime.now().isBefore(_failedUntil)) {
+      throw StateError('api socket cooling down');
+    }
+    final completer = Completer<void>();
+    _connecting = completer;
+    try {
+      _resetChannel();
+      final ch = _factory(_url);
+      _channel = ch;
+      var ready = false;
+      Timer? timer;
+      void fail(Object err) {
+        if (!ready) _failedUntil = DateTime.now().add(_failureCooldown);
+        _failAllPending(err);
+        _teardown();
+        if (!completer.isCompleted) completer.completeError(err);
+      }
+
+      void markReady() {
+        ready = true;
+        _open = true;
+        timer?.cancel();
+        if (!completer.isCompleted) completer.complete();
+      }
+
+      _sub = ch.stream.listen(
+        (raw) => _onFrame(raw, markReady, fail, needAuth),
+        onError: (Object e) => fail(e),
+        onDone: () => fail(StateError('api socket closed')),
+        cancelOnError: true,
+      );
+      timer = Timer(_connectTimeout, () => fail(StateError('api socket timeout')));
+
+      if (needAuth) {
+        _send(['AUTH', authEvent]);
+      } else {
+        // No discrete open event in web_socket_channel; an unauthenticated
+        // socket is usable as soon as we've attached the listener.
+        markReady();
+      }
+      await completer.future;
+    } finally {
+      _connecting = null;
+    }
+  }
+
+  void _onFrame(
+    dynamic raw,
+    void Function() markReady,
+    void Function(Object) fail,
+    bool needAuth,
+  ) {
+    dynamic msg;
+    try {
+      msg = jsonDecode(raw is String ? raw : utf8.decode(raw as List<int>));
+    } catch (_) {
+      return;
+    }
+    if (msg is! List || msg.isEmpty) return;
+    final t = msg[0];
+    if (t == 'AUTH_OK') {
+      _authed = true;
+      markReady();
+      return;
+    }
+    if (t == 'AUTH_ERR') {
+      fail(StateError(msg.length > 1 ? '${msg[1]}' : 'Authentication failed'));
+      return;
+    }
+    if (msg.length < 2) return;
+    final id = msg[1];
+    final p = _pending[id];
+    if (p == null) return;
+    if (t == 'RES') {
+      _pending.remove(id);
+      final status = (msg.length > 2 && msg[2] is num) ? (msg[2] as num).toInt() : 200;
+      final data = (msg.length > 3 && msg[3] is Map)
+          ? (msg[3] as Map).cast<String, dynamic>()
+          : <String, dynamic>{};
+      p.complete(ApiSocketResult(
+          status: status, data: data, items: const [], hasMore: false));
+    } else if (t == 'ITEM') {
+      if (msg.length > 2) p.items.add(msg[2]);
+    } else if (t == 'END') {
+      _pending.remove(id);
+      final hdrs = (msg.length > 3 && msg[3] is Map) ? msg[3] as Map : const {};
+      final hasMore = '${hdrs['x-has-more'] ?? hdrs['X-Has-More'] ?? ''}' == '1';
+      p.complete(ApiSocketResult(
+          status: 200, data: const {}, items: p.items, hasMore: hasMore));
+    }
+  }
+
+  /// Sends a `REQ` for [action] with [extra] and resolves the result. [stream]
+  /// collects `ITEM` frames until `END`; otherwise a single `RES`. Rejects on a
+  /// closed socket or a per-request timeout (so the caller falls back to HTTP).
+  Future<ApiSocketResult> request(
+    String action,
+    Map<String, dynamic> extra, {
+    bool stream = false,
+  }) {
+    if (!_open || _channel == null) {
+      return Future.error(StateError('api socket not ready'));
+    }
+    final id = _nextId++;
+    final p = _Pending(stream: stream);
+    _pending[id] = p;
+    p.timer = Timer(_requestTimeout, () {
+      if (_pending.remove(id) != null) {
+        p.completeError(StateError('api request timeout'));
+      }
+    });
+    try {
+      _send(['REQ', id, action, extra]);
+    } catch (e) {
+      _pending.remove(id);
+      p.completeError(e);
+    }
+    return p.future;
+  }
+
+  void _send(List<dynamic> frame) {
+    final ch = _channel;
+    if (ch == null) throw StateError('api socket not ready');
+    ch.sink.add(jsonEncode(frame));
+  }
+
+  void _failAllPending(Object err) {
+    for (final p in _pending.values) {
+      p.completeError(err);
+    }
+    _pending.clear();
+  }
+
+  void _resetChannel() {
+    _teardown();
+  }
+
+  void _teardown() {
+    _open = false;
+    _authed = false;
+    final sub = _sub;
+    _sub = null;
+    if (sub != null) {
+      unawaited(sub.cancel());
+    }
+    final ch = _channel;
+    _channel = null;
+    if (ch != null) {
+      try {
+        unawaited(ch.sink.close());
+      } catch (_) {}
+    }
+  }
+
+  /// Closes the socket and fails any in-flight requests.
+  void dispose() {
+    _failAllPending(StateError('api socket disposed'));
+    _teardown();
+  }
+}
+
+/// An in-flight `/api` socket request awaiting its `RES`/`END` frame.
+class _Pending {
+  _Pending({required this.stream});
+  final bool stream;
+  final List<dynamic> items = [];
+  final Completer<ApiSocketResult> _completer = Completer<ApiSocketResult>();
+  Timer? timer;
+
+  Future<ApiSocketResult> get future => _completer.future;
+
+  void complete(ApiSocketResult r) {
+    timer?.cancel();
+    if (!_completer.isCompleted) _completer.complete(r);
+  }
+
+  void completeError(Object e) {
+    timer?.cancel();
+    if (!_completer.isCompleted) _completer.completeError(e);
+  }
+}
+
 /// Typed client for the backend proxy endpoints (spec §6).
 ///
 /// Every request carries the `isNymchatClient` UA header
 /// ([ApiConfig.userAgent]). Construction performs NO network — calls are lazy.
 /// The `http.Client` is injectable for tests.
 class ApiClient {
-  ApiClient({http.Client? client, String? baseUrl, String giphyApiKey = kApiGiphyApiKey})
-      : _client = client ?? http.Client(),
+  ApiClient({
+    http.Client? client,
+    String? baseUrl,
+    String giphyApiKey = kApiGiphyApiKey,
+    ApiSocket? apiSocket,
+    ApiSocketFactory? apiSocketFactory,
+  })  : _client = client ?? http.Client(),
         _baseUrl = baseUrl ?? ApiConfig.proxyBaseUrl(),
-        _giphyApiKey = giphyApiKey;
+        _giphyApiKey = giphyApiKey,
+        _injectedSocket = apiSocket,
+        _socketFactory = apiSocketFactory,
+        // The socket is OFF until [activateApiSocket] (or an injected socket /
+        // factory) turns it on, so a plain ApiClient — the unit-test default and
+        // the shop controller's own client — stays HTTP-only and a [MockClient]
+        // still sees every request. Production wires it on at boot.
+        _socketEnabled = apiSocket != null || apiSocketFactory != null;
 
   final http.Client _client;
   final String _baseUrl;
   final String _giphyApiKey;
+
+  /// Whether the WS-first transport for `/api/storage` is active. The PWA always
+  /// rides a persistent socket and falls back to HTTP (shop.js:181-202/215-238);
+  /// natively this is enabled once the controller calls [activateApiSocket] (or
+  /// an `apiSocket`/`apiSocketFactory` is injected), and otherwise HTTP-only.
+  bool _socketEnabled;
+  final ApiSocket? _injectedSocket;
+  final ApiSocketFactory? _socketFactory;
+  ApiSocket? _socket;
+
+  /// Turns on the WS-first storage transport (call once at boot). [factory]
+  /// overrides the native socket factory (tests pass a fake). After this, every
+  /// [storageAction]/[storageStream] tries the socket first per the PWA gating
+  /// and falls back to HTTP on any socket failure.
+  void activateApiSocket({ApiSocketFactory? factory}) {
+    _socketEnabled = true;
+    if (factory != null && _socket == null && _injectedSocket == null) {
+      _socket = ApiSocket(url: _apiSocketUri(), factory: factory);
+    }
+  }
+
+  /// Builds the signed `api-ws` auth event for the socket's AUTH handshake, or
+  /// null when there's no signable identity (an unauthenticated socket is then
+  /// opened for public reads). Wired by the controller, mirroring the PWA's
+  /// `_signBotAuth('api-ws', 'WS')` (shop.js:30). When unset the socket is never
+  /// authenticated, so only public reads ride it.
+  Future<Map<String, dynamic>?> Function()? _apiSocketAuthBuilder;
+
+  /// Registers the `api-ws` socket auth builder (see [_apiSocketAuthBuilder]).
+  void setApiSocketAuthBuilder(
+    Future<Map<String, dynamic>?> Function()? builder,
+  ) {
+    _apiSocketAuthBuilder = builder;
+  }
+
+  /// `wss://<host>/api` — the multiplexed storage socket (`_apiWsUrl`, shop.js:5).
+  /// Derived from the proxy base by swapping scheme→wss and the trailing path
+  /// segment to the bare `/api`.
+  Uri _apiSocketUri() {
+    final u = Uri.parse(_baseUrl);
+    final segs = List<String>.from(u.pathSegments);
+    if (segs.isNotEmpty) {
+      segs.removeLast(); // drop `proxy` → leaves `…/api`
+    }
+    return Uri(
+      scheme: u.scheme == 'http' ? 'ws' : 'wss',
+      host: u.host,
+      port: u.hasPort ? u.port : null,
+      pathSegments: segs,
+    );
+  }
+
+  ApiSocket _ensureSocketObject() {
+    return _socket ??= _injectedSocket ??
+        ApiSocket(
+          url: _apiSocketUri(),
+          factory: _socketFactory ?? defaultApiSocketFactory,
+        );
+  }
+
+  /// Attempts to run a storage [action] over the `/api` socket, returning the
+  /// `(status, data, items, hasMore)` result, or null when the socket is
+  /// skipped/unavailable so the caller falls back to HTTP. Gating mirrors the
+  /// PWA exactly (`if (this.pubkey || !withAuth)`, shop.js:181/215): the socket
+  /// is tried when the request is authenticated ([authed]) OR is a public read
+  /// (`withAuth === false`). Any connect/auth/request failure resolves to null.
+  Future<ApiSocketResult?> _trySocket(
+    String action,
+    Map<String, dynamic> body, {
+    required bool stream,
+  }) async {
+    if (!_socketEnabled) return null;
+    final authed = body.containsKey('auth');
+    // Public reads ride the socket even logged out; authed requests need a
+    // signable identity (the auth builder). Otherwise skip straight to HTTP.
+    final authBuilder = _apiSocketAuthBuilder;
+    if (authed && authBuilder == null) return null;
+    try {
+      final socket = _ensureSocketObject();
+      // Only sign the api-ws AUTH event when the socket isn't already
+      // authenticated (the PWA signs it once per connection, shop.js:30).
+      Map<String, dynamic>? authEvent;
+      if (authed && !socket.isAuthenticated) {
+        authEvent = await authBuilder!();
+        // An authed request with no signable identity can't use the socket.
+        if (authEvent == null) return null;
+      }
+      await socket.ensureConnected(authEvent: authEvent);
+      // The socket is authenticated once; per-request bodies drop pubkey/auth
+      // (the worker pins the socket's pubkey — shop.js comment at :273). Public
+      // reads never carried them. Strip them from the `extra` we frame.
+      final extra = <String, dynamic>{
+        for (final e in body.entries)
+          if (e.key != 'action' && e.key != 'auth' && e.key != 'pubkey')
+            e.key: e.value,
+      };
+      return await socket.request(action, extra, stream: stream);
+    } catch (_) {
+      return null; // fall back to HTTP
+    }
+  }
 
   /// Process-wide /api traffic sink for the Network Stats "App data" section.
   /// Mirrors the PWA's single shared `nym.relayStats` that `_trackApiData`
@@ -426,6 +814,18 @@ class ApiClient {
   /// confirmed yet." → retry).
   Future<Map<String, dynamic>> storageAction(Map<String, dynamic> body) async {
     final action = (body['action'] ?? 'other').toString();
+    // WS-first (PWA `_storageApiRequest`): ride the socket when authed OR public.
+    final ws = await _trySocket(action, body, stream: false);
+    if (ws != null) {
+      if (ws.status < 200 || ws.status >= 300 || ws.data['error'] != null) {
+        throw ApiException(
+          (body['action'] ?? 'storage').toString(),
+          ws.status,
+          ws.data['error']?.toString() ?? 'Request failed (${ws.status})',
+        );
+      }
+      return ws.data;
+    }
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
@@ -457,6 +857,12 @@ class ApiClient {
   /// pager reads. Throws [ApiException] on a non-2xx.
   Future<StorageStream> storageStream(Map<String, dynamic> body) async {
     final action = (body['action'] ?? 'other').toString();
+    // WS-first (PWA `_storageApiStream`): streaming actions collect ITEM frames
+    // over the socket (`{stream:true}` → `_wsItems`) before the HTTP fallback.
+    final ws = await _trySocket(action, body, stream: true);
+    if (ws != null) {
+      return StorageStream(items: ws.items, hasMore: ws.hasMore);
+    }
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
@@ -521,7 +927,10 @@ class ApiClient {
     }
   }
 
-  void dispose() => _client.close();
+  void dispose() {
+    _socket?.dispose();
+    _client.close();
+  }
 }
 
 /// The parsed result of a streaming `/api/storage` read ([ApiClient.storageStream]).

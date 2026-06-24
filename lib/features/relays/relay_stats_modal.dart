@@ -546,17 +546,12 @@ class _RelayListSection extends StatelessWidget {
     });
 
     final hasApiData = stats?.hasApiData ?? false;
-    final shardInfo = stats?.shardInfo ?? const <ShardInfo>[];
 
-    // Compose the list rows. The shard line (proxy mode) renders first and is
-    // always shown when present — even before any relay/app data, mirroring the
-    // PWA which inserts it ahead of `#rsRelayList` (app.js:7407). Then the two
-    // sub-sections: "App data" + its api row, and "Relay data" + its relay rows
-    // (`renderRelayList`'s `ordered` assembly, app.js:7606).
+    // Compose the list rows: "App data" + its api row, then "Relay data" + its
+    // relay rows (`renderRelayList`'s `ordered` assembly, app.js:7606). The
+    // proxy shard fan-in line is intentionally NOT shown (parity: the PWA build
+    // doesn't surface shard data in this modal).
     final rows = <Widget>[];
-    if (shardInfo.isNotEmpty) {
-      rows.add(_ShardLine(shardInfo: shardInfo));
-    }
     final contentEmpty = entries.isEmpty && !hasApiData;
     if (contentEmpty) {
       // .nm-app-5 empty state ("No relays connected", app.js:7601) — shown
@@ -618,43 +613,6 @@ class _RelayListSection extends StatelessWidget {
 /// Key for the App-data row's expansion state (the PWA uses the literal
 /// `'__api__'` url, app.js:7611).
 const String _kApiRowKey = '__api__';
-
-/// Proxy-mode shard fan-in line: `N shard(s) · M relays connected · a/b  c/d…`.
-/// Faithful port of `renderRelayStats`'s shard line (app.js:7409-7417):
-/// `${connected}/${total}` per shard, with a `(status)` suffix when the shard
-/// isn't `connected`.
-class _ShardLine extends StatelessWidget {
-  const _ShardLine({required this.shardInfo});
-  final List<ShardInfo> shardInfo;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    final totalConn =
-        shardInfo.fold<int>(0, (a, sh) => a + sh.connected);
-    final parts = shardInfo.map((sh) {
-      final suffix =
-          sh.status.isNotEmpty && sh.status != 'connected' ? '(${sh.status})' : '';
-      return '${sh.connected}/${sh.total}$suffix';
-    }).join('  ');
-    return Container(
-      // .rs-shard-line: padding 6/12, mono 10, textDim, bottom rule white/0.06.
-      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
-      decoration: BoxDecoration(
-        border:
-            Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
-      ),
-      child: Text(
-        '${shardInfo.length} shard(s) · $totalConn relays connected · $parts',
-        style: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 10,
-          color: c.textDim,
-        ),
-      ),
-    );
-  }
-}
 
 /// A `.relay-stats-section-title` rendered INSIDE the list (the "App data" /
 /// "Relay data" sub-headers, app.js:7609/7617).

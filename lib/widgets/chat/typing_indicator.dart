@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../common/nym_avatar.dart';
 
 /// The `.typing-indicator` row pinned at the bottom of the active conversation
@@ -72,29 +73,47 @@ class _TypingIndicatorRowState extends ConsumerState<TypingIndicatorRow> {
       final visible = pubkeys.take(3).toList();
       final String text;
       if (pubkeys.length == 1) {
-        text = '${nymOf(pubkeys[0])} is typing';
+        // A bot "is thinking" rather than "is typing" (PWA `_renderTypingInto`
+        // `isVerifiedBot` → verb 'thinking').
+        final isBot =
+            ref.read(nostrControllerProvider).isVerifiedBot(pubkeys[0]);
+        text = '${nymOf(pubkeys[0])} is ${isBot ? 'thinking' : 'typing'}';
       } else if (pubkeys.length == 2) {
         text = '${nymOf(pubkeys[0])} and ${nymOf(pubkeys[1])} are typing';
       } else {
         text = '${pubkeys.length} people are typing';
       }
       content = Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 3),
+        // `.typing-indicator`: padding 4px 20px, gap 8.
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
         child: Row(
           children: [
-            // `.typing-indicator-avatars`: 18px round, overlapping by 6px.
+            // `.typing-indicator-avatars`: 18px round, overlapping by 6px, each
+            // ringed by a 1.5px `--bg` border.
             for (var i = 0; i < visible.length; i++)
               Transform.translate(
                 offset: Offset(-6.0 * i, 0),
-                child: NymAvatar(
-                  seed: visible[i],
-                  size: 18,
-                  imageUrl: app.users[visible[i]]?.profile?.picture,
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: c.bg, width: 1.5),
+                  ),
+                  child: NymAvatar(
+                    seed: visible[i],
+                    size: 18,
+                    imageUrl: app.users[visible[i]]?.profile?.picture,
+                  ),
                 ),
               ),
+            // 8px gap after the avatar stack (less the cumulative overlap so the
+            // dots don't drift right).
             if (visible.isNotEmpty)
               SizedBox(
                 width: (8 - 6.0 * (visible.length - 1)).clamp(0, 8).toDouble()),
+            // `.typing-indicator-dots`: three 5px dots bouncing in sequence.
+            _TypingDots(color: c.textDim),
+            const SizedBox(width: 8),
+            // `.typing-indicator-text`: nowrap + ellipsis, 12px text-dim.
             Expanded(
               child: Text(
                 text,
@@ -109,19 +128,94 @@ class _TypingIndicatorRowState extends ConsumerState<TypingIndicatorRow> {
     }
 
     // Animate the 0↔24 height + opacity, matching the CSS transition.
+    // `.typing-indicator` bg: rgba(0,0,0,0.15) dark; light-mode → rgba(0,0,0,
+    // 0.04).
+    final bg = c.isLight
+        ? const Color(0x0A000000) // black @ 0.04
+        : const Color(0x26000000); // black @ 0.15
     return ClipRect(
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         curve: Curves.ease,
         height: active ? 24 : 0,
         width: double.infinity,
-        color: Colors.black.withValues(alpha: 0.15),
+        color: bg,
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 200),
           opacity: active ? 1 : 0,
           child: content,
         ),
       ),
+    );
+  }
+}
+
+/// `.typing-indicator-dots`: three 5px round dots that bounce in sequence
+/// (`@keyframes typingBounce`, 1.2s loop, delays 0 / 0.15s / 0.3s):
+/// opacity 0.3 → 1 and translateY 0 → −3 at the 30% mark, back by 60%.
+class _TypingDots extends StatefulWidget {
+  const _TypingDots({required this.color});
+  final Color color;
+
+  @override
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  /// One dot's bounce factor (0..1) at phase [t] (0..1), peaking at the 30% mark
+  /// and resting (0) from 60% to 100% — a triangular approximation of the CSS
+  /// keyframes (0%,60%,100% → rest; 30% → peak).
+  double _bounce(double t) {
+    if (t < 0.3) return t / 0.3;
+    if (t < 0.6) return 1 - (t - 0.3) / 0.3;
+    return 0;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < 3; i++) ...[
+              if (i > 0) const SizedBox(width: 3), // `.typing-indicator-dots{gap:3}`
+              Builder(builder: (_) {
+                // Stagger each dot by 0.15s / 1.2s ≈ 0.125 of the loop.
+                final phase = (_ctrl.value - i * 0.125) % 1.0;
+                final b = _bounce(phase < 0 ? phase + 1 : phase);
+                return Transform.translate(
+                  offset: Offset(0, -3 * b),
+                  child: Opacity(
+                    opacity: 0.3 + 0.7 * b,
+                    child: Container(
+                      width: 5,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: widget.color,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ],
+          ],
+        );
+      },
     );
   }
 }

@@ -136,8 +136,10 @@ class _ReportModalState extends State<ReportModal> {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      border: Border.all(color: c.glassBorder),
+                      // `body.light-mode select` → black@0.04 fill / black@0.1
+                      // border (white@0.05 / glass in dark).
+                      color: c.insetFill,
+                      border: Border.all(color: c.insetBorder),
                       borderRadius: NymRadius.rsm,
                     ),
                     child: DropdownButton<String>(
@@ -181,14 +183,16 @@ class _ReportModalState extends State<ReportModal> {
                       isDense: true,
                       contentPadding: const EdgeInsets.all(10),
                       filled: true,
-                      fillColor: Colors.white.withValues(alpha: 0.05),
+                      // `body.light-mode textarea` → black@0.04 fill / black@0.1
+                      // border (white@0.05 / glass in dark).
+                      fillColor: c.insetFill,
                       border: OutlineInputBorder(
                         borderRadius: NymRadius.rsm,
-                        borderSide: BorderSide(color: c.glassBorder),
+                        borderSide: BorderSide(color: c.insetBorder),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: NymRadius.rsm,
-                        borderSide: BorderSide(color: c.glassBorder),
+                        borderSide: BorderSide(color: c.insetBorder),
                       ),
                     ),
                   ),

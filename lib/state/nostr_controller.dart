@@ -243,6 +243,14 @@ class NostrController {
       // `discoverChannels`, called on connect from relays.js).
       discoverChannels();
 
+      // Immediately backfill the active channel's D1 archive on boot — the PWA
+      // loads the current channel's (e.g. #nymchat) history right away on load,
+      // not only on a later view switch (`_onViewOpened`).
+      final bootView = _ref.read(appStateProvider).view;
+      if (bootView.kind == ViewKind.channel) {
+        unawaited(_backfillChannelArchive(bootView.id));
+      }
+
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
       // identities skip the durable PM archive. All calls are best-effort.
@@ -325,6 +333,10 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _profileBackfillTimer?.cancel();
+    _profileBackfillTimer = null;
+    _profileBackfillQueue.clear();
+    _profileBackfillQueued.clear();
     _flushScheduled = false;
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
@@ -490,6 +502,10 @@ class NostrController {
         _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
       }
       _maybeNotifyChannel(event);
+      // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
+      // a profile fetch for every message author it lacks a profile for —
+      // `queueProfileFetch`, nostr-core.js:1767). Debounced/batched.
+      _maybeBackfillProfiles(event.pubkey);
     }
   }
 
@@ -603,18 +619,23 @@ class NostrController {
     final isBlocked = appState.blockedUsers.contains(e.pubkey);
     final key = EventMapper.channelKeyOf(e);
     final mention = _mentionsSelf(e.content);
-    final notify = shouldNotify(
+    final isActive = key != null && _isActiveView(key);
+    // Record gate (history) vs alert gate (sound/popup). A historical channel
+    // mention is still added to history silently (nostr-core.js:546-555:
+    // `_addNotificationToHistory` in the `isHistorical` branch) — only the loud
+    // `showNotification` is suppressed.
+    final record = shouldRecordNotification(
       kind: NotifyKind.channel,
       isOwn: isOwn,
-      isHistorical: _isHistorical(e.createdAt),
       notificationsEnabled: _notificationsEnabled,
       isMention: mention,
       isFriend: appState.isFriend(e.pubkey),
       isBlocked: isBlocked,
-      isActiveView: key != null && _isActiveView(key),
+      isActiveView: isActive,
       friendsOnly: _notifyFriendsOnly,
     );
-    if (!notify) return;
+    if (!record) return;
+    final alert = !_isHistorical(e.createdAt);
     // PWA footer context label for a channel source is `in #<geohash>`
     // (notifications.js, derived from `channelInfo`). `channelKeyOf` already
     // returns the `#`-prefixed key (geohash `g` tag / named `d` tag), so reuse
@@ -632,12 +653,18 @@ class NostrController {
       eventId: e.id,
       tsMs: e.createdAt * 1000,
       contextLabel: key != null ? 'in $key' : null,
+      silent: !alert,
     );
   }
 
-  /// PM/group notification gate for an ingested [Message] (mirrors the PWA's
-  /// PM/group `showNotification` calls). PMs always notify; group messages
-  /// notify unless mentions-only is on and the message isn't a mention.
+  /// PM/group notification for an ingested [Message] (mirrors the PWA's PM/group
+  /// handlers, pms.js:1369-1385 / groups.js:1329-1351). The PWA always records a
+  /// qualifying message into the bell history — loudly (`showNotification`) when
+  /// it's fresh, silently (`_addNotificationToHistory`) when it's old — so a PM
+  /// or group message must reach history regardless of age. Historical here is
+  /// the PWA's `msg.isHistorical || ageMs > 30000`: only the loud sound/popup is
+  /// gated on it, not the history record. PMs always qualify; group messages
+  /// qualify unless mentions-only is on and the message isn't a mention.
   void _maybeNotifyMessage(Message m, {required bool isGroup}) {
     final appState = _ref.read(appStateProvider);
     final mention = _mentionsSelf(m.content);
@@ -647,10 +674,12 @@ class NostrController {
             : (m.conversationPubkey != null
                 ? PmLogic.pmStorageKey(m.conversationPubkey!)
                 : ''));
-    final notify = shouldNotify(
+    // Record gate (history) — NOT gated on age, so backlog/gift-wrapped PMs and
+    // group messages (which always arrive with an old `created_at`) still land
+    // in the bell. This is the fix for PMs/group messages never appearing.
+    final record = shouldRecordNotification(
       kind: isGroup ? NotifyKind.group : NotifyKind.pm,
       isOwn: m.isOwn,
-      isHistorical: _isHistorical(m.createdAt),
       notificationsEnabled: _notificationsEnabled,
       isMention: mention,
       isFriend: appState.isFriend(m.pubkey),
@@ -659,16 +688,25 @@ class NostrController {
       friendsOnly: _notifyFriendsOnly,
       groupMentionsOnly: _groupNotifyMentionsOnly,
     );
-    if (!notify) return;
+    if (!record) return;
+    // PWA `treatAsHistorical = msg.isHistorical || ageMs > 30000` — drives the
+    // loud alert only. A fresh message alerts; an older one records silently.
+    final ageMs = DateTime.now().millisecondsSinceEpoch - m.timestamp;
+    final treatAsHistorical = m.isHistorical || ageMs > 30000;
     _dispatchNotification(
-      title: isGroup ? '${_groupNameFor(m.groupId)}: ${m.author}' : m.author,
+      // The panel renders the avatar + decorated `<author#suffix>` from the
+      // sender pubkey (like the PWA modal, which keys both off `senderPubkey`),
+      // so the title is the bare author for BOTH PM and group; the group name
+      // is carried as the `in <GroupName>` context label below (mirrors the PWA
+      // modal pulling `groupName` from the context, not rendering the raw title).
+      title: m.author,
       body: m.content,
       senderPubkey: m.pubkey,
       isFriend: appState.isFriend(m.pubkey),
       isMention: mention,
       isGroup: isGroup,
-      // PM → routes to the peer pubkey; group → routes to the group id (groups
-      // aren't avatar-keyed by a pubkey, so the panel falls back to a text row).
+      // PM → routes to the peer pubkey; group → routes to the group id. The
+      // sender pubkey (for the avatar/author) is carried separately.
       historyType: isGroup ? 'group' : 'pm',
       route: isGroup ? (m.groupId ?? '') : m.pubkey,
       eventId: m.nymMessageId ?? m.id,
@@ -676,6 +714,7 @@ class NostrController {
       // Group footer label `in <GroupName>` (PWA `channelInfo`); PMs leave it
       // null so the panel labels them 'PM' from the type.
       contextLabel: isGroup ? 'in ${_groupNameFor(m.groupId)}' : null,
+      silent: treatAsHistorical,
     );
   }
 
@@ -686,12 +725,15 @@ class NostrController {
     return (g != null && g.name.isNotEmpty) ? g.name : 'Group';
   }
 
-  /// Fires the notification (sound + local popup) AND records it into the
-  /// in-app notification history (`notificationHistoryProvider`). Mirrors the
-  /// PWA's `showNotification` (notifications.js), which is the single entry point
-  /// that both alerts and pushes to history. [historyType] is the panel category
-  /// ('pm' | 'group' | 'mention' | 'reaction'); [route] is the tap target
-  /// (peer pubkey or group id); [eventId] dedupes live + replayed copies.
+  /// Records a notification into the in-app notification history
+  /// (`notificationHistoryProvider`) and, unless [silent], also fires the loud
+  /// alert (sound + local popup). Mirrors the PWA's two entry points: a fresh
+  /// message goes through `showNotification` (alert + history), an old/replayed
+  /// one through `_addNotificationToHistory` ([silent] — history only). So the
+  /// bell always reflects the message; only the sound/popup is suppressed when
+  /// historical. [historyType] is the panel category ('pm' | 'group' | 'mention'
+  /// | 'reaction'); [route] is the tap target (peer pubkey or group id);
+  /// [eventId] dedupes live + replayed copies.
   void _dispatchNotification({
     required String title,
     required String body,
@@ -704,19 +746,22 @@ class NostrController {
     String? eventId,
     int? tsMs,
     String? contextLabel,
+    bool silent = false,
   }) {
-    unawaited(_ref.read(notificationsServiceProvider).notify(
-          title: title,
-          body: body,
-          notifyFriendsOnly: _notifyFriendsOnly,
-          groupNotifyMentionsOnly: _groupNotifyMentionsOnly,
-          context: NotifyContext(
-            senderPubkey: senderPubkey,
-            isFriend: isFriend,
-            isMention: isMention,
-            isGroup: isGroup,
-          ),
-        ));
+    if (!silent) {
+      unawaited(_ref.read(notificationsServiceProvider).notify(
+            title: title,
+            body: body,
+            notifyFriendsOnly: _notifyFriendsOnly,
+            groupNotifyMentionsOnly: _groupNotifyMentionsOnly,
+            context: NotifyContext(
+              senderPubkey: senderPubkey,
+              isFriend: isFriend,
+              isMention: isMention,
+              isGroup: isGroup,
+            ),
+          ));
+    }
     // The verified Nymbot never records to history (notifications.js:14).
     if (isVerifiedBot(senderPubkey)) return;
     try {
@@ -783,6 +828,9 @@ class NostrController {
         ? 'reacted $emoji to: "$preview"'
         : 'reacted $emoji to your message';
 
+    // A replayed/backlogged reaction is still recorded to history, silently
+    // (reactions.js:2032/2057: `isHistorical ? _addNotificationToHistory :
+    // showNotification`). Only a fresh reaction plays the sound/popup.
     _dispatchNotification(
       title: _nymDisplayFor(reactorPubkey),
       body: body,
@@ -793,6 +841,7 @@ class NostrController {
       route: route ?? reactorPubkey,
       eventId: eventId,
       tsMs: tsSec * 1000,
+      silent: _isHistorical(tsSec),
     );
   }
 
@@ -943,6 +992,8 @@ class NostrController {
       if (m == null) return;
       appState.ingestGroupMessage(m);
       _maybeNotifyMessage(m, isGroup: true);
+      // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
+      _maybeBackfillProfiles(m.pubkey);
       // Auto-send a delivery receipt to the sender (best-effort).
       if (!m.isOwn && m.nymMessageId != null) {
         final ek = _groups?.keysFor(groupId);
@@ -966,6 +1017,8 @@ class NostrController {
     if (m == null) return;
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
+    // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
+    _maybeBackfillProfiles(m.pubkey);
     // Delivery receipt back to the sender (not for our own self-copy).
     if (!m.isOwn && m.nymMessageId != null) {
       _service?.publishReceipt(
@@ -3222,6 +3275,52 @@ class NostrController {
   /// avoids redundant in-flight calls within the same tight switch loop.
   final Set<String> _channelBackfillInFlight = <String>{};
 
+  // --- D1 profile backfill (PWA `queueProfileFetch` / `_flushProfileBatch`) ---
+
+  /// Pubkeys queued for a batched D1 `profile-get` because we ingested a
+  /// message from them but hold no kind-0 profile yet (PWA `_profileBatchQueue`,
+  /// nostr-core.js:1774). Deduped against [_profileBackfillQueued] so a busy
+  /// channel can't enqueue the same author repeatedly within a flush window.
+  final List<String> _profileBackfillQueue = <String>[];
+  final Set<String> _profileBackfillQueued = <String>{};
+  Timer? _profileBackfillTimer;
+
+  /// Enqueues [pubkey] for a debounced D1 profile fetch when we have no kind-0
+  /// profile for it yet. Mirrors the PWA's `queueProfileFetch`
+  /// (nostr-core.js:1767): a busy channel/PM/group stream only triggers ONE
+  /// batched `profile-get` per ~400ms window rather than a request per message.
+  /// No-op without storage sync, for an invalid/self pubkey, or when the user is
+  /// already known with a profile. The flush routes each returned kind-0 event
+  /// through [resolveProfiles] (same ingest path live relay kind-0 events take).
+  void _maybeBackfillProfiles(String? pubkey) {
+    if (pubkey == null || pubkey.length != 64) return;
+    if (_storageSync == null) return;
+    final self = _service?.selfPubkey ?? _identity?.pubkey;
+    if (pubkey == self) return;
+    // Already have a profile for this user → nothing to fetch.
+    if (_ref.read(appStateProvider).users[pubkey]?.profile != null) return;
+    if (!_profileBackfillQueued.add(pubkey)) return;
+    _profileBackfillQueue.add(pubkey);
+    _profileBackfillTimer ??= Timer(
+      const Duration(milliseconds: 400),
+      _flushProfileBackfill,
+    );
+  }
+
+  /// Drains the queued pubkeys and resolves their profiles D1-first
+  /// (`resolveProfiles` → `profileGet`, falling back to a relay kind-0 sub for
+  /// any D1 didn't have). Mirrors the PWA's `_flushProfileBatch`
+  /// (nostr-core.js:1784). Best-effort; failures are swallowed inside
+  /// [resolveProfiles].
+  void _flushProfileBackfill() {
+    _profileBackfillTimer = null;
+    if (_profileBackfillQueue.isEmpty) return;
+    final batch = List<String>.from(_profileBackfillQueue);
+    _profileBackfillQueue.clear();
+    _profileBackfillQueued.clear();
+    unawaited(resolveProfiles(batch));
+  }
+
   /// Fetches a single channel's D1 archive (`channel-get`) and replays each
   /// archived event through [AppStateNotifier.ingestEvent] — the SAME path the
   /// live relay subscription uses (`_onEvent`), so dedup by id (`_seenIds`),
@@ -3995,6 +4094,7 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _profileBackfillTimer?.cancel();
     if (_p2pSub != null) {
       _service?.pool.closeSubscription(_p2pSub!);
       _p2pSub = null;
@@ -4017,6 +4117,15 @@ const List<String> kBlossomServers = [
 final p2pServiceProvider = Provider<P2PService>((ref) {
   final controller = ref.read(nostrControllerProvider);
   final service = P2PService(_ControllerP2PTransport(controller));
+  // Route transfer status into the conversation (mirrors callServiceProvider)
+  // and start the 25051/25052 signaling subscription so a pure receiver is
+  // listening before it ever sends an offer.
+  service.onSystemMessage = (m) {
+    try {
+      ref.read(appStateProvider.notifier).addSystemMessage(m);
+    } catch (_) {}
+  };
+  service.start();
   ref.onDispose(service.dispose);
   return service;
 });

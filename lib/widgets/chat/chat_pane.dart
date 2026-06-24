@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
@@ -11,11 +12,13 @@ import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
+import '../../models/group.dart';
 import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/app_dialog.dart';
+import '../common/nym_avatar.dart';
 import 'composer.dart';
 import 'messages_list.dart';
 
@@ -194,17 +197,11 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: c.primary,
-                        fontSize: titleSize,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.3,
-                      ),
-                    ),
+                    // `.channel-title` (#currentChannel): a plain `#name` for a
+                    // channel; `.pm-header-row` (26px avatar + status dot + name)
+                    // for a PM; `.group-header-row` (group glyph + stacked member
+                    // avatars + name) for a group.
+                    _titleLine(c, app, view, title, titleSize),
                     if (metaText.isNotEmpty)
                       Row(
                         mainAxisSize: MainAxisSize.min,
@@ -239,6 +236,181 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         ),
       ),
     );
+  }
+
+  /// The `.channel-title` content (`#currentChannel`). Channel → bare `#name`.
+  /// PM → `.pm-header-row`: a 26px avatar with a status dot + the nym. Group →
+  /// `.group-header-row`: the group glyph + up to four overlapping 18px member
+  /// avatars (or the custom group avatar) + the name. The title text itself is
+  /// primary / weight-700 / +3px in all three.
+  Widget _titleLine(
+    NymColors c,
+    AppState app,
+    ChatView view,
+    String title,
+    double titleSize,
+  ) {
+    final titleStyle = TextStyle(
+      color: c.primary,
+      fontSize: titleSize,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.3,
+    );
+    final titleText = Text(
+      title,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: titleStyle,
+    );
+
+    switch (view.kind) {
+      case ViewKind.channel:
+        return titleText;
+
+      case ViewKind.pm:
+        final user = app.users[view.id];
+        final status = user?.effectiveStatus() ?? UserStatus.offline;
+        // `.pm-header-row`: `.pm-name-text` (base nym) + a dimmed `.nym-suffix`
+        // (`#abcd`, 0.9em / w100 / opacity 0.7), mirroring the PWA header markup.
+        final base = stripPubkeySuffix(title);
+        final suffix = getPubkeySuffix(view.id);
+        final nameRich = Text.rich(
+          TextSpan(
+            style: titleStyle,
+            children: [
+              TextSpan(text: base),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: '#$suffix',
+                  style: titleStyle.copyWith(
+                    color: c.primary.withValues(alpha: 0.7),
+                    fontSize: titleSize * 0.9,
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+            ],
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        );
+        // `.pm-header-avatar`: 26px round, margin-right 10, with a 7px status dot
+        // (bottom-right -2) ringed by the bg. Hidden status drops the dot.
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                NymAvatar(
+                  seed: view.id,
+                  size: 26,
+                  imageUrl: user?.profile?.picture,
+                ),
+                if (status != UserStatus.hidden)
+                  Positioned(
+                    right: -2,
+                    bottom: -2,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: statusColor(status),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: c.bg, width: 2),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(width: 10),
+            Flexible(child: nameRich),
+          ],
+        );
+
+      case ViewKind.group:
+        Group? g;
+        for (final cand in app.groups) {
+          if (cand.id == view.id) {
+            g = cand;
+            break;
+          }
+        }
+        if (g == null) return titleText;
+        final customAvatar = g.avatar;
+        final hasCustom = customAvatar != null && customAvatar.isNotEmpty;
+        final others =
+            g.members.where((pk) => pk != app.selfPubkey).take(4).toList();
+
+        if (hasCustom) {
+          // `.group-header-custom-wrap`: a 26px round custom avatar, margin-right
+          // 8 (mirrors the PM avatar slot).
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              NymAvatar(seed: g.id, size: 26, imageUrl: customAvatar),
+              const SizedBox(width: 8),
+              Flexible(child: titleText),
+            ],
+          );
+        }
+
+        // `.group-header-icon` (18px glyph) + stacked 18px `.group-header-avatar`s
+        // (overlap −4, 1px bg ring) + name. The PWA clips this row
+        // (`.group-header-row { overflow: hidden }`); to avoid a RenderFlex
+        // overflow on a very narrow header we instead drop trailing avatars that
+        // wouldn't fit, then let the name ellipsize in the remainder.
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            const double iconW = 18 + 5; // glyph + its 5px gap
+            const double avatarStep = 14; // 18px avatar minus the 4px overlap
+            // Reserve room for the glyph + a minimum name width; fit as many
+            // avatars as the rest allows (cap 4).
+            final avail = constraints.maxWidth.isFinite
+                ? constraints.maxWidth
+                : 9999.0;
+            final budget = avail - iconW - 40; // 40 ≈ minimum name slot
+            var fit = others.length;
+            if (budget < fit * avatarStep) {
+              fit = (budget / avatarStep).floor().clamp(0, others.length);
+            }
+            final shown = others.take(fit).toList();
+
+            final prefix = <Widget>[
+              Icon(Icons.groups, size: 18, color: c.primary),
+              const SizedBox(width: 5),
+            ];
+            for (var i = 0; i < shown.length; i++) {
+              prefix.add(Transform.translate(
+                offset: Offset(i == 0 ? 0 : -4.0 * i, 0),
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: c.bg, width: 1),
+                  ),
+                  child: NymAvatar(
+                    seed: shown[i],
+                    size: 18,
+                    imageUrl: app.users[shown[i]]?.profile?.picture,
+                  ),
+                ),
+              ));
+            }
+            // `.nm-grp-ml8`: 8px gap before the name when avatars are shown
+            // (offset by the cumulative overlap so the name doesn't drift right).
+            if (shown.isNotEmpty) {
+              prefix.add(SizedBox(
+                  width: (8 - 4.0 * (shown.length - 1)).clamp(0.0, 8.0)));
+            }
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ...prefix,
+                Flexible(child: titleText),
+              ],
+            );
+          },
+        );
+    }
   }
 
   /// `.mobile-header-actions`: the `.icon-btn`-class notif + hamburger toggles,
@@ -505,11 +677,10 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       case ViewKind.pm:
         return app.users[view.id]?.nym ?? 'PM';
       case ViewKind.group:
-        final g = app.groups.firstWhere(
-          (g) => g.id == view.id,
-          orElse: () => app.groups.first,
-        );
-        return g.name;
+        for (final g in app.groups) {
+          if (g.id == view.id) return g.name;
+        }
+        return 'Group';
     }
   }
 

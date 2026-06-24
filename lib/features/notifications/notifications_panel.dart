@@ -4,8 +4,9 @@
 // Foundations ships the STORE (`notificationHistoryProvider`); this builds the
 // modal UI that renders its entries (avatar + decorated author wrapped in
 // `<…>` brackets + body + context label + timestamp), highlights unread rows
-// (cyan wash + primary left rule), and exposes a "Mark all read" action. The
-// shell owns the bell + badge and calls [showNotificationsPanel].
+// (cyan wash + primary left rule), exposes a "Mark all read" action, and opens
+// the source conversation on tap (notifications.js:559-585). The shell owns the
+// bell + badge and calls [showNotificationsPanel].
 //
 // Rendered as a centered `.modal` (showDialog) with shared modal chrome: 22px
 // UPPERCASE primary header + bottom rule, 32px circular glass close chip.
@@ -16,31 +17,117 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../calls/call_nym.dart';
 
 /// Opens the notifications history as a centered modal (the PWA renders it as a
-/// `.modal` overlay). Marks every entry viewed on dismiss (the PWA marks-on-
-/// scroll; we mark on close, which matches the simpler store contract
-/// `markAllViewed`).
+/// `.modal` overlay).
+///
+/// The shell clears the unread badge right after this returns (`markAllViewed`,
+/// chat_pane), which mutates the live entries' `viewed` flags. To keep the cyan
+/// unread rule + "Mark all read" visible while the modal is up (the PWA shows
+/// what was unread and only deducts the badge as items scroll past), we SNAPSHOT
+/// each entry's unread state HERE — synchronously, before `showDialog` and thus
+/// before the shell's `markAllViewed` runs — and hand the frozen rows to the
+/// panel. The badge itself still zeroes on open, matching the PWA.
 Future<void> showNotificationsPanel(BuildContext context) {
+  // Read the store before showDialog so the snapshot precedes the shell's
+  // on-open markAllViewed() (which flips the same entries' `viewed` bools).
+  // Newest-first; the store already trims to 24h and caps the list.
+  final entries =
+      ProviderScope.containerOf(context).read(notificationHistoryProvider).entries;
+  // Freeze the unread state per entry as a parallel list of bools (a public
+  // type, so the widget constructor doesn't leak a private one).
+  final viewedAtOpen = [for (final e in entries) e.viewed];
   return showDialog<void>(
     context: context,
     barrierColor: const Color(0xB3000000), // .modal overlay rgba(0,0,0,0.7)
-    builder: (_) => const NotificationsPanel(),
+    builder: (_) => NotificationsPanel(
+      entries: entries,
+      viewedAtOpen: viewedAtOpen,
+    ),
   );
 }
 
-class NotificationsPanel extends ConsumerWidget {
-  const NotificationsPanel({super.key});
+class NotificationsPanel extends ConsumerStatefulWidget {
+  const NotificationsPanel({
+    super.key,
+    required this.entries,
+    required this.viewedAtOpen,
+  });
+
+  /// Entries snapshotted at open (newest-first).
+  final List<NotificationEntry> entries;
+
+  /// Each entry's `viewed` state frozen at open, parallel to [entries] (see
+  /// [showNotificationsPanel]) — used instead of the live (now-cleared) flags.
+  final List<bool> viewedAtOpen;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<NotificationsPanel> createState() => _NotificationsPanelState();
+}
+
+class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
+  late final List<_NotifRow> _rows = [
+    for (var i = 0; i < widget.entries.length; i++)
+      _NotifRow(widget.entries[i], widget.viewedAtOpen[i]),
+  ];
+
+  /// Drives the "Mark all read" button + per-row highlight locally so the modal
+  /// reflects the action immediately without a provider round-trip.
+  late bool _hasUnread = _rows.any((r) => !r.viewed);
+
+  void _markAllRead() {
+    ref.read(notificationHistoryProvider.notifier).markAllViewed();
+    setState(() {
+      for (final r in _rows) {
+        r.viewed = true;
+      }
+      _hasUnread = false;
+    });
+  }
+
+  /// Opens the source conversation for [entry] and closes the modal
+  /// (notifications.js:559-585: pm → `openUserPM`, group → `openGroup`, reaction/
+  /// mention → the reactor's/author's PM, call → PM or group).
+  void _openEntry(NotificationEntry entry) {
+    final controller = ref.read(nostrControllerProvider);
+    final appState = ref.read(appStateProvider.notifier);
+    final route = entry.route ?? '';
+    final sender = entry.senderPubkey ?? '';
+    final isPubkeyRoute = _isPubkey(route);
+    switch (entry.type) {
+      case 'group':
+        if (route.isNotEmpty) appState.switchView(ChatView.group(route));
+        break;
+      case 'call':
+        // Call routes carry a group id (group call) or a pubkey (1:1 call).
+        if (isPubkeyRoute) {
+          controller.startPM(route);
+        } else if (route.isNotEmpty) {
+          appState.switchView(ChatView.group(route));
+        } else if (sender.isNotEmpty) {
+          controller.startPM(sender);
+        }
+        break;
+      case 'pm':
+      case 'mention':
+      case 'reaction':
+      default:
+        // These route to the sender's PM (the avatar pubkey).
+        final target = sender.isNotEmpty
+            ? sender
+            : (isPubkeyRoute ? route : '');
+        if (target.isNotEmpty) controller.startPM(target);
+        break;
+    }
+    Navigator.of(context).maybePop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
-    final store = ref.watch(notificationHistoryProvider);
-    // Newest-first; the store already trims to 24h.
-    final entries = store.entries;
-    final hasUnread = store.unread > 0;
 
     return Center(
       child: Material(
@@ -89,22 +176,18 @@ class NotificationsPanel extends ConsumerWidget {
                     ),
                   ),
                   // .notifications-mark-read-row (flex-end, padding 8/24/0).
-                  if (hasUnread)
+                  if (_hasUnread)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
                       child: Align(
                         alignment: Alignment.centerRight,
-                        child: _MarkReadBtn(
-                          onTap: () => ref
-                              .read(notificationHistoryProvider.notifier)
-                              .markAllViewed(),
-                        ),
+                        child: _MarkReadBtn(onTap: _markAllRead),
                       ),
                     ),
                   // .notifications-modal-body (max-height 60vh, padding
                   // 12/24/24).
                   Flexible(
-                    child: entries.isEmpty
+                    child: _rows.isEmpty
                         ? Padding(
                             // .notifications-empty: centered textDim 14,
                             // padding 40/20.
@@ -119,10 +202,12 @@ class NotificationsPanel extends ConsumerWidget {
                         : ListView.builder(
                             shrinkWrap: true,
                             padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-                            itemCount: entries.length,
+                            itemCount: _rows.length,
                             itemBuilder: (ctx, i) => _NotificationRow(
-                              entry: entries[i],
-                              isLast: i == entries.length - 1,
+                              entry: _rows[i].entry,
+                              viewed: _rows[i].viewed,
+                              isLast: i == _rows.length - 1,
+                              onTap: () => _openEntry(_rows[i].entry),
                             ),
                           ),
                   ),
@@ -143,6 +228,18 @@ class NotificationsPanel extends ConsumerWidget {
     );
   }
 }
+
+/// A snapshotted notification row: the live [entry] plus its [viewed] state
+/// frozen at open (then locally toggled by "Mark all read").
+class _NotifRow {
+  _NotifRow(this.entry, this.viewed);
+  final NotificationEntry entry;
+  bool viewed;
+}
+
+/// True when [s] is a bare 64-hex pubkey (drives the avatar + decorated author,
+/// and PM routing).
+bool _isPubkey(String s) => RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(s);
 
 /// `.notifications-mark-read-btn`: borderless primary 12px, underline on hover.
 class _MarkReadBtn extends StatefulWidget {
@@ -184,9 +281,16 @@ class _MarkReadBtnState extends State<_MarkReadBtn> {
 }
 
 class _NotificationRow extends ConsumerWidget {
-  const _NotificationRow({required this.entry, required this.isLast});
+  const _NotificationRow({
+    required this.entry,
+    required this.viewed,
+    required this.isLast,
+    required this.onTap,
+  });
   final NotificationEntry entry;
+  final bool viewed;
   final bool isLast;
+  final VoidCallback onTap;
 
   /// `Jun 23, 14:05` — `toLocaleString({month, day, hour, minute})`.
   String _formatTime(int ms) {
@@ -227,79 +331,105 @@ class _NotificationRow extends ConsumerWidget {
     }
   }
 
+  /// Strips blockquoted (`>`-prefixed) lines and collapses whitespace, matching
+  /// the PWA modal body (notifications.js:546-547) so only the new message text
+  /// shows — not the quoted context a reply carries.
+  String _displayBody() {
+    final lines = entry.body
+        .split('\n')
+        .where((l) => !l.startsWith('>'))
+        .join(' ');
+    final collapsed = lines.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return collapsed.length > 200 ? collapsed.substring(0, 200) : collapsed;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    // A call entry routes to a pubkey (1:1) or a group id (group); message
-    // entries carry the sender pubkey in `route`. Treat a 64-hex route as a
-    // pubkey for the avatar + decorated author.
+    // The avatar + decorated author render from the SENDER pubkey (the PWA modal
+    // keys both off `n.senderPubkey || channelInfo.pubkey`, notifications.js:496)
+    // — so a group message shows the sender's avatar + nym with `in <Group>` as
+    // context, exactly like a PM/channel row. Fall back to the route only when no
+    // sender pubkey was carried (older call entries).
+    final sender = entry.senderPubkey ?? '';
     final route = entry.route ?? '';
-    final isPubkey = RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(route);
+    final pubkey = _isPubkey(sender)
+        ? sender
+        : (_isPubkey(route) ? route : '');
+    final hasPubkey = pubkey.isNotEmpty;
     final label = _contextLabel();
     // Real profile picture for the sender avatar (Rule 4).
     final picture =
-        isPubkey ? ref.watch(usersProvider)[route]?.profile?.picture : null;
+        hasPubkey ? ref.watch(usersProvider)[pubkey]?.profile?.picture : null;
+    final body = _displayBody();
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        // .notification-item-unread: cyan@6% wash + 2px primary left rule.
-        // (The wash hex is fixed `0,255,255` — NOT the theme primary.)
-        color: entry.viewed
-            ? null
-            : const Color.fromRGBO(0, 255, 255, 0.06),
-        border: entry.viewed
-            ? (isLast
-                ? null
-                : Border(
-                    bottom: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.04))))
-            : Border(left: BorderSide(color: c.primary, width: 2)),
-      ),
-      // .notification-item-header: gap 6, align flex-start.
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (isPubkey) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: NymAvatar(seed: route, size: 28, imageUrl: picture),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // .notification-item-author: `<base#suffix>` in primary, w600.
-                // The angle brackets are literal (`.nym-bracket`, inherits the
-                // primary author color).
-                _Author(entry: entry, isPubkey: isPubkey),
-                const SizedBox(height: 2),
-                // .notification-item-body: text 13, line-height 1.4, 2-line clamp.
-                Text(
-                  entry.body,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            // .notification-item-unread: cyan@6% wash + 2px primary left rule.
+            // (The wash hex is fixed `0,255,255` — NOT the theme primary.)
+            color: viewed ? null : const Color.fromRGBO(0, 255, 255, 0.06),
+            border: viewed
+                ? (isLast
+                    ? null
+                    : Border(
+                        bottom: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.04))))
+                : Border(left: BorderSide(color: c.primary, width: 2)),
+          ),
+          // .notification-item-header: gap 6, align flex-start.
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (hasPubkey) ...[
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: NymAvatar(seed: pubkey, size: 28, imageUrl: picture),
                 ),
-                const SizedBox(height: 2),
-                // .notification-item-footer: context label + time (both 11px dim).
-                Row(
+                const SizedBox(width: 6),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (label != null) ...[
-                      Text(label,
-                          style: TextStyle(color: c.textDim, fontSize: 11)),
-                      const SizedBox(width: 6),
-                    ],
-                    Text(_formatTime(entry.ts),
-                        style: TextStyle(color: c.textDim, fontSize: 11)),
+                    // .notification-item-author: `<base#suffix>` in primary, w600.
+                    // The angle brackets are literal (`.nym-bracket`, inherits the
+                    // primary author color).
+                    _Author(entry: entry, pubkey: pubkey),
+                    const SizedBox(height: 2),
+                    // .notification-item-body: text 13, line-height 1.4, 2-line clamp.
+                    Text(
+                      body,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          TextStyle(color: c.text, fontSize: 13, height: 1.4),
+                    ),
+                    const SizedBox(height: 2),
+                    // .notification-item-footer: context label + time (both 11px dim).
+                    Row(
+                      children: [
+                        if (label != null) ...[
+                          Text(label,
+                              style:
+                                  TextStyle(color: c.textDim, fontSize: 11)),
+                          const SizedBox(width: 6),
+                        ],
+                        Text(_formatTime(entry.ts),
+                            style: TextStyle(color: c.textDim, fontSize: 11)),
+                      ],
+                    ),
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -309,14 +439,15 @@ class _NotificationRow extends ConsumerWidget {
 /// (`.nym-bracket`, primary), with the decorated nym (base + dim `#suffix` +
 /// badges) inside. For non-pubkey entries the bare title is bracketed.
 class _Author extends StatelessWidget {
-  const _Author({required this.entry, required this.isPubkey});
+  const _Author({required this.entry, required this.pubkey});
   final NotificationEntry entry;
-  final bool isPubkey;
+
+  /// The sender pubkey to decorate (empty → render the bare bracketed title).
+  final String pubkey;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final route = entry.route ?? '';
     final bracket =
         TextStyle(color: c.primary, fontSize: 13, fontWeight: FontWeight.w600);
     return Row(
@@ -324,9 +455,9 @@ class _Author extends StatelessWidget {
       children: [
         Text('<', style: bracket),
         Flexible(
-          child: isPubkey
+          child: pubkey.isNotEmpty
               ? CallNym(
-                  pubkey: route,
+                  pubkey: pubkey,
                   nym: entry.title,
                   baseColor: c.primary,
                   baseStyle: const TextStyle(

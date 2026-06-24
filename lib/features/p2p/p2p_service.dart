@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'p2p_models.dart';
 
@@ -39,6 +42,14 @@ class _P2PConnection {
   RTCDataChannel? channel;
   bool haveRemote = false;
   final List<RTCIceCandidate> pending = [];
+
+  /// 30s establish timeout (`createP2PConnection`, p2p.js:309) — a transfer
+  /// stuck in `connecting` (peer offline) is errored out and cleaned up.
+  Timer? connectTimeout;
+
+  /// 5s grace after `disconnected` before declaring the connection lost
+  /// (`oniceconnectionstatechange`, p2p.js:295).
+  Timer? disconnectGrace;
 }
 
 /// Direct WebRTC data-channel file sharing — 1:1 port of `js/modules/p2p.js`
@@ -76,6 +87,13 @@ class P2PService extends ChangeNotifier {
 
   /// System-message sink (`displaySystemMessage`) + completed-download sink.
   void Function(String message)? onSystemMessage;
+
+  /// Completed-download sink. When unset (the default), [_complete] saves the
+  /// bytes to disk and offers the OS share sheet itself ([_saveDownload]) so a
+  /// finished transfer always lands somewhere the user can open — mirroring the
+  /// PWA's automatic `a.download` blob save (`completeFileTransfer`, p2p.js:586).
+  /// A host may override this to route the bytes elsewhere (e.g. a custom
+  /// save-as flow).
   void Function(String filename, Uint8List bytes)? onDownloadReady;
 
   // --- read-only views for the modal -----------------------------------------
@@ -97,6 +115,8 @@ class P2PService extends ChangeNotifier {
   void dispose() {
     _unsub?.call();
     for (final c in _connections.values) {
+      c.connectTimeout?.cancel();
+      c.disconnectGrace?.cancel();
       try {
         c.channel?.close();
       } catch (_) {}
@@ -136,9 +156,13 @@ class P2PService extends ChangeNotifier {
   }
 
   /// Registers a peer's offer parsed off an inbound message tag
-  /// (`parseFileOfferTag`) so the receiver can later [requestFile] it.
+  /// (`parseFileOfferTag`) so the receiver can later [requestFile] it. Starts
+  /// the signaling subscription as a side effect so the offer card is live the
+  /// moment it renders, even for a user who has never shared a file themselves.
   void registerOffer(FileOffer offer) {
     _offers[offer.offerId] = offer;
+    start();
+    notifyListeners();
   }
 
   // ---------------------------------------------------------------------------
@@ -148,6 +172,10 @@ class P2PService extends ChangeNotifier {
   /// Requests [offerId] from its seeder: creates the transfer state and the
   /// initiating WebRTC connection (`requestP2PFile` → `createP2PConnection`).
   Future<void> requestFile(String offerId) async {
+    // A pure receiver may never have shared a file, so ensure the signaling
+    // subscription is live before we send our offer — otherwise the seeder's
+    // answer/ICE would never reach us and the transfer would hang `connecting`.
+    start();
     final offer = _offers[offerId];
     if (offer == null) {
       _system('File offer not found');
@@ -210,13 +238,7 @@ class P2PService extends ChangeNotifier {
     for (final id in _connections.keys
         .where((id) => id.endsWith(transferId))
         .toList()) {
-      final c = _connections.remove(id);
-      try {
-        c?.channel?.close();
-      } catch (_) {}
-      try {
-        c?.pc.close();
-      } catch (_) {}
+      _cleanupConnection(id);
     }
     if (transfer != null && !silent) _system('Transfer cancelled');
     notifyListeners();
@@ -282,19 +304,48 @@ class P2PService extends ChangeNotifier {
     pc.onIceConnectionState = (s) {
       final transfer = _transfers[transferId];
       if (s == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+        conn.connectTimeout?.cancel();
         if (transfer != null) {
           _updateStatus(transferId, P2PStatus.error,
               'Connection failed - peer may be offline');
         }
         _cleanupConnection(connectionId);
+      } else if (s == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        // Give it a moment to recover before declaring error (p2p.js:295).
+        conn.disconnectGrace?.cancel();
+        conn.disconnectGrace = Timer(const Duration(seconds: 5), () {
+          final st = conn.pc.iceConnectionState;
+          if (st == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
+              st == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+            final t = _transfers[transferId];
+            if (t != null && t.status != P2PStatus.complete) {
+              _updateStatus(transferId, P2PStatus.error, 'Connection lost');
+            }
+            _cleanupConnection(connectionId);
+          }
+        });
       } else if (s == RTCIceConnectionState.RTCIceConnectionStateConnected ||
           s == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        // Established — cancel the connect timeout (p2p.js:321).
+        conn.connectTimeout?.cancel();
+        conn.disconnectGrace?.cancel();
         if (transfer != null && transfer.status == P2PStatus.connecting) {
           transfer.status = P2PStatus.transferring;
           notifyListeners();
         }
       }
     };
+
+    // 30s establish timeout (p2p.js:309): a transfer still `connecting` after
+    // 30s (peer offline / no answer) is errored out and torn down.
+    conn.connectTimeout = Timer(const Duration(seconds: 30), () {
+      final t = _transfers[transferId];
+      if (t != null && t.status == P2PStatus.connecting) {
+        _updateStatus(transferId, P2PStatus.error,
+            'Connection timed out - peer may be offline');
+        _cleanupConnection(connectionId);
+      }
+    });
 
     if (isInitiator) {
       // Receiver side opens the data channel to pull the file.
@@ -468,8 +519,33 @@ class P2PService extends ChangeNotifier {
     }
     _updateStatus(transferId, P2PStatus.complete, 'Download complete!');
     _received.remove(transferId);
-    onDownloadReady?.call(sanitizeDownloadFilename(offer.name), bytes);
+    final safeName = sanitizeDownloadFilename(offer.name);
+    final handler = onDownloadReady;
+    if (handler != null) {
+      handler(safeName, bytes);
+    } else {
+      // No host save handler: persist + offer the OS share/save sheet so the
+      // file actually reaches the user (the PWA triggers a browser download).
+      unawaited(_saveDownload(safeName, bytes));
+    }
     _system('File "${offer.name}" downloaded successfully');
+  }
+
+  /// Writes [bytes] to a temp file and opens the OS share sheet so the user can
+  /// save it to Files/Downloads — the native stand-in for the PWA's blob
+  /// `a.download` (`completeFileTransfer`, p2p.js:586). Best-effort: a failure
+  /// only surfaces a system message, never throws.
+  Future<void> _saveDownload(String filename, Uint8List bytes) async {
+    try {
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/$filename';
+      final file = File(path);
+      await file.writeAsBytes(bytes, flush: true);
+      await Share.shareXFiles([XFile(path)], subject: filename);
+    } catch (e) {
+      debugPrint('P2P save download failed: $e');
+      _system('Downloaded "$filename" but could not open the save dialog');
+    }
   }
 
   void _abort(String transferId, String message) {
@@ -567,6 +643,8 @@ class P2PService extends ChangeNotifier {
   void _cleanupConnection(String connectionId) {
     final c = _connections.remove(connectionId);
     if (c == null) return;
+    c.connectTimeout?.cancel();
+    c.disconnectGrace?.cancel();
     try {
       c.channel?.close();
     } catch (_) {}

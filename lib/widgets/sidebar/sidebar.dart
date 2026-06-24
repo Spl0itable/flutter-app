@@ -554,13 +554,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
             // `.nym-display { margin-top:15px }` — the top gap above the box
             // (cosmetic in app mode where the ASCII logo above is hidden).
             const SizedBox(height: 15),
-            // `.nym-display`: padding 10/14, bg white@0.04, glass border,
-            // radius-sm.
+            // `.nym-display`: padding 10/14, bg white@0.04 (light-mode →
+            // black@0.04), glass border, radius-sm.
             Container(
               key: TutorialTargets.keyFor(TutorialTarget.nymDisplay),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.04),
+                color: c.insetFill,
                 border: Border.all(color: c.glassBorder),
                 borderRadius: NymRadius.rsm,
               ),
@@ -1039,7 +1039,9 @@ class _ReorderBtn extends StatelessWidget {
           height: 18,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
+            // `.section-reorder-btn` bg white@0.08 → mode-aware so the reorder
+            // buttons stay visible in light mode.
+            color: c.hoverOverlay,
             borderRadius: NymRadius.rxs,
           ),
           child: Icon(icon, size: 14, color: c.text),
@@ -1503,7 +1505,9 @@ class _SearchFieldState extends State<_SearchField> {
         // `padding: 8px 28px 8px 12px` (right room for the ✕).
         contentPadding: const EdgeInsets.fromLTRB(12, 8, 28, 8),
         filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.05),
+        // `.search-input` bg white@0.05 → `body.light-mode .search-input`
+        // black@0.04. Mode-aware so it reads in light mode.
+        fillColor: c.insetFill,
         suffixIcon: hasValue
             ? _SearchClear(onTap: () {
                 _controller.clear();

@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../models/user.dart';
+import '../../services/api/storage_sync.dart' show ShopStatusActive;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import 'shop_catalog.dart';
@@ -58,13 +61,17 @@ class UserCosmetics {
 }
 
 /// Resolves the [UserCosmetics] for [pubkey]. Reads `shopControllerProvider` for
-/// the self pubkey and `usersProvider` for others. Pure with respect to its
-/// inputs (no side effects), so it can be called from `build`.
+/// the self pubkey; for others it prefers the authoritative D1 `shop-status`
+/// record ([otherUsersShopProvider]) and falls back to the presence-broadcast
+/// `usersProvider` fields. Pure with respect to its inputs (no fetch), so it can
+/// be called from `build`. Mirrors `getUserShopItems(pubkey)` (shop.js:1111).
 UserCosmetics resolveCosmetics(WidgetRef ref, String pubkey) {
   final selfPubkey = ref.read(nostrControllerProvider).identity?.pubkey;
   if (selfPubkey != null && pubkey == selfPubkey) {
     return _selfCosmetics(ref.read(shopControllerProvider).active);
   }
+  final fromD1 = ref.read(otherUsersShopProvider)[pubkey.toLowerCase()];
+  if (fromD1 != null) return userCosmeticsFromStatus(fromD1);
   final user = ref.read(usersProvider)[pubkey];
   return userCosmeticsFromUser(user);
 }
@@ -99,15 +106,41 @@ UserCosmetics userCosmeticsFromUser(User? user) {
   );
 }
 
+/// Builds [UserCosmetics] from a D1 `shop-status` active record — the
+/// authoritative source for other users' cosmetics (shop.js:459-467). Keeps the
+/// last flair like the PWA and surfaces the Genesis edition from `active.editions`.
+UserCosmetics userCosmeticsFromStatus(ShopStatusActive a) {
+  return UserCosmetics(
+    styleId: (a.style != null && a.style!.isNotEmpty) ? a.style : null,
+    flairId: a.flair.isNotEmpty ? a.flair.last : null,
+    supporter: a.supporter,
+    cosmetics: a.cosmetics,
+    genesisEdition: a.editions['flair-genesis'],
+  );
+}
+
 /// Family provider variant of [resolveCosmetics], so widgets can `watch` a
-/// pubkey's cosmetics and rebuild when the self shop state or the user's
-/// presence-broadcast cosmetics change.
+/// pubkey's cosmetics and rebuild when the self shop state, the authoritative
+/// D1 `shop-status` cache, or the user's presence-broadcast cosmetics change.
+///
+/// For a non-self pubkey this also QUEUES a batched `shop-status` D1 fetch
+/// (debounced, deduped, 10-min-fresh) the first time the pubkey is seen with no
+/// cached record — mirroring the PWA's `getUserShopItems` → `_queueShopStatusFetch`
+/// (shop.js:1121). The queue runs on a microtask so the provider body stays
+/// side-effect-free during build; the cache update then rebuilds this provider.
 final userCosmeticsProvider =
     Provider.family<UserCosmetics, String>((ref, pubkey) {
   final selfPubkey = ref.watch(nostrControllerProvider).identity?.pubkey;
   if (selfPubkey != null && pubkey == selfPubkey) {
     return _selfCosmetics(ref.watch(shopControllerProvider).active);
   }
+  final key = pubkey.toLowerCase();
+  final fromD1 = ref.watch(otherUsersShopProvider)[key];
+  if (fromD1 != null) return userCosmeticsFromStatus(fromD1);
+  // Unknown to D1 yet: trigger a batched lookup, then fall back to the
+  // presence-broadcast fields until the record lands.
+  final other = ref.read(otherUsersShopProvider.notifier);
+  scheduleMicrotask(() => other.queue(key));
   final user = ref.watch(usersProvider)[pubkey];
   return userCosmeticsFromUser(user);
 });
