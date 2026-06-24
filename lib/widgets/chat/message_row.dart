@@ -292,6 +292,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       color: supporterGold ? const Color(0xFFFFD700) : (self ? c.primary : c.secondary),
       fontSize: size,
       fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
+      // `.message-author { letter-spacing: 0.2px }` (styles-chat.css:697).
+      letterSpacing: 0.2,
       shadows: supporterGold
           ? const [Shadow(color: Color(0x66FFD700), blurRadius: 10)]
           : null,
@@ -533,18 +535,23 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           ),
         ),
         if (settings.showTimestamps)
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                formatTime(message.dateTime, settings.timeFormat),
-                style: TextStyle(color: c.textDim, fontSize: 12),
-              ),
-              // `.crypto-lock-irc`: the verification lock sits inside
-              // `.message-time` after the clock (PM/group only).
-              if (_cryptoState != null)
-                CryptoVerifiedBadge(state: _cryptoState!),
-            ],
+          ConstrainedBox(
+            // `.message-time { min-width: 50px }` — the clock reserves a fixed
+            // column so content left-edges line up across rows.
+            constraints: const BoxConstraints(minWidth: 50),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  formatTime(message.dateTime, settings.timeFormat),
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+                // `.crypto-lock-irc`: the verification lock sits inside
+                // `.message-time` after the clock (PM/group only).
+                if (_cryptoState != null)
+                  CryptoVerifiedBadge(state: _cryptoState!),
+              ],
+            ),
           ),
         ConstrainedBox(
           constraints: BoxConstraints(
@@ -680,7 +687,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             content: message.content,
             targetLang: _translateLangOverride,
           ),
-        const SizedBox(height: 2),
+        // `.bubble-time-inner { margin-top: 4px }` — the relative time sits 4px
+        // below the body, right-aligned (`margin-left: auto`).
+        const SizedBox(height: 4),
         Row(
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.end,
@@ -776,7 +785,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         if (!self) ...[
           SizedBox(
             width: 32,
-            child: widget.showAvatar && !widget.grouped
+            // The PWA renders ONE 32px avatar per `.message-group`, pinned to the
+            // bottom of the group (`.message-group-avatar { align-self: flex-end;
+            // position: sticky; bottom: 8px }`). `showAvatar` is set on the LAST
+            // message of a group (others only); with the row bottom-aligned
+            // (`CrossAxisAlignment.end`) the avatar lands at the group's foot —
+            // the PWA's "avatar tracks the bottom of the stack" behaviour. Gating
+            // on `!grouped` too would hide it for every multi-message group, so
+            // gate purely on `showAvatar`.
+            child: widget.showAvatar
                 ? GestureDetector(
                     onTap: () => _openContextMenu(context),
                     child: NymAvatar(
@@ -792,8 +809,24 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
+    // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
+    // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
+    // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
+    // grouped after the lead `-8px`) for a ~2px in-group gap. Flutter list items
+    // can't carry negative inter-item margins, so the equivalent EFFECTIVE gaps
+    // are driven from the top edge only (bottom 0): a group lead opens 6px of
+    // air above it; a continuation member sits 2px below the previous bubble.
+    //
+    // Horizontal inset mirrors `.message-group` padding: an others' group is
+    // `padding: 0 14px 0 6px` (the 32px avatar starts 6px from the edge), a
+    // self group is `padding: 0 14px` (`group-self`, row-reversed, no avatar).
     return Padding(
-      padding: EdgeInsets.fromLTRB(14, widget.grouped ? 1 : 4, 14, 1),
+      padding: EdgeInsets.fromLTRB(
+        self ? 14 : 6,
+        widget.grouped ? 2 : 6,
+        14,
+        0,
+      ),
       child: row,
     );
   }
