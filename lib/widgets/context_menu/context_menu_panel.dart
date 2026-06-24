@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,17 +9,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/identity/nick_edit_modal.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_language_prompt.dart';
 import '../../features/zaps/zap_modal.dart';
 import '../../models/group.dart';
 import '../../models/message.dart';
+import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
 import 'context_menu_actions.dart';
+import 'group_context_menu_panel.dart';
 import 'interaction_hooks.dart';
+import 'profile_badges.dart';
 import 'report_modal.dart';
 
 /// The right-side `#contextMenu` slide-in panel (styles `.context-menu`,
@@ -39,11 +45,16 @@ class ContextMenuPanel extends ConsumerWidget {
     this.message,
     this.onReact,
     this.onTranslateInline,
+    this.backToGroupId,
   });
 
   final CtxTarget target;
   final Animation<double> animation;
   final VoidCallback onClose;
+
+  /// When set (or carried on [target]), a top-left "back" chevron returns to
+  /// that group's context menu (PWA `ctxBackToGroup`, ui-context.js:369-373).
+  final String? backToGroupId;
 
   /// The originating message (used to infer kind for reactions/zaps).
   final Message? message;
@@ -57,13 +68,17 @@ class ContextMenuPanel extends ConsumerWidget {
   final ValueChanged<String?>? onTranslateInline;
 
   /// Presents the panel in the root overlay with the slide-in transition.
+  /// [backToGroupId] (or `target.backToGroupId`) makes the panel show a back
+  /// chevron that returns to that group's context menu.
   static Future<void> show(
     BuildContext context, {
     required CtxTarget target,
     Message? message,
     VoidCallback? onReact,
     ValueChanged<String?>? onTranslateInline,
+    String? backToGroupId,
   }) {
+    final backGroup = backToGroupId ?? target.backToGroupId;
     return showGeneralDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -81,6 +96,7 @@ class ContextMenuPanel extends ConsumerWidget {
               animation: anim,
               onReact: onReact,
               onTranslateInline: onTranslateInline,
+              backToGroupId: backGroup,
               onClose: () => Navigator.of(ctx).maybePop(),
             ),
           ),
@@ -119,6 +135,7 @@ class ContextMenuPanel extends ConsumerWidget {
       targetIsMember: targetIsMember,
       targetIsOwner: targetIsOwner,
       targetIsMod: targetIsMod,
+      backToGroupId: target.backToGroupId,
     );
   }
 
@@ -132,10 +149,13 @@ class ContextMenuPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
+    final controller = ref.read(nostrControllerProvider);
     final target = _enrichTarget(ref);
     final actions = buildContextMenuActions(target);
     final fullNym = '${target.nym}#${getPubkeySuffix(target.pubkey)}';
     final cosmetics = ref.watch(userCosmeticsProvider(target.pubkey));
+    final user = ref.watch(usersProvider)[target.pubkey];
+    final about = user?.profile?.about ?? '';
 
     final panel = Material(
       color: c.bgTertiary,
@@ -144,7 +164,39 @@ class ContextMenuPanel extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _header(context, c, fullNym, cosmetics),
+              _header(
+                context,
+                c,
+                target,
+                fullNym,
+                cosmetics,
+                user,
+                controller,
+                () => ref
+                    .read(appStateProvider.notifier)
+                    .addSystemMessage('Copied pubkey to clipboard'),
+              ),
+              // Bio block (`.context-menu-bio`) — sibling below the header, its
+              // own bottom border; collapses when empty (:empty).
+              if (about.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                          color: Colors.white.withValues(alpha: 0.06)),
+                    ),
+                  ),
+                  child: Text(
+                    about,
+                    style: TextStyle(
+                      color: c.textDim,
+                      fontSize: 13,
+                      height: 1.5,
+                    ),
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.all(6),
                 child: Column(
@@ -152,6 +204,7 @@ class ContextMenuPanel extends ConsumerWidget {
                   children: [
                     for (final a in actions)
                       _ActionItem(
+                        icon: ctxActionIcon(a),
                         label: ctxActionLabel(a, target),
                         color: _colorFor(a, c),
                         onTap: () => _invoke(context, ref, a, target, fullNym),
@@ -165,6 +218,12 @@ class ContextMenuPanel extends ConsumerWidget {
       ),
     );
 
+    // Width 320, clamped to 85vw on very narrow screens (`max-width:85vw`,
+    // styles-shell.css:611). The active panel carries a `-4px 0 24px` drop
+    // shadow for edge separation (F11).
+    final screenW = MediaQuery.of(context).size.width;
+    final panelW = math.min(320.0, screenW * 0.85);
+
     // translateX(100%) → 0 over 150ms (linear).
     return SlideTransition(
       position: Tween<Offset>(
@@ -172,15 +231,30 @@ class ContextMenuPanel extends ConsumerWidget {
         end: Offset.zero,
       ).animate(CurvedAnimation(parent: animation, curve: Curves.linear)),
       child: SizedBox(
-        width: 320,
+        width: panelW,
         height: double.infinity,
         child: Container(
           decoration: BoxDecoration(
             border: Border(left: BorderSide(color: c.glassBorder)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x66000000), // rgba(0,0,0,0.4)
+                blurRadius: 24,
+                offset: Offset(-4, 0),
+              ),
+            ],
           ),
           child: Stack(
             children: [
               panel,
+              // Back chevron (top-left) → return to the originating group menu
+              // (`.context-menu-back`, ui-context.js:369-373). Hidden otherwise.
+              if (backToGroupId != null)
+                Positioned(
+                  top: 14,
+                  left: 14,
+                  child: _backBtn(context, c, backToGroupId!),
+                ),
               Positioned(
                 top: 14,
                 right: 14,
@@ -196,10 +270,42 @@ class ContextMenuPanel extends ConsumerWidget {
   Widget _header(
     BuildContext context,
     NymColors c,
+    CtxTarget target,
     String fullNym,
     UserCosmetics cosmetics,
+    User? user,
+    NostrController controller,
+    VoidCallback onCopied,
   ) {
-    return Container(
+    final bannerUrl = proxiedAvatarUrl(user?.profile?.banner);
+    final hasBanner = bannerUrl != null && bannerUrl.isNotEmpty;
+    final avatarUrl = user?.profile?.picture;
+    final status = user?.effectiveStatus() ?? UserStatus.offline;
+    final isDeveloper = controller.isVerifiedDeveloper(target.pubkey);
+    final isBot = controller.isVerifiedBot(target.pubkey);
+    final showFriendBadge = target.isFriend && !target.isSelf;
+    // Owner/Mod label, only when viewing the target's group (ui-context.js:422).
+    final String? ownerModLabel = target.inGroup
+        ? (target.targetIsOwner
+            ? 'Group Owner'
+            : (target.targetIsMod ? 'Moderator' : null))
+        : null;
+
+    // Avatar — real picture (proxied/cached) with identicon fallback; a 3px
+    // rgba(20,20,35,0.95) ring when it overlaps the banner.
+    final avatar = Container(
+      decoration: hasBanner
+          ? const BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.fromBorderSide(
+                BorderSide(color: Color(0xF2141423), width: 3),
+              ),
+            )
+          : null,
+      child: NymAvatar(seed: target.pubkey, size: 64, imageUrl: avatarUrl),
+    );
+
+    final header = Container(
       padding: const EdgeInsets.fromLTRB(14, 16, 14, 14),
       decoration: BoxDecoration(
         border: Border(
@@ -208,8 +314,13 @@ class ContextMenuPanel extends ConsumerWidget {
       ),
       child: Column(
         children: [
-          NymAvatar(seed: target.pubkey, size: 64),
-          const SizedBox(height: 6),
+          // Without a banner the avatar sits at the top of the header; with a
+          // banner it is hoisted into the Stack overlap below.
+          if (!hasBanner) ...[
+            avatar,
+            const SizedBox(height: 6),
+          ],
+          // Nym row: base#suffix + flair/supporter + verified ✓ + friend badge.
           Row(
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
@@ -230,10 +341,64 @@ class ContextMenuPanel extends ConsumerWidget {
                 flairSize: 15,
                 supporterHeight: 15,
               ),
+              if (isDeveloper || isBot) ...[
+                const SizedBox(width: 4),
+                const VerifiedBadge(size: 16),
+              ],
+              if (showFriendBadge) ...[
+                const SizedBox(width: 2),
+                const FriendBadge(size: 16),
+              ],
             ],
           ),
+          // Dev / Bot text label (`.context-menu-dev-label`).
+          if (isDeveloper || isBot)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                isDeveloper ? 'Nymchat Developer' : 'Nymchat Bot',
+                style: TextStyle(
+                  color: c.textDim,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          // Group Owner / Moderator label (`.context-menu-owner-label`).
+          if (ownerModLabel != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                ownerModLabel,
+                style: TextStyle(
+                  color: c.secondary.withValues(alpha: 0.8),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          // Status row (`.ctx-status-row`): dot + word, hidden when status is
+          // hidden (ui-context.js:445-464).
+          if (status != UserStatus.hidden) ...[
+            const SizedBox(height: 6),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                StatusDot(status: status, size: 8),
+                const SizedBox(width: 6),
+                Text(
+                  _statusLabel(status),
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 6),
-          // Full pubkey block + Copy Pubkey.
+          // Full pubkey block — tap-to-select-all mono text (`.ctx-full-pubkey`,
+          // user-select:all).
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -242,7 +407,7 @@ class ContextMenuPanel extends ConsumerWidget {
               border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
               borderRadius: const BorderRadius.all(Radius.circular(6)),
             ),
-            child: Text(
+            child: SelectableText(
               target.pubkey,
               textAlign: TextAlign.center,
               style: TextStyle(
@@ -253,27 +418,69 @@ class ContextMenuPanel extends ConsumerWidget {
               ),
             ),
           ),
-          InkWell(
+          // Copy Pubkey — confirm + close (F12); hover tint (`.context-menu-copy-pubkey`).
+          _CopyPubkeyRow(
             onTap: () async {
               await Clipboard.setData(ClipboardData(text: target.pubkey));
+              // System-message confirmation (displaySystemMessage) + close.
+              onCopied();
+              onClose();
             },
-            borderRadius: const BorderRadius.all(Radius.circular(6)),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.copy, size: 12, color: c.textDim),
-                  const SizedBox(width: 4),
-                  Text('Copy Pubkey',
-                      style: TextStyle(color: c.textDim, fontSize: 11)),
-                ],
-              ),
-            ),
           ),
         ],
       ),
     );
+
+    if (!hasBanner) return header;
+
+    // Banner (`.context-menu-banner`: 140px, cover) with the avatar straddling
+    // its bottom edge (`margin-top:-36px`): the avatar is hoisted into a Stack
+    // so the header content below starts directly under it (no dead gap). The
+    // header carries extra top padding to clear the avatar's lower half.
+    const avatarBox = 70.0; // 64 + 3px ring on each side
+    final bannerHeader = Padding(
+      padding: EdgeInsets.only(top: avatarBox - 36),
+      child: header,
+    );
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: 140,
+              width: double.infinity,
+              child: CachedNetworkImage(
+                imageUrl: bannerUrl,
+                fit: BoxFit.cover,
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+            bannerHeader,
+          ],
+        ),
+        // Avatar centered on the banner/header seam (140 - 36 from the top).
+        Positioned(
+          top: 140 - 36,
+          left: 0,
+          right: 0,
+          child: Center(child: avatar),
+        ),
+      ],
+    );
+  }
+
+  String _statusLabel(UserStatus status) {
+    switch (status) {
+      case UserStatus.online:
+        return 'Online';
+      case UserStatus.away:
+        return 'Away';
+      case UserStatus.offline:
+      case UserStatus.hidden:
+        return 'Offline';
+    }
   }
 
   Widget _closeBtn(NymColors c) {
@@ -289,6 +496,37 @@ class ContextMenuPanel extends ConsumerWidget {
           border: Border.all(color: c.glassBorder),
         ),
         child: Icon(Icons.close, size: 16, color: c.textDim),
+      ),
+    );
+  }
+
+  /// `.context-menu-back` chevron — pops this panel and re-opens the originating
+  /// group context menu (PWA `ctxBackToGroup`: closeContextMenu →
+  /// showGroupContextMenu(groupId)).
+  Widget _backBtn(BuildContext context, NymColors c, String groupId) {
+    return InkWell(
+      onTap: () {
+        // Capture the root navigator's (stable) context before popping — this
+        // panel's own context is defunct after onClose().
+        final rootContext =
+            Navigator.of(context, rootNavigator: true).context;
+        onClose();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (rootContext.mounted) {
+            GroupContextMenuPanel.show(rootContext, groupId);
+          }
+        });
+      },
+      borderRadius: const BorderRadius.all(Radius.circular(16)),
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: Icon(Icons.chevron_left, size: 20, color: c.textDim),
       ),
     );
   }
@@ -360,6 +598,16 @@ class ContextMenuPanel extends ConsumerWidget {
             context,
             targetNym: fullNym,
             hasMessage: t.messageId != null,
+            // Build + sign + publish the NIP-56 kind-1984 report (F2). When
+            // "report specific message" is checked we attach the `e` tag.
+            onSubmit: (type, details, reportMessage) {
+              controller.submitReport(
+                pubkey: t.pubkey,
+                messageId: reportMessage ? t.messageId : null,
+                type: type,
+                details: details,
+              );
+            },
           );
         }
         break;
@@ -399,15 +647,18 @@ class ContextMenuPanel extends ConsumerWidget {
         break;
       case CtxAction.giftCredits:
         // ui-context.js:102-107 "Gift Nymbot Credits" → showBotCreditsModal.
-        // The bot-credits modal is owned by another slice and has no controller
-        // entry point reachable here yet; close the menu (documented deferral in
-        // docs/audit/05-commands-format-interactions.md).
+        // Post the recipient to the gift-credits mailbox; the nymbot slice opens
+        // its gift-credit modal (CROSS-FILE NEED — see giftCreditsRequestProvider).
         onClose();
+        ref
+            .read(giftCreditsRequestProvider.notifier)
+            .request(pubkey: t.pubkey, nym: t.nym);
         break;
       case CtxAction.editProfile:
-        // ui-context.js:587-594 "Edit Profile" → editNick(). The profile editor
-        // is owned by another slice; close the menu (documented deferral).
+        // ui-context.js:587-594 "Edit Profile" → editNick(). Open the nick/
+        // profile editor modal directly (its public entry point).
         onClose();
+        if (context.mounted) await NickEditModal.open(context);
         break;
       case CtxAction.edit:
         // Own message: prompt for the new content, then editMessage.
@@ -606,13 +857,59 @@ class ContextMenuPanel extends ConsumerWidget {
   }
 }
 
-/// `.context-menu-item`: 10×14 padding, radius 8, hover tint.
+/// `.context-menu-copy-pubkey`: 3×8 padding, radius 6, hover `rgba(255,255,255,
+/// 0.08)` bg + primary text; copy glyph + label. Confirms + closes on tap (F12).
+class _CopyPubkeyRow extends StatefulWidget {
+  const _CopyPubkeyRow({required this.onTap});
+  final Future<void> Function() onTap;
+
+  @override
+  State<_CopyPubkeyRow> createState() => _CopyPubkeyRowState();
+}
+
+class _CopyPubkeyRowState extends State<_CopyPubkeyRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final color = _hover ? c.primary : c.textDim;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => widget.onTap(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            borderRadius: const BorderRadius.all(Radius.circular(6)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.copy, size: 12, color: color),
+              const SizedBox(width: 2),
+              Text('Copy Pubkey', style: TextStyle(color: color, fontSize: 11)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.context-menu-item`: 10×14 padding, radius 8, hover tint, leading 16px icon.
 class _ActionItem extends StatefulWidget {
   const _ActionItem({
+    required this.icon,
     required this.label,
     required this.color,
     required this.onTap,
   });
+  final IconData icon;
   final String label;
   final Color color;
   final VoidCallback onTap;
@@ -626,6 +923,11 @@ class _ActionItemState extends State<_ActionItem> {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.nym;
+    // Neutral rows show a dimmed icon; colored rows (danger/lightning/warning)
+    // tint the icon to match the label (mirrors the PWA's `currentColor` SVGs).
+    final iconColor =
+        widget.color == c.text ? c.textDim : widget.color;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -638,13 +940,21 @@ class _ActionItemState extends State<_ActionItem> {
             color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
             borderRadius: NymRadius.rxs,
           ),
-          child: Text(
-            widget.label,
-            style: TextStyle(
-              color: widget.color,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-            ),
+          child: Row(
+            children: [
+              Icon(widget.icon, size: 16, color: iconColor),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(
+                    color: widget.color,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
+import '../../widgets/context_menu/interaction_hooks.dart';
+import 'bot_credits_modal.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
 
@@ -31,6 +35,21 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
 
+  /// The free, local `?help` guide (PWA `_displayBotPmHelp`). Listed so users
+  /// can discover every PM command without being billed.
+  static const String _botHelpText =
+      'Nymbot commands (free):\n'
+      '?help — this guide\n'
+      '?balance — your standard & Pro credit balances\n'
+      '?buy — purchase credits over Lightning (Standard/Pro)\n'
+      '?gift @nym#xxxx — gift credits to another user\n'
+      '?transfer @nym#xxxx confirm — move ALL credits to another pubkey\n'
+      '?model [name|off] — pick a Pro frontier model (or standard routing)\n'
+      '?git — connect a repo so Pro replies can read/commit code\n'
+      '?clear — wipe this chat and start fresh\n\n'
+      'Just type normally to chat. Start a message with ! for a one-off answer '
+      'that ignores history. Quote-reply a message to ask a follow-up about it.';
+
   @override
   void initState() {
     super.initState();
@@ -54,6 +73,20 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   Widget build(BuildContext context) {
     final c = _colors(context);
     final state = ref.watch(botChatControllerProvider);
+
+    // Observe the gift-credits mailbox the context menu writes to
+    // (`giftCreditsRequestProvider`, interaction_hooks.dart). When a "Gift
+    // Nymbot Credits" request arrives, open the gift-credit modal prefilled with
+    // the recipient, then consume the request (PWA `showBotCreditsModal`).
+    ref.listen<GiftCreditsRequest?>(giftCreditsRequestProvider, (prev, next) {
+      if (next == null) return;
+      // Consume immediately so a rebuild can't re-open the modal.
+      ref.read(giftCreditsRequestProvider.notifier).consume();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _openGiftModal(next.pubkey, next.nym);
+      });
+    });
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -126,17 +159,12 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
 
   Widget _buildMessageList(NymColors c, BotChatState state) {
     if (state.messages.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Text(
-            'Private, end-to-end encrypted chat with Nymbot.\n'
-            'Standard replies are auto-routed (10 sats each); switch to Pro to '
-            'pin a frontier model.\n\nType ?help for the guide.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: c.textDim, fontSize: 13, height: 1.5),
-          ),
-        ),
+      // Rich welcome bubble from Nymbot (PWA `_botWelcomeHtml`), styled like an
+      // actual bot message with avatar + verified ✓ badge.
+      return ListView(
+        controller: _scroll,
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+        children: [_BotWelcomeBubble(colors: c)],
       );
     }
     return ListView.builder(
@@ -156,7 +184,7 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   // ---------------------------------------------------------------------------
 
   void _handleSubmit() {
-    final text = _input.text.trim();
+    var text = _input.text.trim();
     if (text.isEmpty) return;
     final ctrl = ref.read(botChatControllerProvider.notifier);
 
@@ -172,6 +200,24 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
         _showBuy(context);
         return;
       }
+      if (lower == '?help' || lower == '?commands') {
+        // `?help` is a free local guide — never billed (PWA `_displayBotPmHelp`,
+        // pms.js). When the chat is empty the rich welcome bubble already shows
+        // the guide, so just scroll to it; otherwise append a help bubble.
+        _input.clear();
+        if (ref.read(botChatControllerProvider).messages.isEmpty) {
+          _scrollToTop();
+        } else {
+          ctrl.addBotInfo(_botHelpText);
+          _scrollToBottom();
+        }
+        return;
+      }
+      if (lower == '?clear') {
+        _input.clear();
+        ctrl.clearHistory();
+        return;
+      }
       if (lower.startsWith('?model')) {
         final arg = text.substring(6).trim();
         _input.clear();
@@ -180,6 +226,21 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
         } else {
           ctrl.setModel(arg);
         }
+        return;
+      }
+      if (lower.startsWith('?gift')) {
+        // `?gift @nym#xxxx` — resolve the nym, then open the gift-credit modal
+        // prefilled with the recipient (PWA `_handleBotPM` ?gift branch,
+        // pms.js:2426-2441 → showBotCreditsModal({pubkey, nym})).
+        _input.clear();
+        _handleGiftCommand(text);
+        return;
+      }
+      if (lower.startsWith('?transfer')) {
+        // `?transfer @nym [confirm]` — confirm flow that moves ALL credits to
+        // another pubkey (PWA `_handleBotTransferCommand`, pms.js:1919).
+        _input.clear();
+        _handleTransferCommand(text);
         return;
       }
       if (lower.startsWith('?git')) {
@@ -196,9 +257,173 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       }
     }
 
+    // A leading `!` marks a one-off "fresh" message that ignores history
+    // (PWA: `send(..., fresh:true)`).
+    var fresh = false;
+    if (text.startsWith('!')) {
+      fresh = true;
+      text = text.substring(1).trim();
+      if (text.isEmpty) return;
+    }
+
     _input.clear();
-    ctrl.send(text);
+    ctrl.send(text, fresh: fresh);
     _scrollToBottom();
+  }
+
+  void _scrollToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(0,
+            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gift / transfer (PWA `_handleBotPM` ?gift + `_handleBotTransferCommand`)
+  // ---------------------------------------------------------------------------
+
+  /// Opens the gift-credit modal prefilled with [pubkey]/[nym] (PWA
+  /// `showBotCreditsModal({pubkey, nym})`). Pro tier is preselected when a Pro
+  /// model is currently pinned, matching the buy path.
+  void _openGiftModal(String pubkey, String nym) {
+    final state = ref.read(botChatControllerProvider);
+    BotCreditsModal.show(
+      context,
+      colors: _colors(context),
+      giftRecipientPubkey: pubkey,
+      giftRecipientNym: nym,
+      initialTier: state.isPro ? CreditTier.pro : CreditTier.standard,
+    );
+  }
+
+  /// Resolves a `?gift`/`?transfer` argument to a pubkey, mirroring the PWA's
+  /// `resolvePubkeyFromNym` priority: a 64-char hex pubkey is used directly;
+  /// otherwise the users map is matched by `base#suffix` then by base nym
+  /// (case-insensitive). Returns null when nothing matches.
+  String? _resolvePubkeyFromNym(String arg) {
+    final raw = arg.trim().replaceFirst(RegExp(r'^@'), '');
+    if (raw.isEmpty) return null;
+    if (RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(raw)) {
+      return raw.toLowerCase();
+    }
+    final users = ref.read(usersProvider);
+    final needle = raw.toLowerCase();
+    // Exact base#suffix match first.
+    for (final entry in users.entries) {
+      final full =
+          '${stripPubkeySuffix(entry.value.nym)}#${getPubkeySuffix(entry.key)}';
+      if (full.toLowerCase() == needle) return entry.key;
+    }
+    // Then a bare base-nym match (first hit).
+    for (final entry in users.entries) {
+      if (stripPubkeySuffix(entry.value.nym).toLowerCase() == needle) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  /// `?gift @nym#xxxx` — resolves the recipient and opens the gift modal, or
+  /// surfaces the PWA's usage / not-found guidance (pms.js:2426-2441).
+  void _handleGiftCommand(String text) {
+    final ctrl = ref.read(botChatControllerProvider.notifier);
+    final arg = text.replaceFirst(RegExp(r'^\?gift\b', caseSensitive: false), '').trim();
+    if (arg.isEmpty) {
+      ctrl.addBotInfo(
+          'Usage: ?gift @nym#xxxx — gift Nymbot credits to another user.');
+      return;
+    }
+    final pubkey = _resolvePubkeyFromNym(arg);
+    if (pubkey == null) {
+      ctrl.addBotInfo(
+          'Could not find user "${arg.replaceFirst(RegExp(r'^@'), '')}". '
+          'Try ?gift with their full nym (e.g. ?gift @cyber_wolf#a3f2).');
+      return;
+    }
+    final user = ref.read(usersProvider)[pubkey];
+    final nym = stripPubkeySuffix(user?.nym ?? pubkey.substring(0, 8));
+    _openGiftModal(pubkey, nym);
+  }
+
+  /// `?transfer @nym [confirm]` — confirm-gated transfer of ALL credits to
+  /// another pubkey (PWA `_handleBotTransferCommand`, pms.js:1919).
+  Future<void> _handleTransferCommand(String text) async {
+    final ctrl = ref.read(botChatControllerProvider.notifier);
+    final raw =
+        text.replaceFirst(RegExp(r'^\?transfer\b', caseSensitive: false), '').trim();
+    final parts = raw.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    final confirming =
+        parts.isNotEmpty && parts.last.toLowerCase() == 'confirm';
+    final targetArg = (confirming ? parts.sublist(0, parts.length - 1) : parts)
+        .join(' ')
+        .trim()
+        .replaceFirst(RegExp(r'^@'), '');
+    if (targetArg.isEmpty) {
+      ctrl.addBotInfo(
+          'Usage: ?transfer @nym#xxxx or ?transfer <hex pubkey> — moves your '
+          'entire Nymbot credit balance to another pubkey. Append "confirm" to '
+          'execute (e.g. ?transfer @friend#a1b2 confirm).');
+      return;
+    }
+    final targetPubkey = _resolvePubkeyFromNym(targetArg);
+    if (targetPubkey == null) {
+      ctrl.addBotInfo(
+          'Could not resolve "$targetArg". Try ?transfer with a full nym '
+          '(e.g. ?transfer @friend#a1b2 confirm) or a 64-char hex pubkey.');
+      return;
+    }
+    final selfPubkey = ref.read(nostrControllerProvider).identity?.pubkey;
+    if (targetPubkey == selfPubkey) {
+      ctrl.addBotInfo("You can't transfer credits to your own pubkey.");
+      return;
+    }
+    final user = ref.read(usersProvider)[targetPubkey];
+    final targetNym = stripPubkeySuffix(user?.nym ?? targetPubkey.substring(0, 8));
+    final suffix = getPubkeySuffix(targetPubkey);
+
+    if (!confirming) {
+      final b = ref.read(botChatControllerProvider).balance;
+      if (b.balance <= 0 && b.proBalance <= 0) {
+        ctrl.addBotInfo('You have no Nymbot credits to transfer.');
+        return;
+      }
+      final segs = <String>[];
+      if (b.balance > 0) {
+        segs.add('${b.balance} credit${b.balance == 1 ? '' : 's'}');
+      }
+      if (b.proBalance > 0) {
+        segs.add('${b.proBalance} Pro credit${b.proBalance == 1 ? '' : 's'}');
+      }
+      ctrl.addBotInfo(
+          'Transfer ALL ${segs.join(' and ')} to @$targetNym? This empties your '
+          'balance. To confirm, type: ?transfer @$targetNym#$suffix confirm');
+      return;
+    }
+
+    // Confirmed: run the transfer.
+    final res = await ctrl.transferCredits(targetPubkey);
+    if (res == null) {
+      ctrl.addBotInfo('Transfer failed. Please try again.');
+      return;
+    }
+    if (res['error'] != null) {
+      ctrl.addBotInfo('Transfer failed: ${res['error']}');
+      return;
+    }
+    final moved = <String>[];
+    final transferred = (res['transferred'] as num?)?.toInt() ?? 0;
+    final proTransferred = (res['proTransferred'] as num?)?.toInt() ?? 0;
+    if (transferred > 0) {
+      moved.add('$transferred credit${transferred == 1 ? '' : 's'}');
+    }
+    if (proTransferred > 0) {
+      moved.add('$proTransferred Pro credit${proTransferred == 1 ? '' : 's'}');
+    }
+    ctrl.addBotInfo(
+        'Transferred ${moved.isEmpty ? '0 credits' : moved.join(' and ')} to '
+        '@$targetNym. Your balance is now 0.');
   }
 
   void _scrollToBottom() {
@@ -298,11 +523,13 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   }
 
   void _showBuy(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: _colors(context).bgSecondary,
-      builder: (_) => _BuyModal(colors: _colors(context)),
+    // Buy mode of the shared credits modal (PWA: same modal as gift, no
+    // recipient). Pro tier preselected when a Pro model is pinned.
+    final state = ref.read(botChatControllerProvider);
+    BotCreditsModal.show(
+      context,
+      colors: _colors(context),
+      initialTier: state.isPro ? CreditTier.pro : CreditTier.standard,
     );
   }
 
@@ -350,8 +577,9 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
               ListTile(
                 leading: Icon(Icons.bolt, color: c.primary),
                 title: Text(m.label, style: TextStyle(color: c.text)),
+                // PWA `?model` list: the human price-range phrase, not the id.
                 subtitle: Text(
-                    '${m.modelId} · base ${m.baseCredits} cr',
+                    m.priceLabel,
                     style: TextStyle(color: c.textDim, fontSize: 11)),
                 trailing: current?.key == m.key
                     ? Icon(Icons.check, color: c.primary)
@@ -418,21 +646,21 @@ class _TierSwitch extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _segment('Standard', !isPro, onTapStandard, c, c.blue),
+          // PWA `.bot-credit-tier-btn.active`: both segments use the lightning
+          // accent (orange) — fill @0.12, border @0.5, text --lightning bold.
+          _segment('Standard', !isPro, onTapStandard, c),
           _segment(
             isPro && proLabel != null ? 'Pro · $proLabel' : 'Pro',
             isPro,
             onTapPro,
             c,
-            c.primary,
           ),
         ],
       ),
     );
   }
 
-  Widget _segment(
-      String label, bool active, VoidCallback onTap, NymColors c, Color accent) {
+  Widget _segment(String label, bool active, VoidCallback onTap, NymColors c) {
     return Expanded(
       child: GestureDetector(
         onTap: onTap,
@@ -440,18 +668,22 @@ class _TierSwitch extends StatelessWidget {
           duration: const Duration(milliseconds: 150),
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: active ? accent.withValues(alpha: 0.18) : Colors.transparent,
+            color: active
+                ? c.lightning.withValues(alpha: 0.12)
+                : Colors.white.withValues(alpha: 0.04),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-                color: active ? accent : Colors.transparent, width: 1),
+              color: active ? c.lightning.withValues(alpha: 0.5) : c.border,
+              width: 1,
+            ),
           ),
           child: Text(
             label,
             textAlign: TextAlign.center,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: active ? c.textBright : c.textDim,
-              fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+              color: active ? c.lightning : c.textDim,
+              fontWeight: active ? FontWeight.w700 : FontWeight.w400,
               fontSize: 13,
             ),
           ),
@@ -530,6 +762,186 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
+// =============================================================================
+// Rich welcome bubble (empty-state) — PWA `_botWelcomeHtml`
+// =============================================================================
+
+/// The premium-bot intro, rendered as a non-`fromUser` bubble with the bot
+/// avatar (🤖), name, and verified ✓ badge. Copy ported verbatim from the PWA
+/// `_botWelcomeHtml` (pms.js:1707-1728); `**bold**` and `` `code` `` markers are
+/// rendered inline (code spans as monospace pills).
+class _BotWelcomeBubble extends StatelessWidget {
+  const _BotWelcomeBubble({required this.colors});
+  final NymColors colors;
+
+  /// One line of the welcome copy. A leading `• ` marks a bullet row.
+  static const List<String> _lines = [
+    "Hey, I'm **Nymbot** 👋 — your private, end-to-end encrypted 1:1 AI assistant.",
+    '',
+    "I'm smarter than the free public-channel bot. I read each message, figure out the type of task (coding, reasoning/math, creative writing, translation, or general chat) and route it to the best AI model for the job — so my answers are sharper.",
+    '',
+    "**Here's how to get the most out of me:**",
+    '• `?help` — full guide to premium vs Pro, the git repo integration, and every command (free).',
+    '• Just type normally — I use our whole conversation as context.',
+    '• Start a message with `!` to get a one-off answer that ignores all earlier chat history (e.g. `!what is 2+2`).',
+    "• Quote-reply any message to ask a follow-up about it — I'll see what you're replying to.",
+    '• `?clear` — wipe this chat and start fresh.',
+    '• `?balance` — check your credit balance (also shown in the header).',
+    '• `?buy` — purchase more credits. `?gift @nym#xxxx` — gift credits to someone.',
+    '• `?model` — go **Pro**: pick a specific frontier model (Claude Fable 5, Claude Opus/Sonnet/Haiku, GPT-5.1, Codex) for every reply, paid with separate Pro credits.',
+    '• `?git` — connect a git repo (GitHub, GitLab, Gitea/Codeberg) so Pro replies read your actual code and can even commit, branch, and open PRs — like a chat-based coding agent.',
+    '• `?transfer @nym#xxxx confirm` — move ALL your credits to another pubkey (great for switching nyms).',
+    '',
+    '**Pricing:** general chat, creative writing, and translation replies cost **1 credit**. Coding and reasoning/math replies cost **2 credits** (they use larger models). Pro replies start at **1–2 Pro credits** and scale with reply length (each model\'s range is in `?model`). Credits are tied to your nym — save your nsec so you don\'t lose them.',
+    '',
+    'So, what can I help you with?',
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final c = colors;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.9,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Author row: avatar + "Nymbot" + verified ✓ badge.
+            Padding(
+              padding: const EdgeInsets.only(left: 4, bottom: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircleAvatar(
+                    radius: 11,
+                    backgroundColor: c.purple.withValues(alpha: 0.2),
+                    child: const Text('🤖', style: TextStyle(fontSize: 11)),
+                  ),
+                  const SizedBox(width: 6),
+                  Text('Nymbot',
+                      style: TextStyle(
+                          color: c.secondary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 4),
+                  _VerifiedBadge(colors: c),
+                ],
+              ),
+            ),
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: c.bgSecondary,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: c.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final line in _lines) _line(c, line),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _line(NymColors c, String raw) {
+    if (raw.isEmpty) return const SizedBox(height: 8);
+    final bullet = raw.startsWith('• ');
+    final text = bullet ? raw.substring(2) : raw;
+    final body = Text.rich(
+      _inlineSpans(c, text),
+      style: TextStyle(color: c.text, fontSize: 13.5, height: 1.45),
+    );
+    if (!bullet) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 2),
+        child: body,
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('•  ', style: TextStyle(color: c.textDim, fontSize: 13.5)),
+          Expanded(child: body),
+        ],
+      ),
+    );
+  }
+
+  /// Renders `**bold**` and `` `code` `` runs inline. Code runs become a
+  /// monospace pill (bgTertiary fill, secondary-tinted text).
+  TextSpan _inlineSpans(NymColors c, String text) {
+    final spans = <InlineSpan>[];
+    final re = RegExp(r'\*\*(.+?)\*\*|`([^`]+)`');
+    var last = 0;
+    for (final m in re.allMatches(text)) {
+      if (m.start > last) {
+        spans.add(TextSpan(text: text.substring(last, m.start)));
+      }
+      if (m.group(1) != null) {
+        spans.add(TextSpan(
+          text: m.group(1),
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ));
+      } else {
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            margin: const EdgeInsets.symmetric(horizontal: 1),
+            decoration: BoxDecoration(
+              color: c.bgTertiary,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(color: c.border),
+            ),
+            child: Text(
+              m.group(2)!,
+              style: TextStyle(
+                color: c.secondary,
+                fontSize: 12,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ));
+      }
+      last = m.end;
+    }
+    if (last < text.length) {
+      spans.add(TextSpan(text: text.substring(last)));
+    }
+    return TextSpan(children: spans);
+  }
+}
+
+/// The Nymchat verified-bot ✓ badge (a small primary check chip).
+class _VerifiedBadge extends StatelessWidget {
+  const _VerifiedBadge({required this.colors});
+  final NymColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = colors;
+    return Container(
+      width: 14,
+      height: 14,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle),
+      child: Icon(Icons.check, size: 10, color: c.bg),
+    );
+  }
+}
+
 /// The collapsed "💭 Reasoning" section. Tap to expand/collapse.
 class _ReasoningSection extends StatefulWidget {
   const _ReasoningSection({required this.reasoning, required this.colors});
@@ -547,51 +959,64 @@ class _ReasoningSectionState extends State<_ReasoningSection> {
   @override
   Widget build(BuildContext context) {
     final c = widget.colors;
+    // PWA `.bot-think`: secondary @8% fill, 1px glass border + a 3px primary
+    // @45% left accent bar, --radius-xs (8).
+    final side = BorderSide(color: c.glassBorder);
     return Container(
-      margin: const EdgeInsets.only(top: 6, bottom: 2),
+      margin: const EdgeInsets.only(top: 2, bottom: 8),
       decoration: BoxDecoration(
-        color: c.bgTertiary,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: c.border),
+        color: c.secondary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border(
+          top: side,
+          right: side,
+          bottom: side,
+          left: BorderSide(color: c.primary.withValues(alpha: 0.45), width: 3),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           InkWell(
             onTap: () => setState(() => _expanded = !_expanded),
-            borderRadius: BorderRadius.circular(10),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text('💭', style: TextStyle(fontSize: 13)),
+                  // Rotating ▸ marker (rotates 90° when open).
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 250),
+                    turns: _expanded ? 0.25 : 0,
+                    child: Text('▸',
+                        style: TextStyle(color: c.textDim, fontSize: 12)),
+                  ),
                   const SizedBox(width: 6),
+                  const Text('💭', style: TextStyle(fontSize: 13)),
+                  const SizedBox(width: 4),
                   Text('Reasoning',
                       style: TextStyle(
                           color: c.textDim,
                           fontSize: 12,
                           fontWeight: FontWeight.w600)),
-                  const SizedBox(width: 4),
-                  Icon(
-                    _expanded ? Icons.expand_less : Icons.expand_more,
-                    size: 16,
-                    color: c.textDim,
-                  ),
                 ],
               ),
             ),
           ),
           if (_expanded)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-              child: Text(
-                widget.reasoning,
-                style: TextStyle(
-                    color: c.textDim,
-                    fontSize: 12,
-                    height: 1.4,
-                    fontStyle: FontStyle.italic),
+            // `.bot-think-body`: italic dim, capped at 320px with its own scroll.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                child: Text(
+                  widget.reasoning,
+                  style: TextStyle(
+                      color: c.textDim,
+                      fontSize: 12,
+                      height: 1.5,
+                      fontStyle: FontStyle.italic),
+                ),
               ),
             ),
         ],
@@ -626,7 +1051,7 @@ class _TypingDots extends StatelessWidget {
 // Composer
 // =============================================================================
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.colors,
@@ -640,262 +1065,169 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSubmit;
 
   @override
-  Widget build(BuildContext context) {
-    final c = colors;
-    return SafeArea(
-      top: false,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        decoration: BoxDecoration(
-          color: c.bgSecondary,
-          border: Border(top: BorderSide(color: c.border)),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                minLines: 1,
-                maxLines: 5,
-                style: TextStyle(color: c.text, fontSize: 14),
-                onSubmitted: (_) => onSubmit(),
-                textInputAction: TextInputAction.send,
-                decoration: InputDecoration(
-                  hintText: 'Message Nymbot…  (try ?help)',
-                  hintStyle: TextStyle(color: c.textDim),
-                  filled: true,
-                  fillColor: c.bgTertiary,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(20),
-                    borderSide: BorderSide(color: c.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(20),
-                    borderSide: BorderSide(color: c.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(20),
-                    borderSide: BorderSide(color: c.primary),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.filled(
-              onPressed: sending ? null : onSubmit,
-              icon: const Icon(Icons.send, size: 18),
-              style: IconButton.styleFrom(backgroundColor: c.primary),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  State<_Composer> createState() => _ComposerState();
 }
 
-// =============================================================================
-// Buy modal (Standard / Pro switch + invoice QR placeholder)
-// =============================================================================
-
-class _BuyModal extends ConsumerStatefulWidget {
-  const _BuyModal({required this.colors});
-  final NymColors colors;
+class _ComposerState extends State<_Composer> {
+  /// The currently-filtered `?…` suggestions (empty → palette hidden).
+  List<BotPMCommand> _suggestions = const [];
 
   @override
-  ConsumerState<_BuyModal> createState() => _BuyModalState();
-}
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTextChanged);
+  }
 
-class _BuyModalState extends ConsumerState<_BuyModal> {
-  CreditTier _tier = CreditTier.standard;
-  int _amountSats = 1000;
-  BotInvoice? _invoice;
-  bool _loading = false;
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTextChanged);
+    super.dispose();
+  }
 
-  static const _presets = [1000, 5000, 10000, 25000];
+  void _onTextChanged() {
+    final text = widget.controller.text;
+    final next = text.startsWith('?')
+        ? filterBotPMCommands(text)
+        : const <BotPMCommand>[];
+    if (!_sameCommands(next, _suggestions)) {
+      setState(() => _suggestions = next);
+    }
+  }
+
+  /// Cheap equality on the (small) suggestion lists, by command name+order.
+  bool _sameCommands(List<BotPMCommand> a, List<BotPMCommand> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].name != b[i].name) return false;
+    }
+    return true;
+  }
+
+  void _pick(BotPMCommand cmd) {
+    final text = '${cmd.name} ';
+    widget.controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+    // Re-filter so a multi-step command (e.g. `?git `) immediately surfaces its
+    // subcommands; a leaf command just hides the palette.
+    _onTextChanged();
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = widget.colors;
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 20,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-      ),
+    return SafeArea(
+      top: false,
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Buy credits',
-              style: TextStyle(
-                  color: c.textBright,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600)),
-          const SizedBox(height: 14),
-          // Standard / Pro switch.
-          _TierSwitch(
-            isPro: _tier == CreditTier.pro,
-            proLabel: null,
-            colors: c,
-            onTapStandard: () => setState(() {
-              _tier = CreditTier.standard;
-              _invoice = null;
-            }),
-            onTapPro: () => setState(() {
-              _tier = CreditTier.pro;
-              _invoice = null;
-            }),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            _tier == CreditTier.pro
-                ? 'Pro credits · 100 sats each'
-                : 'Standard credits · 10 sats each',
-            style: TextStyle(color: c.textDim, fontSize: 12),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final p in _presets)
-                ChoiceChip(
-                  label: Text('$p sats'),
-                  selected: _amountSats == p,
-                  onSelected: (_) => setState(() {
-                    _amountSats = p;
-                    _invoice = null;
-                  }),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '≈ ${(_amountSats / _tier.satsPerCredit).floor()} '
-            '${_tier == CreditTier.pro ? "Pro" : "standard"} credits',
-            style: TextStyle(color: c.textDim, fontSize: 12),
-          ),
-          const SizedBox(height: 16),
-          if (_invoice != null) ...[
-            _InvoiceView(invoice: _invoice!, colors: c),
-          ] else
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: _loading ? null : _createInvoice,
-                icon: _loading
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.bolt),
-                label: Text(_loading ? 'Creating invoice…' : 'Pay with Lightning'),
-              ),
+          if (_suggestions.isNotEmpty) _palette(c),
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            decoration: BoxDecoration(
+              color: c.bgSecondary,
+              border: Border(top: BorderSide(color: c.border)),
             ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: widget.controller,
+                    minLines: 1,
+                    maxLines: 5,
+                    style: TextStyle(color: c.text, fontSize: 14),
+                    onSubmitted: (_) => widget.onSubmit(),
+                    textInputAction: TextInputAction.send,
+                    decoration: InputDecoration(
+                      hintText: 'Message Nymbot…  (try ?help)',
+                      hintStyle: TextStyle(color: c.textDim),
+                      filled: true,
+                      fillColor: c.bgTertiary,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        borderSide: BorderSide(color: c.border),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        borderSide: BorderSide(color: c.border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                        borderSide: BorderSide(color: c.primary),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  onPressed: widget.sending ? null : widget.onSubmit,
+                  icon: const Icon(Icons.send, size: 18),
+                  style: IconButton.styleFrom(backgroundColor: c.primary),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
   }
 
-  Future<void> _createInvoice() async {
-    setState(() => _loading = true);
-    // TODO(verify): wire to NymbotService.buy via the controller once the
-    // identity/auth blob is bound. For now this builds the invoice through the
-    // controller, which no-ops (returns null) when unbound — the UI then shows a
-    // placeholder so the flow is reviewable without a live backend.
-    BotInvoice? inv;
-    try {
-      inv = await ref
-          .read(botChatControllerProvider.notifier)
-          .buy(_amountSats, _tier);
-    } catch (_) {
-      inv = null;
-    }
-    if (!mounted) return;
-    setState(() {
-      _loading = false;
-      _invoice = inv ??
-          BotInvoice(
-            // TODO(verify): placeholder invoice — replace with the real `pr`.
-            pr: 'lnbc${_amountSats}n1p...stub-invoice-bind-identity-to-buy',
-            invoiceId: 'stub',
-            tier: _tier,
-            amountSats: _amountSats,
+  /// The `#commandPalette` dropdown: `.command-item` rows (name w600 + desc),
+  /// the first row highlighted (`.command-item.selected`), bgTertiary surface.
+  Widget _palette(NymColors c) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      constraints: const BoxConstraints(maxHeight: 240),
+      decoration: BoxDecoration(
+        color: c.bgTertiary,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: c.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ListView.builder(
+        shrinkWrap: true,
+        padding: EdgeInsets.zero,
+        itemCount: _suggestions.length,
+        itemBuilder: (_, i) {
+          final cmd = _suggestions[i];
+          final selected = i == 0;
+          return InkWell(
+            onTap: () => _pick(cmd),
+            child: Container(
+              color: selected ? c.primary.withValues(alpha: 0.12) : null,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Text(cmd.name,
+                      style: TextStyle(
+                          color: c.text,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          fontFamily: 'monospace')),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      cmd.desc,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: c.textDim, fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           );
-    });
-  }
-}
-
-class _InvoiceView extends StatelessWidget {
-  const _InvoiceView({required this.invoice, required this.colors});
-  final BotInvoice invoice;
-  final NymColors colors;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = colors;
-    return Column(
-      children: [
-        // QR placeholder. TODO(verify): render a real QR for `invoice.pr` once a
-        // qr widget/dep is available in the shell.
-        Container(
-          width: 200,
-          height: 200,
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: c.border),
-          ),
-          alignment: Alignment.center,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.qr_code_2, size: 96, color: Colors.black87),
-              const SizedBox(height: 4),
-              const Text('Lightning invoice',
-                  style: TextStyle(color: Colors.black54, fontSize: 11)),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        SelectableText(
-          invoice.pr,
-          maxLines: 2,
-          style: TextStyle(
-              color: c.textDim, fontSize: 11, fontFamily: 'monospace'),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: () => Clipboard.setData(
-                    ClipboardData(text: invoice.pr)),
-                icon: const Icon(Icons.copy, size: 16),
-                label: const Text('Copy'),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: FilledButton.icon(
-                // TODO(verify): open the device wallet via lightning: URI.
-                onPressed: () {},
-                icon: const Icon(Icons.account_balance_wallet, size: 16),
-                label: const Text('Open wallet'),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Text('Waiting for payment…',
-            style: TextStyle(color: c.textDim, fontSize: 11)),
-      ],
+        },
+      ),
     );
   }
 }
+
+// (Buy modal is now the shared `BotCreditsModal` in bot_credits_modal.dart,
+// used for both `?buy` and `?gift`.)
 
 // =============================================================================
 // Git connect modal (provider + PAT + repo/branch)

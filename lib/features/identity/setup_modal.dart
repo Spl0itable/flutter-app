@@ -1,12 +1,16 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import 'dev_nsec_modal.dart';
 import 'nostr_login_modal.dart';
 
 /// First-run setup screen mirroring `#setupModal` (index.html 1257–1346).
@@ -15,9 +19,9 @@ import 'nostr_login_modal.dart';
 /// **Enter** to create an ephemeral identity, or opens the Nostr login. On
 /// success [onComplete] fires so the [BootGate] proceeds to the shell.
 ///
-/// Avatar/banner here are URL inputs (the Flutter port has no file picker in
-/// this flow yet — TODO(verify): the PWA uploads a file and hosts it; we accept
-/// an image URL and persist it the same way to `nym_avatar_url`/`nym_banner_url`).
+/// Avatar/banner are file pickers (`setupAvatarPreview` / `setupBannerPreview`,
+/// index.html:1285-1323): a preview, "Choose photo"/"Remove" buttons, and the
+/// picked local path is threaded through `saveProfile`'s upload→URL path.
 class SetupModal extends ConsumerStatefulWidget {
   const SetupModal({super.key, required this.onComplete});
 
@@ -30,27 +34,51 @@ class SetupModal extends ConsumerStatefulWidget {
 
 class _SetupModalState extends ConsumerState<SetupModal> {
   final _nymCtl = TextEditingController();
-  final _avatarCtl = TextEditingController();
-  final _bannerCtl = TextEditingController();
   final _bioCtl = TextEditingController();
+  String? _avatarPath;
+  String? _bannerPath;
   bool _busy = false;
 
   @override
   void dispose() {
     _nymCtl.dispose();
-    _avatarCtl.dispose();
-    _bannerCtl.dispose();
     _bioCtl.dispose();
     super.dispose();
   }
 
+  Future<void> _pickImage(bool avatar) async {
+    try {
+      final picker = ImagePicker();
+      final file = await picker.pickImage(source: ImageSource.gallery);
+      if (file == null || !mounted) return;
+      setState(() {
+        if (avatar) {
+          _avatarPath = file.path;
+        } else {
+          _bannerPath = file.path;
+        }
+      });
+    } catch (_) {
+      // Picker unavailable (e.g. tests / desktop) — silently ignore.
+    }
+  }
+
   Future<void> _enter() async {
     if (_busy) return;
+    final nym = _nymCtl.text.trim();
+
+    // Reserved nicknames ("Luxas") require the developer nsec before the name
+    // is allowed (index.html setup submit → isReservedNick, app.js:4766).
+    if (nym.isNotEmpty && isReservedNick(nym)) {
+      final verified = await DevNsecModal.open(context);
+      if (!mounted) return;
+      if (verified == null) return; // cancelled — don't proceed with the name
+    }
+
     setState(() => _busy = true);
 
     final kv = ref.read(keyValueStoreProvider);
     final controller = ref.read(nostrControllerProvider);
-    final nym = _nymCtl.text.trim();
 
     // Persist auto-ephemeral so future boots skip the modal (initializeNym).
     await kv.setBool(StorageKeys.autoEphemeral, true);
@@ -59,19 +87,22 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       await kv.setString(StorageKeys.customNick, nym);
     }
     final bio = _bioCtl.text.trim();
-    final avatar = _avatarCtl.text.trim();
-    final banner = _bannerCtl.text.trim();
+    final avatar = _avatarPath;
+    final banner = _bannerPath;
     if (bio.isNotEmpty) await kv.setString(StorageKeys.bio, bio);
-    if (avatar.isNotEmpty) await kv.setString(StorageKeys.avatarUrl, avatar);
-    if (banner.isNotEmpty) await kv.setString(StorageKeys.bannerUrl, banner);
+    if (avatar != null) await kv.setString(StorageKeys.avatarUrl, avatar);
+    if (banner != null) await kv.setString(StorageKeys.bannerUrl, banner);
 
     // The ephemeral keypair was already booted in main(); publish the chosen
     // profile so the nym + avatar/banner/bio land on relays (saveToNostrProfile).
+    // TODO(verify): the PWA uploads the picked file to a host and persists the
+    // returned URL; here we pass the local path through saveProfile's
+    // upload→URL path (same as nick_edit_modal).
     await controller.saveProfile(
       name: nym.isEmpty ? null : nym,
       about: bio.isEmpty ? null : bio,
-      picture: avatar.isEmpty ? null : avatar,
-      banner: banner.isEmpty ? null : banner,
+      picture: avatar,
+      banner: banner,
     );
 
     if (!mounted) return;
@@ -150,6 +181,7 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       controller: _nymCtl,
                       hint: 'Leave empty for random nickname',
                       maxLength: 20,
+                      showCounter: true,
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -159,13 +191,11 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                     const SizedBox(height: 16),
                     _label(c, 'Choose Your Avatar', optional: true),
                     const SizedBox(height: 6),
-                    _field(c,
-                        controller: _avatarCtl, hint: 'Image URL (optional)'),
+                    _avatarPicker(c),
                     const SizedBox(height: 16),
                     _label(c, 'Choose Your Banner', optional: true),
                     const SizedBox(height: 6),
-                    _field(c,
-                        controller: _bannerCtl, hint: 'Banner URL (optional)'),
+                    _bannerPicker(c),
                     const SizedBox(height: 16),
                     _label(c, 'Bio', optional: true),
                     const SizedBox(height: 6),
@@ -175,6 +205,7 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       hint: 'Tell people a bit about yourself...',
                       maxLength: 150,
                       maxLines: 3,
+                      showCounter: true,
                     ),
                     const SizedBox(height: 14),
                     Text(
@@ -263,11 +294,13 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     required String hint,
     int? maxLength,
     int maxLines = 1,
+    bool showCounter = false,
   }) {
-    return TextField(
+    final field = TextField(
       controller: controller,
       maxLength: maxLength,
       maxLines: maxLines,
+      onChanged: showCounter ? (_) => setState(() {}) : null,
       inputFormatters:
           maxLength == null ? null : [LengthLimitingTextInputFormatter(maxLength)],
       style: TextStyle(color: c.text, fontSize: 14),
@@ -286,6 +319,122 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         focusedBorder: OutlineInputBorder(
           borderRadius: NymRadius.rsm,
           borderSide: BorderSide(color: c.primary),
+        ),
+      ),
+    );
+    if (!showCounter || maxLength == null) return field;
+    // `.input-char-count` — warn at 80%, limit at 100% (updateFieldCharCount).
+    final len = controller.text.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        field,
+        Align(
+          alignment: Alignment.centerRight,
+          child: Text(
+            '$len/$maxLength',
+            style: TextStyle(
+              fontSize: 11,
+              color: len >= maxLength
+                  ? c.danger
+                  : (len >= maxLength * 0.8 ? c.warning : c.textDim),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// `setupAvatarPreview` (index.html:1285-1302) — 80×80 preview + Choose/Remove.
+  Widget _avatarPicker(NymColors c) {
+    return Row(
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            width: 80,
+            height: 80,
+            color: c.bg,
+            child: _avatarPath != null
+                ? Image.file(File(_avatarPath!), fit: BoxFit.cover)
+                : Icon(Icons.person_outline, color: c.textDim, size: 36),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Row(
+            children: [
+              _smallButton(c, 'Choose photo', () => _pickImage(true)),
+              if (_avatarPath != null) ...[
+                const SizedBox(width: 8),
+                _smallButton(c, 'Remove',
+                    () => setState(() => _avatarPath = null),
+                    danger: true),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// `setupBannerPreview` (index.html:1304-1323) — preview wrap + Choose/Remove
+  /// with a "No banner set" placeholder.
+  Widget _bannerPicker(NymColors c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          height: 80,
+          decoration: BoxDecoration(
+            color: c.bg,
+            borderRadius: NymRadius.rsm,
+            border: Border.all(color: c.glassBorder),
+            image: _bannerPath != null
+                ? DecorationImage(
+                    image: FileImage(File(_bannerPath!)), fit: BoxFit.cover)
+                : null,
+          ),
+          alignment: Alignment.center,
+          child: _bannerPath == null
+              ? Text('No banner set', style: TextStyle(color: c.textDim))
+              : null,
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _smallButton(c, 'Choose banner', () => _pickImage(false)),
+            if (_bannerPath != null) ...[
+              const SizedBox(width: 8),
+              _smallButton(
+                  c, 'Remove', () => setState(() => _bannerPath = null),
+                  danger: true),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _smallButton(NymColors c, String label, VoidCallback onTap,
+      {bool danger = false}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          borderRadius: NymRadius.rxs,
+          border: Border.all(
+            color: danger ? c.danger.withValues(alpha: 0.4) : c.glassBorder,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: danger ? c.danger : c.text,
+            fontSize: 12,
+          ),
         ),
       ),
     );

@@ -7,6 +7,7 @@
 // (splicing the chosen token back into the input) lives in the composer.
 
 import '../../core/utils/nym_utils.dart';
+import '../../features/globe/geo_projection.dart' show geohashBounds;
 import '../../models/channel.dart';
 import '../../models/user.dart';
 import '../emoji/custom_emoji.dart';
@@ -33,6 +34,7 @@ class MentionResult {
     required this.baseNym,
     required this.suffix,
     required this.status,
+    this.avatarUrl,
   });
 
   final String pubkey;
@@ -40,6 +42,10 @@ class MentionResult {
   final String baseNym;
   final String suffix;
   final UserStatus status;
+
+  /// Remote avatar URL (kind-0 `picture`) for the 18×18 row avatar
+  /// (`getAvatarUrl`, autocomplete.js:382). Null → identicon fallback.
+  final String? avatarUrl;
 
   /// The text inserted into the composer: `@base#suffix ` (note trailing space),
   /// matching `selectAutocomplete` (autocomplete.js:503).
@@ -86,6 +92,7 @@ List<MentionResult> queryMentions({
       baseNym: baseNym,
       suffix: suffix,
       status: status,
+      avatarUrl: user.profile?.picture,
     );
 
     final inChannel = user.channels.contains(currentChannelKey) ||
@@ -147,6 +154,7 @@ class ChannelResult {
     required this.isJoined,
     required this.isCurrent,
     required this.isGeohash,
+    this.location = '',
   });
 
   final String name;
@@ -155,8 +163,27 @@ class ChannelResult {
   final bool isCurrent;
   final bool isGeohash;
 
+  /// Human-readable place for geohash channels — the decoded-center coordinate
+  /// string (`getGeohashLocation`, geohash-globe.js:1256). Empty for named
+  /// channels or when the geohash can't be decoded.
+  final String location;
+
   /// Inserted text: `#name ` (insertChannelReference, autocomplete.js:684).
   String get insertText => '#$name ';
+}
+
+/// Decoded-center coordinate label for a geohash channel, ported 1:1 from the
+/// PWA's `getGeohashLocation` (geohash-globe.js:1256-1269): the center of the
+/// geohash cell rendered as `"{lat}°{N|S}, {lng}°{E|W}"` (2 decimals).
+/// Returns `''` when [geohash] is not a decodable geohash.
+String geohashLocationLabel(String geohash) {
+  final b = geohashBounds(geohash);
+  if (b == null) return '';
+  final lat = (b.latLo + b.latHi) / 2;
+  final lng = (b.lngLo + b.lngHi) / 2;
+  final latStr = '${lat.abs().toStringAsFixed(2)}°${lat >= 0 ? 'N' : 'S'}';
+  final lngStr = '${lng.abs().toStringAsFixed(2)}°${lng >= 0 ? 'E' : 'W'}';
+  return '$latStr, $lngStr';
 }
 
 final RegExp _validChannelRe = RegExp(r'^[\p{L}\p{N}]+$', unicode: true);
@@ -177,13 +204,15 @@ List<ChannelResult> queryChannels({
 
   // From messages we have (keys are bare channel names here).
   messageChannelCounts.forEach((name, count) {
+    final geo = isValidGeohash(name);
     map[name] = ChannelResult(
       name: name,
       messageCount: count,
       isJoined: joinedKeys.contains(name) ||
           channels.any((c) => c.key == name),
       isCurrent: name == currentKey,
-      isGeohash: isValidGeohash(name),
+      isGeohash: geo,
+      location: geo ? geohashLocationLabel(name) : '',
     );
   });
 
@@ -197,18 +226,21 @@ List<ChannelResult> queryChannels({
       isJoined: true,
       isCurrent: key == currentKey,
       isGeohash: ch.isGeohash,
+      location: ch.isGeohash ? geohashLocationLabel(key) : '',
     );
   }
 
   // From the seed common geohashes.
   for (final g in kCommonGeohashes) {
     if (map.containsKey(g)) continue;
+    final geo = isValidGeohash(g);
     map[g] = ChannelResult(
       name: g,
       messageCount: messageChannelCounts[g] ?? 0,
       isJoined: joinedKeys.contains(g) || channels.any((c) => c.key == g),
       isCurrent: g == currentKey,
-      isGeohash: isValidGeohash(g),
+      isGeohash: geo,
+      location: geo ? geohashLocationLabel(g) : '',
     );
   }
 

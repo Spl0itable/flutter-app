@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/constants/event_kinds.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/channels/channel_manager.dart';
+import '../features/emoji/custom_emoji.dart' show emojiPrefsProvider;
+import '../features/emoji/emoji_data.dart';
 import '../features/groups/group_logic.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
@@ -1246,6 +1248,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String? shopStyle,
     String? shopFlair,
     bool isSupporter = false,
+    List<String>? shopCosmetics,
+    int? shopEdition,
   }) {
     final u = state.users.putIfAbsent(
       pubkey,
@@ -1275,6 +1279,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.shopStyle = (shopStyle != null && shopStyle.isNotEmpty) ? shopStyle : null;
       u.shopFlair = (shopFlair != null && shopFlair.isNotEmpty) ? shopFlair : null;
       u.isSupporter = isSupporter;
+      // Special cosmetics + Genesis edition broadcast by other users
+      // (`active.cosmetics`/`active.editions`, shop.js:459-478).
+      u.shopCosmetics = shopCosmetics ?? const <String>[];
+      u.shopEdition = shopEdition;
     }
 
     state = state.copyWith();
@@ -1363,6 +1371,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (removed) state = state.copyWith();
     return removed;
   }
+
+  /// Idempotent blocked-user remover (settings "Blocked" list × button). Alias
+  /// of [unblockUser] under the shared API contract name.
+  void removeBlockedUser(String pubkey) => unblockUser(pubkey);
+
+  /// Idempotent hidden-channel remover (settings "Hidden" list). Alias of
+  /// [unhideChannel] under the shared API contract name.
+  void removeHiddenChannel(String key) => unhideChannel(key);
+
+  /// Idempotent blocked-channel remover (settings "Blocked Channels" list).
+  /// Alias of [unblockChannel] under the shared API contract name.
+  void removeBlockedChannel(String key) => unblockChannel(key);
 
   /// Toggles [pubkey]'s blocked state, returning the new state (true = blocked).
   bool toggleBlockUser(String pubkey) {
@@ -1700,6 +1720,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state = state.copyWith();
     return m;
   }
+
+  /// Injects a centered system/action pill into a conversation's message flow,
+  /// mirroring `displaySystemMessage(content, type)` (`messages.js:1511`). Routes
+  /// to [storageKey] when given, else the active view. Pass [action] for the
+  /// purple-italic `.action-message` variant. This is the in-list sink for
+  /// command feedback, P2P/call status, flood notices, etc.
+  void addSystemMessage(String content, {bool action = false, String? storageKey}) {
+    if (content.isEmpty) return;
+    final key = storageKey ?? state.view.storageKey;
+    final list = state.messages.putIfAbsent(key, () => <Message>[]);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    list.add(Message.system(content, action: action, createdAtMs: nowMs)
+      ..seq = _nextLocalSeq());
+    state = state.copyWith();
+  }
 }
 
 final appStateProvider =
@@ -1846,3 +1881,162 @@ final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
     ),
   );
 });
+
+// =============================================================================
+// Recent emojis (shared API contract). The current recents `List<String>` plus
+// `record(emoji)`, backed by the persisted [EmojiRecentsStore]. Consumed by the
+// quick-react popup, the emoji/reactions pickers, and the call reactions bar.
+// Mirrors reactions.js `addToRecentEmojis`/`loadRecentEmojis`.
+// =============================================================================
+
+class RecentEmojisNotifier extends StateNotifier<List<String>> {
+  RecentEmojisNotifier(this._ref) : super(const []) {
+    _hydrate();
+  }
+
+  final Ref _ref;
+  EmojiRecentsStore? _store;
+
+  Future<void> _hydrate() async {
+    try {
+      final prefs = await _ref.read(emojiPrefsProvider.future);
+      _store = EmojiRecentsStore(prefs);
+      final loaded = _store!.load();
+      if (mounted && loaded.isNotEmpty) state = loaded;
+    } catch (_) {
+      // Recents are best-effort; an unavailable store just yields empty recents.
+    }
+  }
+
+  /// Records [emoji] as the most-recent (dedupe + prepend + cap), updating the
+  /// in-memory list immediately and persisting in the background.
+  void record(String emoji) {
+    if (emoji.isEmpty) return;
+    state = addRecentEmoji(state, emoji);
+    final store = _store;
+    if (store != null) {
+      // Persist (the store re-derives from its own load, so just fire it).
+      store.add(emoji);
+    } else {
+      // Store not hydrated yet — hydrate, then persist this pick.
+      _persistWhenReady(emoji);
+    }
+  }
+
+  Future<void> _persistWhenReady(String emoji) async {
+    try {
+      final prefs = await _ref.read(emojiPrefsProvider.future);
+      _store = EmojiRecentsStore(prefs);
+      await _store!.add(emoji);
+    } catch (_) {}
+  }
+}
+
+/// The user's recent emojis (most-recent-first). Read the list directly;
+/// `ref.read(recentEmojisProvider.notifier).record(emoji)` to bump one.
+final recentEmojisProvider =
+    StateNotifierProvider<RecentEmojisNotifier, List<String>>(
+  (ref) => RecentEmojisNotifier(ref),
+);
+
+// =============================================================================
+// Notification history (shared API contract). A 24h-trimmed list of recent
+// notification entries with an unread count, mirroring the PWA's
+// `notificationHistory` (`notifications.js:5-114`). Fed by message notifications
+// and missed/declined calls; read by the shell bell badge + notifications modal.
+// =============================================================================
+
+/// One entry in the notification history.
+class NotificationEntry {
+  NotificationEntry({
+    required this.type,
+    required this.title,
+    required this.body,
+    required this.ts,
+    this.route,
+    this.viewed = false,
+  });
+
+  /// `'message' | 'mention' | 'reaction' | 'call' | 'pm' | 'group' | …`.
+  final String type;
+  final String title;
+  final String body;
+
+  /// Milliseconds since epoch.
+  final int ts;
+
+  /// An opaque route/target the UI can use to navigate on tap (e.g. a PM pubkey,
+  /// a channel key, or a group id). Null when not actionable.
+  final String? route;
+  bool viewed;
+}
+
+class NotificationHistoryState {
+  const NotificationHistoryState({this.entries = const [], this.unread = 0});
+
+  final List<NotificationEntry> entries;
+  final int unread;
+
+  NotificationHistoryState copyWith({
+    List<NotificationEntry>? entries,
+    int? unread,
+  }) =>
+      NotificationHistoryState(
+        entries: entries ?? this.entries,
+        unread: unread ?? this.unread,
+      );
+}
+
+class NotificationHistoryNotifier
+    extends StateNotifier<NotificationHistoryState> {
+  NotificationHistoryNotifier() : super(const NotificationHistoryState());
+
+  static const int _maxAgeMs = 24 * 60 * 60 * 1000; // 24h
+  static const int _cap = 100;
+
+  /// Records a notification, trimming entries older than 24h and capping the
+  /// list. Increments the unread count. Mirrors `showNotification`'s history
+  /// push + `_updateNotificationBadge` (`notifications.js:5-114`).
+  void record({
+    required String type,
+    required String title,
+    required String body,
+    String? route,
+    int? ts,
+  }) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final entry = NotificationEntry(
+      type: type,
+      title: title,
+      body: body,
+      ts: ts ?? now,
+      route: route,
+    );
+    final kept = [
+      entry,
+      ...state.entries.where((e) => now - e.ts < _maxAgeMs),
+    ];
+    if (kept.length > _cap) kept.removeRange(_cap, kept.length);
+    final unread = kept.where((e) => !e.viewed).length;
+    state = NotificationHistoryState(entries: kept, unread: unread);
+  }
+
+  /// Marks every entry viewed and zeroes the unread count (modal opened).
+  void markAllViewed() {
+    for (final e in state.entries) {
+      e.viewed = true;
+    }
+    state = state.copyWith(entries: List.of(state.entries), unread: 0);
+  }
+
+  /// Clears the history entirely.
+  void clear() => state = const NotificationHistoryState();
+}
+
+/// The notification history store. The shell reads `.unread` for the bell badge;
+/// the notifications modal reads `.entries`. Feed it via
+/// `ref.read(notificationHistoryProvider.notifier).record(...)`.
+final notificationHistoryProvider = StateNotifierProvider<
+    NotificationHistoryNotifier, NotificationHistoryState>(
+  (ref) => NotificationHistoryNotifier(),
+);

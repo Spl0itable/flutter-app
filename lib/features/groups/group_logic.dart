@@ -122,6 +122,12 @@ class GroupLogic {
   }
 
   /// Builds the bootstrap `group-invite` rumor for a freshly created group.
+  ///
+  /// The optional metadata tags (`avatar`, `banner`, `description`) are only
+  /// emitted when the group carries a non-empty value, byte-matching groups.js
+  /// `createGroup` (which pushes each tag only `if (groupAvatar)` etc., 1382-1384)
+  /// so the rumor shape stays identical to the PWA. `allow_invites` /
+  /// `invite_enabled` / `invite_epoch` are always present.
   static UnsignedEvent buildGroupInviteRumor({
     required Group group,
     required String selfPubkey,
@@ -131,12 +137,104 @@ class GroupLogic {
     int? nowSec,
   }) {
     final sec = nowSec ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final avatar = group.avatar;
+    final banner = group.banner;
+    final description = group.description;
     final tags = <List<String>>[
       for (final pk in group.members) ['p', pk],
       ['g', group.id],
       if (group.name.isNotEmpty) ['subject', group.name],
       ['type', GroupControlType.invite],
       ['owner', selfPubkey],
+      if (avatar != null && avatar.isNotEmpty) ['avatar', avatar],
+      if (banner != null && banner.isNotEmpty) ['banner', banner],
+      if (description != null && description.isNotEmpty)
+        ['description', description],
+      ['allow_invites', group.allowMemberInvites ? '1' : '0'],
+      ['invite_enabled', group.inviteEnabled ? '1' : '0'],
+      ['invite_epoch', '${group.inviteEpoch}'],
+      ['x', nymMessageId],
+      ['ephemeral_pk', ephemeralPk],
+    ];
+    return UnsignedEvent(
+      pubkey: selfPubkey,
+      createdAt: sec,
+      kind: EventKind.dmRumor,
+      tags: tags,
+      content: content,
+    );
+  }
+
+  /// Builds the owner-issued `group-metadata` rumor that propagates the group's
+  /// current name/avatar/banner/description + invite policy to the other members
+  /// (groups.js `_broadcastGroupMetadata`, 2102). Content is empty (it's a
+  /// control event, never a chat bubble). The banner/avatar/description tags are
+  /// always present (empty string clears the field, matching the PWA's
+  /// `group.banner || ''`). [createdAtSec] is the group's `metaUpdatedAt` so a
+  /// redelivered metadata event keeps its monotonic stamp; [recipients] should be
+  /// the other members (self is excluded by the caller).
+  static UnsignedEvent buildGroupMetadataRumor({
+    required Group group,
+    required String selfPubkey,
+    required List<String> recipients,
+    required String nymMessageId,
+    int? createdAtSec,
+  }) {
+    final sec = createdAtSec ??
+        (group.metaUpdatedAt > 0
+            ? group.metaUpdatedAt
+            : DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    final tags = <List<String>>[
+      for (final pk in recipients) ['p', pk],
+      ['g', group.id],
+      ['subject', group.name],
+      ['type', GroupControlType.metadata],
+      ['banner', group.banner ?? ''],
+      ['avatar', group.avatar ?? ''],
+      ['description', group.description ?? ''],
+      ['allow_invites', group.allowMemberInvites ? '1' : '0'],
+      ['invite_enabled', group.inviteEnabled ? '1' : '0'],
+      ['invite_epoch', '${group.inviteEpoch}'],
+      ['x', nymMessageId],
+    ];
+    return UnsignedEvent(
+      pubkey: selfPubkey,
+      createdAt: sec,
+      kind: EventKind.dmRumor,
+      tags: tags,
+      content: '',
+    );
+  }
+
+  /// Builds a `group-add-member` rumor announcing [group]'s (already-updated)
+  /// member list, carrying the full group metadata + owner/mod roster + the
+  /// adder's rotated [ephemeralPk] so the new members learn the group's
+  /// appearance and key state from the first wrap (groups.js `addMemberToGroup`,
+  /// 1457). [content] is the "X was added by Y." system line.
+  static UnsignedEvent buildAddMemberRumor({
+    required Group group,
+    required String selfPubkey,
+    required String nymMessageId,
+    required String ephemeralPk,
+    required String content,
+    int? nowSec,
+  }) {
+    final sec = nowSec ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final avatar = group.avatar;
+    final banner = group.banner;
+    final description = group.description;
+    final owner = group.createdBy;
+    final tags = <List<String>>[
+      for (final pk in group.members) ['p', pk],
+      ['g', group.id],
+      if (group.name.isNotEmpty) ['subject', group.name],
+      ['type', GroupControlType.addMember],
+      if (owner != null && owner.isNotEmpty) ['owner', owner],
+      for (final mod in group.mods) ['mod', mod],
+      if (avatar != null && avatar.isNotEmpty) ['avatar', avatar],
+      if (banner != null && banner.isNotEmpty) ['banner', banner],
+      if (description != null && description.isNotEmpty)
+        ['description', description],
       ['allow_invites', group.allowMemberInvites ? '1' : '0'],
       ['invite_enabled', group.inviteEnabled ? '1' : '0'],
       ['invite_epoch', '${group.inviteEpoch}'],
@@ -269,6 +367,15 @@ class GroupLogic {
         if (target == null) return GroupControlResult.invalid;
         if (isStaleModEvent(group, ts, eventId)) {
           return GroupControlResult.stale;
+        }
+        // A member removing *themselves* is a voluntary leave — always allowed,
+        // no role required, and never bans (groups.js `leaveGroup`).
+        if (senderPubkey == target) {
+          recordModEvent(group, ts, eventId);
+          group.members.remove(target);
+          group.mods.remove(target);
+          _modLog(group, type: 'leave', actor: senderPubkey, target: target);
+          return GroupControlResult.applied;
         }
         final ownerAct = isOwner(group, senderPubkey);
         final modAct = isMod(group, senderPubkey);

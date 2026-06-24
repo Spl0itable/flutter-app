@@ -127,6 +127,10 @@ class StorageKeys {
   static const activeStyle = 'nym_active_style';
   static const activeFlair = 'nym_active_flair';
 
+  // Sidebar layout (section collapse + order persistence)
+  static const sidebarSectionCollapsed = 'nym_sidebar_section_collapsed';
+  static const sidebarSectionOrder = 'nym_sidebar_section_order';
+
   // Misc
   static const tutorialSeen = 'nym_tutorial_seen';
   static const dismissedTransfers = 'nym_dismissed_transfers';

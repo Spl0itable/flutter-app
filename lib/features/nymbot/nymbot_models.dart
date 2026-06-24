@@ -16,6 +16,7 @@ class ProModel {
     required this.label,
     required this.modelId,
     required this.baseCredits,
+    this.max,
   });
 
   /// Value passed to the worker as `proModel`, e.g. `claude-opus`.
@@ -29,6 +30,21 @@ class ProModel {
 
   /// Base Pro credits charged per model call (before length scaling).
   final int baseCredits;
+
+  /// Max Pro credits a single (max-length) reply can scale to (PWA
+  /// `_botProModels[].max`, pms.js:2085-2091). Null/<= [baseCredits] means the
+  /// model is flat-priced. Optional so existing call sites are unaffected.
+  final int? max;
+
+  /// The PWA's `_botProPriceLabel` (pms.js:2096-2098): `"<n> Pro credit(s)/reply"`
+  /// for flat models, else `"from <base>, up to <max> for max-length replies"`.
+  String get priceLabel {
+    final base = '$baseCredits Pro credit${baseCredits == 1 ? '' : 's'}';
+    final m = max;
+    return (m != null && m > baseCredits)
+        ? 'from $base, up to $m for max-length replies'
+        : '$base/reply';
+  }
 }
 
 /// The 7 Pro models, in README order (line 170):
@@ -40,44 +56,168 @@ const List<ProModel> kProModels = [
     label: 'Claude Fable 5',
     modelId: 'anthropic/claude-fable-5',
     baseCredits: 2,
+    max: 16,
   ),
   ProModel(
     key: 'claude-opus',
     label: 'Claude Opus 4.8',
     modelId: 'anthropic/claude-opus-4.8',
     baseCredits: 1,
+    max: 8,
   ),
   ProModel(
     key: 'claude-sonnet',
     label: 'Claude Sonnet 4.6',
     modelId: 'anthropic/claude-sonnet-4.6',
     baseCredits: 1,
+    max: 6,
   ),
   ProModel(
     key: 'claude-haiku',
     label: 'Claude Haiku 4.5',
     modelId: 'anthropic/claude-haiku-4.5',
     baseCredits: 1,
+    max: 1,
   ),
   ProModel(
     key: 'gpt-5',
     label: 'GPT-5.1',
     modelId: 'openai/gpt-5.1',
     baseCredits: 1,
+    max: 4,
   ),
   ProModel(
     key: 'gpt-5-mini',
     label: 'GPT-5 mini',
     modelId: 'openai/gpt-5-mini',
     baseCredits: 1,
+    max: 1,
   ),
   ProModel(
     key: 'codex',
     label: 'GPT-5.1 Codex',
     modelId: 'openai/gpt-5.1-codex',
     baseCredits: 1,
+    max: 4,
   ),
 ];
+
+/// A single PM-only Nymbot command, surfaced by the `?…` suggestion palette
+/// inside the private bot chat (PWA `botPMCommands`, commands.js:272-281).
+class BotPMCommand {
+  const BotPMCommand({required this.name, required this.desc});
+
+  /// The command including its leading `?`, e.g. `?model`.
+  final String name;
+
+  /// One-line description shown beneath the command name.
+  final String desc;
+}
+
+/// The 8 PM-only commands the PWA shows in the Nymbot private chat, in order
+/// (commands.js `botPMCommands`). NOTE: this is the *PM* set — distinct from the
+/// public-channel `?` commands (`kBotCommands`), which are not wired here.
+const List<BotPMCommand> kBotPMCommands = [
+  BotPMCommand(
+    name: '?help',
+    desc: 'Guide to premium, Pro models & git repos (free)',
+  ),
+  BotPMCommand(
+    name: '?model',
+    desc: 'Pick a Pro frontier model (?model off for standard)',
+  ),
+  BotPMCommand(
+    name: '?git',
+    desc: 'Connect a git repo to Pro replies (GitHub/GitLab/Gitea)',
+  ),
+  BotPMCommand(
+    name: '?buy',
+    desc: 'Buy Nymbot credits (Standard/Pro switch)',
+  ),
+  BotPMCommand(
+    name: '?balance',
+    desc: 'Check your standard & Pro credit balances',
+  ),
+  BotPMCommand(
+    name: '?gift',
+    desc: 'Gift Nymbot credits to another user',
+  ),
+  BotPMCommand(
+    name: '?transfer',
+    desc: 'Transfer ALL your Nymbot credits to another pubkey',
+  ),
+  BotPMCommand(
+    name: '?clear',
+    desc: 'Clear Nymbot chat history and start fresh',
+  ),
+];
+
+/// Deeper completions surfaced after `?model ` / `?git ` (commands.js
+/// `_botPMSubcommands`, :397-434). Returns the rows to show for a base command
+/// once a trailing space has been typed, with each row's full insertion text.
+/// Returns null when [cmd] has no subcommands.
+List<BotPMCommand>? botPMSubcommands(String cmd) {
+  if (cmd == '?model') {
+    return [
+      for (final m in kProModels)
+        BotPMCommand(name: '?model ${m.key}', desc: '${m.label} — ${m.priceLabel}'),
+      const BotPMCommand(
+          name: '?model off', desc: 'Back to standard multi-model routing'),
+    ];
+  }
+  if (cmd == '?git') {
+    return const [
+      BotPMCommand(
+          name: '?git provider', desc: 'Choose github, gitlab, or gitea [host]'),
+      BotPMCommand(name: '?git token', desc: 'Save your personal access token'),
+      BotPMCommand(name: '?git repos', desc: 'List repos the token can access'),
+      BotPMCommand(
+          name: '?git repo', desc: 'Select working repo (owner/name [branch])'),
+      BotPMCommand(name: '?git branch', desc: 'Set the working branch'),
+      BotPMCommand(
+          name: '?git writes on', desc: 'Allow commits, branches & pull requests'),
+      BotPMCommand(
+          name: '?git writes off', desc: 'Back to read-only repo access'),
+      BotPMCommand(name: '?git off', desc: 'Disconnect the repo (keeps the token)'),
+      BotPMCommand(
+          name: '?git disconnect', desc: 'Remove token and repo from this device'),
+    ];
+  }
+  return null;
+}
+
+/// Filters [kBotPMCommands] (and subcommands) for the `?…` palette given the
+/// current input. Mirrors `showBotCommandPalette` (commands.js:436-468):
+///  * a bare prefix (`?mo`) filters the 8 base commands by `startsWith`;
+///  * a base command plus a space (`?git `) surfaces its subcommands filtered
+///    by the remaining text.
+List<BotPMCommand> filterBotPMCommands(String input) {
+  // Preserve a trailing space (it's meaningful: `?git ` → show subcommands),
+  // but ignore leading whitespace.
+  final needle = input.trimLeft().toLowerCase();
+  if (needle.isEmpty || !needle.startsWith('?')) return const [];
+
+  // Base-command prefix match (no space typed yet).
+  if (!needle.contains(' ')) {
+    return [
+      for (final c in kBotPMCommands)
+        if (c.name.startsWith(needle)) c,
+    ];
+  }
+
+  // `?<cmd> <rest>` → subcommands of <cmd> filtered by <rest> (empty `rest`,
+  // i.e. just-typed trailing space, lists them all).
+  final sp = needle.indexOf(' ');
+  final base = needle.substring(0, sp);
+  final rest = needle.substring(sp + 1).trimLeft();
+  final subs = botPMSubcommands(base);
+  if (subs == null) return const [];
+  return [
+    for (final s in subs)
+      if (s.name.toLowerCase().substring(base.length).trimLeft().startsWith(rest))
+        s,
+  ];
+}
 
 /// Looks up a Pro model by its `?model` argument. Accepts the canonical [key]
 /// as well as a loose match on the label (case-insensitive). Returns null for

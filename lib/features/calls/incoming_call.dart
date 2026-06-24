@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../widgets/common/nym_avatar.dart';
+import 'call_nym.dart';
 import 'call_providers.dart';
 import 'call_signaling.dart';
 
@@ -42,40 +43,54 @@ class IncomingCallModal extends ConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Pulsing avatar ring.
-              Container(
-                padding: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: c.primary, width: 2),
-                ),
-                child: NymAvatar(seed: nym, size: 88),
-              ),
+              // Pulsing avatar ring (`.incoming-call-avatar` incomingCallPulse:
+              // a 1.6s primary box-shadow ring expanding 0→12px).
+              _PulsingAvatar(seed: nym, primary: c.primary),
               const SizedBox(height: 16),
-              Text(
-                nym,
+              // Decorated caller name (#suffix + badges/flair), `_callNymHtml`.
+              DefaultTextStyle(
                 style: TextStyle(
                   color: c.textBright,
                   fontSize: 20,
                   fontWeight: FontWeight.w700,
                 ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+                child: (call.peerPubkey != null && call.peerPubkey!.isNotEmpty)
+                    ? CallNym(
+                        pubkey: call.peerPubkey!,
+                        nym: call.peerNym,
+                        baseColor: c.textBright,
+                        baseStyle: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        badgeSize: 16,
+                      )
+                    : Text(
+                        nym,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
               ),
               const SizedBox(height: 6),
               Text(label, style: TextStyle(color: c.textDim, fontSize: 14)),
               const SizedBox(height: 28),
+              // Buttons: 58px, fixed 36px gap, decline=danger (icon rotated
+              // 135°), accept=primary bg with bg-coloured icon (PWA, not green).
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   _RoundActionButton(
                     color: c.danger,
+                    iconColor: Colors.white,
                     icon: Icons.call_end,
                     tooltip: 'Decline',
                     onTap: service.reject,
                   ),
+                  const SizedBox(width: 36),
                   _RoundActionButton(
-                    color: const Color(0xFF22C55E),
+                    color: c.primary,
+                    iconColor: c.bg,
                     icon: Icons.call,
                     tooltip: 'Accept',
                     onTap: () => service.answer(),
@@ -90,15 +105,72 @@ class IncomingCallModal extends ConsumerWidget {
   }
 }
 
+/// The 88px avatar wrapped in a repeating primary box-shadow ring that expands
+/// 0→12px and fades over 1.6s (`@keyframes incomingCallPulse`).
+class _PulsingAvatar extends StatefulWidget {
+  const _PulsingAvatar({required this.seed, required this.primary});
+  final String seed;
+  final Color primary;
+
+  @override
+  State<_PulsingAvatar> createState() => _PulsingAvatarState();
+}
+
+class _PulsingAvatarState extends State<_PulsingAvatar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1600),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) {
+        // CSS keyframe: 0/100% → spread 0 @ alpha .4; 50% → spread 12 @ alpha 0.
+        final t = _ctrl.value;
+        // Triangular 0→1→0 envelope so the ring grows then resets each cycle.
+        final p = t < 0.5 ? t * 2 : (1 - t) * 2;
+        final spread = 12.0 * p;
+        final alpha = 0.4 * (1 - p);
+        return Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: widget.primary, width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: widget.primary.withValues(alpha: alpha),
+                spreadRadius: spread,
+                blurRadius: 0,
+              ),
+            ],
+          ),
+          child: child,
+        );
+      },
+      child: NymAvatar(seed: widget.seed, size: 88),
+    );
+  }
+}
+
 class _RoundActionButton extends StatelessWidget {
   const _RoundActionButton({
     required this.color,
     required this.icon,
     required this.tooltip,
     required this.onTap,
+    this.iconColor = Colors.white,
   });
 
   final Color color;
+  final Color iconColor;
   final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
@@ -114,9 +186,9 @@ class _RoundActionButton extends StatelessWidget {
           customBorder: const CircleBorder(),
           onTap: onTap,
           child: SizedBox(
-            width: 64,
-            height: 64,
-            child: Icon(icon, color: Colors.white, size: 28),
+            width: 58,
+            height: 58,
+            child: Icon(icon, color: iconColor, size: 26),
           ),
         ),
       ),

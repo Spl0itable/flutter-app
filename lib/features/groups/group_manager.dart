@@ -53,10 +53,21 @@ class GroupManager {
 
   /// Creates a group: generates the id + first ephemeral key, returns a [Group]
   /// owned by [selfPubkey] and publishes the bootstrap `group-invite`.
+  ///
+  /// The optional [avatar] / [banner] / [description] / [allowMemberInvites]
+  /// extras mirror groups.js `createGroup(name, memberPubkeys, opts)` (1355):
+  /// they are stamped onto the [Group] and threaded into the invite rumor's
+  /// metadata tags so members learn the group's appearance + invite policy from
+  /// the first wrap. [allowMemberInvites] defaults to true (PWA
+  /// `opts.allowMemberInvites !== false`).
   Future<Group?> createGroup({
     required String selfPubkey,
     required String name,
     required List<String> memberPubkeys,
+    String? avatar,
+    String? banner,
+    String? description,
+    bool allowMemberInvites = true,
     MessagingSettings settings = const MessagingSettings(),
   }) async {
     if (!_service.canSign) return null;
@@ -67,6 +78,11 @@ class GroupManager {
       name: name.trim(),
       members: members,
       createdBy: selfPubkey,
+      avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+      banner: (banner != null && banner.isNotEmpty) ? banner : null,
+      description:
+          (description != null && description.isNotEmpty) ? description : null,
+      allowMemberInvites: allowMemberInvites,
       lastMessageTime: DateTime.now().millisecondsSinceEpoch,
     );
 
@@ -120,6 +136,95 @@ class GroupManager {
       settings: settings,
     );
     return ok ? nymMessageId : null;
+  }
+
+  /// Broadcasts the owner-issued `group-metadata` control to the other members
+  /// (self excluded; groups.js `_broadcastGroupMetadata`). The group must already
+  /// carry the updated metadata + `metaUpdatedAt`. No-op (returns false) when
+  /// there are no other members. Role checks are the caller's responsibility
+  /// (owner-only).
+  Future<bool> sendMetadata({
+    required Group group,
+    required String selfPubkey,
+    MessagingSettings settings = const MessagingSettings(),
+  }) async {
+    if (!_service.canSign) return false;
+    final others = group.members.where((pk) => pk != selfPubkey).toList();
+    if (others.isEmpty) return false;
+    final ek = keysFor(group.id);
+    final rumor = GroupLogic.buildGroupMetadataRumor(
+      group: group,
+      selfPubkey: selfPubkey,
+      recipients: others,
+      nymMessageId: GroupLogic.generateGroupId(),
+    );
+    return _service.publishGroupMessage(
+      rumor: rumor,
+      recipients: others,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, selfPubkey),
+      settings: settings,
+    );
+  }
+
+  /// Sends the NIP-17 `group-leave` notification to the remaining members
+  /// (self excluded; groups.js `leaveGroup`). No-op (returns false) when there
+  /// are no other members. [content] is the "<nym> left the group." line.
+  Future<bool> sendLeave({
+    required Group group,
+    required String selfPubkey,
+    required String content,
+    MessagingSettings settings = const MessagingSettings(),
+  }) async {
+    if (!_service.canSign) return false;
+    final others = group.members.where((pk) => pk != selfPubkey).toList();
+    if (others.isEmpty) return false;
+    final ek = keysFor(group.id);
+    final rumor = GroupLogic.buildControlRumor(
+      group: group,
+      selfPubkey: selfPubkey,
+      type: GroupControlType.leave,
+      extraTags: const [],
+      nymMessageId: GroupLogic.generateGroupId(),
+      recipients: others,
+      content: content,
+    );
+    return _service.publishGroupMessage(
+      rumor: rumor,
+      recipients: others,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, selfPubkey),
+      settings: settings,
+    );
+  }
+
+  /// Announces a `group-add-member` to every member of [group] (the [group]'s
+  /// `members` list must already include the new pubkeys; groups.js
+  /// `addMemberToGroup`). Advertises the self ephemeral key (current, not
+  /// rotated) so existing members and the new joiners learn it. [content] is the
+  /// "<nym> was added by <nym>." line. Newly-added members have no ephemeral key
+  /// yet, so their wrap targets their real pubkey via [encryptionPubkeyFor].
+  Future<bool> addMembers({
+    required Group group,
+    required String selfPubkey,
+    required String content,
+    MessagingSettings settings = const MessagingSettings(),
+  }) async {
+    if (!_service.canSign) return false;
+    final ek = keysFor(group.id);
+    final eph = ek.ensureSelf();
+    _refreshServiceKeys();
+    final rumor = GroupLogic.buildAddMemberRumor(
+      group: group,
+      selfPubkey: selfPubkey,
+      nymMessageId: GroupLogic.generateGroupId(),
+      ephemeralPk: eph.pk,
+      content: content,
+    );
+    return _service.publishGroupMessage(
+      rumor: rumor,
+      recipients: group.members,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, selfPubkey),
+      settings: settings,
+    );
   }
 
   /// Sends a control event of [type] with [extraTags] (role checks are the

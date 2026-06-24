@@ -288,6 +288,19 @@ class SettingsController extends StateNotifier<Settings> {
   void update(Settings Function(Settings) fn) {
     state = fn(state);
   }
+
+  /// Re-reads every `nym_*` settings key from the [KeyValueStore] back into the
+  /// live [Settings] state. Used after an out-of-band write to the store — a
+  /// settings reset / wipe (`resetAllSettings`) or a cross-device restore that
+  /// mutated KV directly — so the in-memory state reflects the on-disk values
+  /// without restarting the app. Mirrors the PWA's `loadSettings()` re-read.
+  ///
+  /// Does NOT fire [onSyncedChange]: this is a read-back of already-persisted
+  /// values, not a user edit, so it must not trigger a cross-device publish (the
+  /// PWA guards the same re-read with `_applyingRemoteSettings`).
+  void reloadFromStore() {
+    state = Settings.fromStore(_kv);
+  }
 }
 
 final settingsProvider =

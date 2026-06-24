@@ -6,10 +6,16 @@ import '../../core/theme/nym_metrics.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../models/user.dart';
 import '../common/nym_avatar.dart';
+import 'pm_context_menu.dart';
 
 /// A single PM thread row (`.pm-item`, docs/specs/02 §5.3). Same box metrics as
 /// `.channel-item` with a 26px PM avatar and an optional unread pill.
-class PMListItem extends StatelessWidget {
+///
+/// A long-press (mobile) or secondary-tap / right-click (desktop) opens the
+/// `.quick-context-menu` (Block/Unblock user, Leave conversation) — see
+/// [showPmContextMenu]. (Channels carry the equivalent menu via
+/// [ChannelListItem]; PMs got it here per gap F13.)
+class PMListItem extends ConsumerWidget {
   const PMListItem({
     super.key,
     required this.nym,
@@ -30,18 +36,24 @@ class PMListItem extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: NymRadius.rxs,
-          // `.pm-item.active` shares `.channel-item.active`: primary fill/border/
-          // glow + a 3px primary accent bar (NOT purple).
-          child: Stack(
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onLongPressStart: (d) =>
+              showPmContextMenu(context, ref, pubkey, d.globalPosition),
+          onSecondaryTapDown: (d) =>
+              showPmContextMenu(context, ref, pubkey, d.globalPosition),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: NymRadius.rxs,
+            // `.pm-item.active` shares `.channel-item.active`: primary fill/
+            // border/glow + a 3px primary accent bar (NOT purple).
+            child: Stack(
             children: [
               Container(
                 constraints: const BoxConstraints(minHeight: 36),
@@ -131,6 +143,7 @@ class PMListItem extends StatelessWidget {
                 ),
             ],
           ),
+        ),
         ),
       ),
     );

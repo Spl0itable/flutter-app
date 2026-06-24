@@ -450,6 +450,17 @@ class NostrController {
           shopFlair: e.tagValue('shop-flair'),
           isSupporter: e.tagsNamed('shop-supporter')
               .any((t) => t.length > 1 && t[1] == '1'),
+          // Inlined special cosmetics + Genesis edition (one `shop-cosmetic` tag
+          // per active cosmetic; a `shop-edition` tag carries the Genesis number).
+          // The PWA's canonical source is the backend `shop-status` fetch
+          // (active.cosmetics/active.editions); these inlined tags let presence
+          // carry them without a round-trip. See CROSS-FILE NEED for the fetch.
+          shopCosmetics: e
+              .tagsNamed('shop-cosmetic')
+              .where((t) => t.length > 1 && t[1].isNotEmpty)
+              .map((t) => t[1])
+              .toList(),
+          shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
   }
 
@@ -1050,7 +1061,22 @@ class NostrController {
   }
 
   /// Creates a group with [memberPubkeys], registers it locally, and switches.
-  Future<Group?> createGroup(String name, List<String> memberPubkeys) async {
+  ///
+  /// The optional [avatar] / [banner] / [description] / [allowMemberInvites]
+  /// are the group-creation extras the New-Group modal collects; they thread
+  /// through to [GroupManager.createGroup] and onto the bootstrap invite's
+  /// metadata tags (groups.js `createGroup(name, members, opts)`). The positional
+  /// `(name, memberPubkeys)` shape is preserved so existing callers/tests keep
+  /// compiling; [allowMemberInvites] defaults to true (PWA
+  /// `opts.allowMemberInvites !== false`).
+  Future<Group?> createGroup(
+    String name,
+    List<String> memberPubkeys, {
+    String? avatar,
+    String? banner,
+    String? description,
+    bool allowMemberInvites = true,
+  }) async {
     final service = _service;
     final identity = _identity;
     final groups = _groups;
@@ -1059,6 +1085,10 @@ class NostrController {
       selfPubkey: identity.pubkey,
       name: name,
       memberPubkeys: memberPubkeys,
+      avatar: avatar,
+      banner: banner,
+      description: description,
+      allowMemberInvites: allowMemberInvites,
       settings: _msgSettings,
     );
     if (group == null) return null;
@@ -1072,6 +1102,167 @@ class NostrController {
   /// approver-side `group-join-request` flow is not yet implemented.
   Future<void> joinGroupViaInvite(GroupInviteToken token) async {
     debugPrint('joinGroupViaInvite not yet implemented: ${token.groupId}');
+  }
+
+  /// Sends [body] as a gift-wrapped kind-14 PM to the verified developer
+  /// ([verifiedDeveloperPubkey]) — the About → "Send Message" / contact form
+  /// (app.js:4438 `nym.sendPM(body, nym.verifiedDeveloper.pubkey)`). Returns true
+  /// when the wrap was published.
+  ///
+  /// Mirrors `sendPM` → `sendNIP17PM`: a kind-14 rumor wrapped to the recipient
+  /// plus a self-copy (so the message also lands in our own PM thread with the
+  /// developer). The recipient is a normal pubkey (not the Nymbot), so the
+  /// bot-command short-circuit in `sendPM` doesn't apply. Empty bodies and the
+  /// no-signer / not-connected states return false, matching the PWA's guards
+  /// (`if (!content.trim()) return false` / `if (!connected) throw`).
+  Future<bool> sendContactMessage(String body) async {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) return false;
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null || !service.canSign) return false;
+
+    // Mark us active (recordOwnActivity) like every other PM send.
+    recordOwnActivity();
+
+    final nymMessageId = PmLogic.generateSharedEventId();
+    final rumor = PmLogic.buildPmRumor(
+      selfPubkey: identity.pubkey,
+      recipientPubkey: verifiedDeveloperPubkey,
+      content: trimmed,
+      nymMessageId: nymMessageId,
+    );
+    try {
+      return await service.publishPM(
+        rumor: rumor,
+        recipientPubkey: verifiedDeveloperPubkey,
+        settings: _msgSettings,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Outbound settings transfer (F9; shop.js:1767 `executeSettingsTransfer`).
+  // ---------------------------------------------------------------------------
+
+  /// Transfers this user's nickname, avatar, and transferable preferences to
+  /// [recipientPubkey] by publishing a gift-wrapped kind-30078 event, mirroring
+  /// the PWA's `executeSettingsTransfer` (shop.js:1804). The recipient surfaces
+  /// it as a pending settings-transfer offer (`handleSettingsTransferEvent`).
+  ///
+  /// The event uses the replaceable `d` tag
+  /// `nym-settings-transfer-<selfPubkey>-<recipientPubkey>` plus
+  /// `['settings-transfer-to', recipientPubkey]`; the content is the JSON payload
+  /// `{fromPubkey, fromNym, toPubkey, transferredAt, nickname, avatarUrl,
+  /// settings}` where `settings` is the flat synced payload (PWA
+  /// `_buildSettingsPayload`) minus the device-local keys the PWA strips
+  /// (`closedPMs`, `leftGroups`, `notificationLastReadTime`, `userJoinedChannels`,
+  /// `pinnedChannels`, `keypairMode`).
+  ///
+  /// It is gift-wrapped (NIP-59, encrypted-to-recipient) like the other 30078
+  /// transfer path, reusing [NostrService.publishGiftWrappedRumor]. Caller is
+  /// expected to have validated the recipient (64-hex, non-self); this also
+  /// guards on a signer being available. Returns true when a wrap was published.
+  Future<bool> sendSettingsTransfer(String recipientPubkey) async {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null || !service.canSign) return false;
+
+    // Mark us active like every other outbound gift-wrap path.
+    recordOwnActivity();
+
+    // Flat synced payload (PWA `_buildSettingsPayload`): flatten the section
+    // payloads and drop the per-section `v` markers so the shape matches the
+    // PWA's flat settings object.
+    final settings = _ref.read(settingsProvider);
+    final transferSettings = <String, dynamic>{};
+    StorageSync.buildSectionPayloads(settings).forEach((_, fields) {
+      fields.forEach((k, v) {
+        if (k == 'v') return;
+        transferSettings[k] = v;
+      });
+    });
+    // Strip the device-local keys the PWA deletes before sending (most aren't in
+    // the native subset; this stays byte-faithful if any are added later).
+    for (final k in const [
+      'closedPMs',
+      'leftGroups',
+      'notificationLastReadTime',
+      'userJoinedChannels',
+      'pinnedChannels',
+      'keypairMode',
+    ]) {
+      transferSettings.remove(k);
+    }
+
+    final avatar =
+        _ref.read(appStateProvider).users[identity.pubkey]?.profile?.picture ??
+            '';
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final payload = <String, dynamic>{
+      'fromPubkey': identity.pubkey,
+      'fromNym': identity.nym,
+      'toPubkey': recipientPubkey,
+      'transferredAt': nowSec,
+      'nickname': identity.nym,
+      'avatarUrl': avatar,
+      'settings': transferSettings,
+    };
+
+    final rumor = UnsignedEvent(
+      pubkey: identity.pubkey,
+      createdAt: nowSec,
+      kind: EventKind.appData, // 30078
+      tags: [
+        ['d', 'nym-settings-transfer-${identity.pubkey}-$recipientPubkey'],
+        ['title', 'Nymchat Settings Transfer'],
+        ['p', recipientPubkey],
+        ['settings-transfer-to', recipientPubkey],
+      ],
+      content: jsonEncode(payload),
+    );
+    try {
+      return await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: [recipientPubkey],
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cache size / clear (settings.js data controls: "Cache: N MB" + "Clear
+  // cache"). The on-disk [CacheStore] owns the real byte accounting + wipe; this
+  // exposes them to the settings UI. Both no-op safely before [init].
+  // ---------------------------------------------------------------------------
+
+  /// Real on-disk size of the message/profile/reaction cache, in bytes
+  /// (settings.js `estimateCacheSize`). 0 when the cache hasn't been opened yet.
+  Future<int> cacheSizeBytes() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return 0;
+    return cache.totalBytes();
+  }
+
+  /// Clears all cached channels / PMs / profiles / reactions (settings.js
+  /// "Clear cache"). Flushes any pending dirty writes first so an in-flight
+  /// debounce can't immediately re-persist what we just wiped, drops the dirty
+  /// sets, then wipes the store. Also clears the in-memory hydrated profile /
+  /// reaction caches via the cache wipe; the live app_state is untouched (the
+  /// PWA clears the persisted cache, not the open session).
+  Future<void> clearCache() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return;
+    // Cancel the pending flush + forget dirty keys so we don't re-write the
+    // conversations we're about to drop.
+    _flushTimer?.cancel();
+    _flushScheduled = false;
+    _dirtyChannelKeys.clear();
+    _dirtyPmKeys.clear();
+    await cache.wipe();
   }
 
   // --- moderation entry points (role-checked) -------------------------------
@@ -1191,6 +1382,214 @@ class NostrController {
     appState.removeMessage(messageId);
     if (ok) _emitSystemMessage('Message deleted');
     return ok;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Group owner / membership controls (groups.js:3046-3083 owner rows). The
+  // metadata/leave/add primitives live in [GroupManager]; these drive the local
+  // mutation + the gift-wrapped control publish + the PWA's system feedback.
+  // ---------------------------------------------------------------------------
+
+  /// Leaves [groupId]: notifies the remaining members with a `group-leave`
+  /// control rumor (groups.js `leaveGroup`, 1792), then drops the group locally
+  /// so it doesn't reappear from stale relay data (the self-removal path in
+  /// app_state's `applyGroupControl`). Switches away if the left group was open.
+  /// Returns true if the group existed and was left.
+  Future<bool> leaveGroup(String groupId) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+
+    // Notify the other members (best-effort; needs a signer).
+    final suffix = getPubkeySuffix(identity.pubkey);
+    final leaveContent =
+        '${stripPubkeySuffix(identity.nym)}#$suffix left the group.';
+    await groups.sendLeave(
+      group: group,
+      selfPubkey: identity.pubkey,
+      content: leaveContent,
+      settings: _msgSettings,
+    );
+
+    // Drop locally via the self-removal path (adds to leftGroups, removes the
+    // group + its messages). The self-kick is always authorized (group_logic).
+    appState.applyGroupControl(
+      groupId: groupId,
+      type: GroupControlType.removeMember,
+      tags: [
+        ['kick', identity.pubkey],
+      ],
+      senderPubkey: identity.pubkey,
+      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      eventId: GroupLogic.generateGroupId(),
+    );
+
+    // If we were viewing the group, fall back to the default channel.
+    if (_ref.read(appStateProvider).view.kind == ViewKind.group &&
+        _ref.read(appStateProvider).view.id == groupId) {
+      appState.switchView(ChatView.channel('nymchat'));
+    }
+    return true;
+  }
+
+  /// Owner-only: updates [groupId]'s metadata in place (any of [name],
+  /// [description], [avatar], [banner]) and broadcasts a `group-metadata` control
+  /// to the other members (groups.js `setGroupName`/`setGroupDescription`/
+  /// `_applyGroupImage`, all funnel through `_broadcastGroupMetadata`).
+  ///
+  /// Passing `null` for a field leaves it unchanged; passing an empty string for
+  /// [avatar]/[banner] clears it (matching the Remove Avatar/Banner rows). [name]
+  /// is single-line sanitized (cap 40); [description] is multiline sanitized
+  /// (cap 150, empty ⇒ cleared). Returns true if a change was applied.
+  Future<bool> updateGroupMetadata(
+    String groupId, {
+    String? name,
+    String? description,
+    String? avatar,
+    String? banner,
+  }) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.isOwner(group, identity.pubkey)) return false;
+
+    var changed = false;
+    if (name != null) {
+      final trimmed = _sanitizeGroupName(name);
+      if (trimmed.isNotEmpty && trimmed != group.name) {
+        group.name = trimmed;
+        changed = true;
+      }
+    }
+    if (description != null) {
+      final trimmed = _sanitizeGroupDescription(description);
+      final next = trimmed.isEmpty ? null : trimmed;
+      if (next != group.description) {
+        group.description = next;
+        changed = true;
+      }
+    }
+    if (avatar != null) {
+      final next = avatar.isEmpty ? null : avatar;
+      if (next != group.avatar) {
+        group.avatar = next;
+        changed = true;
+      }
+    }
+    if (banner != null) {
+      final next = banner.isEmpty ? null : banner;
+      if (next != group.banner) {
+        group.banner = next;
+        changed = true;
+      }
+    }
+    if (!changed) return false;
+
+    group.metaUpdatedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    appState.upsertGroup(group);
+    await groups.sendMetadata(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    return true;
+  }
+
+  /// Owner-only: toggles whether regular members may add others
+  /// (groups.js `setGroupAllowMemberInvites`, 2267). Mutates the group locally
+  /// and broadcasts a `group-metadata` control. Returns true if the value
+  /// changed.
+  Future<bool> setGroupAllowInvites(String groupId, bool allow) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.isOwner(group, identity.pubkey)) return false;
+    if (allow == group.allowMemberInvites) return false;
+
+    group.allowMemberInvites = allow;
+    group.metaUpdatedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    appState.upsertGroup(group);
+    await groups.sendMetadata(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _emitSystemMessage(allow
+        ? 'Group members can now add new users.'
+        : 'Only the group owner can add new users now.');
+    return true;
+  }
+
+  /// Adds [pubkeys] to [groupId] (owner, or a member when member-invites are
+  /// allowed; groups.js `addMemberToGroup`, 1418). Each new member is appended
+  /// locally, then a single `group-add-member` control is broadcast carrying the
+  /// updated roster + metadata + the self ephemeral key. Already-present members
+  /// are skipped; banned users are skipped unless the caller can moderate.
+  /// Returns true if at least one member was added.
+  Future<bool> addGroupMembers(String groupId, List<String> pubkeys) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.canAddMembers(group, identity.pubkey)) return false;
+
+    final canMod = GroupLogic.canModerate(group, identity.pubkey);
+    final added = <String>[];
+    for (final pk in pubkeys) {
+      if (pk.isEmpty || pk == identity.pubkey) continue;
+      if (group.members.contains(pk)) continue;
+      // Re-admitting a banned user requires owner/mod.
+      if (group.banned.contains(pk)) {
+        if (!canMod) continue;
+        group.banned.remove(pk);
+      }
+      group.members.add(pk);
+      added.add(pk);
+    }
+    if (added.isEmpty) return false;
+    appState.upsertGroup(group);
+
+    final inviter = '${stripPubkeySuffix(identity.nym)}#'
+        '${getPubkeySuffix(identity.pubkey)}';
+    final names = added.map((pk) => _nymDisplayFor(pk)).join(', ');
+    final content = added.length == 1
+        ? '$names was added by $inviter.'
+        : '$names were added by $inviter.';
+    await groups.addMembers(
+      group: group,
+      selfPubkey: identity.pubkey,
+      content: content,
+      settings: _msgSettings,
+    );
+    _emitSystemMessage(content);
+    return true;
+  }
+
+  /// Single-line group-name sanitizer (groups.js `sanitizeGroupName`): strips
+  /// control chars, collapses whitespace, caps at 40.
+  static String _sanitizeGroupName(String name) {
+    final collapsed = name
+        .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return collapsed.length > 40 ? collapsed.substring(0, 40) : collapsed;
+  }
+
+  /// Multiline group-description sanitizer (groups.js `sanitizeGroupDescription`):
+  /// keeps newlines, strips other control chars, collapses 3+ newlines, caps 150.
+  static String _sanitizeGroupDescription(String description) {
+    final cleaned = description
+        .replaceAll(RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'), '')
+        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+        .trim();
+    return cleaned.length > 150 ? cleaned.substring(0, 150) : cleaned;
   }
 
   // ---------------------------------------------------------------------------
@@ -2226,6 +2625,68 @@ class NostrController {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Pending settings transfers (inbound cross-device settings offers). The PWA
+  // auto-applies remote settings; the native UI instead surfaces each newer
+  // section as an accept/decline offer so the user opts in. Data lives in
+  // [pendingSettingsTransfersProvider]; these methods populate + resolve it.
+  // ---------------------------------------------------------------------------
+
+  /// Re-fetches the inbound settings-transfer offers (sections in D1 newer than
+  /// our last applied sync ts) and publishes them to
+  /// [pendingSettingsTransfersProvider]. Best-effort; no-op without storage sync.
+  Future<void> refreshPendingSettingsTransfers() async {
+    final sync = _storageSync;
+    if (sync == null) return;
+    try {
+      final sinceMs = _lastSettingsSyncMs();
+      final offers = await sync.settingsTransfersSince(sinceMs);
+      _ref
+          .read(pendingSettingsTransfersProvider.notifier)
+          .setOffers(offers);
+    } catch (_) {
+      // Best-effort.
+    }
+  }
+
+  /// Accepts an inbound settings-transfer [id]: applies the section's payload to
+  /// the local [Settings] (PWA field names → typed setters), advances the stored
+  /// sync ts to its `updatedAt` so it won't re-offer, and removes it from the
+  /// pending list. Returns true if an offer with that id was applied.
+  bool acceptSettingsTransfer(String id) {
+    final notifier = _ref.read(pendingSettingsTransfersProvider.notifier);
+    final offer = notifier.removeById(id);
+    if (offer == null) return false;
+    _applySyncedSettings(offer.payload);
+    // Advance the sync ts (stored in seconds, matching the PWA) so the accepted
+    // section isn't re-surfaced on the next refresh.
+    final kv = _ref.read(keyValueStoreProvider);
+    final lastSec = int.tryParse(
+            kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
+        0;
+    final offerSec = offer.updatedAt ~/ 1000;
+    if (offerSec > lastSec) {
+      kv.setString(StorageKeys.lastSettingsSyncTs, '$offerSec');
+    }
+    return true;
+  }
+
+  /// Declines an inbound settings-transfer [id]: drops it from the pending list
+  /// without applying it. Returns true if it was present. (It may re-appear on a
+  /// later refresh if that section is published again with a newer ts — matching
+  /// the PWA, which has no permanent per-section suppression.)
+  bool declineSettingsTransfer(String id) {
+    return _ref.read(pendingSettingsTransfersProvider.notifier).removeById(id) !=
+        null;
+  }
+
+  int _lastSettingsSyncMs() {
+    final kv = _ref.read(keyValueStoreProvider);
+    final sec =
+        int.tryParse(kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ?? 0;
+    return sec * 1000;
+  }
+
   /// Debounced encrypted-settings publish (`_debouncedNostrSettingsSave`, 5s).
   /// Call after any synced-setting change. No-op when storage sync is
   /// unavailable. The PWA also skips ephemeral random/hardcore keypair modes;
@@ -2519,6 +2980,44 @@ class NostrController {
     await service.pool.publish(signed);
   }
 
+  /// Builds, signs and publishes a NIP-56 kind-1984 report event for [pubkey]
+  /// (optionally about a specific [messageId]), mirroring `submitReport`
+  /// (`ui-context.js:312-352`). [type] is the NIP-56 report-type string used as
+  /// the third element of the `p`/`e` tags (e.g. `nudity`, `spam`, `illegal`,
+  /// `profanity`, `impersonation`, `other`); [details] is the free-text content.
+  /// Surfaces a system message on success/failure (matching the PWA).
+  Future<bool> submitReport({
+    required String pubkey,
+    String? messageId,
+    required String type,
+    String? details,
+  }) async {
+    final service = _service;
+    final identity = _identity;
+    final sig = _signer;
+    if (service == null || identity == null || sig == null) return false;
+    try {
+      final tags = <List<String>>[
+        ['p', pubkey, type],
+        if (messageId != null && messageId.isNotEmpty) ['e', messageId, type],
+      ];
+      final unsigned = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        kind: 1984,
+        tags: tags,
+        content: details ?? '',
+      );
+      final signed = await sig.sign(unsigned);
+      await service.pool.publish(signed);
+      _emitSystemMessage('Report submitted successfully');
+      return true;
+    } catch (_) {
+      _emitSystemMessage('Failed to submit report');
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Nymbot interception (`?`/@Nymbot) — commands.js `_handleBotCommand`
   // ---------------------------------------------------------------------------
@@ -2526,6 +3025,18 @@ class NostrController {
   /// The verified Nymbot pubkey (`verifiedBot.pubkey`, app.js:1096).
   static const String nymbotPubkey =
       'fb242a282d605f5f8141da8087a3ff0c16b255935306b324b578b43c6cf54bb2';
+
+  /// The verified Nymchat developer pubkey (`verifiedDeveloper.pubkey`,
+  /// app.js:1090-1094). Used for the "Nymchat Developer" verified badge.
+  static const String verifiedDeveloperPubkey =
+      'd49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df';
+
+  /// True when [pubkey] is the verified developer (`isVerifiedDeveloper`,
+  /// users.js:62). Shared API for the profile card / mention dropdown / composer.
+  bool isVerifiedDeveloper(String pubkey) => pubkey == verifiedDeveloperPubkey;
+
+  /// True when [pubkey] is the verified Nymbot (`isVerifiedBot`, users.js:71).
+  bool isVerifiedBot(String pubkey) => pubkey == nymbotPubkey;
 
   /// True when [text] in a CHANNEL view should be routed to Nymbot instead of
   /// published as a normal message: a `?` command or an `@Nymbot` mention
@@ -2836,6 +3347,46 @@ final nostrControllerProvider = Provider<NostrController>((ref) {
   ref.onDispose(c.dispose);
   return c;
 });
+
+/// Holds the inbound settings-transfer offers (cross-device settings sections
+/// newer than this device's last applied sync) for the settings UI's
+/// accept/decline list. Populated by
+/// [NostrController.refreshPendingSettingsTransfers]; resolved via
+/// [NostrController.acceptSettingsTransfer] / `declineSettingsTransfer`.
+final pendingSettingsTransfersProvider = StateNotifierProvider<
+    PendingSettingsTransfersNotifier, List<SettingsTransferOffer>>((ref) {
+  return PendingSettingsTransfersNotifier();
+});
+
+/// StateNotifier backing [pendingSettingsTransfersProvider]. Holds the offers
+/// newest-first; the controller mutates it through [setOffers] / [removeById].
+class PendingSettingsTransfersNotifier
+    extends StateNotifier<List<SettingsTransferOffer>> {
+  PendingSettingsTransfersNotifier() : super(const []);
+
+  /// Replaces the pending list (newest-first as supplied by the fetch).
+  void setOffers(List<SettingsTransferOffer> offers) {
+    state = List.unmodifiable(offers);
+  }
+
+  /// Removes and returns the offer with [id], or null if absent.
+  SettingsTransferOffer? removeById(String id) {
+    SettingsTransferOffer? found;
+    final next = <SettingsTransferOffer>[];
+    for (final o in state) {
+      if (found == null && o.id == id) {
+        found = o;
+      } else {
+        next.add(o);
+      }
+    }
+    if (found != null) state = List.unmodifiable(next);
+    return found;
+  }
+
+  /// Clears all pending offers (e.g. on logout).
+  void clear() => state = const [];
+}
 
 /// The NIP-46 remote-signer transport. The controller reads this at boot to
 /// restore a persisted `'nip46'` session and build a [Nip46SignerAdapter]. A

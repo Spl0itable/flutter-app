@@ -201,6 +201,29 @@ class BotChatController extends StateNotifier<BotChatState> {
 
   void setBalance(BotBalance b) => state = state.copyWith(balance: b);
 
+  /// `?clear` — wipes the local chat history and starts fresh (PWA
+  /// `_clearBotPMHistory`, pms.js:1894). Does not touch credits or the pinned
+  /// model.
+  void clearHistory() => state = state.copyWith(messages: const []);
+
+  /// Appends a local, non-billed Nymbot info message — the in-chat equivalent of
+  /// the PWA's `displaySystemMessage` for command usage / errors / confirmations
+  /// (e.g. the `?transfer` and `?gift` usage and result lines). No network.
+  void addBotInfo(String text) {
+    final now = DateTime.now();
+    state = state.copyWith(
+      messages: [
+        ...state.messages,
+        BotChatMessage(
+          id: 'sys_${now.microsecondsSinceEpoch}',
+          text: text,
+          fromUser: false,
+          timestamp: now,
+        ),
+      ],
+    );
+  }
+
   // --- Network ---------------------------------------------------------------
 
   /// Sends a private chat message and appends the reply (with reasoning split
@@ -311,15 +334,56 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
   }
 
-  /// Creates a buy invoice (Standard/Pro). Returns null if not bound.
-  Future<BotInvoice?> buy(int amountSats, CreditTier tier) async {
+  /// Creates a buy invoice (Standard/Pro). When [recipientPubkey] is set the
+  /// credits are gifted to that user (PWA `generateBotCreditInvoice` with
+  /// `reqExtra.recipientPubkey`, zaps.js:606). [comment] is attached to the
+  /// invoice. Returns null if not bound.
+  Future<BotInvoice?> buy(
+    int amountSats,
+    CreditTier tier, {
+    String? recipientPubkey,
+    String? comment,
+  }) async {
     if (_pubkey == null) return null;
+    // A gift to my own pubkey is just a normal self-buy (PWA drops the
+    // recipient when `giftPk === this.pubkey`, zaps.js:606).
+    final recip =
+        (recipientPubkey != null && recipientPubkey != _pubkey)
+            ? recipientPubkey
+            : null;
     return _service.buy(
       amountSats: amountSats,
       tier: tier,
       pubkey: _pubkey!,
       auth: _auth,
+      recipientPubkey: recip,
+      comment: comment,
     );
+  }
+
+  /// Transfers ALL of the user's credits (standard + Pro) to [targetPubkey]
+  /// (`action: transfer-credits`, PWA `_handleBotTransferCommand`, pms.js:1919).
+  /// On success the local balances are zeroed and the worker response (with
+  /// `transferred`/`proTransferred`) is returned. Returns null if not bound.
+  Future<Map<String, dynamic>?> transferCredits(String targetPubkey) async {
+    if (_pubkey == null) return null;
+    final res =
+        await _service.transfer(pubkey: _pubkey!, targetPubkey: targetPubkey, auth: _auth);
+    // Mirror the PWA: zero the displayed balances once the transfer succeeds.
+    if (res['error'] == null) {
+      final b = state.balance;
+      state = state.copyWith(
+        balance: BotBalance(
+          balance: 0,
+          totalPurchased: b.totalPurchased,
+          totalUsed: b.totalUsed,
+          proBalance: 0,
+          proTotalPurchased: b.proTotalPurchased,
+          proTotalUsed: b.proTotalUsed,
+        ),
+      );
+    }
+    return res;
   }
 
   void _replacePending(

@@ -3,8 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/autocomplete/pending_edit.dart';
+import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
+import '../../features/p2p/p2p_models.dart';
+import '../../features/p2p/p2p_service.dart';
 import '../../features/shop/cosmetics.dart';
+import '../../features/reactions/quick_context_items.dart';
 import '../../features/reactions/quick_react_popup.dart';
 import '../../features/reactions/reaction_burst.dart';
 import '../../features/reactions/reactors_modal.dart';
@@ -13,6 +18,7 @@ import '../../models/message.dart';
 import '../../models/settings.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
 import '../context_menu/context_menu_actions.dart';
 import '../context_menu/context_menu_panel.dart';
@@ -101,6 +107,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return null;
   }
 
+  /// The active special-cosmetic auras (gold/neon/prism/frost/phoenix/cosmic/
+  /// hologram) composed onto the bubble/row.
+  List<CosmeticAura> get _auras => resolveCosmeticAuras(_cosmetics);
+
   /// The flair + supporter badges that follow the author nym.
   Widget _nymBadges(BuildContext context, {double flairSize = 16}) {
     return CosmeticNymBadges(
@@ -110,9 +120,175 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
+  /// The author-name [TextStyle], bolding Genesis holders (`.has-genesis-flair`)
+  /// and gold-tinting active supporters whose author line should match the
+  /// supporter-style gold (`styles-features.css:1478-1481`).
+  TextStyle _authorStyle(NymColors c, {required bool self, required double size}) {
+    final cos = _cosmetics;
+    final genesis = hasGenesisFlair(cos);
+    final supporterGold = cos.supporter && cos.styleId == null;
+    return TextStyle(
+      color: supporterGold ? const Color(0xFFFFD700) : (self ? c.primary : c.secondary),
+      fontSize: size,
+      fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
+      shadows: supporterGold
+          ? const [Shadow(color: Color(0x66FFD700), blurRadius: 10)]
+          : null,
+    );
+  }
+
+  /// The message body: a P2P file-offer card when this is an offer, a redacted
+  /// block when the redacted cosmetic is active, else the rich-formatted content
+  /// tinted by the active style.
+  Widget _bodyContent(
+    BuildContext context,
+    Color color,
+    double fontSize, {
+    MessageStyleDecoration? deco,
+  }) {
+    if (message.isFileOffer && message.fileOffer != null) {
+      final p2p = ref.read(p2pServiceProvider);
+      return FileOfferCard(
+        offer: FileOffer.fromJson(message.fileOffer!),
+        isOwn: message.isOwn,
+        service: p2p,
+      );
+    }
+    // cosmetic-redacted: content replaced with █ blocks (`shop.js:498-503`).
+    // TODO(ui-parity): the PWA reveals for 10s then blanks; we redact upfront.
+    if (_cosmetics.isRedacted) {
+      return Text(
+        '████████',
+        style: TextStyle(
+          color: color.withValues(alpha: 0.5),
+          fontSize: fontSize,
+          letterSpacing: 1,
+        ),
+      );
+    }
+    return _content(context, color, fontSize, deco: deco);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    // Centered system / action pill (`displaySystemMessage`).
+    if (message.isSystemRow) return _buildSystemMessage(context);
+    // `/me …` emote → italic "* author action *" line.
+    if (message.isMeAction) return _buildActionMessage(context);
+    final row =
+        settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
+    // current conversation is dimmed (`messages.js:652-656`). Own messages are
+    // never flooded.
+    if (!message.isOwn &&
+        ref.watch(floodTrackerProvider).isFlooding(message.pubkey)) {
+      return Opacity(opacity: 0.2, child: row);
+    }
+    return row;
+  }
+
+  /// A centered `.system-message` (or `.action-message`) pill injected into the
+  /// conversation flow (`styles-chat.css:1334-1360`). Text-dim, rounded-20,
+  /// `white@0.03` bg, glass border, `textSize-3`; the action variant is
+  /// purple-italic.
+  Widget _buildSystemMessage(BuildContext context) {
+    final c = context.nym;
+    final isAction = message.kind == MessageKind.action;
+    final size = settings.textSize.toDouble() - 3;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: Text(
+            message.content,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: isAction ? c.purple : c.textDim,
+              fontSize: size,
+              fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
+              fontWeight: FontWeight.w400,
+              height: 1.3,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// A `/me` emote rendered as a centered italic `* author#suffix action *` line
+  /// over the system-message pill (`.system-message.me-message`,
+  /// `messages.js:662-683`). The author uses the purple/secondary accent.
+  Widget _buildActionMessage(BuildContext context) {
+    final c = context.nym;
+    final fontSize = settings.textSize.toDouble() - 3;
+    final action = message.content.startsWith('/me ')
+        ? message.content.substring(4)
+        : message.content;
+    final suffix = getPubkeySuffix(message.pubkey);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: DefaultTextStyle(
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: fontSize,
+              fontStyle: FontStyle.italic,
+              height: 1.3,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const Text('* '),
+                NymAvatar(seed: message.author, size: fontSize + 2),
+                const SizedBox(width: 4),
+                GestureDetector(
+                  onTap: () => _openContextMenu(context),
+                  child: Text.rich(TextSpan(children: [
+                    TextSpan(
+                      text: message.author,
+                      style: TextStyle(
+                        color: c.secondary,
+                        fontWeight: FontWeight.w600,
+                        fontStyle: FontStyle.normal,
+                      ),
+                    ),
+                    if (suffix.isNotEmpty)
+                      TextSpan(
+                        text: '#$suffix',
+                        style: TextStyle(
+                          color: c.secondaryA(0.6),
+                          fontStyle: FontStyle.normal,
+                        ),
+                      ),
+                  ])),
+                ),
+                _nymBadges(context, flairSize: fontSize + 2),
+                const SizedBox(width: 4),
+                // The action text (formatted). Kept inline; italic inherited.
+                Flexible(
+                  child: MessageContent(content: action, fontSize: fontSize),
+                ),
+                const Text(' *'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   // ---- IRC layout ----
@@ -138,6 +314,90 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       barColor = deco!.borderAccent;
       bg = deco.contentBackground ?? bg;
     }
+    // Special cosmetic auras also paint a left bar + background tint on the row.
+    final auras = _auras;
+    final strongestAura = auras.isNotEmpty ? auras.last : null;
+    if (strongestAura?.borderAccent != null) {
+      barColor = strongestAura!.borderAccent;
+    }
+    bg = strongestAura?.background ?? bg;
+    final watermark = deco?.watermark ??
+        auras.map((a) => a.watermark).firstWhere((w) => w != null, orElse: () => null);
+
+    final rowChildren = Wrap(
+      crossAxisAlignment: WrapCrossAlignment.start,
+      spacing: 10,
+      runSpacing: 4,
+      children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
+          child: GestureDetector(
+            onTap: () => _openContextMenu(context),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    message.author,
+                    overflow: TextOverflow.ellipsis,
+                    style: _authorStyle(c, self: self, size: fontSize),
+                  ),
+                ),
+                _nymBadges(context),
+              ],
+            ),
+          ),
+        ),
+        if (settings.showTimestamps)
+          SizedBox(
+            width: 50,
+            child: Text(
+              formatTime(message.dateTime, settings.timeFormat),
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            ),
+          ),
+        ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width - 220,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _bodyContent(context, c.text, fontSize, deco: deco),
+              if (_showTranslation)
+                MessageTranslation(
+                  content: message.content,
+                  targetLang: _translateLangOverride,
+                ),
+              // `.edited-indicator-irc`: right-aligned 10px italic dim (edited).
+              if (message.isEdited)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      '(edited)',
+                      style: TextStyle(
+                        color: c.textDim.withValues(alpha: 0.7),
+                        fontSize: 10,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                ),
+              if (reactions.isNotEmpty || widget.onReactionPicker != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 5),
+                  child: _reactionsRow(context),
+                ),
+              if (_showReaderAvatars) _readerAvatars(context),
+              if (self && message.isPM && !message.isGroup)
+                _deliveryTicks(context),
+            ],
+          ),
+        ),
+      ],
+    );
 
     final content = Container(
       decoration: BoxDecoration(
@@ -147,66 +407,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             : null,
       ),
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      child: Wrap(
-        crossAxisAlignment: WrapCrossAlignment.start,
-        spacing: 10,
-        runSpacing: 4,
-        children: [
-          ConstrainedBox(
-            constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
-            child: GestureDetector(
-              onTap: () => _openContextMenu(context),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      message.author,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: self ? c.primary : c.secondary,
-                        fontSize: fontSize,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  _nymBadges(context),
-                ],
-              ),
-            ),
-          ),
-          if (settings.showTimestamps)
-            SizedBox(
-              width: 50,
-              child: Text(
-                formatTime(message.dateTime, settings.timeFormat),
-                style: TextStyle(color: c.textDim, fontSize: 12),
-              ),
-            ),
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width - 220,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: watermark != null
+          ? Stack(
               children: [
-                _content(context, c.text, fontSize, deco: deco),
-                if (_showTranslation)
-                  MessageTranslation(
-                    content: message.content,
-                    targetLang: _translateLangOverride,
-                  ),
-                if (reactions.isNotEmpty || widget.onReactionPicker != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 5),
-                    child: _reactionsRow(context),
-                  ),
-                if (self && message.isPM) _deliveryTicks(context),
+                Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
+                rowChildren,
               ],
-            ),
-          ),
-        ],
-      ),
+            )
+          : rowChildren,
     );
     return GestureDetector(
       onLongPress: () => _onMessageLongPress(context),
@@ -224,56 +432,64 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
     // In bubble mode the CSS applies the message style to `.message-content`
     // (the bubble): a translucent style background plus a soft glow halo.
+    final auras = _auras;
+    final lastAura = auras.isNotEmpty ? auras.last : null;
     final bubbleColor = deco?.contentBackground ??
+        lastAura?.background ??
         (self ? c.primaryA(0.25) : Colors.white.withValues(alpha: 0.14));
-    final glow = deco?.glow;
+    final radius = _bubbleRadius(self);
+
+    final innerContent = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _bodyContent(context, c.text, fontSize, deco: deco),
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        const SizedBox(height: 2),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            if (message.isEdited)
+              Text(
+                '(edited) ',
+                style: TextStyle(
+                    color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
+              ),
+            Text(
+              formatTime(message.dateTime, settings.timeFormat),
+              style: TextStyle(color: c.textDim, fontSize: 10),
+            ),
+            if (self && message.isPM && !message.isGroup) ...[
+              const SizedBox(width: 4),
+              _ticksGlyph(context),
+            ],
+          ],
+        ),
+      ],
+    );
 
     final bubble = GestureDetector(
       onLongPress: () => _onMessageLongPress(context),
-      child: Container(
+      child: ConstrainedBox(
         constraints: BoxConstraints(
           minWidth: 0,
           maxWidth: MediaQuery.of(context).size.width * 0.85,
         ),
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-        decoration: BoxDecoration(
-          color: bubbleColor,
-          borderRadius: _bubbleRadius(self),
-          boxShadow: glow != null
-              ? [BoxShadow(color: glow, blurRadius: 18, spreadRadius: -2)]
-              : null,
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _content(context, c.text, fontSize, deco: deco),
-            if (_showTranslation)
-              MessageTranslation(
-                content: message.content,
-                targetLang: _translateLangOverride,
-              ),
-            const SizedBox(height: 2),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                if (message.isEdited)
-                  Text(
-                    'edited ',
-                    style: TextStyle(color: c.textDim, fontSize: 10),
-                  ),
-                Text(
-                  formatTime(message.dateTime, settings.timeFormat),
-                  style: TextStyle(color: c.textDim, fontSize: 10),
-                ),
-                if (self && message.isPM) ...[
-                  const SizedBox(width: 4),
-                  _ticksGlyph(context),
-                ],
-              ],
-            ),
-          ],
+        child: _decorateBubble(
+          radius: radius,
+          bubbleColor: bubbleColor,
+          glow: deco?.glow,
+          gradient: lastAura?.gradient,
+          auras: auras,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            child: innerContent,
+          ),
         ),
       ),
     );
@@ -293,11 +509,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     child: Text(
                       message.author,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: self ? c.primary : c.secondary,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
+                      style: _authorStyle(c, self: self, size: 11),
                     ),
                   ),
                   _nymBadges(context, flairSize: 14),
@@ -306,6 +518,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             ),
           ),
         bubble,
+        if (_showReaderAvatars) _readerAvatars(context),
         if (reactions.isNotEmpty || widget.onReactionPicker != null)
           Padding(
             padding: const EdgeInsets.only(top: 5),
@@ -339,6 +552,165 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return Padding(
       padding: EdgeInsets.fromLTRB(14, widget.grouped ? 1 : 4, 14, 1),
       child: row,
+    );
+  }
+
+  /// Wraps the bubble [child] with the style glow + cosmetic-aura box-shadows,
+  /// an optional aura background gradient, a tiled watermark behind the content,
+  /// and the prism-ring / hologram overlays painted above it. Everything is
+  /// clipped to the bubble [radius].
+  Widget _decorateBubble({
+    required BorderRadius radius,
+    required Color bubbleColor,
+    required Color? glow,
+    required List<Color>? gradient,
+    required List<CosmeticAura> auras,
+    required Widget child,
+  }) {
+    final shadows = <BoxShadow>[];
+    if (glow != null) {
+      shadows.add(BoxShadow(color: glow, blurRadius: 18, spreadRadius: -2));
+    }
+    for (final a in auras) {
+      // Inset ring (approximated as a tight 0-blur spread inside the box via a
+      // border below) + the outer glow.
+      if (a.glowColor != null && a.glowBlur > 0) {
+        shadows.add(BoxShadow(color: a.glowColor!, blurRadius: a.glowBlur));
+      }
+    }
+    // The strongest inset ring (last aura) is drawn as a hairline inner border.
+    final inset = auras.isNotEmpty ? auras.last : null;
+
+    // Watermark from the active style or a frost/cosmic aura.
+    final watermark = _styleDecoration?.watermark ??
+        auras
+            .map((a) => a.watermark)
+            .firstWhere((w) => w != null, orElse: () => null);
+
+    final overlays =
+        auras.where((a) => a.hasOverlay).toList();
+    final overlayAura = overlays.isNotEmpty ? overlays.first : null;
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: gradient == null ? bubbleColor : null,
+        gradient: gradient != null
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: gradient,
+              )
+            : null,
+        borderRadius: radius,
+        border: inset?.insetColor != null
+            ? Border.all(color: inset!.insetColor!, width: inset.insetWidth)
+            : null,
+        boxShadow: shadows.isEmpty ? null : shadows,
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Stack(
+          children: [
+            if (watermark != null)
+              Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
+            child,
+            if (overlayAura != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: CosmeticOverlayPainter(
+                      aura: overlayAura,
+                      radius: radius,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// True when this own message should show the stacked reader-avatar delivery
+  /// indicator (own channel or own group message with readers) instead of the
+  /// PM tick glyph. (`messages.js:824-847`.)
+  bool get _showReaderAvatars =>
+      message.isOwn &&
+      !message.isPM &&
+      (message.isGroup || _isChannelMessage) &&
+      message.readers.isNotEmpty;
+
+  /// A channel message: not a PM, not a group, with a 64-hex geohash (the PWA
+  /// gate `message.geohash && /^[0-9a-f]{64}$/`).
+  bool get _isChannelMessage {
+    if (message.isPM || message.isGroup) return false;
+    final g = message.geohash ?? '';
+    return RegExp(r'^[0-9a-f]{64}$').hasMatch(g);
+  }
+
+  /// A right-aligned row of up to 3 overlapping 14px reader avatars + a `+N`
+  /// overflow, mirroring `_buildGroupReadersHtmlFromMap` (`groups.js:2624-2641`)
+  /// and `.group-readers`/`.group-reader-avatar` (`styles-chat.css:612-654`).
+  /// Long-press opens a "seen by" modal.
+  Widget _readerAvatars(BuildContext context) {
+    const maxVisible = 3;
+    final entries = message.readers.entries.toList();
+    final visible = entries.take(maxVisible).toList();
+    final overflow = entries.length - visible.length;
+    final c = context.nym;
+    return GestureDetector(
+      onLongPress: () => _showSeenBy(context),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 3, right: 4),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          mainAxisSize: MainAxisSize.max,
+          children: [
+            for (var i = 0; i < visible.length; i++)
+              Transform.translate(
+                offset: Offset(i == 0 ? 0 : -5.0 * i, 0),
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: c.bg, width: 1.5),
+                  ),
+                  child: Opacity(
+                    opacity: 0.85,
+                    child: NymAvatar(seed: visible[i].value, size: 14),
+                  ),
+                ),
+              ),
+            if (overflow > 0)
+              Padding(
+                padding: const EdgeInsets.only(left: 3),
+                child: Text(
+                  '+$overflow',
+                  style: TextStyle(
+                      color: c.textDim, fontSize: 9, height: 14 / 9),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSeenBy(BuildContext context) {
+    final reactors = <ReactorEntry>[
+      for (final e in message.readers.entries)
+        ReactorEntry(
+          pubkey: e.key,
+          nym: _baseNym(e.value),
+          suffix: getPubkeySuffix(e.key),
+        ),
+    ];
+    // Reuse the reactors modal as the "seen by" list (mirror the PWA's readers
+    // modal); the 👁 glyph in the header reads as "seen by N".
+    showReactorsModal(
+      context,
+      anchorRect: _globalRectOfContext(context) ?? Rect.zero,
+      emoji: '👁',
+      reactors: reactors,
     );
   }
 
@@ -405,15 +777,28 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   void _onMessageLongPress(BuildContext context) {
     final rect = _globalRectOfContext(context);
-    // Quick-react recents are sourced from the engine when exposed; until then
-    // the popup pads with the six defaults (calls.js `_messageQuickReactDefaults`).
+    // Quick-react row = recents-first, padded with the six defaults
+    // (`_messageQuickReactDefaults`), deduped (ctx-menu F7).
+    final recents = ref.read(recentEmojisProvider);
     showQuickReactPopup(
       context,
       anchorRect: rect ?? Rect.zero,
-      emojis: quickReactEmojis(const []),
+      emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
       onMenu: message.isOwn ? null : () => _openContextMenu(context),
+      // The PWA long-press surface also carries the labelled quick actions
+      // (Slap/Hug/Zap/Quote/Copy/Translate/Edit/Delete) below the emoji pill.
+      contextItems: buildQuickContextItems(
+        context,
+        ref,
+        message,
+        onTranslate: () => setState(() => _showTranslation = true),
+        onEdit: () => ref.read(pendingEditProvider.notifier).request(
+              messageId: message.id,
+              content: message.content,
+            ),
+      ),
     );
   }
 
@@ -421,6 +806,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final controller = ref.read(nostrControllerProvider);
     final view = ref.read(currentViewProvider);
     final already = reactions.any((r) => r.emoji == emoji && r.userReacted);
+    // Record the pick into the shared recents store (reactions.js bump).
+    ref.read(recentEmojisProvider.notifier).record(emoji);
     final ok = await controller.toggleReaction(
       message.id,
       emoji,
@@ -493,16 +880,33 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// gradient style (aurora) clips the text with a `ShaderMask`. The per-glyph
   /// `text-shadow` glow can't be pushed through `MessageContent`, so the glow is
   /// rendered as the bubble/row halo instead (see TODO(verify) in the report).
+  /// Whether to blur this message's images: never for own messages; otherwise
+  /// per the `blurOthersImages` setting (`true` → always, `friends` → only when
+  /// the sender isn't a friend). Mirrors `messages.js:1267-1274`.
+  bool _shouldBlurImages() {
+    if (message.isOwn) return false;
+    final setting = ref.read(settingsProvider.notifier).blurImages;
+    if (setting == 'true') return true;
+    if (setting == 'friends') {
+      return !ref.read(appStateProvider).isFriend(message.pubkey);
+    }
+    return false;
+  }
+
   Widget _content(
     BuildContext context,
     Color color,
     double fontSize, {
     MessageStyleDecoration? deco,
   }) {
+    final blur = _shouldBlurImages();
     final body = MessageContent(
       content: message.content,
       baseColor: deco?.textColor ?? color,
       fontSize: fontSize,
+      blurImages: blur,
+      glyphShadows: deco?.textShadows,
+      monospace: deco?.monospace ?? false,
     );
     final gradient = deco?.gradient;
     if (gradient != null && gradient.length >= 2) {
@@ -518,6 +922,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           content: message.content,
           baseColor: Colors.white,
           fontSize: fontSize,
+          blurImages: blur,
         ),
       );
     }
@@ -576,7 +981,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
 /// A single `.reaction-badge` pill. Tappable (toggle) with a long-press to show
 /// the reactor list; reports its global bounds to the callbacks for anchoring.
-class _ReactionBadge extends StatelessWidget {
+/// User-reacted badges get a soft glow halo (`box-shadow 0 0 10px primary@0.1`)
+/// and the pill presses/pops on tap (`active scale(0.95)`).
+class _ReactionBadge extends StatefulWidget {
   const _ReactionBadge({
     required this.reaction,
     required this.onTap,
@@ -585,6 +992,13 @@ class _ReactionBadge extends StatelessWidget {
   final MessageReaction reaction;
   final void Function(Rect) onTap;
   final void Function(Rect) onLongPress;
+
+  @override
+  State<_ReactionBadge> createState() => _ReactionBadgeState();
+}
+
+class _ReactionBadgeState extends State<_ReactionBadge> {
+  bool _pressed = false;
 
   Rect _rect(BuildContext context) {
     final box = context.findRenderObject() as RenderBox?;
@@ -595,26 +1009,36 @@ class _ReactionBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final r = reaction;
+    final r = widget.reaction;
     return GestureDetector(
-      onTap: () => onTap(_rect(context)),
-      onLongPress: () => onLongPress(_rect(context)),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: r.userReacted
-              ? c.primaryA(0.12)
-              : Colors.white.withValues(alpha: 0.05),
-          borderRadius: const BorderRadius.all(Radius.circular(20)),
-          border: Border.all(
-            color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+      onTap: () => widget.onTap(_rect(context)),
+      onLongPress: () => widget.onLongPress(_rect(context)),
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.95 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: r.userReacted
+                ? c.primaryA(0.12)
+                : Colors.white.withValues(alpha: 0.05),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+            border: Border.all(
+              color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+            ),
+            boxShadow: r.userReacted
+                ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
+                : null,
           ),
-        ),
-        child: Text(
-          '${r.emoji} ${r.count}',
-          style: TextStyle(
-            color: r.userReacted ? c.primary : c.text,
-            fontSize: 12,
+          child: Text(
+            '${r.emoji} ${r.count}',
+            style: TextStyle(
+              color: r.userReacted ? c.primary : c.text,
+              fontSize: 12,
+            ),
           ),
         ),
       ),
@@ -642,8 +1066,266 @@ class _AddReactionBtn extends StatelessWidget {
             borderRadius: const BorderRadius.all(Radius.circular(20)),
             border: Border.all(color: c.glassBorder),
           ),
-          child: Icon(Icons.add_reaction_outlined, size: 14, color: c.textDim),
+          child: Icon(Icons.add_reaction_outlined, size: 16, color: c.text),
         ),
+      ),
+    );
+  }
+}
+
+/// The in-message P2P file-offer card (`.file-offer`, `messages.js:851-917`,
+/// `styles-features.css:2087-2290`). Header = category-coloured doc icon + name
+/// + meta (`size • type • Torrent?`); status block flips between
+/// seeding/unseeded (own) and Download / inline-progress / "No longer available"
+/// (peer). Driven live by [P2PService] (a [ChangeNotifier]) keyed by offerId.
+class FileOfferCard extends StatelessWidget {
+  const FileOfferCard({
+    super.key,
+    required this.offer,
+    required this.isOwn,
+    required this.service,
+  });
+
+  final FileOffer offer;
+  final bool isOwn;
+  final P2PService service;
+
+  /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
+  static (Color, IconData) _category(NymColors c, FileOffer o) {
+    final ext = o.name.contains('.') ? o.name.split('.').last.toLowerCase() : '';
+    final mime = o.type.toLowerCase();
+    bool any(List<String> exts) => exts.contains(ext);
+    if (any(['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma']) ||
+        mime.startsWith('audio/')) {
+      return (c.purple, Icons.audiotrack);
+    }
+    if (any(['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm']) ||
+        mime.startsWith('video/')) {
+      return (c.danger, Icons.movie_outlined);
+    }
+    if (any(['zip', 'rar', '7z', 'tar', 'gz', 'bz2'])) {
+      return (c.warning, Icons.folder_zip_outlined);
+    }
+    if (any(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf'])) {
+      return (c.secondary, Icons.description_outlined);
+    }
+    return (c.textDim, Icons.insert_drive_file_outlined);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return ListenableBuilder(
+      listenable: service,
+      builder: (context, _) {
+        final (iconColor, iconData) = _category(c, offer);
+        final isTorrent = offer.isTorrent;
+        final unseeded = service.isUnseeded(offer.offerId);
+        // The active transfer for this offer, if any.
+        P2PTransfer? transfer;
+        for (final t in service.transfers) {
+          if (t.offerId == offer.offerId) transfer = t;
+        }
+
+        return Container(
+          constraints: const BoxConstraints(maxWidth: 320),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.04),
+            borderRadius: const BorderRadius.all(Radius.circular(8)),
+            border: Border.all(
+              color: isTorrent ? c.secondaryA(0.3) : c.glassBorder,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(iconData, color: iconColor, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          offer.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: c.primary,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          '${formatFileSize(offer.size)} • '
+                          '${offer.type.isEmpty ? 'Unknown type' : offer.type}'
+                          '${isTorrent ? ' • Torrent' : ''}',
+                          style: TextStyle(color: c.textDim, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _status(context, c, unseeded: unseeded, transfer: transfer),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _status(
+    BuildContext context,
+    NymColors c, {
+    required bool unseeded,
+    required P2PTransfer? transfer,
+  }) {
+    // Own offer: seeding (green dot + Stop) or no-longer-seeding (grey dot).
+    if (isOwn) {
+      if (unseeded) {
+        return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer seeding',
+            dim: true);
+      }
+      return Row(
+        children: [
+          _dot(c.primary),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('Seeding - available for download',
+                style: TextStyle(color: c.primary, fontSize: 11)),
+          ),
+          _StopBtn(onTap: () => service.stopSeeding(offer.offerId)),
+        ],
+      );
+    }
+    // Peer offer, no longer available.
+    if (unseeded) {
+      return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer available',
+          dim: true);
+    }
+    // Active transfer → inline progress bar.
+    if (transfer != null && transfer.status != P2PStatus.complete) {
+      final pct = transfer.progress;
+      final failed = transfer.status == P2PStatus.error;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (failed)
+            _OfferBtn(
+              label: 'Retry',
+              color: c.primary,
+              onTap: () => service.requestFile(offer.offerId),
+            )
+          else ...[
+            ClipRRect(
+              borderRadius: const BorderRadius.all(Radius.circular(10)),
+              child: LinearProgressIndicator(
+                value: pct <= 0 ? null : pct / 100,
+                minHeight: 5,
+                backgroundColor: Colors.white.withValues(alpha: 0.05),
+                valueColor: AlwaysStoppedAnimation(c.primary),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              transfer.message ?? 'Connecting...',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: c.textDim, fontSize: 11),
+            ),
+          ],
+        ],
+      );
+    }
+    if (transfer != null && transfer.status == P2PStatus.complete) {
+      return _OfferBtn(label: 'Downloaded', color: c.secondary, onTap: null);
+    }
+    // Available → Download / Download (Torrent).
+    return _OfferBtn(
+      label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
+      color: offer.isTorrent ? c.secondary : c.primary,
+      onTap: () => service.requestFile(offer.offerId),
+    );
+  }
+
+  Widget _dot(Color color) => Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      );
+
+  Widget _dotRow(NymColors c, Color dotColor, String label,
+      {bool dim = false}) {
+    return Opacity(
+      opacity: dim ? 0.7 : 1,
+      child: Row(
+        children: [
+          _dot(dotColor),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+}
+
+/// `.file-offer-btn` — a full-width tinted action pill (Download / Retry /
+/// Downloaded). A null [onTap] renders a disabled (terminal) state.
+class _OfferBtn extends StatelessWidget {
+  const _OfferBtn({required this.label, required this.color, this.onTap});
+  final String label;
+  final Color color;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          border: Border.all(color: color.withValues(alpha: 0.25)),
+          borderRadius: const BorderRadius.all(Radius.circular(6)),
+        ),
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.file-offer-stop-btn` — a small danger-outlined "Stop" pill (own seeding).
+class _StopBtn extends StatelessWidget {
+  const _StopBtn({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 8),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.danger),
+          borderRadius: const BorderRadius.all(Radius.circular(6)),
+        ),
+        child: Text('Stop',
+            style: TextStyle(color: c.danger, fontSize: 10)),
       ),
     );
   }

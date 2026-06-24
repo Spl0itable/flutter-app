@@ -5,6 +5,7 @@ import 'package:local_auth/local_auth.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/storage/secure_store.dart';
+import '../../widgets/common/app_dialog.dart';
 import 'identity_vault.dart' show SecureStoreLike;
 import 'vault_settings_modal.dart' show identityVaultProvider;
 
@@ -131,33 +132,16 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
     if (mounted) widget.onForget();
   }
 
-  Future<bool> _confirmForget() async {
-    final c = context.nym;
-    final ok = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
-      builder: (ctx) => AlertDialog(
-        backgroundColor: c.bgSecondary,
-        title: Text('Forget identity', style: TextStyle(color: c.text)),
-        content: Text(
-          'This permanently deletes the encrypted identity on this device and '
-          'starts a fresh one. Continue?',
-          style: TextStyle(color: c.textDim),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('Cancel', style: TextStyle(color: c.textDim)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Forget',
-                style: TextStyle(color: Color(0xFFE5484D))),
-          ),
-        ],
-      ),
+  Future<bool> _confirmForget() {
+    // Shared danger-confirm (`.app-dialog`, the F6 component).
+    return showAppConfirm(
+      context,
+      'This permanently deletes the encrypted identity on this device and '
+      'starts a fresh one. Continue?',
+      title: 'Forget identity',
+      okLabel: 'Forget',
+      danger: true,
     );
-    return ok ?? false;
   }
 
   Future<bool> _biometricAuth() async {

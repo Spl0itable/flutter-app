@@ -43,6 +43,8 @@ dependencies:
   cached_network_image: ^3.4.1
   share_plus: ^10.0.2
   url_launcher: any
+  # Inline video playback for video messages / galleries (PWA <video>).
+  video_player: ^2.9.1
 
   # Realtime media
   flutter_webrtc: ^0.12.5+hotfix.1

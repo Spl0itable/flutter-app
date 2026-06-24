@@ -30,7 +30,10 @@ class User {
     this.shopStyle,
     this.shopFlair,
     this.isSupporter = false,
-  }) : channels = channels ?? <String>{};
+    List<String>? shopCosmetics,
+    this.shopEdition,
+  })  : channels = channels ?? <String>{},
+        shopCosmetics = shopCosmetics ?? const <String>[];
 
   final String pubkey;
   String nym;
@@ -51,6 +54,16 @@ class User {
   String? shopStyle; // active message-style item id
   String? shopFlair; // active nickname-flair item id
   bool isSupporter; // owns the supporter badge
+
+  /// Active special-cosmetic item ids broadcast by this user (the
+  /// `active.cosmetics` array — `cosmetic-aura-gold`, `cosmetic-frost`, …).
+  /// Populated by presence / shop-status ingestion for OTHER users; the self
+  /// pubkey reads these live from the shop controller instead. (`shop.js:459`.)
+  List<String> shopCosmetics;
+
+  /// Active numbered-flair edition (`active.editions['flair-genesis']`), stamped
+  /// on the rendered flair badge for OTHER users. Null when unknown / unnumbered.
+  int? shopEdition;
 
   /// Effective status given the active threshold (docs/specs/03 §2.5).
   UserStatus effectiveStatus({int? nowMs}) {

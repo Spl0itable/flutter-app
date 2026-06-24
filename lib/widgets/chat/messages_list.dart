@@ -29,24 +29,31 @@ class MessagesList extends ConsumerWidget {
     final containerColor = Colors.black.withValues(alpha: 0.15);
 
     if (messages.isEmpty) {
+      // PWA settles an empty channel/PM to "No recent messages"
+      // (`messages.js:3043-3052`, `.msg-empty-note`).
       return ColoredBox(
         color: containerColor,
         child: Center(
           child: Text(
-            'No messages yet',
+            'No recent messages',
             style: TextStyle(color: c.textDim, fontSize: 13),
           ),
         ),
       );
     }
 
-    // Precompute bubble grouping flags (in chronological order).
+    // Precompute bubble grouping flags (in chronological order). System/action
+    // pill rows and `/me` action lines never group and never join a group.
     final groupedWithPrev = List<bool>.filled(messages.length, false);
     final hasNextSameGroup = List<bool>.filled(messages.length, false);
     for (var i = 1; i < messages.length; i++) {
       final prev = messages[i - 1];
       final cur = messages[i];
-      final same = prev.pubkey == cur.pubkey &&
+      final same = !prev.isSystemRow &&
+          !cur.isSystemRow &&
+          !prev.isMeAction &&
+          !cur.isMeAction &&
+          prev.pubkey == cur.pubkey &&
           (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
       groupedWithPrev[i] = same;
       if (same) hasNextSameGroup[i - 1] = true;

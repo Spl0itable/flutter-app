@@ -31,20 +31,27 @@ class ShopState {
   const ShopState({
     this.owned = const {},
     this.active = const ActiveItems(),
+    this.supply = const {},
   });
 
   final Map<String, OwnedItem> owned;
   final ActiveItems active;
+
+  /// Live remaining supply per limited item id (`shop-supply` response), keyed
+  /// by item id → remaining count. Empty until the limited tab fetches it.
+  final Map<String, int> supply;
 
   bool owns(String itemId) => owned.containsKey(itemId);
 
   ShopState copyWith({
     Map<String, OwnedItem>? owned,
     ActiveItems? active,
+    Map<String, int>? supply,
   }) =>
       ShopState(
         owned: owned ?? this.owned,
         active: active ?? this.active,
+        supply: supply ?? this.supply,
       );
 }
 
@@ -481,6 +488,92 @@ class ShopController extends StateNotifier<ShopState> {
     state = state.copyWith(owned: owned, active: active);
     await _persist();
   }
+
+  // ---------------------------------------------------------------------------
+  // Limited-drop supply (shop-supply, public/no-auth; shop.js:832-854)
+  // ---------------------------------------------------------------------------
+
+  /// Last `shop-supply` fetch time (ms epoch); throttles refetches to 30s like
+  /// the PWA's `_maybeFetchSupply`.
+  int _supplyTs = 0;
+  bool _supplyFetching = false;
+
+  /// Fetches remaining supply for [itemIds] via the public `shop-supply` action
+  /// (no auth) and merges it into [ShopState.supply] (shop.js `fetchShopSupply`).
+  /// Tolerates transport failure (keeps the last known supply). Throttled to one
+  /// fetch per 30s unless [force] is set.
+  ///
+  /// TODO(verify): live `/api/storage` host is unreachable in this environment.
+  Future<void> fetchSupply(List<String> itemIds, {bool force = false}) async {
+    if (itemIds.isEmpty || _supplyFetching) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && _supplyTs != 0 && now - _supplyTs < 30000) return;
+    _supplyFetching = true;
+    try {
+      final data = await _api.storageAction({
+        'action': 'shop-supply',
+        'itemIds': itemIds,
+      });
+      final s = data['supply'];
+      if (s is Map) {
+        final next = Map<String, int>.from(state.supply);
+        s.forEach((id, info) {
+          final remaining = info is Map ? (info['remaining'] as num?) : null;
+          if (remaining != null) next[id.toString()] = remaining.toInt();
+        });
+        state = state.copyWith(supply: next);
+      }
+      _supplyTs = DateTime.now().millisecondsSinceEpoch;
+    } catch (_) {
+      // Keep last known supply.
+    } finally {
+      _supplyFetching = false;
+    }
+  }
+
+  /// Resolves the availability `{state,label}` of a limited [item] from its
+  /// `startsAt`/`endsAt`/`maxSupply` + live [ShopState.supply]
+  /// (shop.js `_shopItemAvailability`). Pure; safe to call from `build`.
+  ShopAvailability availability(ShopItem item) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final startsAt = item.startsAt;
+    if (startsAt != null && now < startsAt) {
+      final d = DateTime.fromMillisecondsSinceEpoch(startsAt);
+      return ShopAvailability(
+        ShopAvailabilityState.soon,
+        'Starts ${_shortDate(d)}',
+      );
+    }
+    final endsAt = item.endsAt;
+    if (endsAt != null && now > endsAt) {
+      return const ShopAvailability(ShopAvailabilityState.ended, 'Drop ended');
+    }
+    final max = item.maxSupply;
+    if (max != null) {
+      final remaining = state.supply[item.id];
+      if (remaining != null) {
+        if (remaining <= 0) {
+          return const ShopAvailability(
+              ShopAvailabilityState.soldout, 'Sold out');
+        }
+        return ShopAvailability(
+          ShopAvailabilityState.available,
+          '$remaining / $max left',
+        );
+      }
+      return ShopAvailability(
+          ShopAvailabilityState.available, 'Limited · $max');
+    }
+    return const ShopAvailability(ShopAvailabilityState.available, '');
+  }
+
+  /// `M/D/YYYY` (matches JS `toLocaleDateString()` en-US default).
+  static String _shortDate(DateTime d) => '${d.month}/${d.day}/${d.year}';
+
+  /// Invalidate the supply-fetch throttle so the next [fetchSupply] re-queries
+  /// the server — called after a limited purchase changes remaining supply
+  /// (shop.js sets `_shopSupplyTs = 0` post-claim).
+  void invalidateSupply() => _supplyTs = 0;
 
   /// Local-only optimistic grant used when the backend is unreachable in this
   /// environment (e.g. the "I've paid" manual confirmation in the modal stub).

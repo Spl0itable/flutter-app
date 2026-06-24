@@ -206,18 +206,24 @@ class FormInput extends StatelessWidget {
     this.hint,
     this.onSubmitted,
     this.onChanged,
+    this.focusNode,
+    this.onTap,
   });
 
   final TextEditingController? controller;
   final String? hint;
   final ValueChanged<String>? onSubmitted;
   final ValueChanged<String>? onChanged;
+  final FocusNode? focusNode;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     return TextField(
       controller: controller,
+      focusNode: focusNode,
+      onTap: onTap,
       onSubmitted: onSubmitted,
       onChanged: onChanged,
       style: TextStyle(color: c.text, fontSize: 13),

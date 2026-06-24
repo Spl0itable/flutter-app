@@ -2,6 +2,8 @@
 // mirroring the PWA's visual treatment (docs/specs/03 §9): markdown spans,
 // code/quote/heading blocks, channel/mention chips, emoji, and media galleries.
 
+import 'dart:ui' show ImageFilter;
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +17,7 @@ import '../../../state/app_state.dart';
 import '../../../state/settings_provider.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
+import 'video_message.dart';
 
 /// Shared stateless [ApiClient] for media/emoji proxy URL construction. The
 /// builders are pure (no network), so a single instance is fine.
@@ -48,6 +51,9 @@ class MessageContent extends ConsumerWidget {
     required this.content,
     this.baseColor,
     this.fontSize,
+    this.blurImages = false,
+    this.glyphShadows,
+    this.monospace = false,
   });
 
   final String content;
@@ -57,6 +63,16 @@ class MessageContent extends ConsumerWidget {
 
   /// Base font size (defaults to settings.textSize).
   final double? fontSize;
+
+  /// Blur inline/gallery images behind a tap-to-reveal (others' images privacy).
+  final bool blurImages;
+
+  /// Glyph [Shadow]s carried by the body text — the per-style `text-shadow`
+  /// glow (neon/matrix/fire/…) or the glitch chromatic split. (`F11`/`F12`.)
+  final List<Shadow>? glyphShadows;
+
+  /// Render the body in a monospace family (the CRT style). (`F13`.)
+  final bool monospace;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -76,6 +92,10 @@ class MessageContent extends ConsumerWidget {
     final size = fontSize ?? settings.textSize.toDouble();
     final color = baseColor ?? c.text;
 
+    // Emoji-only messages (1-6 emoji, no other text) render enlarged
+    // (`.emoji-only .emoji { font-size: 2.5em }`, `messages.js:922-924`).
+    final emojiOnly = isEmojiOnly(content);
+
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
     final previewUrls = _collectPreviewUrls(blocks);
@@ -86,7 +106,7 @@ class MessageContent extends ConsumerWidget {
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(height: 4),
-          _block(context, c, blocks[i], color, size),
+          _block(context, c, blocks[i], color, size, emojiOnly: emojiOnly),
         ],
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
@@ -144,11 +164,19 @@ class MessageContent extends ConsumerWidget {
     NymColors c,
     FormatBlock block,
     Color color,
-    double size,
-  ) {
+    double size, {
+    bool emojiOnly = false,
+  }) {
     switch (block) {
       case ParagraphBlock(:final inlines):
-        return _RichInline(inlines: inlines, color: color, size: size);
+        return _RichInline(
+          inlines: inlines,
+          color: color,
+          size: size,
+          emojiOnly: emojiOnly,
+          shadows: glyphShadows,
+          monospace: monospace,
+        );
       case HeadingBlock(:final level, :final inlines):
         final scale = level == 1 ? 1.5 : (level == 2 ? 1.3 : 1.15);
         return _RichInline(
@@ -162,9 +190,33 @@ class MessageContent extends ConsumerWidget {
       case QuoteBlock():
         return _QuoteBox(block: block, color: color, size: size);
       case MediaBlock(:final items):
-        return _MediaGallery(items: items);
+        return _MediaGallery(items: items, blur: blurImages);
     }
   }
+}
+
+/// One emoji "unit" (the PWA's `_EMOJI_UNIT`, `messages.js:8`): a flag pair, a
+/// keycap, or a presentation/pictographic glyph with optional VS / skin-tone /
+/// ZWJ sequences and tags.
+const String _emojiUnit =
+    r'(?:[\u{1F1E0}-\u{1F1FF}]{2})|(?:[#*0-9]\u{FE0F}?\u{20E3})|'
+    r'(?:(?:\p{Emoji_Presentation}|\p{Extended_Pictographic})'
+    r'(?:\u{FE0F}|\u{FE0E})?(?:[\u{1F3FB}-\u{1F3FF}])?'
+    r'(?:\u{200D}(?:\p{Emoji_Presentation}|\p{Extended_Pictographic})'
+    r'(?:\u{FE0F}|\u{FE0E})?(?:[\u{1F3FB}-\u{1F3FF}])?)*)'
+    r'(?:[\u{E0020}-\u{E007E}]+\u{E007F})?';
+
+final RegExp _rxEmojiOnly = RegExp('^(?:$_emojiUnit){1,6}\$', unicode: true);
+final RegExp _rxWhitespace = RegExp(r'\s', unicode: true);
+
+/// True when [content] is 1-6 emoji with optional whitespace and no other text
+/// (port of `isEmojiOnly`, `messages.js:1424-1430`). Custom-emoji-only messages
+/// (e.g. `:shrug:`) are out of scope here — those are detected by the formatter.
+bool isEmojiOnly(String content) {
+  if (content.isEmpty) return false;
+  final stripped = content.replaceAll(_rxWhitespace, '');
+  if (stripped.isEmpty) return false;
+  return _rxEmojiOnly.hasMatch(stripped);
 }
 
 /// Renders a list of inline nodes as a single [Text.rich] (with [WidgetSpan]s
@@ -175,12 +227,24 @@ class _RichInline extends StatelessWidget {
     required this.color,
     required this.size,
     this.weight,
+    this.emojiOnly = false,
+    this.shadows,
+    this.monospace = false,
   });
 
   final List<InlineNode> inlines;
   final Color color;
   final double size;
   final FontWeight? weight;
+
+  /// Whole message is 1-6 emoji → enlarge emoji glyphs/images.
+  final bool emojiOnly;
+
+  /// Per-style glyph shadows (glow / glitch chromatic split).
+  final List<Shadow>? shadows;
+
+  /// Render glyphs in a monospace family (CRT).
+  final bool monospace;
 
   @override
   Widget build(BuildContext context) {
@@ -190,6 +254,8 @@ class _RichInline extends StatelessWidget {
       fontSize: size,
       fontWeight: weight,
       height: 1.4,
+      shadows: shadows,
+      fontFamily: monospace ? 'monospace' : null,
     );
     return Text.rich(
       TextSpan(
@@ -244,7 +310,11 @@ class _RichInline extends StatelessWidget {
           recognizer: _LinkTap(url),
         );
       case EmojiNode(:final unicode):
-        return TextSpan(text: unicode, style: base.merge(TextStyle(fontSize: size * 1.25)));
+        // `.emoji-only .emoji { font-size: 2.5em }`, else inline `1.25em`.
+        return TextSpan(
+          text: unicode,
+          style: base.merge(TextStyle(fontSize: size * (emojiOnly ? 2.5 : 1.25))),
+        );
       case MentionNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
@@ -256,14 +326,16 @@ class _RichInline extends StatelessWidget {
           child: _ChannelChip(node: node, size: size),
         );
       case CustomEmojiNode(:final url, :final shortcode):
+        // `.emoji-only .custom-emoji { width/height: 2.75em }`, else 22px.
+        final side = emojiOnly ? size * 2.75 : 22.0;
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 1),
             child: CachedNetworkImage(
               imageUrl: proxiedMedia(url, emoji: true),
-              width: 22,
-              height: 22,
+              width: side,
+              height: side,
               fit: BoxFit.contain,
               errorWidget: (_, __, ___) =>
                   Text(':$shortcode:', style: base),
@@ -319,11 +391,13 @@ class _MentionChip extends StatelessWidget {
             ),
           ),
           if (node.suffix != null)
+            // `.nym-suffix`: opacity 0.7, 0.9em, weight 100 (inherits primary).
             TextSpan(
               text: '#${node.suffix}',
               style: TextStyle(
-                color: c.primaryA(0.6),
-                fontSize: size * 0.92,
+                color: c.primaryA(0.7),
+                fontSize: size * 0.9,
+                fontWeight: FontWeight.w100,
               ),
             ),
         ],
@@ -499,17 +573,48 @@ class _QuoteBox extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (block.author != null)
-            Text(
-              '${block.author}:',
-              style: TextStyle(
-                color: c.secondary,
-                fontSize: size - 1,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+          if (block.author != null) _quoteAuthor(c, block.author!),
           for (final child in block.children)
             _quoteChild(context, c, child),
+        ],
+      ),
+    );
+  }
+
+  /// The `<span class="quote-author">author#suffix:</span>` header, splitting
+  /// the base nym (secondary 600) from a dimmed `.nym-suffix` (`#xxxx`).
+  Widget _quoteAuthor(NymColors c, String author) {
+    final hash = author.indexOf('#');
+    final base = hash > 0 ? author.substring(0, hash) : author;
+    final suffix = hash > 0 ? author.substring(hash) : null;
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: base,
+            style: TextStyle(
+              color: c.secondary,
+              fontSize: size - 1,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (suffix != null)
+            TextSpan(
+              text: suffix,
+              style: TextStyle(
+                color: c.secondaryA(0.7),
+                fontSize: (size - 1) * 0.9,
+                fontWeight: FontWeight.w100,
+              ),
+            ),
+          TextSpan(
+            text: ':',
+            style: TextStyle(
+              color: c.secondary,
+              fontSize: size - 1,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );
@@ -534,37 +639,75 @@ class _QuoteBox extends StatelessWidget {
 }
 
 /// A 1/2/3/4-up media grid. Images are tappable (expand placeholder); videos
-/// render as a play tile (no playback yet).
+/// render as an inline [VideoMessage] (tap-to-play, fullscreen expand).
 class _MediaGallery extends StatelessWidget {
-  const _MediaGallery({required this.items});
+  const _MediaGallery({required this.items, this.blur = false});
   final List<MediaItem> items;
+  final bool blur;
 
   @override
   Widget build(BuildContext context) {
+    // Single image/video: max 300×300, min-height 80 (`styles-chat.css:1029`).
     if (items.length == 1) {
-      return _MediaTile(item: items.first, maxSize: 300);
+      return _MediaTile(item: items.first, maxSize: 300, blur: blur);
     }
-    final cols = items.length == 2 ? 2 : (items.length == 3 ? 3 : 4);
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 300),
-      child: GridView.count(
-        crossAxisCount: cols,
+    // The grid is ALWAYS 2 columns, gap 4, max-width 420, radius sm
+    // (`styles-chat.css:987-1023`). 3 items = a tall left hero + two stacked
+    // right; 2 / 4+ = a 2-column wrap. Tiles cap at 220px tall.
+    const gap = 4.0;
+    Widget tile(MediaItem m) =>
+        _MediaTile(item: m, maxSize: 220, blur: blur, inGallery: true);
+    Widget body;
+    if (items.length == 3) {
+      body = Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: tile(items[0])),
+          const SizedBox(width: gap),
+          Expanded(
+            child: Column(
+              children: [
+                Expanded(child: tile(items[1])),
+                const SizedBox(height: gap),
+                Expanded(child: tile(items[2])),
+              ],
+            ),
+          ),
+        ],
+      );
+    } else {
+      body = GridView.count(
+        crossAxisCount: 2,
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
-        mainAxisSpacing: 4,
-        crossAxisSpacing: 4,
-        children: [
-          for (final item in items) _MediaTile(item: item, maxSize: 150),
-        ],
-      ),
+        mainAxisSpacing: gap,
+        crossAxisSpacing: gap,
+        children: [for (final item in items) tile(item)],
+      );
+    }
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420, maxHeight: 444),
+      child: body,
     );
   }
 }
 
 class _MediaTile extends StatelessWidget {
-  const _MediaTile({required this.item, required this.maxSize});
+  const _MediaTile({
+    required this.item,
+    required this.maxSize,
+    this.blur = false,
+    this.inGallery = false,
+  });
   final MediaItem item;
   final double maxSize;
+
+  /// Apply the privacy blur (others' images), revealed on tap (`.blurred`).
+  final bool blur;
+
+  /// This tile sits inside a multi-up gallery grid — videos drop their border
+  /// and corner radius (the grid clips), matching `.message-gallery video`.
+  final bool inGallery;
 
   @override
   Widget build(BuildContext context) {
@@ -572,41 +715,65 @@ class _MediaTile extends StatelessWidget {
     final radius = const BorderRadius.all(Radius.circular(8));
 
     if (item.isVideo) {
-      return ClipRRect(
-        borderRadius: radius,
-        child: Container(
-          constraints:
-              BoxConstraints(maxWidth: maxSize, maxHeight: maxSize, minHeight: 80),
-          color: Colors.black.withValues(alpha: 0.4),
-          alignment: Alignment.center,
-          child: Icon(Icons.play_circle_fill, size: 48, color: c.text),
-        ),
+      // Inline playable video (`F16`): single → bordered max-300 radius-sm;
+      // gallery cell → borderless, square corners, filling the tile.
+      return VideoMessage(
+        url: item.url,
+        maxSize: maxSize,
+        bordered: !inGallery,
+        borderRadius: inGallery ? BorderRadius.zero : null,
       );
     }
 
+    final image = CachedNetworkImage(
+      imageUrl: proxiedMedia(item.url),
+      fit: BoxFit.cover,
+      width: maxSize,
+      placeholder: (_, __) => Container(
+        width: maxSize,
+        height: maxSize,
+        color: Colors.white.withValues(alpha: 0.05),
+      ),
+      errorWidget: (_, __, ___) => Container(
+        width: maxSize,
+        height: 80,
+        color: Colors.white.withValues(alpha: 0.05),
+        alignment: Alignment.center,
+        child: Icon(Icons.broken_image, color: c.textDim),
+      ),
+    );
+
+    return ClipRRect(
+      borderRadius: radius,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
+        child: blur ? _BlurReveal(child: image) : image,
+      ),
+    );
+  }
+}
+
+/// Wraps an image in a gaussian blur revealed on tap (`.blurred`,
+/// `messages.js:1267-1274` — the PWA clears the blur class on tap).
+class _BlurReveal extends StatefulWidget {
+  const _BlurReveal({required this.child});
+  final Widget child;
+
+  @override
+  State<_BlurReveal> createState() => _BlurRevealState();
+}
+
+class _BlurRevealState extends State<_BlurReveal> {
+  bool _revealed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_revealed) return widget.child;
     return GestureDetector(
-      onTap: () {}, // expand placeholder
-      child: ClipRRect(
-        borderRadius: radius,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
-          child: CachedNetworkImage(
-            imageUrl: proxiedMedia(item.url),
-            fit: BoxFit.cover,
-            placeholder: (_, __) => Container(
-              width: maxSize,
-              height: maxSize,
-              color: Colors.white.withValues(alpha: 0.05),
-            ),
-            errorWidget: (_, __, ___) => Container(
-              width: maxSize,
-              height: 80,
-              color: Colors.white.withValues(alpha: 0.05),
-              alignment: Alignment.center,
-              child: Icon(Icons.broken_image, color: c.textDim),
-            ),
-          ),
-        ),
+      onTap: () => setState(() => _revealed = true),
+      child: ImageFiltered(
+        imageFilter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: widget.child,
       ),
     );
   }

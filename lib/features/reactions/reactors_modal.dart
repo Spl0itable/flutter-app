@@ -40,6 +40,7 @@ class ReactorsModal extends StatelessWidget {
     required this.emoji,
     required this.reactors,
     this.onTapReactor,
+    this.title,
   });
 
   static const int maxRows = 50;
@@ -47,6 +48,11 @@ class ReactorsModal extends StatelessWidget {
   final String emoji;
   final List<ReactorEntry> reactors;
   final void Function(ReactorEntry)? onTapReactor;
+
+  /// Optional header title shown in place of the 40px emoji + count (Foundations
+  /// reuses this list for a "Seen by" sheet). When null the emoji+count header
+  /// is rendered (the reactions case).
+  final String? title;
 
   @override
   Widget build(BuildContext context) {
@@ -74,22 +80,32 @@ class ReactorsModal extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // `.reactors-modal-header`: 40px emoji + count.
+            // `.reactors-modal-header`: 40px emoji + count, or a [title] label.
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 border: Border(bottom: BorderSide(color: c.glassBorder)),
               ),
-              child: Row(
-                children: [
-                  Text(emoji, style: const TextStyle(fontSize: 40, height: 1)),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${reactors.length}',
-                    style: TextStyle(fontSize: 12, color: c.textDim),
-                  ),
-                ],
-              ),
+              child: title != null
+                  ? Text(
+                      title!,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: c.text,
+                      ),
+                    )
+                  : Row(
+                      children: [
+                        Text(emoji,
+                            style: const TextStyle(fontSize: 40, height: 1)),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${reactors.length}',
+                          style: TextStyle(fontSize: 12, color: c.textDim),
+                        ),
+                      ],
+                    ),
             ),
             // `.reactors-modal-list`.
             Flexible(
@@ -173,6 +189,7 @@ void showReactorsModal(
   required String emoji,
   required List<ReactorEntry> reactors,
   void Function(ReactorEntry)? onTapReactor,
+  String? title,
 }) {
   final overlay = Overlay.of(context, rootOverlay: true);
   final size = MediaQuery.of(context).size;
@@ -209,6 +226,7 @@ void showReactorsModal(
           child: ReactorsModal(
             emoji: emoji,
             reactors: reactors,
+            title: title,
             onTapReactor: onTapReactor == null
                 ? null
                 : (r) {

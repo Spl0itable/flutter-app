@@ -1,21 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import 'settings_widgets.dart';
 
-/// App version string shown in the About header (`#aboutVersion`).
-///
-/// TODO(verify): the PWA derives this from its build manifest at runtime; the
-/// native build version source isn't wired into this UI yet.
-const String kAboutVersion = 'v1.0.0';
+/// Absolute base for the PWA's relative `static/*.html` legal pages. The PWA
+/// serves them from its own origin; on native we point at the same files in the
+/// public source repo so the links are real and tappable (gap report F14).
+const String _kStaticBase = 'https://github.com/Spl0itable/NYM/blob/main/';
+
+/// App version string shown in the About header (`#aboutVersion`). Matches the
+/// current PWA constant `NYMCHAT_VERSION` (app.js:4229). The native build can
+/// later override this from its own manifest; until then it tracks the PWA.
+const String kAboutVersion = 'v3.72.517';
 
 /// The About modal (`#aboutModal`, index.html:2118), presented as a centered
 /// `.modal-content`. Layout mirrors the PWA: header (Nymchat + version), build
-/// integrity + warrant-canary panels (placeholders), description, links,
-/// divider, and the "Contact the developer" form.
+/// integrity + warrant-canary panels (honest static native state + verify
+/// links), description, external links, divider, and the "Contact the
+/// developer" form.
 class AboutScreen extends ConsumerStatefulWidget {
   const AboutScreen({super.key});
 
@@ -35,6 +43,12 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   final _messageController = TextEditingController();
   String _topic = 'General feedback';
   final List<TapGestureRecognizer> _recognizers = [];
+
+  /// Contact-form status line (`#aboutContactStatus`). [_statusOk] picks the
+  /// secondary (success) vs danger (error) color.
+  String? _status;
+  bool _statusOk = false;
+  bool _sending = false;
 
   @override
   void dispose() {
@@ -135,6 +149,19 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                               label: 'Message',
                               child: _messageBox(c),
                             ),
+                            // Contact status line (`#aboutContactStatus`, F12).
+                            if (_status != null)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Text(
+                                  _status!,
+                                  style: TextStyle(
+                                    color: _statusOk ? c.secondary : c.danger,
+                                    fontSize: 12,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -203,8 +230,11 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     );
   }
 
-  /// `.about-build` panel. Network verification (build integrity / provenance)
-  /// is a low-priority trust feature, so the live status is a placeholder.
+  /// `.about-build` panel. The web bundle-attestation verification has no native
+  /// analogue (the app ships as a signed store binary, not a hashed web bundle),
+  /// so instead of a perpetual "—" we show an honest static state and link out
+  /// to the source/provenance (F15). The title uses `--text-dim` like the PWA's
+  /// `.about-build-title`.
   Widget _buildPanel(NymColors c) {
     return Container(
       margin: const EdgeInsets.only(top: 14),
@@ -221,9 +251,10 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('Build integrity',
-                  style: TextStyle(color: c.text, fontSize: 13)),
-              // Placeholder: not verified on native yet.
-              Text('—', style: TextStyle(color: c.textDim, fontSize: 13)),
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
+              // Native ships as a signed store binary; verify via the repo.
+              Text('Signed native build',
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
             ],
           ),
           const SizedBox(height: 6),
@@ -243,7 +274,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     );
   }
 
-  /// `.about-canary` warrant-canary panel (placeholder status).
+  /// `.about-canary` warrant-canary panel. The live Nostr/BTC-anchor signature
+  /// check is its own feature; here we show an honest static state and link to
+  /// the published canary (F15). Title uses `--text-dim` like the PWA.
   Widget _canaryPanel(NymColors c) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -259,8 +292,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('Warrant canary',
-                  style: TextStyle(color: c.text, fontSize: 13)),
-              Text('—', style: TextStyle(color: c.textDim, fontSize: 13)),
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
+              Text('Published on Nostr',
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
             ],
           ),
           const SizedBox(height: 6),
@@ -350,10 +384,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
           const SizedBox(width: 10),
           // `.send-btn` style.
           InkWell(
-            onTap: () {
-              // TODO(verify): sendAboutContact delivers an encrypted PM to the
-              // developer (networked); wiring deferred to the messaging owner.
-            },
+            onTap: _sending ? null : _sendContact,
             borderRadius: NymRadius.rsm,
             child: Container(
               padding:
@@ -364,7 +395,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                 border: Border.all(color: c.primaryA(0.30)),
               ),
               child: Text(
-                'SEND MESSAGE',
+                _sending ? 'SENDING...' : 'SEND MESSAGE',
                 style: TextStyle(
                   color: c.primary,
                   fontSize: 12,
@@ -381,7 +412,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
 
   Widget _link(NymColors c, String text, String url) {
     return GestureDetector(
-      onTap: () {/* TODO(verify): external link handling */},
+      onTap: () => _openLink(url),
       child: Text(
         text,
         style: TextStyle(
@@ -394,13 +425,80 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   }
 
   TextSpan _linkSpan(NymColors c, String text, String url) {
-    final recognizer = TapGestureRecognizer()
-      ..onTap = () {/* TODO(verify): external link handling */};
+    final recognizer = TapGestureRecognizer()..onTap = () => _openLink(url);
     _recognizers.add(recognizer);
     return TextSpan(
       text: text,
       style: TextStyle(color: c.secondary),
       recognizer: recognizer,
     );
+  }
+
+  /// Opens [url] externally (F14). Relative `static/*` legal pages are resolved
+  /// against the source-repo base.
+  Future<void> _openLink(String url) async {
+    final abs = url.startsWith('http') ? url : '$_kStaticBase$url';
+    final uri = Uri.tryParse(abs);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // Best-effort; a missing browser/handler just no-ops.
+    }
+  }
+
+  /// About → Send Message (F12; app.js:4406 `sendAboutContact`): validate a
+  /// non-empty message + relay connection, then build the
+  /// `[Nymchat contact — <topic>]` body and deliver it as an encrypted PM to the
+  /// verified developer via the controller. Drives the button label
+  /// ("Sending…") and the `#aboutContactStatus` line through sent/error states,
+  /// clearing the field only on success.
+  Future<void> _sendContact() async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) {
+      setState(() {
+        _status = 'Please enter a message.';
+        _statusOk = false;
+      });
+      return;
+    }
+    // Relay connectivity (PWA `nym.connected`).
+    final connected = ref.read(appStateProvider).connectedRelays > 0;
+    if (!connected) {
+      setState(() {
+        _status = 'Not connected to relay. Try again once connected.';
+        _statusOk = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _sending = true;
+      _status = null;
+    });
+
+    // The body the PWA gift-wraps to the developer (`sendAboutContact`):
+    //   `[Nymchat contact — <topic>]\n\n<message>`
+    // sent as an encrypted PM to `NostrController.verifiedDeveloperPubkey`.
+    final body = '[Nymchat contact — $_topic]\n\n$text';
+    var ok = false;
+    try {
+      ok = await ref.read(nostrControllerProvider).sendContactMessage(body);
+    } catch (_) {
+      ok = false;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _sending = false;
+      if (ok) {
+        _status = 'Message sent. Thanks for reaching out!';
+        _statusOk = true;
+        _messageController.clear();
+      } else {
+        _status = 'Failed to send. Please try again.';
+        _statusOk = false;
+      }
+    });
   }
 }
