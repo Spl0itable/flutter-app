@@ -600,9 +600,25 @@ class RelayPoolProxy implements PoolTransport {
 
   /// Live aggregate traffic counters (a fresh snapshot each read). Bytes are
   /// summed by the shard sockets; events + latency by [_onShardMessage]. Mirrors
-  /// the PWA's single `nym.relayStats`.
+  /// the PWA's single `nym.relayStats`. The shard fan-in summary
+  /// ([RelayStats.shardInfo]) is rebuilt from the live shard sockets here (the
+  /// backend never emits a `POOL:SHARDS` frame; the PWA's shard line, app.js:7409,
+  /// is a client-side aggregate of the per-worker connected sets).
   @override
-  RelayStats get stats => _stats.snapshot();
+  RelayStats get stats {
+    _stats.shardInfo
+      ..clear()
+      ..addAll([
+        for (final sock in _sockets)
+          ShardInfo(
+            id: sock.shard.id,
+            status: sock.isOpen ? 'connected' : 'connecting',
+            connected: sock.connectedRelays.length,
+            total: sock.shard.relays.length,
+          ),
+      ]);
+    return _stats.snapshot();
+  }
 
   /// Start the 1-second throughput sampler (idempotent). Mirrors
   /// `startRelayStatsSampling`.
@@ -792,6 +808,93 @@ class RelayPoolProxy implements PoolTransport {
     }
   }
 
+  /// Apply the latest geo-relay set and reconcile the live shard sockets to the
+  /// new layout. Faithful port of `_poolSendRelayConfigNow` +
+  /// `_ensureAllShardsConnected` (relays.js:2839/1919):
+  ///   1. Rebuild the shard layout from `allRelays` + the new [geoRelayUrls].
+  ///   2. For each open socket whose shard still exists but whose relay set
+  ///      changed, update it in place and re-send its `RELAYS` frame.
+  ///   3. Close + drop any socket whose shard no longer exists (the geo set
+  ///      shrank).
+  ///   4. Open a fresh socket for any newly-expected shard that has none yet
+  ///      (the geo shards). New sockets push their `RELAYS` config + re-issue
+  ///      every active REQ on connect.
+  ///
+  /// No-op before [connectAll] (no sockets yet — `connectAll` will pick up the
+  /// stored geo urls) and when [geoRelayUrls] is unchanged.
+  @override
+  void updateGeoRelays(List<String> geoRelayUrls) {
+    final next = [...geoRelayUrls];
+    // Cheap unchanged-check: same set ⇒ nothing to reconcile.
+    if (_geoRelayUrls.length == next.length &&
+        next.toSet().containsAll(_geoRelayUrls)) {
+      return;
+    }
+    _geoRelayUrls
+      ..clear()
+      ..addAll(next);
+    if (_sockets.isEmpty) return; // connectAll() will shard with these urls.
+
+    final layout = shardRelaysByRole(
+      _allRelays,
+      _geoRelayUrls,
+      _dmRelays,
+      permanentBlacklist: _permanentBlacklist,
+    );
+    final byId = {for (final s in layout) s.id: s};
+
+    bool sameRelays(List<String> a, List<String> b) {
+      if (a.length != b.length) return false;
+      final setA = a.toSet();
+      for (final v in b) {
+        if (!setA.contains(v)) return false;
+      }
+      return true;
+    }
+
+    // Update existing sockets / close vanished shards.
+    final survivors = <_ShardSocket>[];
+    for (final sock in _sockets) {
+      final shard = byId[sock.shard.id];
+      if (shard == null) {
+        unawaited(sock.close());
+        continue;
+      }
+      survivors.add(sock);
+      if (!sameRelays(sock.shard.relays, shard.relays) ||
+          !sameRelays(sock.shard.dmRelays, shard.dmRelays)) {
+        sock.shard = shard;
+        if (sock.isOpen) {
+          sock.send(PoolFrame.relays(shard.relays, shard.dmRelays));
+        }
+      }
+    }
+    _sockets
+      ..clear()
+      ..addAll(survivors);
+
+    // Open sockets for newly-expected shards (the geo shards).
+    final haveIds = {for (final s in _sockets) s.shard.id};
+    for (final shard in layout) {
+      if (haveIds.contains(shard.id)) continue;
+      final sock = _ShardSocket(
+        shard: shard,
+        url: _poolUrl,
+        channelFactory: _channelFactory,
+        rng: _rng,
+        stats: _stats,
+        onMessage: _onShardMessage,
+        onConnected: _onShardConnected,
+        onClosed: _onShardClosed,
+      );
+      _sockets.add(sock);
+      sock.connect();
+    }
+  }
+
+  /// The geo relay urls currently sharded onto the pool (for inspection/tests).
+  List<String> get geoRelayUrls => List.unmodifiable(_geoRelayUrls);
+
   // --- Shard socket callbacks -----------------------------------------------
 
   void _onShardConnected(_ShardSocket sock) {
@@ -855,9 +958,17 @@ class RelayPoolProxy implements PoolTransport {
         // attributed to the proxy-tagged sourceRelay when present.
         _stats.totalEvents++;
         _stats.eventsThisSecond++;
+        // Attribute the event to its proxy-tagged source relay when present.
+        // The per-relay count AND the per-kind breakdown use the same
+        // attribution, so the expanded kind counts sum to the collapsed `evt`
+        // total (relays.js:3744-3751). An un-attributed proxy event (no
+        // `wss://` sourceRelay) is left out of the per-relay rows, exactly as
+        // the PWA's `attributedRelay` skips it.
         if (sourceRelay != null && sourceRelay.startsWith('wss://')) {
           _stats.eventsPerRelay[sourceRelay] =
               (_stats.eventsPerRelay[sourceRelay] ?? 0) + 1;
+          _stats.recordRelayKind(sourceRelay, event.kind,
+              utf8.encode(jsonEncode(event.toJson())).length);
         }
         final sub = _subscriptions[subId];
         if (sub != null) unawaited(sub.onEvent(sock.shard.id, event));

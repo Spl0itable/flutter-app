@@ -181,13 +181,17 @@ class RelayConnection {
     final msg = RelayMessage.parse(data);
     if (msg == null) return;
     switch (msg) {
-      case EventMessage():
+      case EventMessage(:final event):
         // Unique inbound EVENT: bump the total, the per-second counter, and the
         // per-relay tally (relays.js handleRelayMessage:3738-3746). Dedup is the
         // pool's job; per-connection a frame arrives once.
         stats.totalEvents++;
         stats.eventsThisSecond++;
         stats.eventsPerRelay[url] = (stats.eventsPerRelay[url] ?? 0) + 1;
+        // Per-relay, per-kind breakdown for the expanded Network Stats row
+        // (`_trackRelayKindData`, relays.js:3750), sized by the event's frame
+        // length so the expanded view's bytes match what arrived.
+        stats.recordRelayKind(url, event.kind, utf8.encode(data).length);
       case EoseMessage(:final subId):
         // Stamp REQ→EOSE latency for this relay (ms). The REQ send time was
         // recorded in [subscribe]; clear it so a later re-REQ re-measures.

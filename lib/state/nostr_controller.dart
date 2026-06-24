@@ -50,6 +50,13 @@ import '../services/storage/secure_store.dart';
 import 'app_state.dart';
 import 'settings_provider.dart';
 
+/// The well-known "common" geohash channels seeded into the sidebar on connect
+/// (PWA `this.commonGeohashes`, app.js:681). `nymchat` is the default named
+/// channel; the rest are geohash channels.
+const List<String> kCommonGeohashes = [
+  'nymchat', '9q', 'w2', 'dr5r', '9q8y', 'u4pr', 'gcpv', 'f2m6', 'xn77', 'tjm5',
+];
+
 /// Ties identity + relay + crypto to the [AppState] store: boots an ephemeral
 /// identity, connects to relays, and routes inbound events into the store. Send
 /// requests from the composer flow through here.
@@ -231,6 +238,11 @@ class NostrController {
       recordOwnActivity();
       _startPresenceTimer();
 
+      // Seed the sidebar with the well-known common geohash channels so the
+      // channel list isn't empty before the user joins anything (PWA
+      // `discoverChannels`, called on connect from relays.js).
+      discoverChannels();
+
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
       // identities skip the durable PM archive. All calls are best-effort.
@@ -239,6 +251,20 @@ class NostrController {
     } catch (e, st) {
       // Stay on seed/offline data if boot fails (e.g. no secure storage).
       debugPrint('NostrController.init failed: $e\n$st');
+    }
+  }
+
+  /// Seeds the sidebar with the well-known "common" geohash channels (PWA
+  /// `discoverChannels`, channels.js:598, over the `commonGeohashes` list,
+  /// app.js:681). Skipped in group/PM-only mode; `addChannel` is idempotent so
+  /// re-running on each connect can't duplicate rows, and `#nymchat` (always
+  /// present as the default named channel) is left to the registry.
+  void discoverChannels() {
+    if (_ref.read(settingsProvider).groupChatPMOnlyMode) return;
+    final app = _ref.read(appStateProvider.notifier);
+    for (final g in kCommonGeohashes) {
+      if (g == 'nymchat') continue;
+      app.addChannel(g, geohash: g);
     }
   }
 

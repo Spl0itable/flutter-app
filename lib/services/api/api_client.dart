@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../models/nostr_event.dart';
+import '../relay/relay_stats.dart';
 import 'api_config.dart';
 
 /// Default Giphy API key (PWA `this.giphyApiKey`, app.js:679). Mirrors the
@@ -164,6 +165,29 @@ class ApiClient {
   final String _baseUrl;
   final String _giphyApiKey;
 
+  /// Process-wide /api traffic sink for the Network Stats "App data" section.
+  /// Mirrors the PWA's single shared `nym.relayStats` that `_trackApiData`
+  /// writes to (shop.js:113): every [ApiClient] (shop, zaps, profiles, geo,
+  /// media, …) tallies its request/response bytes per action here. Set once at
+  /// boot ([NostrService] wires it to its persistent stats); null = not tracked
+  /// (the default in tests, so unit tests stay isolated).
+  static RelayStats? apiStatsSink;
+
+  /// Record an /api request of [action] that sent [sent] request bytes and
+  /// received [recv] response bytes into [apiStatsSink] (no-op when unset).
+  /// Mirrors `_trackApiData` (shop.js:113).
+  static void _trackApiData(String action, {int sent = 0, int recv = 0}) {
+    apiStatsSink?.recordApiData(action, sent: sent, recv: recv);
+  }
+
+  /// Best-effort byte size of a request body for the App-data tally: a String
+  /// body counts its UTF-8 length; a byte body its length; null/other → 0.
+  static int _bodyLen(Object? body) {
+    if (body is String) return utf8.encode(body).length;
+    if (body is List<int>) return body.length;
+    return 0;
+  }
+
   // ---------------------------------------------------------------------------
   // URL builders (pure — used directly by media widgets and unit tests).
   // ---------------------------------------------------------------------------
@@ -243,11 +267,14 @@ class ApiClient {
     String target, {
     String source = 'auto',
   }) async {
+    final payload = jsonEncode({'text': text, 'source': source, 'target': target});
     final res = await _client.post(
       Uri.parse('$_baseUrl?action=translate'),
       headers: _headers({'Content-Type': 'application/json'}),
-      body: jsonEncode({'text': text, 'source': source, 'target': target}),
+      body: payload,
     );
+    _trackApiData('translate',
+        sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('translate', res.statusCode, res.body);
     }
@@ -257,7 +284,9 @@ class ApiClient {
 
   /// GET unfurl (OpenGraph preview).
   Future<UnfurlResult> unfurl(String url) async {
-    final res = await _client.get(Uri.parse(unfurlUrl(url)), headers: _headers());
+    final u = unfurlUrl(url);
+    final res = await _client.get(Uri.parse(u), headers: _headers());
+    _trackApiData('unfurl', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('unfurl', res.statusCode, res.body);
     }
@@ -281,6 +310,7 @@ class ApiClient {
       }),
       body: bytes,
     );
+    _trackApiData('upload', sent: bytes.length, recv: _bodyLen(res.bodyBytes));
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw ApiException('upload', res.statusCode, res.body);
     }
@@ -291,7 +321,9 @@ class ApiClient {
   /// (relays.js:20). Returns an empty list on a non-200 so the caller can fall
   /// back to the bitchat CSV.
   Future<List<GeoRelay>> geoRelays() async {
-    final res = await _client.get(Uri.parse(geoRelaysUrl()), headers: _headers());
+    final u = geoRelaysUrl();
+    final res = await _client.get(Uri.parse(u), headers: _headers());
+    _trackApiData('geo-relays', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) return const [];
     final data = jsonDecode(res.body);
     if (data is! Map || data['relays'] is! List) return const [];
@@ -316,10 +348,9 @@ class ApiClient {
     int zoom = 10,
     String lang = 'en',
   }) async {
-    final res = await _client.get(
-      Uri.parse(geocodeUrl(lat, lng, zoom: zoom, lang: lang)),
-      headers: _headers(),
-    );
+    final u = geocodeUrl(lat, lng, zoom: zoom, lang: lang);
+    final res = await _client.get(Uri.parse(u), headers: _headers());
+    _trackApiData('geocode', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('geocode', res.statusCode, res.body);
     }
@@ -328,8 +359,9 @@ class ApiClient {
 
   /// GET Giphy search -> raw Giphy JSON.
   Future<Map<String, dynamic>> giphySearch(String query) async {
-    final res =
-        await _client.get(Uri.parse(giphySearchUrl(query)), headers: _headers());
+    final u = giphySearchUrl(query);
+    final res = await _client.get(Uri.parse(u), headers: _headers());
+    _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('giphy', res.statusCode, res.body);
     }
@@ -338,8 +370,9 @@ class ApiClient {
 
   /// GET Giphy trending -> raw Giphy JSON.
   Future<Map<String, dynamic>> giphyTrending() async {
-    final res =
-        await _client.get(Uri.parse(giphyTrendingUrl()), headers: _headers());
+    final u = giphyTrendingUrl();
+    final res = await _client.get(Uri.parse(u), headers: _headers());
+    _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('giphy', res.statusCode, res.body);
     }
@@ -363,16 +396,19 @@ class ApiClient {
     Map<String, dynamic>? receipt,
   }) async {
     try {
+      final payload = jsonEncode({
+        'pr': pr,
+        'verifyUrl': verifyUrl,
+        'providerPubkey': providerPubkey,
+        'receipt': receipt,
+      });
       final res = await _client.post(
         Uri.parse(zapVerifyUrl()),
         headers: _headers({'Content-Type': 'application/json'}),
-        body: jsonEncode({
-          'pr': pr,
-          'verifyUrl': verifyUrl,
-          'providerPubkey': providerPubkey,
-          'receipt': receipt,
-        }),
+        body: payload,
       );
+      _trackApiData('zap-verify',
+          sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
       if (res.statusCode != 200) return false;
       final data = jsonDecode(res.body);
       return data is Map && data['paid'] == true;
@@ -389,11 +425,15 @@ class ApiClient {
   /// non-2xx so the caller can surface the server `error` (e.g. "Payment not
   /// confirmed yet." → retry).
   Future<Map<String, dynamic>> storageAction(Map<String, dynamic> body) async {
+    final action = (body['action'] ?? 'other').toString();
+    final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
       headers: _headers({'Content-Type': 'application/json'}),
-      body: jsonEncode(body),
+      body: payload,
     );
+    _trackApiData(action,
+        sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     final decoded = _decodeJson(res);
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw ApiException(
@@ -416,11 +456,15 @@ class ApiClient {
   /// the parsed per-line JSON values plus the `X-Has-More` header flag the PM
   /// pager reads. Throws [ApiException] on a non-2xx.
   Future<StorageStream> storageStream(Map<String, dynamic> body) async {
+    final action = (body['action'] ?? 'other').toString();
+    final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
       headers: _headers({'Content-Type': 'application/json'}),
-      body: jsonEncode(body),
+      body: payload,
     );
+    _trackApiData(action,
+        sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode < 200 || res.statusCode >= 300) {
       final decoded = _decodeJson(res);
       throw ApiException(
@@ -448,11 +492,15 @@ class ApiClient {
   /// as [storageAction] but bound to [botUrl]. Returns the decoded JSON map;
   /// throws [ApiException] on a non-2xx.
   Future<Map<String, dynamic>> botAction(Map<String, dynamic> body) async {
+    final action = (body['action'] ?? 'other').toString();
+    final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(botUrl),
       headers: _headers({'Content-Type': 'application/json'}),
-      body: jsonEncode(body),
+      body: payload,
     );
+    _trackApiData(action,
+        sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     final decoded = _decodeJson(res);
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw ApiException(

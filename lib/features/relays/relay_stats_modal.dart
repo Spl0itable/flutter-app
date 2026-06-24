@@ -60,6 +60,16 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
   // counters every second so the cards/graph/rows refresh while the modal is up.
   Timer? _ticker;
 
+  /// The url/key of the currently-expanded relay row (or `__api__` for the App
+  /// data row), or null when none is expanded. Mirrors the PWA's
+  /// `_rsExpandedRelay` (app.js:7506) — clicking a row toggles its kind/action
+  /// breakdown.
+  String? _expandedRow;
+
+  void _toggleRow(String key) {
+    setState(() => _expandedRow = _expandedRow == key ? null : key);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -84,9 +94,11 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
         ref.watch(settingsProvider.select((s) => s.lowDataMode));
 
     // Live relay traffic counters — typed getter on the controller, null before
-    // boot. Read a stable snapshot so a per-second source mutation can't tear a
-    // frame mid-render (mirrors the PWA reading `nym.relayStats` each tick).
-    final stats = ref.read(nostrControllerProvider).relayStats?.snapshot();
+    // boot. Already a fresh snapshot (the controller getter merges the pool's
+    // live relay stats with the persistent /api "App data" counters), so a
+    // per-second source mutation can't tear a frame (mirrors the PWA reading
+    // `nym.relayStats` each tick).
+    final stats = ref.read(nostrControllerProvider).relayStats;
 
     // Per-relay connection status (url → connected), typed getter; empty before
     // boot → the relay list shows the real "No relays connected" empty state.
@@ -160,6 +172,8 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
                             _RelayListSection(
                               relayStatus: relayStatus,
                               stats: stats,
+                              expandedRow: _expandedRow,
+                              onToggleRow: _toggleRow,
                             ),
                             const SizedBox(height: 14),
                             _LowDataPanel(
@@ -479,16 +493,33 @@ class _ThroughputPainter extends CustomPainter {
 
 // =============================================================================
 // Relay list (.relay-stats-relay-list / .relay-stats-row)
+//
+// Mirrors the PWA `renderRelayStats` shard line + `renderRelayList` (app.js
+// 7399-7680): an optional shard fan-in line (proxy mode), then up to two
+// sub-sections inside the list — "App data" (the /api backend, clickable for a
+// per-action breakdown) and "Relay data" (clickable per relay for a per-kind
+// breakdown).
 // =============================================================================
 
 class _RelayListSection extends StatelessWidget {
-  const _RelayListSection({required this.relayStatus, required this.stats});
+  const _RelayListSection({
+    required this.relayStatus,
+    required this.stats,
+    required this.expandedRow,
+    required this.onToggleRow,
+  });
 
   /// Per-relay url → open (empty before boot → real empty state).
   final Map<String, bool> relayStatus;
 
   /// Live counters for the per-relay events/latency columns; null before boot.
   final RelayStats? stats;
+
+  /// Currently-expanded row key (`__api__` or a relay url), or null.
+  final String? expandedRow;
+
+  /// Toggle a row's expansion by key.
+  final ValueChanged<String> onToggleRow;
 
   @override
   Widget build(BuildContext context) {
@@ -514,6 +545,37 @@ class _RelayListSection extends StatelessWidget {
       return b.events - a.events;
     });
 
+    final hasApiData = stats?.hasApiData ?? false;
+    final shardInfo = stats?.shardInfo ?? const <ShardInfo>[];
+
+    // Compose the ordered list rows: [App data hdr, api row], [Relay data hdr,
+    // relay rows]. Matches `renderRelayList`'s `ordered` assembly (app.js:7606).
+    final rows = <Widget>[];
+    if (shardInfo.isNotEmpty) {
+      rows.add(_ShardLine(shardInfo: shardInfo));
+    }
+    if (hasApiData) {
+      rows.add(const _ListSubHeader('App data'));
+      rows.add(_ApiRow(
+        stats: stats!,
+        expanded: expandedRow == _kApiRowKey,
+        onTap: () => onToggleRow(_kApiRowKey),
+      ));
+    }
+    if (entries.isNotEmpty) {
+      rows.add(const _ListSubHeader('Relay data'));
+      for (final e in entries) {
+        rows.add(_RelayRow(
+          data: e,
+          stats: stats,
+          expanded: expandedRow == e.url,
+          onTap: () => onToggleRow(e.url),
+        ));
+      }
+    }
+
+    final isEmpty = rows.isEmpty || (entries.isEmpty && !hasApiData);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -527,25 +589,88 @@ class _RelayListSection extends StatelessWidget {
             border: Border.all(color: c.glassBorder),
           ),
           clipBehavior: Clip.antiAlias,
-          child: entries.isEmpty
+          child: isEmpty
               ? Padding(
+                  // .nm-app-5 empty state ("No relays connected", app.js:7601).
                   padding: const EdgeInsets.all(12),
                   child: Text(
                     'No relays connected',
                     style: TextStyle(color: c.textDim, fontSize: 12),
                   ),
                 )
-              : ListView.builder(
-                  shrinkWrap: true,
-                  padding: EdgeInsets.zero,
-                  itemCount: entries.length,
-                  itemBuilder: (ctx, i) => _RelayRow(
-                    data: entries[i],
-                    isLast: i == entries.length - 1,
+              : SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: rows,
                   ),
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// Key for the App-data row's expansion state (the PWA uses the literal
+/// `'__api__'` url, app.js:7611).
+const String _kApiRowKey = '__api__';
+
+/// Proxy-mode shard fan-in line: `N shard(s) · M relays connected · a/b  c/d…`.
+/// Faithful port of `renderRelayStats`'s shard line (app.js:7409-7417):
+/// `${connected}/${total}` per shard, with a `(status)` suffix when the shard
+/// isn't `connected`.
+class _ShardLine extends StatelessWidget {
+  const _ShardLine({required this.shardInfo});
+  final List<ShardInfo> shardInfo;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final totalConn =
+        shardInfo.fold<int>(0, (a, sh) => a + sh.connected);
+    final parts = shardInfo.map((sh) {
+      final suffix =
+          sh.status.isNotEmpty && sh.status != 'connected' ? '(${sh.status})' : '';
+      return '${sh.connected}/${sh.total}$suffix';
+    }).join('  ');
+    return Container(
+      // .rs-shard-line: padding 6/12, mono 10, textDim, bottom rule white/0.06.
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+      decoration: BoxDecoration(
+        border:
+            Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
+      ),
+      child: Text(
+        '${shardInfo.length} shard(s) · $totalConn relays connected · $parts',
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 10,
+          color: c.textDim,
+        ),
+      ),
+    );
+  }
+}
+
+/// A `.relay-stats-section-title` rendered INSIDE the list (the "App data" /
+/// "Relay data" sub-headers, app.js:7609/7617).
+class _ListSubHeader extends StatelessWidget {
+  const _ListSubHeader(this.label);
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+      child: Text(
+        label.toUpperCase(),
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: c.textDim,
+          letterSpacing: 0.5,
+        ),
+      ),
     );
   }
 }
@@ -567,87 +692,309 @@ class _RelayRowData {
   final int? latency;
 }
 
-class _RelayRow extends StatelessWidget {
-  const _RelayRow({required this.data, required this.isLast});
-  final _RelayRowData data;
-  final bool isLast;
+/// Shared row chrome: a dot + url + latency + a right-aligned metric, optionally
+/// expanded to a kind/action breakdown. Mirrors `.relay-stats-row`.
+class _StatsRow extends StatelessWidget {
+  const _StatsRow({
+    required this.open,
+    required this.label,
+    required this.tooltip,
+    required this.latency,
+    required this.metric,
+    required this.metricColor,
+    required this.expanded,
+    required this.onTap,
+    this.detail,
+  });
+
+  final bool open;
+  final String label;
+  final String tooltip;
+  final int? latency;
+  final String metric;
+  final Color metricColor;
+  final bool expanded;
+  final VoidCallback onTap;
+  final Widget? detail;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final shortUrl =
-        data.url.replaceFirst('wss://', '').replaceFirst('ws://', '');
-    return Container(
-      // .relay-stats-row: padding 8/12, gap 10, bottom border white/0.04.
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-      decoration: BoxDecoration(
-        border: isLast
-            ? null
-            : Border(
-                bottom: BorderSide(color: Colors.white.withValues(alpha: 0.04))),
-      ),
-      child: Row(
-        children: [
-          // .relay-stats-dot: 6px, open=primary (glow) / closed=danger (glow).
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: data.open ? c.primary : c.danger,
-              boxShadow: [
-                BoxShadow(
-                  color: (data.open ? c.primary : c.danger)
-                      .withValues(alpha: data.open ? 0.5 : 0.4),
-                  blurRadius: 6,
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        // .relay-stats-row: padding 8/12, gap 10, bottom border white/0.04.
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+        decoration: BoxDecoration(
+          border: Border(
+              bottom: BorderSide(color: Colors.white.withValues(alpha: 0.04))),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                // .relay-stats-dot: 6px, open=primary (glow) / closed=danger.
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: open ? c.primary : c.danger,
+                    boxShadow: [
+                      BoxShadow(
+                        color: (open ? c.primary : c.danger)
+                            .withValues(alpha: open ? 0.5 : 0.4),
+                        blurRadius: 6,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // .relay-stats-url: mono 11, textDim, ellipsized.
+                Expanded(
+                  child: Tooltip(
+                    message: tooltip,
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: c.textDim,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // .relay-stats-latency: mono 11, textDim, right. `<ms>ms`/`--`.
+                SizedBox(
+                  width: 45,
+                  child: Text(
+                    latency != null ? '${latency}ms' : '--',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      color: c.textDim,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                // .relay-stats-events: mono 11, right. `<n> evt` or `<bytes> ↓`.
+                SizedBox(
+                  width: 60,
+                  child: Text(
+                    metric,
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                      color: metricColor,
+                    ),
+                  ),
                 ),
               ],
             ),
+            if (expanded && detail != null)
+              Padding(
+                // .relay-stats-detail: margin-top 6, padding-left 16.
+                padding: const EdgeInsets.only(top: 6, left: 16),
+                child: detail!,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A single relay row, expandable to its per-kind breakdown
+/// (`rsRenderRelayDetail`'s kind branch, app.js:7541).
+class _RelayRow extends StatelessWidget {
+  const _RelayRow({
+    required this.data,
+    required this.stats,
+    required this.expanded,
+    required this.onTap,
+  });
+  final _RelayRowData data;
+  final RelayStats? stats;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final shortUrl =
+        data.url.replaceFirst('wss://', '').replaceFirst('ws://', '');
+    return _StatsRow(
+      open: data.open,
+      label: shortUrl,
+      tooltip: data.url,
+      latency: data.latency,
+      // `<n> evt` per-relay event count (app.js:7652).
+      metric: '${data.events} evt',
+      metricColor: context.nym.textBright,
+      expanded: expanded,
+      onTap: onTap,
+      detail:
+          expanded ? _KindDetail(perKind: stats?.kindStatsPerRelay[data.url]) : null,
+    );
+  }
+}
+
+/// The App-data ("app backend") row, expandable to its per-action breakdown
+/// (`rsRenderRelayDetail`'s `__api__` branch, app.js:7516).
+class _ApiRow extends StatelessWidget {
+  const _ApiRow({
+    required this.stats,
+    required this.expanded,
+    required this.onTap,
+  });
+  final RelayStats stats;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // The PWA row shows `${formatBytes(bytesReceived)} ↓` as the metric and the
+    // `app backend` label; the dot is open when the api socket is open. Native
+    // has no persistent api socket, so treat any recorded api data as "open".
+    return _StatsRow(
+      open: stats.hasApiData,
+      label: 'app backend',
+      tooltip: 'App backend (D1 storage, profiles, messages)',
+      latency: null,
+      metric: '${formatBytes(stats.apiBytesReceived)} ↓',
+      metricColor: c.textBright,
+      expanded: expanded,
+      onTap: onTap,
+      detail: expanded ? _ApiActionDetail(actions: stats.apiActionStats) : null,
+    );
+  }
+}
+
+/// Per-kind breakdown rows (`kind <k>` · `<n> evt` · `<bytes>`), sorted by bytes
+/// DESC. Mirrors `rsRenderRelayDetail` (app.js:7546-7551).
+class _KindDetail extends StatelessWidget {
+  const _KindDetail({required this.perKind});
+  final Map<int, KindStat>? perKind;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final pk = perKind;
+    if (pk == null || pk.isEmpty) {
+      return Text(
+        'No events recorded from this relay yet.',
+        style: TextStyle(color: c.textDim, fontSize: 10),
+      );
+    }
+    final rows = pk.entries.toList()
+      ..sort((a, b) => b.value.bytes - a.value.bytes);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final e in rows)
+          _KindRow(
+            left: 'kind ${e.key}',
+            mid: '${e.value.count} evt',
+            right: formatBytes(e.value.bytes),
           ),
-          const SizedBox(width: 10),
-          // .relay-stats-url: mono 11, textDim, ellipsized.
+      ],
+    );
+  }
+}
+
+/// Per-action /api breakdown rows (`<label>` · `<n>×` · `<bytes>`), sorted by
+/// bytes DESC, with the PWA's friendly action labels (app.js:7522).
+class _ApiActionDetail extends StatelessWidget {
+  const _ApiActionDetail({required this.actions});
+  final Map<String, ApiActionStat> actions;
+
+  /// PWA action → friendly label (app.js:7522-7530).
+  static const Map<String, String> _labels = {
+    'channel-get': 'Channel history',
+    'channel-activity': 'Channel activity',
+    'channel-active': 'Active channels',
+    'channel-delete': 'Channel cleanup',
+    'pm-get': 'Direct messages',
+    'pm-put': 'Message backup',
+    'pm-deposit': 'Message delivery',
+    'pm-delete': 'Message cleanup',
+    'profile-get': 'Profiles',
+    'profile-set': 'Profile updates',
+    'emoji-get': 'Emoji',
+    'settings-get': 'Settings',
+    'settings-set': 'Settings sync',
+    'auth': 'Sign-in',
+    'other': 'Other',
+  };
+
+  /// Title-case fallback so no raw hyphenated action ever shows (app.js:7532).
+  static String _labelFor(String action) {
+    final known = _labels[action];
+    if (known != null) return known;
+    final words = action.split(RegExp(r'[-_]+')).where((w) => w.isNotEmpty);
+    return words
+        .map((w) => w[0].toUpperCase() + w.substring(1))
+        .join(' ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    if (actions.isEmpty) {
+      return Text(
+        'No app data recorded yet.',
+        style: TextStyle(color: c.textDim, fontSize: 10),
+      );
+    }
+    final rows = actions.entries.toList()
+      ..sort((a, b) => b.value.bytes - a.value.bytes);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final e in rows)
+          _KindRow(
+            left: _labelFor(e.key),
+            mid: '${e.value.count}×',
+            right: formatBytes(e.value.bytes),
+          ),
+      ],
+    );
+  }
+}
+
+/// One `.rs-kind-row`: a 3-column mono-10 grid (label · count · bytes), the
+/// last two right-aligned (app.js CSS .rs-kind-row).
+class _KindRow extends StatelessWidget {
+  const _KindRow({required this.left, required this.mid, required this.right});
+  final String left;
+  final String mid;
+  final String right;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final style = TextStyle(
+      fontFamily: 'monospace',
+      fontSize: 10,
+      color: c.textDim,
+    );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        children: [
           Expanded(
-            child: Text(
-              shortUrl,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 11,
-                color: c.textDim,
-              ),
-            ),
+            child: Text(left, maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
           ),
           const SizedBox(width: 10),
-          // .relay-stats-latency: mono 11, textDim, right-aligned. Real
-          // `<ms>ms`, or `--` when no latency has been measured (app.js:7660).
-          SizedBox(
-            width: 45,
-            child: Text(
-              data.latency != null ? '${data.latency}ms' : '--',
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 11,
-                color: c.textDim,
-              ),
-            ),
-          ),
+          Expanded(child: Text(mid, textAlign: TextAlign.right, style: style)),
           const SizedBox(width: 10),
-          // .relay-stats-events: mono 11, textBright, right-aligned. Real
-          // `<n> evt` per-relay event count (app.js:7652).
-          SizedBox(
-            width: 50,
-            child: Text(
-              '${data.events} evt',
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 11,
-                color: c.textBright,
-              ),
-            ),
-          ),
+          Expanded(child: Text(right, textAlign: TextAlign.right, style: style)),
         ],
       ),
     );

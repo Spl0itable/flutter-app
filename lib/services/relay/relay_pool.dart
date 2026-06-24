@@ -69,6 +69,14 @@ abstract interface class PoolTransport {
   /// Connect every relay / shard socket.
   void connectAll();
 
+  /// Apply the latest geo-relay set so geohash-channel subscriptions reach the
+  /// closest geo relays. In proxy mode this re-shards the pool and pushes the
+  /// updated RELAYS config + opens geo shard sockets (mirrors
+  /// `_poolSendRelayConfigNow` / `connectToGeoRelays`, relays.js:2839); in direct
+  /// mode it opens a direct socket per geo url and back-fills active subs
+  /// (`connectToGeoRelays` legacy branch). No-op when [geoRelayUrls] is empty.
+  void updateGeoRelays(List<String> geoRelayUrls);
+
   /// Broadcast [event]; returns the number of relays/shards that accepted it.
   Future<int> publish(NostrEvent event);
 
@@ -285,6 +293,12 @@ class RelayPool implements PoolTransport {
       s.latencyPerRelay.forEach((url, ms) {
         agg.latencyPerRelay[url] = ms;
       });
+      // Per-relay, per-kind breakdown (one socket per url → straight copy).
+      s.kindStatsPerRelay.forEach((url, perKind) {
+        agg.kindStatsPerRelay[url] = {
+          for (final e in perKind.entries) e.key: e.value.copy(),
+        };
+      });
     }
     return agg;
   }
@@ -347,6 +361,21 @@ class RelayPool implements PoolTransport {
     _startSampler();
     for (final conn in _connections.values) {
       conn.connect();
+    }
+  }
+
+  /// Direct-mode geo relay delivery: open a direct socket to each geo relay url
+  /// not already in the pool, so geohash-channel events reach them. Each newly
+  /// added relay is connected and back-filled with the active read subscriptions
+  /// (via [addRelay]), mirroring `connectToGeoRelays`'s legacy branch
+  /// (relays.js:220) + `ensureGeoRelayDelivery` (the geo relays then carry the
+  /// standing kind-20000 sub). No-op for urls already present or blocked.
+  @override
+  void updateGeoRelays(List<String> geoRelayUrls) {
+    for (final url in geoRelayUrls) {
+      if (!url.startsWith('wss://')) continue;
+      if (_connections.containsKey(url)) continue;
+      addRelay(url);
     }
   }
 
