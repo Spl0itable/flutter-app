@@ -9,6 +9,7 @@ import '../../core/constants/relays.dart';
 import '../../core/crypto/bitchat.dart' as bitchat;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/keys.dart' as keys;
+import '../../core/crypto/pow.dart';
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
@@ -871,6 +872,7 @@ class NostrService {
     required String nym,
     String? geohash,
     List<List<String>> emojiTags = const [],
+    int powDifficulty = 0,
     EventSigner? signerOverride,
   }) async {
     // [signerOverride] is the pseudonymous-send path: a fresh per-message
@@ -893,7 +895,13 @@ class NostrService {
       ...emojiTags,
     ];
 
-    final signed = await sig.sign(
+    // Channel messages carry the Nymchat NIP-13 PoW floor (and any higher user
+    // setting) — the self-attestation the web-of-trust uses to tell a Nymchat
+    // client from spam (PWA `max(userPow, nymchatPowFloor)`). Mined off the main
+    // thread, then signed by the (local or remote) signer.
+    final difficulty =
+        powDifficulty > kNymchatPowFloor ? powDifficulty : kNymchatPowFloor;
+    final mined = await mineNonce(
       UnsignedEvent(
         pubkey: sig.pubkey,
         createdAt: nowSec,
@@ -901,7 +909,9 @@ class NostrService {
         tags: tags,
         content: content,
       ),
+      difficulty,
     );
+    final signed = await sig.sign(mined);
 
     // Geohash channel messages (kind 20000 with a `g` tag) route through
     // GEO_EVENT so the proxy prioritizes the closest geo relays; the proxy

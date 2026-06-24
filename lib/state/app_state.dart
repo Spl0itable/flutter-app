@@ -1000,6 +1000,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return false;
   }
 
+  /// Loads persisted web-of-trust sets (CacheStore meta) into the live graph on
+  /// boot — additive over the roots already seeded in `goLive`. Mirrors the PWA
+  /// restoring nymchatPubkeys / nymchatVouches / trustedPubkeys from its meta
+  /// store so the spam gate isn't cold on every launch (persistence.js:301-343).
+  void hydrateTrustSets(
+    Set<String> pubkeys,
+    Set<String> vouches,
+    Set<String> trusted,
+  ) {
+    if (pubkeys.isEmpty && vouches.isEmpty && trusted.isEmpty) return;
+    state.nymchatPubkeys.addAll(pubkeys);
+    state.nymchatVouches.addAll(vouches);
+    state.trustedPubkeys.addAll(trusted);
+    state = state.copyWith();
+  }
+
   /// pubkey → distinct message ids seen this session, until the sender crosses
   /// the ≥2 trust threshold (messages.js `pubkeyMsgIds`, line 326). Pruned once
   /// trust is earned. Capped at 20000 senders (oldest dropped).

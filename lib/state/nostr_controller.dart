@@ -344,6 +344,8 @@ class NostrController {
     _vouchPublishTimer = null;
     _vouchExpansionTimer?.cancel();
     _vouchExpansionTimer = null;
+    _trustPersistTimer?.cancel();
+    _trustPersistTimer = null;
     _lastVouchPublishAt = 0;
     _profileBackfillTimer?.cancel();
     _profileBackfillTimer = null;
@@ -549,9 +551,10 @@ class NostrController {
       //      list (`_markNymchatPubkey` + `_observeNymchatPubkey`).
       final selfPk = _identity?.pubkey ?? '';
       if (event.pubkey != selfPk) {
-        _ref
+        final earnedTrust = _ref
             .read(appStateProvider.notifier)
             .trackPubkeyMessage(event.pubkey, event.id);
+        if (earnedTrust) _scheduleTrustPersist();
         if (pow.validatePow(event, _nymchatPowFloor)) {
           _observeNymchatPubkey(event.pubkey);
         }
@@ -1004,7 +1007,10 @@ class NostrController {
         );
     // Newly trusted pubkeys are new vouch authors to fetch — expand one hop via
     // a heavily debounced resubscribe (converges, then goes quiet).
-    if (added) _scheduleVouchExpansion();
+    if (added) {
+      _scheduleVouchExpansion();
+      _scheduleTrustPersist();
+    }
   }
 
   /// Records an observation that [pubkey] is running Nymchat (valid PoW channel
@@ -1018,6 +1024,7 @@ class NostrController {
     notifier.markNymchatPubkey(pubkey);
     final added = notifier.observeNymchatPubkey(pubkey);
     if (added) _scheduleVouchPublish();
+    _scheduleTrustPersist();
   }
 
   /// NIP-13 PoW floor (leading zero bits) a channel message must meet to be
@@ -1051,6 +1058,32 @@ class NostrController {
     try {
       await service.publishVouches(list);
       _lastVouchPublishAt = DateTime.now().millisecondsSinceEpoch;
+    } catch (_) {
+      // best-effort
+    }
+  }
+
+  /// Debounced (5s coalescing) persist of the three web-of-trust sets to the
+  /// on-disk cache, so the graph survives a restart instead of rebuilding cold
+  /// every launch (the PWA persists nymchatPubkeys/Vouches/trusted to its meta
+  /// store). Scheduled whenever an observation/vouch/earned-trust mutates a set.
+  Timer? _trustPersistTimer;
+  void _scheduleTrustPersist() {
+    if (_trustPersistTimer != null) return;
+    _trustPersistTimer = Timer(const Duration(seconds: 5), () {
+      _trustPersistTimer = null;
+      unawaited(_persistTrust());
+    });
+  }
+
+  Future<void> _persistTrust() async {
+    final cache = _cache;
+    if (cache == null) return;
+    final s = _ref.read(appStateProvider);
+    try {
+      await cache.saveMetaSet(CacheStore.metaNymchatPubkeys, s.nymchatPubkeys);
+      await cache.saveMetaSet(CacheStore.metaNymchatVouches, s.nymchatVouches);
+      await cache.saveMetaSet(CacheStore.metaTrustedPubkeys, s.trustedPubkeys);
     } catch (_) {
       // best-effort
     }
@@ -3485,6 +3518,15 @@ class NostrController {
       final reactions = results[1] as Map<String, List<dynamic>>;
       if (profiles.isNotEmpty) appState.hydrateProfiles(profiles);
       if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
+      // Web-of-trust graph: restore the persisted nymchatPubkeys / vouches /
+      // trusted sets so the spam gate isn't cold on launch (it still grows live
+      // from PoW-valid messages + receipts + vouches).
+      final trust = await Future.wait([
+        cache.loadMetaSet(CacheStore.metaNymchatPubkeys),
+        cache.loadMetaSet(CacheStore.metaNymchatVouches),
+        cache.loadMetaSet(CacheStore.metaTrustedPubkeys),
+      ]);
+      appState.hydrateTrustSets(trust[0], trust[1], trust[2]);
       // Channel/PM message rehydration happens lazily as channels are opened
       // (loadChannelMessages); the cache is wired so saves persist 1000 caps.
     } catch (e) {
