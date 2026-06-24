@@ -3603,7 +3603,7 @@ class NostrController {
     final authEvent = UnsignedEvent(
       pubkey: identity.pubkey,
       createdAt: nowSec,
-      kind: EventKind.httpAuth, // 24242 BUD auth (event_kinds.dart)
+      kind: EventKind.blossomAuth, // 24242 BUD-01 auth (NOT NIP-98 27235)
       tags: [
         ['t', 'upload'],
         ['x', hashHex],
