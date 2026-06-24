@@ -583,9 +583,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   ),
                 ),
               // Reactions row renders only when reactions OR zaps exist (the PWA
-              // `updateMessageReactions` early-returns on an empty reaction set;
-              // the add-reaction pill is NOT drawn standalone — the first react
-              // is via long-press quick-react). The zap badge sits at its front.
+              // `updateMessageReactions` early-returns on an empty reaction set,
+              // removing the row entirely unless zaps remain). The zap badge sits
+              // at its front; the `.add-reaction-btn` (smiley-plus) is appended at
+              // the end but ONLY on rows that already carry reactions — the first
+              // react on a bare message is still via long-press quick-react.
               if (reactions.isNotEmpty || _hasZaps)
                 Padding(
                   padding: const EdgeInsets.only(top: 5),
@@ -1026,6 +1028,17 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             onTap: (rect) => _toggleReaction(context, r),
             onLongPress: (rect) => _showReactors(context, r, rect),
           ),
+        // The `.add-reaction-btn` (a smiley-plus glyph) is appended at the END
+        // of the row, AFTER the reaction badges (`reactions.js:569-581`). The
+        // PWA only renders it on rows that already carry reactions — its
+        // `updateMessageReactions` early-returns and strips the button when the
+        // reaction set is empty (`reactions.js:440-453`), so it is NOT drawn for
+        // zero-reaction or zap-only rows. Clicking it opens the full emoji
+        // picker (`showEnhancedReactionPicker`) → `widget.onReactionPicker`.
+        if (reactions.isNotEmpty && widget.onReactionPicker != null)
+          _AddReactionButton(
+            onTap: () => widget.onReactionPicker?.call(message),
+          ),
       ],
     );
   }
@@ -1337,6 +1350,68 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
             // change — `styles-chat.css:439-443`).
             '${r.emoji} ${abbreviateNumber(r.count)}',
             style: TextStyle(color: c.text, fontSize: 12),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `.add-reaction-btn` pill (`styles-chat.css:463-488`, `reactions.js:569`):
+/// a 16px smiley-plus glyph in a rounded-20 pill (bg white@0.04, 1px glass
+/// border, `4px 8px` padding) resting at `opacity: 0.6`. Tapping it opens the
+/// full emoji reaction picker for the message (the PWA's
+/// `showEnhancedReactionPicker`). The CSS `:hover` brightens it to opacity 1
+/// with a primary-tinted border/background; since touch has no hover, we surface
+/// that as a press state (opacity 1 + primary tint while held) and a slight
+/// scale-down, mirroring the `.reaction-badge:active` feel.
+class _AddReactionButton extends StatefulWidget {
+  const _AddReactionButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_AddReactionButton> createState() => _AddReactionButtonState();
+}
+
+class _AddReactionButtonState extends State<_AddReactionButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.95 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: Opacity(
+          // `.add-reaction-btn { opacity: 0.6 }`, `:hover { opacity: 1 }`.
+          opacity: _pressed ? 1.0 : 0.6,
+          child: Container(
+            // `padding: 4px 8px`.
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              // bg white@0.04; `:hover` → primary@0.08.
+              color: _pressed
+                  ? c.primaryA(0.08)
+                  : Colors.white.withValues(alpha: 0.04),
+              // `border-radius: 20px`.
+              borderRadius: const BorderRadius.all(Radius.circular(20)),
+              // 1px glass border; `:hover` → primary@0.3.
+              border: Border.all(
+                color: _pressed ? c.primaryA(0.3) : c.glassBorder,
+              ),
+            ),
+            // `.add-reaction-btn svg { width:16px; height:16px; fill:var(--text) }`
+            // — a smiley-plus glyph (`Icons.add_reaction_outlined`) tinted --text.
+            child: Icon(
+              Icons.add_reaction_outlined,
+              size: 16,
+              color: c.text,
+            ),
           ),
         ),
       ),
