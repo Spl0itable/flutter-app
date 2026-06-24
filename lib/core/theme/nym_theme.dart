@@ -158,6 +158,16 @@ NymColors resolveNymColors({
 /// The monospace stack the PWA uses (`--font-mono`).
 const String kMonoFont = 'monospace';
 
+/// The bundled color-emoji family (declared in `pubspec.yaml`). Used as a
+/// `fontFamilyFallback` everywhere text is rendered so unicode emoji codepoints
+/// resolve to color glyphs instead of tofu (□) on devices whose system emoji
+/// font Flutter can't reach (de-Googled / minimal Android images).
+const String kEmojiFont = 'Noto Color Emoji';
+
+/// The app-wide emoji font fallback chain. Kept as a single list so the theme
+/// and the message renderer stay in sync.
+const List<String> kEmojiFontFallback = [kEmojiFont];
+
 /// Builds Flutter [ThemeData] wrapping a [NymColors]. Most custom widgets read
 /// tokens via `context.nym`; this provides sensible Material defaults +
 /// the [NymColors] extension.
@@ -176,12 +186,23 @@ ThemeData buildNymThemeData(NymColors c) {
     error: c.danger,
   );
 
+  // Append the bundled color-emoji font to every text style's fallback chain so
+  // emoji codepoints render as color glyphs app-wide (not tofu) without
+  // changing the primary family. `.apply(fontFamilyFallback:)` REPLACES the
+  // per-style fallback list; the base Material themes don't set one, so this is
+  // purely additive here. (BUG: unicode emoji → □ on some Android devices.)
+  final textTheme = base.textTheme.apply(fontFamilyFallback: kEmojiFontFallback);
+  final primaryTextTheme =
+      base.primaryTextTheme.apply(fontFamilyFallback: kEmojiFontFallback);
+
   return base.copyWith(
     colorScheme: scheme,
     scaffoldBackgroundColor: c.bg,
     canvasColor: c.bg,
     dividerColor: c.glassBorder,
     splashFactory: InkRipple.splashFactory,
+    textTheme: textTheme,
+    primaryTextTheme: primaryTextTheme,
     textSelectionTheme: TextSelectionThemeData(
       cursorColor: c.primary,
       selectionColor: c.primary.withValues(alpha: 0.3),

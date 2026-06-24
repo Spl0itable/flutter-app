@@ -99,6 +99,15 @@ flutter:
     - assets/text/
     - assets/data/
 
+  # Bundled color-emoji font so unicode emoji render on devices whose system
+  # emoji font Flutter can't reach (e.g. de-Googled / minimal Android builds),
+  # instead of falling back to tofu (□). Referenced via `fontFamilyFallback`
+  # ('Noto Color Emoji') on the base text theme and the message renderer.
+  fonts:
+    - family: Noto Color Emoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf
+
 flutter_launcher_icons:
   android: true
   ios: true

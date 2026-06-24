@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -9,6 +11,7 @@ import '../../models/poll.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import 'message_row.dart';
+import 'message_skeleton.dart';
 import 'typing_indicator.dart';
 
 /// The scrolling message list (`.messages-container`, column-reverse). Renders
@@ -39,19 +42,22 @@ class MessagesList extends ConsumerWidget {
         : const Color(0x26000000); // black @ 0.15
 
     if (messages.isEmpty && polls.isEmpty) {
-      // PWA settles an empty channel/PM to "No recent messages"
-      // (`messages.js:3043-3052`, `.msg-empty-note`). The typing row still
-      // animates in below it for an empty PM/group where the peer is typing.
+      // PWA shows the shimmer skeleton FIRST while the conversation loads, then
+      // settles an empty channel/PM into the "No recent messages" note after a
+      // grace period (`messages.js:_showMessageSkeleton` → `_appendEmptyNote`,
+      // `.msg-skeleton` / `.msg-empty-note`). An arriving message clears the
+      // empty branch entirely (this widget no longer renders). The typing row
+      // still animates in below for an empty PM/group where the peer is typing.
       return ColoredBox(
         color: containerColor,
         child: Column(
           children: [
             Expanded(
-              child: Center(
-                child: Text(
-                  'No recent messages',
-                  style: TextStyle(color: c.textDim, fontSize: 13),
-                ),
+              // Keyed on the active view so re-entering a conversation re-runs
+              // the shimmer-then-settle grace period.
+              child: _EmptyOrLoading(
+                key: ValueKey(app.view),
+                useBubbles: settings.useBubbles,
               ),
             ),
             const TypingIndicatorRow(),
@@ -134,6 +140,60 @@ class MessagesList extends ConsumerWidget {
   String _baseNym(String nym) {
     final hash = nym.indexOf('#');
     return hash > 0 ? nym.substring(0, hash) : nym;
+  }
+}
+
+/// The empty-conversation surface: the shimmer [MessageSkeleton] while history
+/// is plausibly still loading, settling into the centered "No recent messages"
+/// note after a grace period — a 1:1 port of the PWA's `_showMessageSkeleton`
+/// (shimmer) → `_appendEmptyNote` (note) flow with the same ~3s settle timer
+/// (`messages.js:3030`, `this._msgSkeletonSettleMs || 3000`). Recreated (via a
+/// view-keyed instance in [MessagesList]) each time an empty conversation is
+/// opened, so the shimmer plays on every entry. Once a message arrives the
+/// empty branch stops rendering, which removes this widget — matching the PWA
+/// where an incoming message clears the skeleton/note immediately.
+class _EmptyOrLoading extends StatefulWidget {
+  const _EmptyOrLoading({super.key, required this.useBubbles});
+
+  final bool useBubbles;
+
+  @override
+  State<_EmptyOrLoading> createState() => _EmptyOrLoadingState();
+}
+
+class _EmptyOrLoadingState extends State<_EmptyOrLoading> {
+  // `this._msgSkeletonSettleMs || 3000`.
+  static const _settle = Duration(seconds: 3);
+
+  Timer? _timer;
+  bool _settled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(_settle, () {
+      if (mounted) setState(() => _settled = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_settled) {
+      return MessageSkeleton(useBubbles: widget.useBubbles);
+    }
+    final c = context.nym;
+    return Center(
+      child: Text(
+        'No recent messages',
+        style: TextStyle(color: c.textDim, fontSize: 13),
+      ),
+    );
   }
 }
 

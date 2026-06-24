@@ -11,7 +11,6 @@
 // (styles-themes-responsive.css:436-439). Search filters by emoji char or any
 // of its shortcode names (emoji.js `_applyEmojiSearch`, lines 789-804).
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -20,6 +19,7 @@ import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../messages/format/message_content.dart' show proxiedMedia;
+import '../messages/inline_network_image.dart';
 import 'custom_emoji.dart';
 import 'emoji_data.dart';
 
@@ -389,20 +389,24 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
   Widget _customCell(String shortcode, String url) {
     return _EmojiCell(
       onTap: () => widget.onSelect(':$shortcode:'),
-      child: CachedNetworkImage(
+      // SVG-aware + decode-safe (same handling as the message body): SVG custom
+      // emoji render via flutter_svg, others via the cached raster path, and an
+      // undecodable image shows a small broken-image glyph instead of throwing
+      // "ImageDecoder unimplemented".
+      child: InlineNetworkImage(
         // Always route custom-emoji images through the media proxy so the
         // user's IP is hidden from the host (PWA getProxiedEmojiUrl). When an
         // explicit [proxyBase] is supplied (tests) honor it; otherwise fall
         // back to the shared ApiClient proxy via [proxiedMedia].
-        imageUrl: (widget.proxyBase != null && widget.proxyBase!.isNotEmpty)
+        url: (widget.proxyBase != null && widget.proxyBase!.isNotEmpty)
             ? proxiedEmojiUrl(url, widget.proxyBase)
             : proxiedMedia(url, emoji: true),
         width: 30,
         height: 30,
         fit: BoxFit.contain,
-        placeholder: (_, __) => const SizedBox(width: 30, height: 30),
-        errorWidget: (_, __, ___) =>
-            const SizedBox(width: 30, height: 30, child: Icon(Icons.broken_image, size: 16)),
+        placeholder: const SizedBox(width: 30, height: 30),
+        errorChild: const SizedBox(
+            width: 30, height: 30, child: Icon(Icons.broken_image, size: 16)),
       ),
     );
   }
