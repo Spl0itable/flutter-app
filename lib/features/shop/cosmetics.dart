@@ -257,11 +257,15 @@ class CosmeticAura {
     this.watermark,
     this.prismRing = false,
     this.hologram = false,
+    this.insetRing = false,
   });
 
   final String id;
 
-  /// `box-shadow: inset 0 0 0 {insetWidth}px {insetColor}`.
+  /// `box-shadow: inset 0 0 0 {insetWidth}px {insetColor}`. Rendered as a true
+  /// inner ring (stroked fully INSIDE the bubble edge — not an outset glow) by
+  /// [CosmeticOverlayPainter] when [insetRing] is set, else as the inner
+  /// `Border.all(insetColor, insetWidth)` `message_row` already applies.
   final Color? insetColor;
   final double insetWidth;
 
@@ -286,6 +290,18 @@ class CosmeticAura {
 
   /// Render the holographic multi-gradient sheen (hologram).
   final bool hologram;
+
+  /// Render the `inset 0 0 0 {insetWidth}px {insetColor}` box-shadow as a true
+  /// inner ring (+ a soft inward feather) via [CosmeticOverlayPainter]. Set for
+  /// the aura ids whose CSS box-shadow has an `inset` part
+  /// (gold/neon/phoenix/cosmic/frost/hologram). `prismRing`/`hologram` already
+  /// route through the overlay; the others currently fall back to the inner
+  /// `Border.all` (see the CROSS-FILE NOTE on [CosmeticOverlayPainter]).
+  final bool insetRing;
+
+  /// True when this aura should be painted by [CosmeticOverlayPainter] (it has a
+  /// prism ring, holographic sheen, or a true inset ring to stroke).
+  bool get hasOverlay => prismRing || hologram || insetRing;
 }
 
 /// Maps a message-style id to its [MessageStyleDecoration], or null for an
@@ -317,12 +333,16 @@ const Map<String, List<Shadow>> _styleGlyphShadows = {
 };
 
 /// Per-style repeating-SVG / scanline watermarks (`--style-pattern` /
-/// `.message-content::before`), ported verbatim from `styles-features.css`. We
-/// ship the highest-value textures; the rest fall back to colour + glow only.
+/// `.message-content::before`), ported verbatim from `styles-features.css`.
+/// Every textured `.message.style-X` is covered: the SVG path data, tile sizes
+/// and `fill/stroke-opacity` alphas are the exact in-chat `--style-pattern`
+/// values (`styles-features.css:593-943,1257,1286`) — NOT the denser
+/// `.style-preview-*` alphas (those are a separate, shop-card-only pattern set).
 ///
-/// TODO(ui-parity): the remaining tiled textures (fire/ice/ghost/ocean/sakura/
-/// galaxy/toxic/gold/vapor/blood/royal/circuit/rainbow) are not yet rasterised
-/// here — add their `data:image/svg+xml` tiles from styles-features.css:604-943.
+/// Each tile is rendered behind `.message-content` via the same flutter_svg
+/// tiling mechanism ([StyleWatermarkLayer] / [_TiledSvg]) used for satoshi /
+/// matrix. The radial-glow half of the eclipse `--style-pattern` is folded into
+/// the glow/background instead (Flutter has no tiled radial-gradient layer here).
 final Map<String, StyleWatermark> styleWatermarks = {
   // satoshi: tiled ₿ glyph (styles-features.css:545-566), 50×40 tile.
   'style-satoshi': StyleWatermark.svg(
@@ -353,6 +373,137 @@ final Map<String, StyleWatermark> styleWatermarks = {
     color: Color(0x47FFB000), // rgba(255,176,0,0.28)
     scanlineGap: 3,
     scanlineThickness: 1,
+  ),
+  // fire: two flame teardrops (styles-features.css:610), 46×46.
+  'style-fire': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='46' height='46'>"
+        "<g fill='#ff6600' fill-opacity='0.12'>"
+        "<path d='M11 4C12 7 14.5 8.6 14.5 11.6A3.6 3.6 0 0 1 7.4 11.6C7.4 10 "
+        "8.4 9.3 9.2 10.1 8.7 7.8 9.7 5.8 11 4Z'/>"
+        "<path d='M32 25C32.8 27.2 34.6 28.4 34.6 30.6A2.7 2.7 0 0 1 29.2 "
+        "30.6C29.2 29.4 30 28.9 30.6 29.5 30.2 27.8 30.9 26.3 32 25Z'/>"
+        "</g></svg>",
+    const Size(46, 46),
+  ),
+  // ice: two snow-crystals (styles-features.css:616), 44×44.
+  'style-ice': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='44' height='44'>"
+        "<g stroke='#00ccee' stroke-opacity='0.16' stroke-width='1' "
+        "stroke-linecap='round'>"
+        "<path d='M11 4v14M4 11h14M6 6l10 10M16 6 6 16'/>"
+        "<path d='M11 5.5 9.5 7M11 5.5 12.5 7M11 16.5 9.5 15M11 16.5 12.5 "
+        "15M5.5 11 7 9.5M5.5 11 7 12.5M16.5 11 15 9.5M16.5 11 15 12.5'/></g>"
+        "<g stroke='#00ccee' stroke-opacity='0.1' stroke-width='1' "
+        "stroke-linecap='round' transform='translate(28 26)'>"
+        "<path d='M5 0v10M0 5h10M1.5 1.5 8.5 8.5M8.5 1.5 1.5 8.5'/></g></svg>",
+    const Size(44, 44),
+  ),
+  // ghost: two little ghosts (styles-features.css:604), 52×52.
+  'style-ghost': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'>"
+        "<g fill='#ffffff' fill-opacity='0.08' fill-rule='evenodd'>"
+        "<path d='M13 7c-3.3 0-5.5 2.4-5.5 5.5V19l2.2-1.6L12 19l1-1 1 1 2.3-1.6L18.5 "
+        "19v-6.5C18.5 9.4 16.3 7 13 7z M10.5 11.5a0.85 0.85 0 1 0 1.7 0 0.85 0.85 "
+        "0 1 0 -1.7 0z M13.8 11.5a0.85 0.85 0 1 0 1.7 0 0.85 0.85 0 1 0 -1.7 0z'/>"
+        "<path d='M37 29c-2.6 0-4.5 1.9-4.5 4.5V38l1.8-1.3L36 38l.8-.8.8.8 1.7-1.3L41 "
+        "38v-4.5C41 30.9 39.1 29 37 29z M35.1 33a0.7 0.7 0 1 0 1.4 0 0.7 0.7 0 1 0 "
+        "-1.4 0z M37.7 33a0.7 0.7 0 1 0 1.4 0 0.7 0.7 0 1 0 -1.4 0z'/></g></svg>",
+    const Size(52, 52),
+  ),
+  // ocean: two sine waves (styles-features.css:735), 48×24.
+  'style-ocean': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='24'>"
+        "<g fill='none' stroke='#38bdf8' stroke-opacity='0.16' stroke-width='1.4'>"
+        "<path d='M0 12 Q6 6 12 12 T24 12 T36 12 T48 12'/>"
+        "<path d='M0 20 Q6 14 12 20 T24 20 T36 20 T48 20'/></g></svg>",
+    const Size(48, 24),
+  ),
+  // sakura: four rotated petals (styles-features.css:760), 50×50.
+  'style-sakura': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'>"
+        "<g fill='#ff7eb6' fill-opacity='0.14'>"
+        "<ellipse cx='12' cy='12' rx='3' ry='1.6' transform='rotate(30 12 12)'/>"
+        "<ellipse cx='36' cy='30' rx='3' ry='1.6' transform='rotate(-20 36 30)'/>"
+        "<ellipse cx='42' cy='8' rx='2.5' ry='1.3' transform='rotate(60 42 8)'/>"
+        "<ellipse cx='8' cy='40' rx='2.5' ry='1.3' transform='rotate(10 8 40)'/>"
+        "</g></svg>",
+    const Size(50, 50),
+  ),
+  // galaxy: star dots + a tiny sparkle cross (styles-features.css:785), 60×60.
+  'style-galaxy': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
+        "<g fill='#c084fc' fill-opacity='0.2'><circle cx='10' cy='12' r='1.2'/>"
+        "<circle cx='40' cy='8' r='0.9'/><circle cx='52' cy='30' r='1.4'/>"
+        "<circle cx='24' cy='40' r='1'/><circle cx='8' cy='48' r='0.8'/>"
+        "<circle cx='34' cy='52' r='1.1'/></g>"
+        "<g stroke='#c084fc' stroke-opacity='0.18' stroke-width='1' "
+        "stroke-linecap='round'><path d='M30 22v5M27.5 24.5h5'/></g></svg>",
+    const Size(60, 60),
+  ),
+  // toxic: radiation rings + dots (styles-features.css:810), 48×48.
+  'style-toxic': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'>"
+        "<g fill='none' stroke='#84ff3b' stroke-opacity='0.14' stroke-width='1.2'>"
+        "<circle cx='12' cy='12' r='3'/><circle cx='36' cy='34' r='3'/></g>"
+        "<g fill='#84ff3b' fill-opacity='0.12'><circle cx='12' cy='12' r='1'/>"
+        "<circle cx='36' cy='34' r='1'/></g></svg>",
+    const Size(48, 48),
+  ),
+  // gold: two four-point sparkles (styles-features.css:839), 46×46.
+  'style-gold': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='46' height='46'>"
+        "<g fill='#ffd700' fill-opacity='0.13'>"
+        "<path d='M12 4 13.2 10.8 20 12 13.2 13.2 12 20 10.8 13.2 4 12 10.8 10.8z'/>"
+        "<path d='M34 26 34.8 30.2 39 31 34.8 31.8 34 36 33.2 31.8 29 31 33.2 30.2z'/>"
+        "</g></svg>",
+    const Size(46, 46),
+  ),
+  // vapor: an angular grid stroke (styles-features.css:868), 24×24.
+  'style-vapor': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>"
+        "<g fill='none' stroke='#05d9e8' stroke-opacity='0.14' stroke-width='1'>"
+        "<path d='M0 0H24V24'/></g></svg>",
+    const Size(24, 24),
+  ),
+  // blood: two blood drops (styles-features.css:893), 44×44.
+  'style-blood': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='44' height='44'>"
+        "<g fill='#ff3b3b' fill-opacity='0.12'>"
+        "<path d='M11 6c3 4 4.5 6 4.5 8a4.5 4.5 0 0 1-9 0c0-2 1.5-4 4.5-8z'/>"
+        "<path d='M33 26c2 2.7 3 4 3 5.3a3 3 0 0 1-6 0c0-1.3 1-2.6 3-5.3z'/>"
+        "</g></svg>",
+    const Size(44, 44),
+  ),
+  // royal: a crown diamond + two corner chevrons (styles-features.css:918), 32×32.
+  'style-royal': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'>"
+        "<g fill='none' stroke='#e8c860' stroke-opacity='0.16' stroke-width='1'>"
+        "<path d='M16 4 22 12 16 20 10 12z'/>"
+        "<path d='M0 20 6 28 0 36M32 20 26 28 32 36'/></g></svg>",
+    const Size(32, 32),
+  ),
+  // circuit: PCB traces + solder nodes (styles-features.css:943), 48×48.
+  'style-circuit': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'>"
+        "<g fill='none' stroke='#2dd4bf' stroke-opacity='0.16' stroke-width='1'>"
+        "<path d='M6 6h12v12M18 6h12M30 6v10h12M6 24v12h10M16 36h14v8M30 30h12'/></g>"
+        "<g fill='#2dd4bf' fill-opacity='0.22'><circle cx='6' cy='6' r='1.5'/>"
+        "<circle cx='42' cy='16' r='1.5'/><circle cx='16' cy='36' r='1.5'/>"
+        "<circle cx='42' cy='30' r='1.5'/></g></svg>",
+    const Size(48, 48),
+  ),
+  // rainbow: stacked ROYGBIV arc-pairs (styles-features.css:622), 46×46.
+  'style-rainbow': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='46' height='46'>"
+        "<g fill='none' stroke-width='1.3' stroke-linecap='round'>"
+        "<path d='M6 14a6 6 0 0 1 12 0' stroke='#ff3b3b' stroke-opacity='0.5'/>"
+        "<path d='M8.5 14a3.5 3.5 0 0 1 7 0' stroke='#33dd00' stroke-opacity='0.45'/>"
+        "<path d='M10.5 14a1.5 1.5 0 0 1 3 0' stroke='#2a5bff' stroke-opacity='0.45'/>"
+        "<path d='M27 35a6 6 0 0 1 12 0' stroke='#ff8a00' stroke-opacity='0.5'/>"
+        "<path d='M29.5 35a3.5 3.5 0 0 1 7 0' stroke='#00c3ff' stroke-opacity='0.45'/>"
+        "<path d='M31.5 35a1.5 1.5 0 0 1 3 0' stroke='#b13bff' stroke-opacity='0.45'/>"
+        "</g></svg>",
+    const Size(46, 46),
   ),
 };
 
@@ -419,6 +570,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     id: 'cosmetic-aura-gold',
     insetColor: Color(0x59FFD700), // rgba(255,215,0,.35)
     insetWidth: 1,
+    insetRing: true,
     glowColor: Color(0x2EFFD700), // rgba(255,215,0,.18)
     glowBlur: 18,
     borderAccent: Color(0xFFFFD700),
@@ -428,6 +580,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   'cosmetic-aura-neon': const CosmeticAura(
     id: 'cosmetic-aura-neon',
     insetColor: Color(0x8C00E5FF), // rgba(0,229,255,.55)
+    insetRing: true,
     glowColor: Color(0x5200E5FF), // rgba(0,229,255,.32)
     glowBlur: 22,
     borderAccent: Color(0xFF00E5FF),
@@ -444,6 +597,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   'cosmetic-frost': CosmeticAura(
     id: 'cosmetic-frost',
     insetColor: const Color(0x8CE1F6FF), // rgba(225,246,255,.55)
+    insetRing: true,
     glowColor: const Color(0x33BEE6FF), // rgba(150,210,255,.2) approx
     glowBlur: 10,
     background: const Color(0x29BEE6FF), // rgba(190,230,255,.16)
@@ -453,6 +607,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   'cosmetic-aura-phoenix': const CosmeticAura(
     id: 'cosmetic-aura-phoenix',
     insetColor: Color(0x99FFA000), // rgba(255,160,0,.6)
+    insetRing: true,
     glowColor: Color(0x66FF6E00), // rgba(255,110,0,.4)
     glowBlur: 26,
     borderAccent: Color(0xFFFF6A00),
@@ -462,6 +617,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   'cosmetic-aura-cosmic': CosmeticAura(
     id: 'cosmetic-aura-cosmic',
     insetColor: const Color(0x99A082FF), // rgba(160,130,255,.6)
+    insetRing: true,
     glowColor: const Color(0x738C64FF), // rgba(140,100,255,.45)
     glowBlur: 26,
     borderAccent: const Color(0xFF7C5CFF),
@@ -472,6 +628,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   'cosmetic-bubble-hologram': const CosmeticAura(
     id: 'cosmetic-bubble-hologram',
     insetColor: Color(0x80FFFFFF), // rgba(255,255,255,.5)
+    insetRing: true,
     glowColor: Color(0x8096B4FF), // rgba(150,180,255,.5)
     glowBlur: 18,
     hologram: true,
@@ -569,8 +726,24 @@ class _TiledSvg extends StatelessWidget {
   }
 }
 
-/// Paints a conic prism ring (rainbow cosmetic) or holographic sheen as a border
-/// overlay on a message bubble. Sits above the content in a `Positioned.fill`.
+/// Paints the parts of a `.message.cosmetic-X` box-shadow / overlay that a plain
+/// [BoxDecoration] can't express, as a `Positioned.fill` layer above the bubble
+/// content: the conic prism ring (rainbow), the holographic sheen (hologram),
+/// and — for any aura flagged [CosmeticAura.insetRing] — the
+/// `box-shadow: inset 0 0 0 {insetWidth}px {insetColor}` rendered as a TRUE
+/// inner ring (stroked fully inside the bubble edge) plus a soft inward feather,
+/// instead of the outset glow `BoxShadow` can only approximate.
+///
+/// CROSS-FILE NOTE (no edit made here): `message_row.dart` only routes auras
+/// with `prismRing || hologram` through this painter (its `overlays` filter at
+/// `_decorateBubble`, ~line 581). So hologram + rainbow get the painter today;
+/// the four pure-ring auras (gold/neon/phoenix/cosmic/frost) still fall back to
+/// the inner `Border.all(insetColor, insetWidth)` `_decorateBubble` already
+/// applies — a faithful inner ring, but a *centred* 1px stroke rather than a
+/// fully-inset one. For pixel-identical insets on those four, widen that filter
+/// to `a.prismRing || a.hologram || a.insetRing` (or `a.hasOverlay`) so every
+/// inset-ring aura reaches this painter. Nothing else in `message_row` needs to
+/// change — the painter no-ops for auras without an overlay/ring.
 class CosmeticOverlayPainter extends CustomPainter {
   CosmeticOverlayPainter({
     required this.aura,
@@ -634,9 +807,46 @@ class CosmeticOverlayPainter extends CustomPainter {
         ..blendMode = BlendMode.screen;
       canvas.drawRRect(rrect, sheen);
     }
+    // True inset ring (`box-shadow: inset 0 0 0 {w}px {c}`). Drawn last so it
+    // sits crisply on top of the hologram sheen / prism ring.
+    final ringColor = aura.insetColor;
+    if (aura.insetRing && ringColor != null) {
+      final w = aura.insetWidth;
+      // A stroked rounded-rect deflated by half its width keeps the whole stroke
+      // INSIDE the bubble edge — matching CSS `inset 0 0 0 {w}px` (which paints
+      // the ring entirely within the box) rather than a centred `Border.all`.
+      final ringRect = rrect.deflate(w / 2);
+      final ring = Paint()
+        ..color = ringColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = w;
+      canvas.drawRRect(ringRect, ring);
+      // The soft inward feather an inset box-shadow casts: the ring colour at a
+      // low alpha fading from the edge toward the centre, clipped to the bubble
+      // so it never bleeds outside. (CSS inset shadows have 0 blur here, so this
+      // is a faint accent, not a heavy halo — a fixed low alpha on the ring hue.)
+      final inner = rrect.deflate(w);
+      final feather = Paint()
+        ..shader = RadialGradient(
+          radius: 0.9,
+          colors: [
+            ringColor.withValues(alpha: 0),
+            ringColor.withValues(alpha: 0.10),
+          ],
+          stops: const [0.72, 1.0],
+        ).createShader(inner.outerRect);
+      canvas.save();
+      canvas.clipRRect(inner);
+      canvas.drawRRect(inner, feather);
+      canvas.restore();
+    }
   }
 
   @override
   bool shouldRepaint(CosmeticOverlayPainter old) =>
-      old.aura.id != aura.id || old.radius != radius;
+      old.aura.id != aura.id ||
+      old.radius != radius ||
+      old.aura.insetColor != aura.insetColor ||
+      old.aura.insetWidth != aura.insetWidth ||
+      old.aura.insetRing != aura.insetRing;
 }

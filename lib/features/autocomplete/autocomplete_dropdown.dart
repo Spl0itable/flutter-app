@@ -11,6 +11,7 @@ import '../../models/user.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/profile_badges.dart';
 import '../emoji/custom_emoji.dart';
+import '../shop/cosmetics.dart';
 import 'autocomplete_queries.dart';
 
 /// Per-pubkey badge flags resolved by the host (the composer holds `ref`):
@@ -83,6 +84,7 @@ class AutocompleteDropdown extends StatelessWidget {
     required this.onSelectKaomoji,
     this.custom = CustomEmojiState.empty,
     this.badgesFor,
+    this.cosmeticsFor,
   });
 
   final AutocompleteView view;
@@ -96,6 +98,12 @@ class AutocompleteDropdown extends StatelessWidget {
   /// Resolves the verified/friend badge flags for a mention-row pubkey. When
   /// null (e.g. tests), rows render avatar + name without badges.
   final MentionBadges Function(String pubkey)? badgesFor;
+
+  /// Resolves the active shop flair/supporter cosmetics for a mention-row pubkey
+  /// (`getFlairForUser`, autocomplete.js:405). The pure query layer can't reach
+  /// the shop/user state, so the host (composer, holds `ref`) supplies it. When
+  /// null (e.g. tests) the flair glyph is omitted.
+  final UserCosmetics Function(String pubkey)? cosmeticsFor;
 
   @override
   Widget build(BuildContext context) {
@@ -206,6 +214,10 @@ class AutocompleteDropdown extends StatelessWidget {
 
   Widget _mentionRow(NymColors c, MentionResult m, bool selected) {
     final badges = badgesFor?.call(m.pubkey);
+    final cosmetics = cosmeticsFor?.call(m.pubkey);
+    final hasFlair = cosmetics != null &&
+        ((cosmetics.flairId != null && cosmetics.flairId!.isNotEmpty) ||
+            cosmetics.supporter);
     return _selectable(
       c,
       selected: selected,
@@ -233,6 +245,16 @@ class AutocompleteDropdown extends StatelessWidget {
               ),
             ),
           ),
+          // Shop flair glyph + supporter badge after the nym (before verified),
+          // matching the PWA's `getFlairForUser` insertion (autocomplete.js:407).
+          if (hasFlair) ...[
+            const SizedBox(width: 4),
+            CosmeticNymBadges(
+              cosmetics: cosmetics!,
+              flairSize: 14,
+              supporterHeight: 14,
+            ),
+          ],
           if (badges != null && badges.verified) ...[
             const SizedBox(width: 4),
             const VerifiedBadge(size: 14),

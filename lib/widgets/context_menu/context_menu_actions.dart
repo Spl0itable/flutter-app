@@ -50,6 +50,7 @@ class CtxTarget {
     this.targetIsMember = false,
     this.targetIsOwner = false,
     this.targetIsMod = false,
+    this.backToGroupId,
   });
 
   final String pubkey;
@@ -75,6 +76,12 @@ class CtxTarget {
   final bool targetIsMember;
   final bool targetIsOwner;
   final bool targetIsMod;
+
+  /// When this profile was opened from a group's member list, the originating
+  /// group id — the user context menu then shows a top-left "back" chevron that
+  /// returns to that group's context menu (PWA `backToGroupId`,
+  /// ui-context.js:354/371). Null for every other entry point.
+  final String? backToGroupId;
 
   bool get iCanModerate => iAmOwner || iAmMod;
 }

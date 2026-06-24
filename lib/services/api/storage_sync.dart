@@ -348,6 +348,86 @@ class StorageSync {
     return SettingsLoadResult(payload: merged, newestTs: newestTs);
   }
 
+  /// Fetches inbound settings-transfer offers: the per-section encrypted
+  /// settings categories in D1 whose `updatedAt` is newer than [sinceMs] (the
+  /// stored `nym_last_settings_sync_ts`, in ms). These are settings another of
+  /// the user's devices published that this device hasn't applied yet — the
+  /// inbound side of the cross-device settings sync (settings.js
+  /// `settingsLoadFromD1`, surfaced here as discrete accept/decline offers rather
+  /// than auto-applied).
+  ///
+  /// Each offer carries the real section name, the decrypted payload (PWA field
+  /// names, `__cat` stripped) and its `updatedAt` (ms), newest-first. Returns an
+  /// empty list on any failure / when nothing is newer than [sinceMs]. The
+  /// legacy monolithic `nymchat-settings` blob is included as a single offer
+  /// only when no section blobs exist (mirroring `settingsGet`'s fallback).
+  Future<List<SettingsTransferOffer>> settingsTransfersSince(int sinceMs) async {
+    Map<String, dynamic> data;
+    try {
+      data = await _api.storageAction({
+        'action': 'settings-get',
+        'pubkey': _pubkey,
+        'auth': _auth('settings-get'),
+      });
+    } catch (_) {
+      return const [];
+    }
+    final cats = data['categories'];
+    if (cats is! Map) return const [];
+
+    final decoded = <_DecodedCategory>[];
+    for (final e in cats.entries) {
+      final entry = e.value;
+      if (entry is! Map) continue;
+      final blob = entry['blob'];
+      if (blob is! String || blob.isEmpty) continue;
+      final updatedAt = (entry['updatedAt'] as num?)?.toInt() ?? 0;
+      try {
+        final plain = await _decryptFromSelf(blob);
+        if (plain == null) continue;
+        final payload = jsonDecode(plain);
+        if (payload is! Map<String, dynamic>) continue;
+        final realCat = payload['__cat'] is String
+            ? payload['__cat'] as String
+            : e.key.toString();
+        payload.remove('__cat');
+        decoded.add(_DecodedCategory(
+          category: realCat,
+          payload: payload,
+          updatedAt: updatedAt,
+        ));
+      } catch (_) {
+        // Skip an undecryptable/corrupt category.
+      }
+    }
+    if (decoded.isEmpty) return const [];
+
+    bool isCore(String c) =>
+        c == 'nymchat-settings' || c.startsWith('nymchat-settings-');
+    final core = decoded.where((d) => isCore(d.category)).toList();
+    final sections =
+        core.where((d) => d.category != 'nymchat-settings').toList();
+    final source = sections.isNotEmpty
+        ? sections
+        : core.where((d) => d.category == 'nymchat-settings').toList();
+
+    final offers = <SettingsTransferOffer>[];
+    for (final d in source) {
+      if (d.updatedAt <= sinceMs) continue;
+      final section = d.category.startsWith('nymchat-settings-')
+          ? d.category.substring('nymchat-settings-'.length)
+          : d.category;
+      offers.add(SettingsTransferOffer(
+        id: d.category,
+        section: section,
+        payload: d.payload,
+        updatedAt: d.updatedAt,
+      ));
+    }
+    offers.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return offers;
+  }
+
   // ===========================================================================
   // D1-first profile mirror.
   // ===========================================================================
@@ -699,4 +779,31 @@ class SettingsLoadResult {
   const SettingsLoadResult({required this.payload, required this.newestTs});
   final Map<String, dynamic> payload;
   final int newestTs;
+}
+
+/// An inbound settings-transfer offer (one synced settings section another
+/// device published, newer than this device's last sync). The list UI shows
+/// these as accept/decline rows; accepting applies [payload] via the settings
+/// controller and advances the sync ts.
+class SettingsTransferOffer {
+  const SettingsTransferOffer({
+    required this.id,
+    required this.section,
+    required this.payload,
+    required this.updatedAt,
+  });
+
+  /// Stable id (the D1 category, e.g. `nymchat-settings-appearance`) — used as
+  /// the accept/decline key.
+  final String id;
+
+  /// The settings-modal section name (`appearance`, `privacy`, …) or the raw
+  /// category for the legacy monolithic blob.
+  final String section;
+
+  /// The decoded payload (PWA field names, `__cat` removed).
+  final Map<String, dynamic> payload;
+
+  /// The category's `updatedAt` in ms (D1 wall-clock of the publishing device).
+  final int updatedAt;
 }

@@ -53,10 +53,21 @@ class GroupManager {
 
   /// Creates a group: generates the id + first ephemeral key, returns a [Group]
   /// owned by [selfPubkey] and publishes the bootstrap `group-invite`.
+  ///
+  /// The optional [avatar] / [banner] / [description] / [allowMemberInvites]
+  /// extras mirror groups.js `createGroup(name, memberPubkeys, opts)` (1355):
+  /// they are stamped onto the [Group] and threaded into the invite rumor's
+  /// metadata tags so members learn the group's appearance + invite policy from
+  /// the first wrap. [allowMemberInvites] defaults to true (PWA
+  /// `opts.allowMemberInvites !== false`).
   Future<Group?> createGroup({
     required String selfPubkey,
     required String name,
     required List<String> memberPubkeys,
+    String? avatar,
+    String? banner,
+    String? description,
+    bool allowMemberInvites = true,
     MessagingSettings settings = const MessagingSettings(),
   }) async {
     if (!_service.canSign) return null;
@@ -67,6 +78,11 @@ class GroupManager {
       name: name.trim(),
       members: members,
       createdBy: selfPubkey,
+      avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+      banner: (banner != null && banner.isNotEmpty) ? banner : null,
+      description:
+          (description != null && description.isNotEmpty) ? description : null,
+      allowMemberInvites: allowMemberInvites,
       lastMessageTime: DateTime.now().millisecondsSinceEpoch,
     );
 

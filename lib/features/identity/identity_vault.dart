@@ -219,6 +219,54 @@ class IdentityVault {
     await _kv.remove(StorageKeys.vaultCheck);
   }
 
+  // ---------------------------------------------------------------------------
+  // Encrypt-at-rest prompt trigger (key-vault.js `maybePromptEncryptAtRest` /
+  // `_hasPersistedSecret`). The boot/setup flow calls [shouldPromptEncryptAtRest]
+  // to decide whether to offer turning on identity encryption; [declineEncryptAtRest]
+  // persists the user's "Not now" so we don't nag again.
+  // ---------------------------------------------------------------------------
+
+  /// Whether any identity secret is stored **in plaintext** (not already
+  /// `enc:v1:`-wrapped). Mirrors key-vault.js `_hasPersistedSecret` but, because
+  /// the native secrets live in the keystore, it also confirms the secret is
+  /// actually unencrypted-at-rest (an enabled vault stores `enc:v1:` blobs, so
+  /// those don't count as "exposed").
+  Future<bool> hasUnencryptedSecret() async {
+    for (final name in vaultKeys) {
+      final cur = await _secure.get(name);
+      if (cur != null && cur.isNotEmpty && !cur.startsWith('enc:v1:')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether the user previously dismissed the encrypt-at-rest prompt
+  /// (`nym_encrypt_at_rest_prompt_dismissed === '1'`).
+  bool get encryptAtRestPromptDismissed =>
+      _kv.getBool(StorageKeys.encryptAtRestPromptDismissed);
+
+  /// True when the boot/setup flow should offer to enable encryption-at-rest:
+  /// the vault is **not** already enabled, the user hasn't dismissed the prompt,
+  /// and an identity secret is sitting in storage unencrypted (so enabling the
+  /// vault would actually protect something). Mirrors key-vault.js
+  /// `maybePromptEncryptAtRest`'s gates (vault-off + not-dismissed +
+  /// has-persisted-secret); the cross-device `encryptAtRestPreferred` hint is an
+  /// *additional* reason the PWA prompts, but a locally-stored plaintext nsec is
+  /// sufficient on its own to warrant the offer.
+  Future<bool> shouldPromptEncryptAtRest() async {
+    if (isEnabled) return false;
+    if (encryptAtRestPromptDismissed) return false;
+    return hasUnencryptedSecret();
+  }
+
+  /// Persists the user's "Not now" so [shouldPromptEncryptAtRest] won't fire
+  /// again (key-vault.js `dismiss()` →
+  /// `localStorage.setItem('nym_encrypt_at_rest_prompt_dismissed', '1')`).
+  Future<void> declineEncryptAtRest() async {
+    await _kv.setBool(StorageKeys.encryptAtRestPromptDismissed, true);
+  }
+
   final Random _rng = Random.secure();
 
   Uint8List _randomBytes(int n) {

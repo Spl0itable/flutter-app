@@ -20,6 +20,7 @@ import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
 import '../../features/nymbot/bot_chat_screen.dart';
+import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
 import '../../state/app_state.dart';
@@ -836,6 +837,7 @@ class _ComposerState extends ConsumerState<Composer> {
             selectedIndex: _selectedIndex,
             custom: _customEmojis,
             badgesFor: _mentionBadges,
+            cosmeticsFor: (pk) => resolveCosmetics(ref, pk),
             onSelectMention: (m) => _replaceTriggerToken(m.insertText),
             onSelectChannel: (ch) => _replaceTriggerToken(ch.insertText),
             onSelectEmoji: _onEmojiAutocompletePicked,

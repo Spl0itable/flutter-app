@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
+import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
 import '../../features/p2p/p2p_models.dart';
 import '../../features/p2p/p2p_service.dart';
@@ -174,7 +175,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isSystemRow) return _buildSystemMessage(context);
     // `/me …` emote → italic "* author action *" line.
     if (message.isMeAction) return _buildActionMessage(context);
-    return settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    final row =
+        settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
+    // current conversation is dimmed (`messages.js:652-656`). Own messages are
+    // never flooded.
+    if (!message.isOwn &&
+        ref.watch(floodTrackerProvider).isFlooding(message.pubkey)) {
+      return Opacity(opacity: 0.2, child: row);
+    }
+    return row;
   }
 
   /// A centered `.system-message` (or `.action-message`) pill injected into the
@@ -578,7 +588,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             .firstWhere((w) => w != null, orElse: () => null);
 
     final overlays =
-        auras.where((a) => a.prismRing || a.hologram).toList();
+        auras.where((a) => a.hasOverlay).toList();
     final overlayAura = overlays.isNotEmpty ? overlays.first : null;
 
     return DecoratedBox(

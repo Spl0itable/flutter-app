@@ -26,13 +26,43 @@ const double kGlobeNarrowBreakpoint = 768;
 /// Path to the bundled world map TopoJSON (`countries-110m.json`).
 const String kWorldTopoAsset = 'assets/data/countries-110m.json';
 
+/// Path to the bundled admin-1 (state/province) GeoJSON (F2/F3).
+const String kAdmin1Asset =
+    'assets/data/ne_50m_admin_1_states_provinces_lakes.json';
+
+/// Path to the bundled populated-places (cities) GeoJSON (F4).
+const String kCitiesAsset =
+    'assets/data/ne_50m_populated_places_simple.json';
+
+/// Zoom at/above which the admin-1 + city detail layers are lazy-loaded
+/// (geohash-globe.js:10-11: ADMIN1_ZOOM_THRESHOLD / CITY_ZOOM_THRESHOLD).
+const double kSubregionZoomThreshold = 2.5;
+
 /// Active-window options in hours (matches the PWA's `windowOptions`).
 const List<int> kActiveWindowOptions = [1, 3, 6, 12, 24];
+
+/// Activity-refresh cadence (`ACTIVE_WINDOW_REFRESH_MS=30000`): re-tally channel
+/// counts so the dots/heatmap stay current.
+const Duration kActiveWindowRefresh = Duration(milliseconds: 30000);
+
+/// Day/night terminator refresh cadence (`DAYNIGHT_REFRESH_MS=60000`): the
+/// terminator drifts slowly, so it repaints half as often as activity (F9).
+const Duration kDaynightRefresh = Duration(milliseconds: 60000);
 
 /// Top-level worker entry for [compute]: decode the world TopoJSON off the UI
 /// thread. Defined at top level so it can run in an isolate.
 List<GeoFeature> decodeWorldFeaturesIsolate(String jsonString) =>
     decodeWorldTopoJson(jsonString);
+
+/// Top-level worker entry for [compute]: decode the admin-1 GeoJSON off the UI
+/// thread (the dataset is ~1.7 MB).
+List<GeoFeature> decodeAdmin1FeaturesIsolate(String jsonString) =>
+    decodeAdmin1GeoJson(jsonString);
+
+/// Top-level worker entry for [compute]: decode the cities GeoJSON off the UI
+/// thread.
+List<CityPoint> decodeCitiesIsolate(String jsonString) =>
+    decodeCitiesGeoJson(jsonString);
 
 /// The `#geohashExplorerModal` screen — a self-contained equirectangular world
 /// map for browsing geohash channels. Pan via drag, zoom via scroll/pinch, an
@@ -70,6 +100,16 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   List<GeoFeature> _features = const [];
   Size _lastSize = Size.zero;
 
+  // --- Lazy detail layers (F2/F3/F4) ---------------------------------------
+  // Admin-1 borders/labels + city dots/labels are loaded on demand once the
+  // view zooms to `kSubregionZoomThreshold`, mirroring the PWA's
+  // `ensureSubregions`. The `*Loaded` guards prevent a double-load (the PWA
+  // flips `admin1Loaded`/`citiesLoaded` true before the promise resolves).
+  List<GeoFeature> _admin1Features = const [];
+  List<CityPoint> _cities = const [];
+  bool _admin1Loaded = false;
+  bool _citiesLoaded = false;
+
   bool _heatmap = false;
   bool _daynight = false;
   bool _grid = false;
@@ -103,24 +143,36 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
 
   final ApiClient _api = ApiClient();
 
-  // Periodic refresh (heatmap activity / day-night), like the PWA's intervals.
-  Timer? _refreshTimer;
+  // Periodic refresh, split into two cadences to match the PWA exactly (F9):
+  //   - activity: re-tally channel counts every ACTIVE_WINDOW_REFRESH_MS (30s);
+  //   - day/night: repaint the terminator every DAYNIGHT_REFRESH_MS (60s),
+  //     and only while day/night mode is on (the PWA's daynightTimer early-outs
+  //     when `!daynightMode`).
+  Timer? _activeWindowTimer;
+  Timer? _daynightTimer;
   final ValueNotifier<int> _ticker = ValueNotifier<int>(0);
 
   @override
   void initState() {
     super.initState();
     _loadFeatures();
-    // Refresh activity counts (30s) and day/night (60s); a single 30s tick that
-    // rebuilds is sufficient for our read-only store.
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) _ticker.value++;
+    // Activity tick (30s): bump the repaint notifier and rebuild so the dots /
+    // heatmap re-tally against the moving active window.
+    _activeWindowTimer = Timer.periodic(kActiveWindowRefresh, (_) {
+      if (!mounted) return;
+      _ticker.value++;
+      setState(() {}); // re-run _channels() against the new "now".
+    });
+    // Day/night tick (60s): repaint only when the terminator is shown.
+    _daynightTimer = Timer.periodic(kDaynightRefresh, (_) {
+      if (mounted && _daynight) _ticker.value++;
     });
   }
 
   @override
   void dispose() {
-    _refreshTimer?.cancel();
+    _activeWindowTimer?.cancel();
+    _daynightTimer?.cancel();
     _heatDebounce?.cancel();
     _heatImage?.dispose();
     _ticker.dispose();
@@ -136,6 +188,47 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
       setState(() => _features = feats);
     } catch (_) {
       // Leave the map empty (ocean + graticule) if decoding fails.
+    }
+  }
+
+  /// Lazy-loads the admin-1 + city detail datasets once the view crosses
+  /// `kSubregionZoomThreshold`, exactly like the PWA's `ensureSubregions`
+  /// (geohash-globe.js:354): each is loaded at most once (the `*Loaded` guard is
+  /// flipped before the async decode starts, so a burst of zoom events can't
+  /// trigger a second load), decoded off the UI thread, cached, and painted on
+  /// arrival. Call after any zoom change.
+  void _ensureSubregions() {
+    if (_view.zoom >= kSubregionZoomThreshold && !_admin1Loaded) {
+      _admin1Loaded = true;
+      _loadAdmin1();
+    }
+    if (_view.zoom >= kSubregionZoomThreshold && !_citiesLoaded) {
+      _citiesLoaded = true;
+      _loadCities();
+    }
+  }
+
+  Future<void> _loadAdmin1() async {
+    try {
+      final jsonStr = await rootBundle.loadString(kAdmin1Asset);
+      final feats = await compute(decodeAdmin1FeaturesIsolate, jsonStr);
+      if (!mounted) return;
+      setState(() => _admin1Features = feats);
+    } catch (_) {
+      // Leave admin-1 borders absent if decoding fails (allow a retry).
+      _admin1Loaded = false;
+    }
+  }
+
+  Future<void> _loadCities() async {
+    try {
+      final jsonStr = await rootBundle.loadString(kCitiesAsset);
+      final cities = await compute(decodeCitiesIsolate, jsonStr);
+      if (!mounted) return;
+      setState(() => _cities = cities);
+    } catch (_) {
+      // Leave city dots absent if decoding fails (allow a retry).
+      _citiesLoaded = false;
     }
   }
 
@@ -157,6 +250,9 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
 
   void _setView(GeoView v, Size size) {
     setState(() => _view = v.clamped(size));
+    // Trigger the admin-1/city lazy-load on any zoom change (PWA calls
+    // `ensureSubregions` from onWheel/onTouchMove/zoomBy/zoomToBounds).
+    _ensureSubregions();
   }
 
   // --- Heatmap image lifecycle (F1) ----------------------------------------
@@ -299,7 +395,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
             isJoined: false,
           );
     _selectChannel(point);
-    _view = _view.fitBounds(bounds, size).clamped(size);
+    // `zoomToBounds` in the PWA also calls `ensureSubregions` after re-framing.
+    _setView(_view.fitBounds(bounds, size), size);
   }
 
   void _resetView(Size size) {
@@ -522,6 +619,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
                 view: _view,
                 style: style,
                 features: _features,
+                admin1Features: _admin1Features,
+                cities: _cities,
                 channels: channels,
                 heatmap: _heatmap,
                 daynight: _daynight,

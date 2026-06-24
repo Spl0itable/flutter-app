@@ -21,6 +21,7 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
 import 'context_menu_actions.dart';
+import 'group_context_menu_panel.dart';
 import 'interaction_hooks.dart';
 import 'profile_badges.dart';
 import 'report_modal.dart';
@@ -44,11 +45,16 @@ class ContextMenuPanel extends ConsumerWidget {
     this.message,
     this.onReact,
     this.onTranslateInline,
+    this.backToGroupId,
   });
 
   final CtxTarget target;
   final Animation<double> animation;
   final VoidCallback onClose;
+
+  /// When set (or carried on [target]), a top-left "back" chevron returns to
+  /// that group's context menu (PWA `ctxBackToGroup`, ui-context.js:369-373).
+  final String? backToGroupId;
 
   /// The originating message (used to infer kind for reactions/zaps).
   final Message? message;
@@ -62,13 +68,17 @@ class ContextMenuPanel extends ConsumerWidget {
   final ValueChanged<String?>? onTranslateInline;
 
   /// Presents the panel in the root overlay with the slide-in transition.
+  /// [backToGroupId] (or `target.backToGroupId`) makes the panel show a back
+  /// chevron that returns to that group's context menu.
   static Future<void> show(
     BuildContext context, {
     required CtxTarget target,
     Message? message,
     VoidCallback? onReact,
     ValueChanged<String?>? onTranslateInline,
+    String? backToGroupId,
   }) {
+    final backGroup = backToGroupId ?? target.backToGroupId;
     return showGeneralDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -86,6 +96,7 @@ class ContextMenuPanel extends ConsumerWidget {
               animation: anim,
               onReact: onReact,
               onTranslateInline: onTranslateInline,
+              backToGroupId: backGroup,
               onClose: () => Navigator.of(ctx).maybePop(),
             ),
           ),
@@ -124,6 +135,7 @@ class ContextMenuPanel extends ConsumerWidget {
       targetIsMember: targetIsMember,
       targetIsOwner: targetIsOwner,
       targetIsMod: targetIsMod,
+      backToGroupId: target.backToGroupId,
     );
   }
 
@@ -235,6 +247,14 @@ class ContextMenuPanel extends ConsumerWidget {
           child: Stack(
             children: [
               panel,
+              // Back chevron (top-left) → return to the originating group menu
+              // (`.context-menu-back`, ui-context.js:369-373). Hidden otherwise.
+              if (backToGroupId != null)
+                Positioned(
+                  top: 14,
+                  left: 14,
+                  child: _backBtn(context, c, backToGroupId!),
+                ),
               Positioned(
                 top: 14,
                 right: 14,
@@ -476,6 +496,37 @@ class ContextMenuPanel extends ConsumerWidget {
           border: Border.all(color: c.glassBorder),
         ),
         child: Icon(Icons.close, size: 16, color: c.textDim),
+      ),
+    );
+  }
+
+  /// `.context-menu-back` chevron — pops this panel and re-opens the originating
+  /// group context menu (PWA `ctxBackToGroup`: closeContextMenu →
+  /// showGroupContextMenu(groupId)).
+  Widget _backBtn(BuildContext context, NymColors c, String groupId) {
+    return InkWell(
+      onTap: () {
+        // Capture the root navigator's (stable) context before popping — this
+        // panel's own context is defunct after onClose().
+        final rootContext =
+            Navigator.of(context, rootNavigator: true).context;
+        onClose();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (rootContext.mounted) {
+            GroupContextMenuPanel.show(rootContext, groupId);
+          }
+        });
+      },
+      borderRadius: const BorderRadius.all(Radius.circular(16)),
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Colors.white.withValues(alpha: 0.05),
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: Icon(Icons.chevron_left, size: 20, color: c.textDim),
       ),
     );
   }

@@ -11,7 +11,9 @@ import '../../core/theme/nym_theme.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../models/channel.dart';
 import '../../models/settings.dart';
+import '../../services/api/storage_sync.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../emoji/emoji_picker.dart';
@@ -61,6 +63,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// Whether the landing-channel suggestions overlay is open.
   bool _landingOpen = false;
 
+  /// The on-device cache readout shown in Data & Backup (F7). Null while the
+  /// first `cacheSizeBytes()` read is in flight (renders the PWA's
+  /// "Calculating…" placeholder); otherwise a formatted human string.
+  String? _cacheReadout;
+
   // Section open/collapsed state (all expanded by default, matching the PWA's
   // aria-expanded="true").
   final Map<String, bool> _open = {
@@ -87,6 +94,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         setState(() => _landingOpen = false);
       }
     });
+    // Kick off the real on-device cache-size read (F7; refreshAppCacheSize is
+    // run on settings open in the PWA, app.js:3625).
+    _loadCacheSize();
+    // Pull any inbound pending settings transfers (F17).
+    ref.read(nostrControllerProvider).refreshPendingSettingsTransfers();
+  }
+
+  /// Reads the real on-device cache size from the controller and formats it as
+  /// MB into [_cacheReadout] (F7). Mirrors the PWA's `refreshAppCacheSize`
+  /// (app.js:3681): show "Calculating…" until the async read resolves, then the
+  /// byte total (or the honest empty-state string when nothing is cached).
+  Future<void> _loadCacheSize() async {
+    final controller = ref.read(nostrControllerProvider);
+    try {
+      final bytes = await controller.cacheSizeBytes();
+      if (!mounted) return;
+      setState(() {
+        _cacheReadout = bytes <= 0
+            ? 'No cached data on device yet'
+            : '${formatCacheMb(bytes)} cached on device';
+      });
+    } catch (_) {
+      if (!mounted) return;
+      // Fall back to the honest empty-state rather than a perpetual spinner.
+      setState(() => _cacheReadout = 'No cached data on device yet');
+    }
   }
 
   @override
@@ -112,6 +145,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // Watch the moderation Sets so the Friends/Blocked/Keywords/Hidden/Blocked
     // lists (F1) re-render on add/remove.
     ref.watch(appStateProvider);
+    // Watch inbound settings-transfer offers so the Pending Settings Transfers
+    // list (F17) re-renders as offers arrive or are accepted/declined.
+    ref.watch(pendingSettingsTransfersProvider);
 
     final sections = <_SectionSpec>[
       _SectionSpec(
@@ -407,9 +443,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, then
-  /// (cross-file) wipe the on-device cache. The networked/SQLite wipe is owned
-  /// by the storage layer; here we confirm + toast + close so the button acts.
+  /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, wipe the
+  /// real on-device cache via the controller, then re-read the size so the
+  /// readout updates in place and toast (app.js:4001 `clearLocalStorageCache`).
+  /// The modal stays open so the freshly-cleared "No cached data on device yet"
+  /// readout is observable.
   Future<void> _clearCache() async {
     final ok = await showAppConfirm(
       context,
@@ -419,14 +457,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       danger: true,
     );
     if (!ok || !mounted) return;
+    final controller = ref.read(nostrControllerProvider);
+    // Reflect the in-flight wipe in the readout immediately.
+    setState(() => _cacheReadout = null);
+    try {
+      await controller.clearCache();
+    } catch (_) {
+      // Best-effort; still re-read so the readout reflects the true state.
+    }
+    if (!mounted) return;
+    await _loadCacheSize();
     _systemMessage(
         'Local storage cache cleared. Settings, group memberships, and login '
         'preserved.');
-    Navigator.of(context).maybePop();
   }
 
   /// Reset Settings to Defaults (F11): danger confirm, wipe the exact settings
-  /// keys (+ image-blur prefixes), reset moderation Sets, then toast + close.
+  /// keys (+ image-blur prefixes), reset moderation Sets, reload Settings from
+  /// the now-cleared store so theme/layout/wallpaper revert live, then toast +
+  /// close.
   Future<void> _resetSettings() async {
     final ok = await showAppConfirm(
       context,
@@ -462,6 +511,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     for (final key in ref.read(appStateProvider).blockedChannels.toList()) {
       notifier.removeBlockedChannel(key);
     }
+
+    // F11 follow-up: rebuild Settings from the now-cleared store so every
+    // synced/visual default (theme, color-mode, message layout, wallpaper,
+    // text size, transparency, …) reverts immediately without a relaunch.
+    // This mirrors the PWA's post-reset re-apply of color-mode/wallpaper('none')
+    // /layout('bubbles') (app.js:4095-4100): rebuilding `Settings.fromStore`
+    // drives all of those reactively here.
+    ref.read(settingsProvider.notifier).reloadFromStore();
+
     if (!mounted) return;
     _systemMessage(
         'Settings reset to defaults. Cache, group memberships, and login '
@@ -470,8 +528,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   /// Transfer → Send (F9): client-side validate the recipient pubkey and show
-  /// the matching inline error. The networked kind-30078 send is the sync
-  /// subsystem's; here we validate + surface feedback so Send is observable.
+  /// the matching inline error (shop.js:1767 `executeSettingsTransfer`). On a
+  /// valid recipient, clear the field as the PWA does on its success path.
+  ///
+  /// The actual outbound kind-30078 gift-wrapped transfer has no controller
+  /// entry point in this wave (see CROSS-FILE NEED), so this performs the
+  /// validation + inline-error surface only — it does not (and must not) claim a
+  /// delivery that didn't happen.
   void _sendTransfer() {
     final err = validateTransferPubkey(
       _transferPubkeyController.text,
@@ -479,7 +542,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
     setState(() => _transferError = err);
     if (err == null) {
-      _systemMessage('Settings transfer sent.');
+      // Valid recipient: clear the input (PWA `input.value = ''`). Wire the
+      // gift-wrapped send here once the controller exposes it.
+      _transferPubkeyController.clear();
     }
   }
 
@@ -1334,7 +1399,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         FormGroup(
           label: 'Pending Settings Transfers',
-          child: _emptyListBox('No pending transfers'),
+          child: _pendingTransfers(),
         ),
         FormGroup(
           hint: 'Clears the on-device app cache (channel history, PMs, group '
@@ -1343,9 +1408,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Real on-device cache readout (F7; refreshAppCacheSize).
+              // Real on-device cache readout (F7; refreshAppCacheSize). Shows
+              // the PWA's "Calculating…" placeholder until the async
+              // `cacheSizeBytes()` read resolves, then the formatted MB total.
               Text(
-                cacheReadoutFor(ref.watch(appStateProvider)),
+                _cacheReadout ?? 'Calculating…',
                 style: TextStyle(color: context.nym.textDim, fontSize: 12),
               ),
               const SizedBox(height: 8),
@@ -1447,6 +1514,111 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  /// Pending Settings Transfers list (F17; shop.js:1996
+  /// `renderPendingSettingsTransfers`): one card per inbound offer (sender nym +
+  /// verified-sender-key + date + an "Includes:" summary) with Accept/Decline
+  /// buttons wired to the provider's notifier. Falls back to the dim placeholder
+  /// when there are no offers.
+  Widget _pendingTransfers() {
+    final transfers = ref.watch(pendingSettingsTransfersProvider);
+    if (transfers.isEmpty) return _emptyListBox('No pending transfers');
+    final c = context.nym;
+    final controller = ref.read(nostrControllerProvider);
+    void accept(String id) => controller.acceptSettingsTransfer(id);
+    void decline(String id) => controller.declineSettingsTransfer(id);
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
+        borderRadius: NymRadius.rsm,
+        border: Border.all(color: c.glassBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < transfers.length; i++)
+            _transferRow(
+              transfers[i],
+              isFirst: i == 0,
+              onAccept: accept,
+              onDecline: decline,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _transferRow(
+    SettingsTransferOffer t, {
+    required bool isFirst,
+    required void Function(String id) onAccept,
+    required void Function(String id) onDecline,
+  }) {
+    final c = context.nym;
+    final count = t.payload.length;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        border:
+            isFirst ? null : Border(top: BorderSide(color: c.glassBorder)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // The settings section the offer carries (appearance, privacy, …).
+          Text(
+            '${_humanizeSection(t.section)} settings',
+            style: TextStyle(
+                color: c.text, fontSize: 13, fontWeight: FontWeight.w600),
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 2),
+          // Publishing device's wall-clock for the category.
+          Text(
+            'Updated ${formatTransferTimestamp(t.updatedAt)}',
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
+          if (count > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                'Includes: $count ${count == 1 ? 'preference' : 'preferences'}',
+                style: TextStyle(color: c.textDim, fontSize: 11),
+              ),
+            ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              NymOutlineButton(
+                label: 'Accept',
+                uppercase: false,
+                onPressed: () => onAccept(t.id),
+              ),
+              const SizedBox(width: 8),
+              NymOutlineButton(
+                label: 'Decline',
+                uppercase: false,
+                danger: true,
+                onPressed: () => onDecline(t.id),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Humanizes a settings-transfer category (`nymchat-settings-appearance` →
+  /// `Appearance`) for the pending-transfers list.
+  String _humanizeSection(String s) {
+    final base =
+        s.replaceAll('nymchat-settings-', '').replaceAll('nymchat-', '').trim();
+    if (base.isEmpty) return 'Synced';
+    return base[0].toUpperCase() + base.substring(1);
   }
 
   /// Resolves a `base#suffix` display nym for a pubkey, preferring a known user

@@ -103,14 +103,18 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        const HomeShell(),
+        HomeShell(key: HomeShell.tutorialKey),
         if (_showTutorial)
           Positioned.fill(
-            // `sidebar:` is left null until HomeShell exposes a drawer driver
-            // (CROSS-FILE NEED, gap F2). Sidebar-anchored steps then degrade to
-            // centered cards on narrow layouts instead of pointing at a closed
-            // drawer; targets that ARE on screen still get the spotlight.
-            child: TutorialOverlay(onDismiss: _dismissTutorial),
+            // The tutorial renders one frame after the shell mounts (post-frame
+            // setState below), so `tutorialKey.currentState` is populated here.
+            // On narrow layouts the overlay drives the drawer per step; on wide
+            // layouts the driver's open/close are no-ops and targets spotlight
+            // in place.
+            child: TutorialOverlay(
+              onDismiss: _dismissTutorial,
+              sidebar: HomeShell.tutorialKey.currentState,
+            ),
           ),
       ],
     );

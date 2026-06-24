@@ -162,12 +162,17 @@ class CallService {
 
   /// Pushes a missed-call entry into the notification history (calls.js
   /// `_recordMissedCall`). [callerNym] is the decorated-or-base caller name.
+  /// [whenMs] timestamps the entry (defaults to now); a stale-invite missed call
+  /// stamps it with the invite's own `created_at * 1000` so the notification
+  /// reflects when the call actually came in (calls.js:328 passes
+  /// `createdAt * 1000`).
   void _recordMissedCall({
     required String callerPubkey,
     required String callerNym,
     required CallKind kind,
     bool isGroup = false,
     String? groupId,
+    int? whenMs,
   }) {
     if (callerPubkey.isEmpty) return;
     final niceKind = kind == CallKind.video ? 'video' : 'audio';
@@ -182,6 +187,7 @@ class CallService {
             title: callerNym.isNotEmpty ? callerNym : _nymFor(callerPubkey),
             body: body,
             route: isGroup ? (groupId ?? '') : callerPubkey,
+            ts: whenMs,
           );
     } catch (_) {
       // History store may be unavailable in a teardown; best-effort.
@@ -659,7 +665,8 @@ class CallService {
   // ---------------------------------------------------------------------------
 
   /// Entry point registered via NostrController.setCallSignalHandler. [rumor]
-  /// is the decoded kind-25053 rumor: { pubkey, content(JSON payload)... }.
+  /// is the decoded kind-25053 rumor: { pubkey, created_at, content(JSON
+  /// payload)... }.
   void handleSignal(Map<String, dynamic> rumor) {
     final sender = rumor['pubkey'] as String?;
     if (sender == null || sender == _self) return;
@@ -668,9 +675,15 @@ class CallService {
     if (_isBlocked(sender)) return;
     final data = _decodePayload(rumor);
     if (data == null) return;
+    // The invite's freshness is judged from the rumor's own created_at — the
+    // signaling payload (`content` JSON) carries no timestamp, so calls.js
+    // threads `event.created_at` into `_onCallInvite(sender, data, event)`
+    // (calls.js:176/310). The decoded gift-wrap rumor preserves created_at, so
+    // we read it here and hand it to `_onInvite`.
+    final createdAt = (rumor['created_at'] as num?)?.toInt() ?? 0;
     switch (data['type']) {
       case 'invite':
-        _onInvite(sender, data);
+        _onInvite(sender, data, createdAt);
         break;
       case 'accept':
         _onAccept(sender, data);
@@ -738,11 +751,41 @@ class CallService {
     return null;
   }
 
-  void _onInvite(String sender, Map<String, dynamic> data) {
+  /// Seconds a missed/answered call record stays relevant — matches the 24h
+  /// notification window so a stale invite older than this is dropped silently
+  /// rather than surfaced (calls.js `_CALL_SEEN_TTL_SEC = 86400`).
+  static const int _callSeenTtlSec = 86400;
+
+  void _onInvite(String sender, Map<String, dynamic> data, [int createdAtSec = 0]) {
     // Accept-calls preference gate (calls.js _onCallInvite).
     final pref = _ref.read(settingsProvider).acceptCalls;
     final friend = _isFriend(sender);
     if (!shouldRingForInvite(acceptCalls: pref, isFriend: friend)) return;
+
+    // Stale-invite handling (calls.js:320-331): an invite that arrived while the
+    // app was closed can't be answered. If it's older than 60s, don't ring —
+    // instead log it as a missed call so it surfaces in notifications on reopen
+    // (but only while still within the seen-call window; beyond that it's
+    // dropped). A fresh invite (createdAt == 0, e.g. tests/engine without a ts,
+    // or ≤60s old) rings normally.
+    if (createdAtSec > 0) {
+      final ageSec =
+          (DateTime.now().millisecondsSinceEpoch ~/ 1000) - createdAtSec;
+      if (ageSec > 60) {
+        if (ageSec <= _callSeenTtlSec) {
+          _recordMissedCall(
+            callerPubkey: sender,
+            callerNym: (data['nym'] as String?) ?? _nymFor(sender),
+            kind: CallKind.fromWire(data['kind']),
+            isGroup: data['isGroup'] == true,
+            groupId: data['groupId'] as String?,
+            whenMs: createdAtSec * 1000,
+          );
+        }
+        return;
+      }
+    }
+
     if (_active != null || _incoming != null) {
       _send(sender,
           CallSignal.reject(data['callId'] as String, 'busy'));

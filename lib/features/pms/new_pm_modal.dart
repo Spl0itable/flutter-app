@@ -172,13 +172,20 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
       final name = _groupNameController.text.trim().isNotEmpty
           ? _groupNameController.text.trim()
           : _recipients.map((r) => stripPubkeySuffix(r.nym)).take(3).join(', ');
-      // TODO(ui-parity): thread group avatar/banner/description/allowInvites
-      // through createGroup once Foundations extends its signature. The fields
-      // are collected here; see CROSS-FILE NEEDS. createGroup keeps its current
-      // 2-arg signature so this stays compiling.
+      final description = _groupDescController.text.trim();
+      // Thread the group-creation extras the modal collected into createGroup
+      // (groups.js `createGroup(name, members, { avatar, banner, description,
+      // allowMemberInvites })`). The avatar/banner here are the picked local
+      // file paths; an upload-to-URL step is a separate concern (the PWA uploads
+      // before passing a URL — see CROSS-FILE NEEDS), so we forward what's
+      // collected and let empty stay null.
       await controller.createGroup(
         name,
         _recipients.map((r) => r.pubkey).toList(),
+        avatar: _groupAvatarPath,
+        banner: _groupBannerPath,
+        description: description.isNotEmpty ? description : null,
+        allowMemberInvites: _allowInvites,
       );
     }
     // Send the optional initial message into the just-opened conversation

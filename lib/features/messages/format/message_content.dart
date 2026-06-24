@@ -17,6 +17,7 @@ import '../../../state/app_state.dart';
 import '../../../state/settings_provider.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
+import 'video_message.dart';
 
 /// Shared stateless [ApiClient] for media/emoji proxy URL construction. The
 /// builders are pure (no network), so a single instance is fine.
@@ -638,7 +639,7 @@ class _QuoteBox extends StatelessWidget {
 }
 
 /// A 1/2/3/4-up media grid. Images are tappable (expand placeholder); videos
-/// render as a play tile (no playback yet).
+/// render as an inline [VideoMessage] (tap-to-play, fullscreen expand).
 class _MediaGallery extends StatelessWidget {
   const _MediaGallery({required this.items, this.blur = false});
   final List<MediaItem> items;
@@ -646,7 +647,7 @@ class _MediaGallery extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Single image: max 300×300, min-height 80 (`styles-chat.css:1029-1034`).
+    // Single image/video: max 300×300, min-height 80 (`styles-chat.css:1029`).
     if (items.length == 1) {
       return _MediaTile(item: items.first, maxSize: 300, blur: blur);
     }
@@ -654,7 +655,8 @@ class _MediaGallery extends StatelessWidget {
     // (`styles-chat.css:987-1023`). 3 items = a tall left hero + two stacked
     // right; 2 / 4+ = a 2-column wrap. Tiles cap at 220px tall.
     const gap = 4.0;
-    Widget tile(MediaItem m) => _MediaTile(item: m, maxSize: 220, blur: blur);
+    Widget tile(MediaItem m) =>
+        _MediaTile(item: m, maxSize: 220, blur: blur, inGallery: true);
     Widget body;
     if (items.length == 3) {
       body = Row(
@@ -691,12 +693,21 @@ class _MediaGallery extends StatelessWidget {
 }
 
 class _MediaTile extends StatelessWidget {
-  const _MediaTile({required this.item, required this.maxSize, this.blur = false});
+  const _MediaTile({
+    required this.item,
+    required this.maxSize,
+    this.blur = false,
+    this.inGallery = false,
+  });
   final MediaItem item;
   final double maxSize;
 
   /// Apply the privacy blur (others' images), revealed on tap (`.blurred`).
   final bool blur;
+
+  /// This tile sits inside a multi-up gallery grid — videos drop their border
+  /// and corner radius (the grid clips), matching `.message-gallery video`.
+  final bool inGallery;
 
   @override
   Widget build(BuildContext context) {
@@ -704,15 +715,13 @@ class _MediaTile extends StatelessWidget {
     final radius = const BorderRadius.all(Radius.circular(8));
 
     if (item.isVideo) {
-      return ClipRRect(
-        borderRadius: radius,
-        child: Container(
-          constraints:
-              BoxConstraints(maxWidth: maxSize, maxHeight: maxSize, minHeight: 80),
-          color: Colors.black.withValues(alpha: 0.4),
-          alignment: Alignment.center,
-          child: Icon(Icons.play_circle_fill, size: 48, color: c.text),
-        ),
+      // Inline playable video (`F16`): single → bordered max-300 radius-sm;
+      // gallery cell → borderless, square corners, filling the tile.
+      return VideoMessage(
+        url: item.url,
+        maxSize: maxSize,
+        bordered: !inGallery,
+        borderRadius: inGallery ? BorderRadius.zero : null,
       );
     }
 

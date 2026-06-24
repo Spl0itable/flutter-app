@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import 'settings_widgets.dart';
 
 /// Absolute base for the PWA's relative `static/*.html` legal pages. The PWA
@@ -449,7 +450,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   /// About → Send Message (F12; app.js:4406 `sendAboutContact`): validate a
   /// non-empty message + relay connection, then build the
   /// `[Nymchat contact — <topic>]` body and deliver it as an encrypted PM to the
-  /// verified developer. Updates the button + status line through each state.
+  /// verified developer via the controller. Drives the button label
+  /// ("Sending…") and the `#aboutContactStatus` line through sent/error states,
+  /// clearing the field only on success.
   Future<void> _sendContact() async {
     final text = _messageController.text.trim();
     if (text.isEmpty) {
@@ -474,22 +477,28 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
       _status = null;
     });
 
-    // The body the PWA gift-wraps to the developer (`sendAboutContact`).
-    // ignore: unused_local_variable
+    // The body the PWA gift-wraps to the developer (`sendAboutContact`):
+    //   `[Nymchat contact — <topic>]\n\n<message>`
+    // sent as an encrypted PM to `NostrController.verifiedDeveloperPubkey`.
     final body = '[Nymchat contact — $_topic]\n\n$text';
-    // CROSS-FILE NEED: a public "send an encrypted PM to <pubkey>" entry point
-    // on NostrController (the PWA's `nym.sendPM(body, developerPubkey)` to
-    // `NostrController.verifiedDeveloperPubkey`). None is exposed yet, so the
-    // gift-wrapped network delivery can't be performed from this slice. The
-    // validation + connectivity gates above are real; wire the actual send
-    // (e.g. `controller.sendContactMessage(body)`) when the API lands.
+    var ok = false;
+    try {
+      ok = await ref.read(nostrControllerProvider).sendContactMessage(body);
+    } catch (_) {
+      ok = false;
+    }
 
     if (!mounted) return;
     setState(() {
       _sending = false;
-      _status = 'Message sent. Thanks for reaching out!';
-      _statusOk = true;
-      _messageController.clear();
+      if (ok) {
+        _status = 'Message sent. Thanks for reaching out!';
+        _statusOk = true;
+        _messageController.clear();
+      } else {
+        _status = 'Failed to send. Please try again.';
+        _statusOk = false;
+      }
     });
   }
 }

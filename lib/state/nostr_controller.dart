@@ -1061,7 +1061,22 @@ class NostrController {
   }
 
   /// Creates a group with [memberPubkeys], registers it locally, and switches.
-  Future<Group?> createGroup(String name, List<String> memberPubkeys) async {
+  ///
+  /// The optional [avatar] / [banner] / [description] / [allowMemberInvites]
+  /// are the group-creation extras the New-Group modal collects; they thread
+  /// through to [GroupManager.createGroup] and onto the bootstrap invite's
+  /// metadata tags (groups.js `createGroup(name, members, opts)`). The positional
+  /// `(name, memberPubkeys)` shape is preserved so existing callers/tests keep
+  /// compiling; [allowMemberInvites] defaults to true (PWA
+  /// `opts.allowMemberInvites !== false`).
+  Future<Group?> createGroup(
+    String name,
+    List<String> memberPubkeys, {
+    String? avatar,
+    String? banner,
+    String? description,
+    bool allowMemberInvites = true,
+  }) async {
     final service = _service;
     final identity = _identity;
     final groups = _groups;
@@ -1070,6 +1085,10 @@ class NostrController {
       selfPubkey: identity.pubkey,
       name: name,
       memberPubkeys: memberPubkeys,
+      avatar: avatar,
+      banner: banner,
+      description: description,
+      allowMemberInvites: allowMemberInvites,
       settings: _msgSettings,
     );
     if (group == null) return null;
@@ -1083,6 +1102,77 @@ class NostrController {
   /// approver-side `group-join-request` flow is not yet implemented.
   Future<void> joinGroupViaInvite(GroupInviteToken token) async {
     debugPrint('joinGroupViaInvite not yet implemented: ${token.groupId}');
+  }
+
+  /// Sends [body] as a gift-wrapped kind-14 PM to the verified developer
+  /// ([verifiedDeveloperPubkey]) — the About → "Send Message" / contact form
+  /// (app.js:4438 `nym.sendPM(body, nym.verifiedDeveloper.pubkey)`). Returns true
+  /// when the wrap was published.
+  ///
+  /// Mirrors `sendPM` → `sendNIP17PM`: a kind-14 rumor wrapped to the recipient
+  /// plus a self-copy (so the message also lands in our own PM thread with the
+  /// developer). The recipient is a normal pubkey (not the Nymbot), so the
+  /// bot-command short-circuit in `sendPM` doesn't apply. Empty bodies and the
+  /// no-signer / not-connected states return false, matching the PWA's guards
+  /// (`if (!content.trim()) return false` / `if (!connected) throw`).
+  Future<bool> sendContactMessage(String body) async {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) return false;
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null || !service.canSign) return false;
+
+    // Mark us active (recordOwnActivity) like every other PM send.
+    recordOwnActivity();
+
+    final nymMessageId = PmLogic.generateSharedEventId();
+    final rumor = PmLogic.buildPmRumor(
+      selfPubkey: identity.pubkey,
+      recipientPubkey: verifiedDeveloperPubkey,
+      content: trimmed,
+      nymMessageId: nymMessageId,
+    );
+    try {
+      return await service.publishPM(
+        rumor: rumor,
+        recipientPubkey: verifiedDeveloperPubkey,
+        settings: _msgSettings,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cache size / clear (settings.js data controls: "Cache: N MB" + "Clear
+  // cache"). The on-disk [CacheStore] owns the real byte accounting + wipe; this
+  // exposes them to the settings UI. Both no-op safely before [init].
+  // ---------------------------------------------------------------------------
+
+  /// Real on-disk size of the message/profile/reaction cache, in bytes
+  /// (settings.js `estimateCacheSize`). 0 when the cache hasn't been opened yet.
+  Future<int> cacheSizeBytes() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return 0;
+    return cache.totalBytes();
+  }
+
+  /// Clears all cached channels / PMs / profiles / reactions (settings.js
+  /// "Clear cache"). Flushes any pending dirty writes first so an in-flight
+  /// debounce can't immediately re-persist what we just wiped, drops the dirty
+  /// sets, then wipes the store. Also clears the in-memory hydrated profile /
+  /// reaction caches via the cache wipe; the live app_state is untouched (the
+  /// PWA clears the persisted cache, not the open session).
+  Future<void> clearCache() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return;
+    // Cancel the pending flush + forget dirty keys so we don't re-write the
+    // conversations we're about to drop.
+    _flushTimer?.cancel();
+    _flushScheduled = false;
+    _dirtyChannelKeys.clear();
+    _dirtyPmKeys.clear();
+    await cache.wipe();
   }
 
   // --- moderation entry points (role-checked) -------------------------------
@@ -2237,6 +2327,68 @@ class NostrController {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Pending settings transfers (inbound cross-device settings offers). The PWA
+  // auto-applies remote settings; the native UI instead surfaces each newer
+  // section as an accept/decline offer so the user opts in. Data lives in
+  // [pendingSettingsTransfersProvider]; these methods populate + resolve it.
+  // ---------------------------------------------------------------------------
+
+  /// Re-fetches the inbound settings-transfer offers (sections in D1 newer than
+  /// our last applied sync ts) and publishes them to
+  /// [pendingSettingsTransfersProvider]. Best-effort; no-op without storage sync.
+  Future<void> refreshPendingSettingsTransfers() async {
+    final sync = _storageSync;
+    if (sync == null) return;
+    try {
+      final sinceMs = _lastSettingsSyncMs();
+      final offers = await sync.settingsTransfersSince(sinceMs);
+      _ref
+          .read(pendingSettingsTransfersProvider.notifier)
+          .setOffers(offers);
+    } catch (_) {
+      // Best-effort.
+    }
+  }
+
+  /// Accepts an inbound settings-transfer [id]: applies the section's payload to
+  /// the local [Settings] (PWA field names → typed setters), advances the stored
+  /// sync ts to its `updatedAt` so it won't re-offer, and removes it from the
+  /// pending list. Returns true if an offer with that id was applied.
+  bool acceptSettingsTransfer(String id) {
+    final notifier = _ref.read(pendingSettingsTransfersProvider.notifier);
+    final offer = notifier.removeById(id);
+    if (offer == null) return false;
+    _applySyncedSettings(offer.payload);
+    // Advance the sync ts (stored in seconds, matching the PWA) so the accepted
+    // section isn't re-surfaced on the next refresh.
+    final kv = _ref.read(keyValueStoreProvider);
+    final lastSec = int.tryParse(
+            kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
+        0;
+    final offerSec = offer.updatedAt ~/ 1000;
+    if (offerSec > lastSec) {
+      kv.setString(StorageKeys.lastSettingsSyncTs, '$offerSec');
+    }
+    return true;
+  }
+
+  /// Declines an inbound settings-transfer [id]: drops it from the pending list
+  /// without applying it. Returns true if it was present. (It may re-appear on a
+  /// later refresh if that section is published again with a newer ts — matching
+  /// the PWA, which has no permanent per-section suppression.)
+  bool declineSettingsTransfer(String id) {
+    return _ref.read(pendingSettingsTransfersProvider.notifier).removeById(id) !=
+        null;
+  }
+
+  int _lastSettingsSyncMs() {
+    final kv = _ref.read(keyValueStoreProvider);
+    final sec =
+        int.tryParse(kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ?? 0;
+    return sec * 1000;
+  }
+
   /// Debounced encrypted-settings publish (`_debouncedNostrSettingsSave`, 5s).
   /// Call after any synced-setting change. No-op when storage sync is
   /// unavailable. The PWA also skips ephemeral random/hardcore keypair modes;
@@ -2897,6 +3049,46 @@ final nostrControllerProvider = Provider<NostrController>((ref) {
   ref.onDispose(c.dispose);
   return c;
 });
+
+/// Holds the inbound settings-transfer offers (cross-device settings sections
+/// newer than this device's last applied sync) for the settings UI's
+/// accept/decline list. Populated by
+/// [NostrController.refreshPendingSettingsTransfers]; resolved via
+/// [NostrController.acceptSettingsTransfer] / `declineSettingsTransfer`.
+final pendingSettingsTransfersProvider = StateNotifierProvider<
+    PendingSettingsTransfersNotifier, List<SettingsTransferOffer>>((ref) {
+  return PendingSettingsTransfersNotifier();
+});
+
+/// StateNotifier backing [pendingSettingsTransfersProvider]. Holds the offers
+/// newest-first; the controller mutates it through [setOffers] / [removeById].
+class PendingSettingsTransfersNotifier
+    extends StateNotifier<List<SettingsTransferOffer>> {
+  PendingSettingsTransfersNotifier() : super(const []);
+
+  /// Replaces the pending list (newest-first as supplied by the fetch).
+  void setOffers(List<SettingsTransferOffer> offers) {
+    state = List.unmodifiable(offers);
+  }
+
+  /// Removes and returns the offer with [id], or null if absent.
+  SettingsTransferOffer? removeById(String id) {
+    SettingsTransferOffer? found;
+    final next = <SettingsTransferOffer>[];
+    for (final o in state) {
+      if (found == null && o.id == id) {
+        found = o;
+      } else {
+        next.add(o);
+      }
+    }
+    if (found != null) state = List.unmodifiable(next);
+    return found;
+  }
+
+  /// Clears all pending offers (e.g. on logout).
+  void clear() => state = const [];
+}
 
 /// The NIP-46 remote-signer transport. The controller reads this at boot to
 /// restore a persisted `'nip46'` session and build a [Nip46SignerAdapter]. A

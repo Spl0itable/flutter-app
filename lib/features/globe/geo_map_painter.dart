@@ -19,8 +19,12 @@ class GeoMapStyle {
     required this.ocean,
     required this.land,
     required this.border,
+    required this.adminBorder,
     required this.graticule,
     required this.label,
+    required this.adminLabel,
+    required this.cityDot,
+    required this.cityLabel,
     required this.labelStroke,
     required this.gridLine,
     required this.gridLabel,
@@ -35,8 +39,12 @@ class GeoMapStyle {
   final Color ocean;
   final Color land;
   final Color border;
+  final Color adminBorder;
   final Color graticule;
   final Color label;
+  final Color adminLabel;
+  final Color cityDot;
+  final Color cityLabel;
   final Color labelStroke;
   final Color gridLine;
   final Color gridLabel;
@@ -58,10 +66,21 @@ class GeoMapStyle {
       ocean: isLight ? const Color(0xFFD6E8F1) : const Color(0xFF0A131E),
       land: isLight ? const Color(0xFFEEF2F4) : const Color(0xFF1C2A39),
       border: isLight ? const Color(0xFF9AAEBA) : const Color(0xFF2C4357),
+      // dark: rgba(180,200,220,0.22) -> 0x38 alpha;
+      // light: rgba(120,140,160,0.55) -> 0x8C alpha.
+      adminBorder:
+          isLight ? const Color(0x8C788CA0) : const Color(0x38B4C8DC),
       graticule: isLight
           ? const Color(0x0D000000) // rgba(0,0,0,0.05)
           : const Color(0x0AFFFFFF), // rgba(255,255,255,0.04)
       label: isLight ? const Color(0xD91E2837) : const Color(0xD9DCE8F5),
+      // dark: rgba(190,205,220,0.65) -> 0xA6; light: rgba(70,80,95,0.75) -> 0xBF.
+      adminLabel:
+          isLight ? const Color(0xBF46505F) : const Color(0xA6BECDDC),
+      // dark: rgba(220,232,245,0.9) -> 0xE6; light: rgba(60,70,85,0.85) -> 0xD9.
+      cityDot: isLight ? const Color(0xD93C4655) : const Color(0xE6DCE8F5),
+      // dark: rgba(220,232,245,0.85) -> 0xD9; light: rgba(50,60,75,0.85) -> 0xD9.
+      cityLabel: isLight ? const Color(0xD9323C4B) : const Color(0xD9DCE8F5),
       labelStroke: isLight ? const Color(0xD9FFFFFF) : const Color(0xA6000000),
       // dark: rgba(0,220,255,0.35) -> 0x59 alpha; light: rgba(0,100,140,0.45).
       gridLine: isLight ? const Color(0x73006490) : const Color(0x5900DCFF),
@@ -295,6 +314,8 @@ class GeoMapPainter extends CustomPainter {
     required this.heatmap,
     required this.daynight,
     required this.grid,
+    this.admin1Features = const [],
+    this.cities = const [],
     this.hoveredGeohash,
     this.userLocation,
     this.heatmapImage,
@@ -304,6 +325,14 @@ class GeoMapPainter extends CustomPainter {
   final GeoView view;
   final GeoMapStyle style;
   final List<GeoFeature> features;
+
+  /// Admin-1 (state/province) borders + labels, lazy-loaded once the view
+  /// reaches `_admin1ZoomThreshold` (F2/F3). Empty until loaded.
+  final List<GeoFeature> admin1Features;
+
+  /// Populated-place dots + labels, lazy-loaded once the view reaches
+  /// `_cityZoomThreshold` (F4). Empty until loaded.
+  final List<CityPoint> cities;
   final List<GeohashChannelPoint> channels;
   final bool heatmap;
   final bool daynight;
@@ -315,6 +344,10 @@ class GeoMapPainter extends CustomPainter {
   /// Built off the paint pass by the explorer; blitted to full size here.
   final ui.Image? heatmapImage;
   final Listenable? repaint;
+
+  // Zoom thresholds for the lazy detail layers (geohash-globe.js:10-11).
+  static const double _admin1ZoomThreshold = 2.5; // ADMIN1_ZOOM_THRESHOLD
+  static const double _cityZoomThreshold = 2.5; // CITY_ZOOM_THRESHOLD
 
   bool _inView(Offset p, double pad, Size size) =>
       p.dx >= -pad &&
@@ -329,20 +362,16 @@ class GeoMapPainter extends CustomPainter {
 
     _drawGraticule(canvas, size);
     _drawWorld(canvas, size);
-    // TODO(ui-parity): the PWA draws an admin-1 (state/province) border layer
-    // (`drawAdmin1`, zoom>=2.5, gap report F2) and its labels (`drawAdmin1Labels`,
-    // zoom>=4, F3) here, between world and country labels. DEFERRED: the source
-    // dataset `ne_50m_admin_1_states_provinces_lakes.json` is NOT bundled
-    // (assets/data/ holds only countries-110m.json). Vendoring it + a
-    // `decodeAdmin1` (topojson.dart) is required before this can be drawn.
+    // Admin-1 (state/province) borders fade in from zoom 2.5 (F2), then country
+    // labels, then admin-1 labels at zoom >= 4 (F3) — mirrors `draw()` order.
+    _drawAdmin1(canvas, size);
     _drawLabels(canvas, size);
+    _drawAdmin1Labels(canvas, size);
     if (heatmap) {
       _drawHeatmap(canvas, size);
     } else {
-      // TODO(ui-parity): the PWA also draws progressive city dots + labels here
-      // (`drawCities`, zoom>=2.5, gap report F4). DEFERRED: the source dataset
-      // `ne_50m_populated_places_simple.json` is NOT bundled. Vendoring it + a
-      // `decodeCities` (topojson.dart) is required before this can be drawn.
+      // City dots + progressive labels (F4) draw under the channel dots.
+      _drawCities(canvas, size);
       _drawChannels(canvas, size);
     }
     if (daynight) _drawDaynight(canvas, size);
@@ -428,6 +457,118 @@ class GeoMapPainter extends CustomPainter {
       final p = view.project(c[0], c[1], size);
       if (!_inView(p, 40, size)) continue;
       _strokedText(canvas, text, p, 10, style.label, style.labelStroke, 3);
+    }
+  }
+
+  /// Admin-1 (state/province) borders, faded in over [2.5, 4.0] (F2). Port of
+  /// `drawAdmin1` (geohash-globe.js:580-621): stroke `style.adminBorder` width
+  /// 0.4, bounds-culled, with the antimeridian seam broken via `moveTo` (NOT
+  /// closed — these are open border strokes, unlike the filled world polygons).
+  /// The PWA's `globalAlpha = t` is folded into the stroke color's alpha.
+  void _drawAdmin1(Canvas canvas, Size size) {
+    if (view.zoom < _admin1ZoomThreshold || admin1Features.isEmpty) return;
+    const fadeStart = _admin1ZoomThreshold;
+    const fadeEnd = fadeStart + 1.5; // [2.5 .. 4.0]
+    final t = ((view.zoom - fadeStart) / (fadeEnd - fadeStart)).clamp(0.0, 1.0);
+    if (t <= 0) return;
+
+    final stroke = Paint()
+      ..color = style.adminBorder.withValues(alpha: style.adminBorder.a * t)
+      ..strokeWidth = 0.4
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+
+    final path = Path();
+    for (final feat in admin1Features) {
+      final bb = feat.bounds;
+      final a = view.project(bb[0], bb[3], size);
+      final b = view.project(bb[2], bb[1], size);
+      if (b.dx < -10 ||
+          a.dx > size.width + 10 ||
+          b.dy < -10 ||
+          a.dy > size.height + 10) {
+        continue;
+      }
+      for (final poly in feat.polygons) {
+        for (final ring in poly) {
+          if (ring.length < 2) continue;
+          var prevLng = ring[0][0];
+          final first = view.project(prevLng, ring[0][1], size);
+          path.moveTo(first.dx, first.dy);
+          for (var i = 1; i < ring.length; i++) {
+            final lng = ring[i][0];
+            final p = view.project(lng, ring[i][1], size);
+            if ((lng - prevLng).abs() > 180) {
+              path.moveTo(p.dx, p.dy);
+            } else {
+              path.lineTo(p.dx, p.dy);
+            }
+            prevLng = lng;
+          }
+        }
+      }
+    }
+    canvas.drawPath(path, stroke);
+  }
+
+  /// Admin-1 labels at zoom >= 4 (F3). Port of `drawAdmin1Labels`
+  /// (geohash-globe.js:623-651): weight 500, fontSize 9, fill `style.adminLabel`,
+  /// stroke width 2.5, drawn only where the feature's projected span >=
+  /// max(40, name.length*5.5).
+  void _drawAdmin1Labels(Canvas canvas, Size size) {
+    if (view.zoom < 4 || admin1Features.isEmpty) return;
+    for (final feat in admin1Features) {
+      if (feat.name.isEmpty) continue;
+      final bb = feat.bounds;
+      final a = view.project(bb[0], bb[3], size);
+      final b = view.project(bb[2], bb[1], size);
+      final span = math.max((b.dx - a.dx).abs(), (b.dy - a.dy).abs());
+      final text = feat.name;
+      final minSpan = math.max(40.0, text.length * 5.5);
+      if (span < minSpan) continue;
+
+      final c = feat.centroid;
+      final p = view.project(c[0], c[1], size);
+      if (!_inView(p, 30, size)) continue;
+      _strokedText(canvas, text, p, 9, style.adminLabel, style.labelStroke, 2.5,
+          weight: FontWeight.w500);
+    }
+  }
+
+  /// City dots + progressive labels at zoom >= 2.5 (F4). Port of `drawCities`
+  /// (geohash-globe.js:653-689): a zoom-stepped `rankCutoff` ladder filters
+  /// `cities` by scalerank, 1.5px dots in `style.cityDot`, and at zoom >= 3
+  /// left-aligned stroked labels (offset +4px) in `style.cityLabel`.
+  void _drawCities(Canvas canvas, Size size) {
+    if (view.zoom < _cityZoomThreshold || cities.isEmpty) return;
+
+    // scalerank: 0 = world's largest. Higher zoom -> show smaller cities.
+    final rankCutoff = view.zoom < 3
+        ? 2
+        : view.zoom < 4
+            ? 4
+            : view.zoom < 6
+                ? 6
+                : view.zoom < 8
+                    ? 8
+                    : 10;
+
+    const dotR = 1.5;
+    final showLabels = view.zoom >= 3;
+    final dotPaint = Paint()..color = style.cityDot;
+
+    for (final city in cities) {
+      // cities are rank-sorted ascending; once we pass the cutoff, stop.
+      if (city.rank > rankCutoff) break;
+      final p = view.project(city.lng, city.lat, size);
+      if (!_inView(p, 80, size)) continue;
+
+      canvas.drawCircle(p, dotR, dotPaint);
+
+      if (showLabels && city.name.isNotEmpty) {
+        _strokedTextLeft(canvas, city.name, Offset(p.dx + 4, p.dy), 9,
+            style.cityLabel, style.labelStroke, 2.5);
+      }
     }
   }
 
@@ -645,10 +786,52 @@ class GeoMapPainter extends CustomPainter {
     tpFill.paint(canvas, offset);
   }
 
+  /// Left-aligned, vertically-centered stroked label whose left edge sits at
+  /// [anchor].dx and whose vertical middle sits at [anchor].dy — matching the
+  /// PWA's `textAlign='left'` + `textBaseline='middle'` city labels.
+  void _strokedTextLeft(
+    Canvas canvas,
+    String text,
+    Offset anchor,
+    double fontSize,
+    Color fill,
+    Color stroke,
+    double strokeWidth, {
+    FontWeight weight = FontWeight.w500,
+  }) {
+    TextPainter make(Paint fg) => TextPainter(
+          text: TextSpan(
+            text: text,
+            style: TextStyle(
+              fontSize: fontSize,
+              fontWeight: weight,
+              foreground: fg,
+            ),
+          ),
+          textAlign: TextAlign.left,
+          textDirection: TextDirection.ltr,
+        )..layout();
+
+    final strokePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeJoin = StrokeJoin.round
+      ..color = stroke;
+    final fillPaint = Paint()..color = fill;
+
+    final tpStroke = make(strokePaint);
+    final tpFill = make(fillPaint);
+    final offset = Offset(anchor.dx, anchor.dy - tpFill.height / 2);
+    tpStroke.paint(canvas, offset);
+    tpFill.paint(canvas, offset);
+  }
+
   @override
   bool shouldRepaint(covariant GeoMapPainter old) =>
       old.view != view ||
       old.features != features ||
+      old.admin1Features != admin1Features ||
+      old.cities != cities ||
       old.channels != channels ||
       old.heatmap != heatmap ||
       old.daynight != daynight ||

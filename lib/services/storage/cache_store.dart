@@ -581,6 +581,64 @@ class CacheStore {
       await _database.delete(table);
     }
   }
+
+  /// Clears all cached **content** — channels / PMs / profiles / reactions
+  /// (plus their avatar/banner blobs) — leaving only the `meta` dedup/trust sets
+  /// intact, then reclaims the freed pages. This is the "Clear cache" data
+  /// control (settings.js `clearMessageCache`): a user wiping cached
+  /// conversations + profiles, NOT a full identity logout (which uses
+  /// [resetCache]). `meta` is preserved so processed-event dedup and the trust
+  /// roster survive the wipe (mirrors the PWA, which keeps the meta store when
+  /// clearing the message cache).
+  Future<void> wipe() async {
+    for (final table in const [
+      'channels',
+      'pms',
+      'profiles',
+      'reactions',
+      'avatars',
+      'banners',
+    ]) {
+      await _database.delete(table);
+    }
+    // Reclaim the pages the deleted rows held so the reported on-disk size drops
+    // (SQLite keeps freed pages by default). VACUUM can't run inside a txn; the
+    // deletes above are auto-committed, so this is safe.
+    try {
+      await _database.execute('VACUUM');
+    } catch (_) {
+      // VACUUM is best-effort (e.g. an in-memory DB or an open cursor); the rows
+      // are already gone regardless.
+    }
+  }
+
+  /// The real on-disk size of the cache database in bytes (settings.js
+  /// `estimateCacheSize` / the "Cache: N MB" data-control readout).
+  ///
+  /// Uses SQLite's own page accounting (`page_count * page_size`) rather than a
+  /// row-by-row estimate so it reflects the actual file footprint — including
+  /// index + free pages — and works for the injected in-memory test DB (where
+  /// there is no file to `stat`). Returns 0 if the pragmas are unavailable.
+  Future<int> totalBytes() async {
+    try {
+      final pageCountRows =
+          await _database.rawQuery('PRAGMA page_count');
+      final pageSizeRows = await _database.rawQuery('PRAGMA page_size');
+      final pageCount = _firstInt(pageCountRows);
+      final pageSize = _firstInt(pageSizeRows);
+      return pageCount * pageSize;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  static int _firstInt(List<Map<String, Object?>> rows) {
+    if (rows.isEmpty) return 0;
+    final v = rows.first.values.first;
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    return int.tryParse('$v') ?? 0;
+  }
 }
 
 /// A cached avatar/banner blob record (bytes + source URL + kind0Ts).

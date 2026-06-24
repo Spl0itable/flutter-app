@@ -122,6 +122,12 @@ class GroupLogic {
   }
 
   /// Builds the bootstrap `group-invite` rumor for a freshly created group.
+  ///
+  /// The optional metadata tags (`avatar`, `banner`, `description`) are only
+  /// emitted when the group carries a non-empty value, byte-matching groups.js
+  /// `createGroup` (which pushes each tag only `if (groupAvatar)` etc., 1382-1384)
+  /// so the rumor shape stays identical to the PWA. `allow_invites` /
+  /// `invite_enabled` / `invite_epoch` are always present.
   static UnsignedEvent buildGroupInviteRumor({
     required Group group,
     required String selfPubkey,
@@ -131,12 +137,19 @@ class GroupLogic {
     int? nowSec,
   }) {
     final sec = nowSec ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final avatar = group.avatar;
+    final banner = group.banner;
+    final description = group.description;
     final tags = <List<String>>[
       for (final pk in group.members) ['p', pk],
       ['g', group.id],
       if (group.name.isNotEmpty) ['subject', group.name],
       ['type', GroupControlType.invite],
       ['owner', selfPubkey],
+      if (avatar != null && avatar.isNotEmpty) ['avatar', avatar],
+      if (banner != null && banner.isNotEmpty) ['banner', banner],
+      if (description != null && description.isNotEmpty)
+        ['description', description],
       ['allow_invites', group.allowMemberInvites ? '1' : '0'],
       ['invite_enabled', group.inviteEnabled ? '1' : '0'],
       ['invite_epoch', '${group.inviteEpoch}'],

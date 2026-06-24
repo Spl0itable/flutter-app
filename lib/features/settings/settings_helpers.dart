@@ -193,7 +193,19 @@ String cacheReadoutFor(AppState s) {
   return '${formatCacheBytes(bytes)} cached on device — $breakdown';
 }
 
-/// Formats a byte count into a short human string (app.js:3631 `formatCacheBytes`).
+/// Formats a byte count as a fixed-unit "MB" string for the Data & Backup
+/// cache readout (F7 asks for the size in MB specifically). Sub-megabyte totals
+/// keep one decimal (e.g. `0.4 MB`); larger totals round to whole MB.
+String formatCacheMb(int bytes) {
+  if (bytes <= 0) return '0 MB';
+  final mb = bytes / (1024 * 1024);
+  final fixed = mb >= 10 ? 0 : 1;
+  return '${mb.toStringAsFixed(fixed)} MB';
+}
+
+/// Formats a byte count into a short auto-scaled human string (app.js:3631
+/// `formatCacheBytes`). Retained for the breakdown helper / tests; the live
+/// readout uses [formatCacheMb].
 String formatCacheBytes(int bytes) {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -205,6 +217,25 @@ String formatCacheBytes(int bytes) {
   }
   final fixed = (n >= 10 || i == 0) ? 0 : 1;
   return '${n.toStringAsFixed(fixed)} ${units[i]}';
+}
+
+/// Formats an inbound settings-transfer timestamp (unix seconds) as a compact
+/// local date-time for the Pending Settings Transfers row (F17). Mirrors the
+/// PWA's `new Date(transferredAt * 1000).toLocaleString()` (shop.js:2006) with a
+/// dependency-free `YYYY-MM-DD HH:MM` rendering.
+String formatTransferTimestamp(int unixSeconds) {
+  if (unixSeconds <= 0) return '';
+  final dt = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000).toLocal();
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${dt.year}-${two(dt.month)}-${two(dt.day)} '
+      '${two(dt.hour)}:${two(dt.minute)}';
+}
+
+/// Abbreviates a hex pubkey as `<first16>…<last8>` for the transfer row's
+/// "Verified sender key" line (shop.js:2011).
+String abbreviateTransferKey(String pubkey) {
+  if (pubkey.length <= 24) return pubkey;
+  return '${pubkey.substring(0, 16)}…${pubkey.substring(pubkey.length - 8)}';
 }
 
 /// The exact `nym_*` keys wiped by "Reset Settings to Defaults"
