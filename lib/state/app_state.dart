@@ -1178,7 +1178,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.lastSeen = m.timestamp;
     }
     if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
-      state.unreadCounts[gid] = (state.unreadCounts[gid] ?? 0) + 1;
+      // Key the unread count by the group's storage key (== `key`), NOT the bare
+      // gid — the sidebar group row reads `unread[groupStorageKey(id)]`, so a
+      // bare-gid write never surfaced as a badge.
+      state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
     state = state.copyWith();
   }
