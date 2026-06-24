@@ -586,7 +586,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   Row(
                     children: [
                       NymAvatar(
-                        seed: nym,
+                        seed: ref.read(appStateProvider).selfPubkey,
                         size: 32,
                         imageUrl: ref
                             .read(appStateProvider)
@@ -1318,7 +1318,7 @@ class _GroupAvatarStack extends StatelessWidget {
                 ),
                 child: ClipOval(
                   child: NymAvatar(
-                    seed: users[members[i]]?.nym ?? members[i],
+                    seed: members[i],
                     size: 18,
                     imageUrl: users[members[i]]?.profile?.picture,
                   ),

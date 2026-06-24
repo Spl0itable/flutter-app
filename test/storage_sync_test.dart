@@ -404,4 +404,111 @@ void main() {
       expect(bodies, isEmpty, reason: 'ephemeral makes no PM-archive calls');
     });
   });
+
+  // ===========================================================================
+  // 5. channel-get archive backfill (public read, no auth) + ephemeral group
+  //    inbox (pm-get keyed by `pubkeys`, also public).
+  // ===========================================================================
+  group('channel-get', () {
+    Map<String, dynamic> chanEvent(String id, String d) => {
+          'id': id,
+          'pubkey': 'a' * 64,
+          'kind': 23333,
+          'created_at': 100,
+          'tags': [
+            ['d', d],
+          ],
+          'content': 'hi',
+          'sig': 's',
+        };
+
+    test('body carries action + lowercased channels, no pubkey/auth (public)',
+        () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (
+          200,
+          '${jsonEncode(chanEvent('m1', 'nymchat'))}\n',
+          {'Content-Type': 'application/x-ndjson'},
+        ),
+      );
+      final events = await sync.channelGet(['NymChat']);
+      expect(events.length, 1);
+      expect(events.first['id'], 'm1');
+      final b = bodies.single;
+      expect(b['action'], 'channel-get');
+      expect(b['channels'], ['nymchat']); // lowercased
+      expect(b.containsKey('auth'), isFalse, reason: 'public read');
+      expect(b.containsKey('pubkey'), isFalse, reason: 'public read');
+    });
+
+    test('throttles a re-fetch within 60s unless forced', () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (200, '', {'Content-Type': 'application/x-ndjson'}),
+      );
+      await sync.channelGet(['9q8y']);
+      expect(calls, 1);
+      // Second open within the window is skipped (no request).
+      await sync.channelGet(['9q8y']);
+      expect(calls, 1);
+      // force bypasses the window.
+      await sync.channelGet(['9q8y'], force: true);
+      expect(calls, 2);
+    });
+
+    test('channelGet works for ephemeral identities (public read)', () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        durable: false,
+        respond: (_) => (
+          200,
+          '${jsonEncode(chanEvent('e1', 'nymchat'))}\n',
+          {'Content-Type': 'application/x-ndjson'},
+        ),
+      );
+      final events = await sync.channelGet(['nymchat']);
+      expect(events.length, 1);
+      expect(bodies.single['action'], 'channel-get');
+    });
+
+    test('pmGetByPubkeys posts a public pm-get keyed by pubkeys, oldest-first',
+        () async {
+      final ephA = 'b' * 64;
+      final older = {
+        'id': 'g-old',
+        'pubkey': 'c' * 64,
+        'kind': 1059,
+        'created_at': 100,
+        'tags': [
+          ['p', ephA],
+        ],
+        'content': 'x',
+        'sig': 's',
+      };
+      final newer = Map<String, dynamic>.from(older)
+        ..['id'] = 'g-new'
+        ..['created_at'] = 300;
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (
+          200,
+          '${jsonEncode(newer)}\n${jsonEncode(older)}\n',
+          {'Content-Type': 'application/x-ndjson'},
+        ),
+      );
+      final events = await sync.pmGetByPubkeys([ephA.toUpperCase()]);
+      expect(events.length, 2);
+      expect(events.first['id'], 'g-old'); // oldest-first
+      final b = bodies.single;
+      expect(b['action'], 'pm-get');
+      expect(b['pubkeys'], [ephA]); // lowercased
+      expect(b.containsKey('auth'), isFalse, reason: 'public read');
+      expect(b.containsKey('pubkey'), isFalse);
+    });
+  });
 }

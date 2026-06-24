@@ -5,13 +5,12 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../models/channel.dart';
 
-/// The canonical web host for the PWA (`https://app.nymchat.app`). The PWA's
-/// `shareChannel()` uses `window.location.origin + pathname`; in the native app
-/// we mirror the production share host so links resolve to the web PWA.
-// TODO(verify): the PWA builds the share URL from the runtime
-// `window.location` (origin + pathname), not a hard-coded host. The task spec
-// pins `https://app.nymchat.app/#<channel>`, so we use that constant here.
-const String kNymchatShareHost = 'https://app.nymchat.app';
+/// The canonical web host for the PWA (`https://web.nymchat.app`). The PWA's
+/// `shareChannel()` uses `window.location.origin + pathname` (channels.js:413),
+/// which in production resolves to `web.nymchat.app` — the only OFFICIAL_HOST
+/// (`build-verify.js:10`). The native app mirrors that production host so shared
+/// links open the live web PWA. (`app.nymchat.app` does not exist.)
+const String kNymchatShareHost = 'https://web.nymchat.app';
 
 /// Builds the share URL for a channel (`shareChannel`, channels.js): the base
 /// host with a `#<channel>` fragment. [channel] is the channel name (or geohash

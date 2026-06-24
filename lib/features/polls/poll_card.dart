@@ -60,7 +60,7 @@ class PollCard extends ConsumerWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                NymAvatar(seed: poll.nym, size: 18, imageUrl: authorPic),
+                NymAvatar(seed: poll.pubkey, size: 18, imageUrl: authorPic),
                 const SizedBox(width: 4),
                 Text.rich(
                   TextSpan(children: [

@@ -40,22 +40,22 @@ void main() {
   group('channel share URL', () {
     test('builds …/#<channel>', () {
       expect(
-          buildChannelShareUrl('bitcoin'), 'https://app.nymchat.app/#bitcoin');
-      expect(buildChannelShareUrl('9q8y'), 'https://app.nymchat.app/#9q8y');
+          buildChannelShareUrl('bitcoin'), 'https://web.nymchat.app/#bitcoin');
+      expect(buildChannelShareUrl('9q8y'), 'https://web.nymchat.app/#9q8y');
     });
 
     test('falls back to #nymchat for an empty channel', () {
-      expect(buildChannelShareUrl(''), 'https://app.nymchat.app/#nymchat');
+      expect(buildChannelShareUrl(''), 'https://web.nymchat.app/#nymchat');
     });
 
     test('channelEntryShareUrl uses the entry key (geohash or name)', () {
       expect(
         channelEntryShareUrl(ChannelEntry(channel: '9q8y', geohash: '9q8y')),
-        'https://app.nymchat.app/#9q8y',
+        'https://web.nymchat.app/#9q8y',
       );
       expect(
         channelEntryShareUrl(ChannelEntry(channel: 'Dev')),
-        'https://app.nymchat.app/#dev',
+        'https://web.nymchat.app/#dev',
       );
     });
   });

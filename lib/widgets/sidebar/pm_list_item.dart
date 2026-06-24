@@ -85,7 +85,7 @@ class PMListItem extends ConsumerWidget {
                 child: Row(
                   children: [
                     // `.avatar-pm`: 26px, margin-right 4 (no sidebar status dot).
-                    NymAvatar(seed: nym, size: 26, imageUrl: picture),
+                    NymAvatar(seed: pubkey, size: 26, imageUrl: picture),
                     const SizedBox(width: 4),
                     Flexible(
                       // `.pm-name`: color --text-dim, normal weight, with a dim

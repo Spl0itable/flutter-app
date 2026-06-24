@@ -838,7 +838,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
         child: Row(
           children: [
             NymAvatar(
-              seed: nym.isNotEmpty ? nym : pubkey,
+              seed: pubkey,
               size: 26,
               imageUrl: imageUrl,
             ),

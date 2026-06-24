@@ -333,6 +333,8 @@ class NostrController {
 
     // 3) Stop syncing settings on change (the binding captured the old signer).
     _ref.read(settingsProvider.notifier).onSyncedChange = null;
+    // Stop backfilling on view-open (the binding captured the old storage sync).
+    _ref.read(appStateProvider.notifier).onViewOpened = null;
 
     // 4) Remove the persisted login + auto-ephemeral + per-identity caches the
     //    PWA's `signOut()` clears (app.js:6743-6761).
@@ -3158,7 +3160,98 @@ class NostrController {
     // Fire a debounced encrypted-settings publish whenever a synced setting
     // changes (the PWA's `nostrSettingsSave()` peppered through every setter).
     _ref.read(settingsProvider.notifier).onSyncedChange = syncSettings;
+
+    // Backfill conversation history from the D1 archive on open (the PWA's
+    // per-open `channelRestoreFromD1` in `switchChannel`, plus the ephemeral
+    // group inbox). Best-effort; gated/idempotent inside the handler.
+    _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
   }
+
+  /// Reacts to a conversation being opened ([AppStateNotifier.switchView]) by
+  /// fetching its D1 message archive and ingesting it through the same pipeline
+  /// live events use. Channels hit `channel-get`; groups pull the ephemeral
+  /// inbox. PMs need no per-open fetch — their archive is restored globally at
+  /// boot via [_restorePmArchive] (`pmRestoreFromD1`), matching the PWA, which
+  /// also restores all 1:1 PMs up front rather than per-conversation. All work
+  /// is best-effort and never blocks the (already-committed) view switch.
+  void _onViewOpened(ChatView view) {
+    switch (view.kind) {
+      case ViewKind.channel:
+        unawaited(_backfillChannelArchive(view.id));
+      case ViewKind.group:
+        unawaited(_backfillGroupArchive());
+      case ViewKind.pm:
+        break;
+    }
+  }
+
+  /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
+  /// 60s freshness window lives in [StorageSync.channelGet]; this set just
+  /// avoids redundant in-flight calls within the same tight switch loop.
+  final Set<String> _channelBackfillInFlight = <String>{};
+
+  /// Fetches a single channel's D1 archive (`channel-get`) and replays each
+  /// archived event through [AppStateNotifier.ingestEvent] — the SAME path the
+  /// live relay subscription uses (`_onEvent`), so dedup by id (`_seenIds`),
+  /// `created_at`/`ms` ordering, and cosmetics all apply. [channelKey] is the
+  /// geohash or named-channel key (the PWA's `geohash || channel`). No-op
+  /// without storage sync; failures are swallowed.
+  Future<void> _backfillChannelArchive(String channelKey) async {
+    final sync = _storageSync;
+    if (sync == null || channelKey.isEmpty) return;
+    final name = channelKey.toLowerCase();
+    if (!_channelBackfillInFlight.add(name)) return;
+    try {
+      // Honor channelGet's 60s freshness window (channels.js `_channelD1FetchedAt`)
+      // so reopening the same channel in a tight loop doesn't refetch; the first
+      // open of the session still hydrates. The live subscription + any reconnect
+      // backfill top this up beyond the window.
+      final events = await sync.channelGet([name]);
+      final appState = _ref.read(appStateProvider.notifier);
+      for (final raw in events) {
+        try {
+          appState.ingestEvent(NostrEvent.fromJson(raw));
+        } catch (_) {
+          // Skip a malformed archived event (mirrors the PWA's per-event catch).
+        }
+      }
+    } catch (_) {
+      // Best-effort: live subscription continues regardless.
+    } finally {
+      _channelBackfillInFlight.remove(name);
+    }
+  }
+
+  /// Restores group history from the ephemeral-key D1 inbox on group open
+  /// (`_recoverEphemeralHistory`, relays.js:2631). Group messages OTHER members
+  /// sent are gift-wrapped to our per-group ephemeral keys, so they live in the
+  /// `pm-get?pubkeys=` inbox rather than our own (those addressed-to-us wraps,
+  /// incl. our own sent copies, are restored at boot by [_restorePmArchive]).
+  /// Each restored wrap is unwrapped + routed through the normal gift-wrap
+  /// handler (re-archiving is a no-op via the session dedup). Gated to one
+  /// in-flight pass; idempotent via the wrap-id dedup in [StorageSync].
+  Future<void> _backfillGroupArchive() async {
+    final sync = _storageSync;
+    final groups = _groups;
+    final service = _service;
+    if (sync == null || groups == null || service == null) return;
+    if (_groupBackfillInFlight) return;
+    _groupBackfillInFlight = true;
+    try {
+      final ephPks = groups.allEphemeralPubkeys();
+      if (ephPks.isEmpty) return;
+      final wraps = await sync.pmGetByPubkeys(ephPks);
+      for (final w in wraps) {
+        _replayArchivedWrap(w);
+      }
+    } catch (_) {
+      // Best-effort.
+    } finally {
+      _groupBackfillInFlight = false;
+    }
+  }
+
+  bool _groupBackfillInFlight = false;
 
   /// Boot-time sync: merge cross-device encrypted settings (honoring
   /// `nym_last_settings_sync_ts`), then restore the PM backlog from D1 for

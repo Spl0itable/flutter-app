@@ -279,8 +279,7 @@ class _Top extends ConsumerWidget {
       final users = ref.watch(usersProvider);
       final members = <(String pubkey, String seed)>[
         if (selfPk.isNotEmpty) (selfPk, selfPk),
-        for (final p in call.participants)
-          (p.pubkey, p.nym.isNotEmpty ? p.nym : p.pubkey),
+        for (final p in call.participants) (p.pubkey, p.pubkey),
       ].take(4).toList();
       id = Row(
         mainAxisSize: MainAxisSize.min,
@@ -316,7 +315,7 @@ class _Top extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           NymAvatar(
-            seed: call.peerNym ?? call.peerPubkey!,
+            seed: call.peerPubkey!,
             size: 22,
             imageUrl: users[call.peerPubkey!]?.profile?.picture, // Rule 4
           ),
@@ -391,7 +390,7 @@ class _Grid extends StatelessWidget {
           label: p.nym,
           renderer: service.rendererFor(p.pubkey),
           hasVideo: p.hasVideo,
-          seed: p.nym,
+          seed: p.pubkey,
           sharing: p.sharing,
         ),
     ];
@@ -1055,7 +1054,7 @@ class _Receipt extends StatelessWidget {
               for (final r in readers)
                 Padding(
                   padding: const EdgeInsets.only(left: 2),
-                  child: NymAvatar(seed: r.value, size: 14),
+                  child: NymAvatar(seed: r.key, size: 14),
                 ),
             ],
           ),

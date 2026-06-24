@@ -62,7 +62,7 @@ class Message {
     this.conversationPubkey,
     this.eventKind = 0,
     this.isHistorical = false,
-    this.senderVerified = false,
+    this.senderVerified,
     this.bitchatMessageId,
     this.nymMessageId,
     this.deliveryStatus = DeliveryStatus.sending,
@@ -114,7 +114,14 @@ class Message {
   int eventKind;
 
   bool isHistorical;
-  bool senderVerified;
+
+  /// Tri-state cryptographic verification of a sealed (NIP-17/NIP-59) sender,
+  /// mirroring the PWA's `senderVerified` (`messages.js:736`): `true` when the
+  /// seal's signer matches the claimed author, `false` for a throwaway-key
+  /// (Bitchat) seal, `null` when the seal isn't available to verify (restored
+  /// history, or a public channel message that carries no seal). Drives the
+  /// `.crypto-verified-badge` lock shown on PM/group messages.
+  bool? senderVerified;
   String? bitchatMessageId;
   String? nymMessageId;
   DeliveryStatus deliveryStatus;
@@ -234,7 +241,8 @@ class Message {
       conversationPubkey: j['conversationPubkey'] as String?,
       eventKind: (j['eventKind'] as num?)?.toInt() ?? 0,
       isHistorical: j['isHistorical'] == true,
-      senderVerified: j['senderVerified'] == true,
+      senderVerified:
+          j['senderVerified'] is bool ? j['senderVerified'] as bool : null,
       bitchatMessageId: j['bitchatMessageId'] as String?,
       nymMessageId: j['nymMessageId'] as String?,
       deliveryStatus: deliveryStatusFromString(j['deliveryStatus'] as String?),

@@ -59,7 +59,7 @@ class UserListItem extends ConsumerWidget {
                 // `.user-status-dot` overlaid bottom-right (-1px), 8px + a 2px
                 // #0a0a0f ring (content-box → 12px outer).
                 _AvatarWithStatus(
-                  seed: user.nym,
+                  seed: user.pubkey,
                   imageUrl: user.profile?.picture,
                   status: status,
                 ),

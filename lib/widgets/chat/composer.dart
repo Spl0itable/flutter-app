@@ -1098,7 +1098,14 @@ class _ComposerState extends ConsumerState<Composer> {
       maxLines: _popout ? 12 : 5,
       minLines: 1,
       textInputAction: TextInputAction.newline,
-      onChanged: (_) => _onInputChanged(),
+      onChanged: (_) {
+        _onInputChanged();
+        // Emit a typing indicator on real keystrokes (PWA sends kind-69420
+        // 'start' on input). `sendTypingStart` self-throttles to ~1/s, gates on
+        // the typing-scope setting, and no-ops in channel views, so calling it
+        // every keystroke is safe. (`messages.js` typing emit on input.)
+        ref.read(nostrControllerProvider).sendTypingStart();
+      },
       style: TextStyle(
         color: Colors.white,
         fontSize: widget.compact ? 16 : 15,

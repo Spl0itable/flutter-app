@@ -24,22 +24,6 @@ TapGestureRecognizer _linkTap(String url) {
         launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 }
 
-/// The "nymchat" ASCII-art logo, verbatim from index.html:1261-1271
-/// (`.setup-logo`, rendered at monospace 6px). A raw string keeps the literal
-/// backslashes; no `$` appears in the art.
-const String _kAsciiLogo = r'''
-                                            ##\                  ##\
-                                            ## |                 ## |
-#######\  ##\   ##\ ######\####\   #######\ #######\   ######\ ######\
-##  __##\ ## |  ## |##  _##  _##\ ##  _____|##  __##\  \____##\\_##  _|
-## |  ## |## |  ## |## / ## / ## |## /      ## |  ## | ####### | ## |
-## |  ## |## |  ## |## | ## | ## |## |      ## |  ## |##  __## | ## |##\
-## |  ## |\####### |## | ## | ## |\#######\ ## |  ## |\####### | \####  |
-\__|  \__| \____## |\__| \__| \__| \_______|\__|  \__| \_______|  \____/
-          ##\   ## |
-          \######  |
-           \______/''';
-
 /// First-run setup screen mirroring `#setupModal` (index.html 1257–1346).
 ///
 /// The user picks an optional nickname / avatar / banner / bio and taps
@@ -263,17 +247,19 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // The 9-line ASCII-art logo (index.html:1261-1271),
-                    // monospace 6px, centered, doubling as a login affordance.
+                    // The "nymchat" wordmark. The PWA's 6px ASCII-art logo is
+                    // illegible on a phone, so the native app shows a clean
+                    // wordmark instead; it still doubles as the login affordance.
                     GestureDetector(
                       onTap: _login,
                       child: Text(
-                        _kAsciiLogo,
+                        'nymchat',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           color: c.primary,
-                          fontSize: 6,
-                          height: 1.0,
+                          fontSize: 30,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 2,
                           fontFamily: 'monospace',
                         ),
                       ),

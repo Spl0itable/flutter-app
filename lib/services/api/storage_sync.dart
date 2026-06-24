@@ -671,6 +671,116 @@ class StorageSync {
     return pmGet(before: _pmOldestTs!, limit: 200);
   }
 
+  /// Restores group history from the *ephemeral-key* D1 inbox: group messages
+  /// other members sent are gift-wrapped to our per-group ephemeral keys and
+  /// deposited under those keys, so they only rehydrate via a `pm-get` keyed by
+  /// `pubkeys` (NOT our real pubkey). Mirrors `_recoverEphemeralHistory`
+  /// (relays.js:2631): a PUBLIC read (no `since` gate — gift-wrap `created_at`
+  /// is randomized per NIP-59 so a floor would drop most wraps), chunked to the
+  /// server's 200-pubkey cap.
+  ///
+  /// Returns the parsed wrap events sorted oldest-to-newest, deduped against the
+  /// session's processed-id set so a wrap already restored (e.g. via `pm-get`
+  /// for wraps addressed to us) isn't re-applied. Unlike the other PM-archive
+  /// reads this runs for ephemeral identities too — the `pubkeys` form is an
+  /// unauthenticated public read and group ephemeral keys exist regardless of
+  /// the login method.
+  Future<List<Map<String, dynamic>>> pmGetByPubkeys(
+    List<String> pubkeys,
+  ) async {
+    final keys = <String>[];
+    final seen = <String>{};
+    for (final raw in pubkeys) {
+      final pk = raw.toLowerCase();
+      if (!_isHex64(pk) || !seen.add(pk)) continue;
+      keys.add(pk);
+    }
+    if (keys.isEmpty) return const [];
+    final events = <Map<String, dynamic>>[];
+    for (var i = 0; i < keys.length; i += 200) {
+      final end = (i + 200) < keys.length ? i + 200 : keys.length;
+      final chunk = keys.sublist(i, end);
+      StorageStream stream;
+      try {
+        // Public read (withAuth === false in the PWA): no `pubkey`/`auth`.
+        stream = await _api.storageStream({
+          'action': 'pm-get',
+          'pubkeys': chunk,
+        });
+      } catch (_) {
+        continue;
+      }
+      for (final item in stream.items) {
+        if (item is! Map) continue;
+        final id = item['id'];
+        if (id is! String || id.isEmpty) continue;
+        if (_archivedIds.contains(id)) continue;
+        _archivedIds.add(id);
+        events.add(Map<String, dynamic>.from(item));
+      }
+    }
+    _trim(_archivedIds);
+    events.sort((a, b) => _createdAt(a).compareTo(_createdAt(b)));
+    return events;
+  }
+
+  // ===========================================================================
+  // Channel archive (D1 `channel-get`) — public read, no auth.
+  // ===========================================================================
+
+  /// Per-channel "last fetched" wall-clock (ms), keyed by lowercased channel
+  /// name (`_channelD1FetchedAt`, channels.js:1118). Throttles re-fetches.
+  final Map<String, int> _channelFetchedAt = {};
+
+  /// Restores recent channel history from the D1 archive (`channel-get`) for
+  /// [channelNames] (geohash or named-channel keys, the PWA's `geohash ||
+  /// channel`). Mirrors `channelRestoreManyFromD1` (channels.js:1115):
+  ///   - lowercases + de-dups the names,
+  ///   - skips any fetched within the last 60s unless [force],
+  ///   - caps the batch at 50 channels,
+  ///   - issues one `_storageApiStream('channel-get', { channels }, false)`
+  ///     (a PUBLIC read — no `pubkey`/`auth`).
+  ///
+  /// Returns the parsed archived events (channel messages, reactions, edits) in
+  /// the order the worker streamed them. The caller replays each through the
+  /// same ingest pipeline live relay events use (so dedup by id, ordering, and
+  /// cosmetics all apply). Failures resolve to an empty list (best-effort; the
+  /// live subscription still backfills).
+  Future<List<Map<String, dynamic>>> channelGet(
+    List<String> channelNames, {
+    bool force = false,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final names = <String>[];
+    final seen = <String>{};
+    for (final raw in channelNames) {
+      if (raw.isEmpty) continue;
+      final name = raw.toLowerCase();
+      if (!seen.add(name)) continue;
+      if (!force && (_channelFetchedAt[name] ?? 0) > now - 60000) continue;
+      _channelFetchedAt[name] = now;
+      names.add(name);
+      if (names.length >= 50) break;
+    }
+    if (names.isEmpty) return const [];
+    StorageStream stream;
+    try {
+      // channel-get is a PUBLIC read (withAuth === false, channels.js:1136).
+      stream = await _api.storageStream({
+        'action': 'channel-get',
+        'channels': names,
+      });
+    } catch (_) {
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
+  }
+
   // ===========================================================================
   // Helpers.
   // ===========================================================================

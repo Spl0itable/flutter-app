@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/constants/relays.dart';
 import '../../models/nostr_event.dart';
+import '../api/api_config.dart';
 import 'relay_message.dart';
 import 'relay_stats.dart';
 
@@ -43,8 +45,22 @@ Duration applyJitter(Duration d, Random rng, {double spread = 0.25}) {
 /// tests to avoid real sockets.
 typedef WebSocketChannelFactory = WebSocketChannel Function(Uri url);
 
-WebSocketChannel _defaultChannelFactory(Uri url) =>
-    WebSocketChannel.connect(url);
+/// The REAL/native channel factory used by every relay socket (direct relays,
+/// the relay-pool proxy shards, and the single-relay `/api/relay` path).
+///
+/// Routes through [IOWebSocketChannel] so we can attach a
+/// `User-Agent: ApiConfig.userAgent` header — the backend `isNymchatClient`
+/// gate (`_shared.js`: `/NymchatApp\//i`) recognizes the native client by it
+/// (e.g. the app-relay `nymchat_proxy` perk, relay-pool.js:1124). The
+/// headers-less `WebSocketChannel.connect` would send a default Dart UA.
+///
+/// Tests inject their own [WebSocketChannelFactory] (a fake channel), so this
+/// native path — and dart:io — never runs under `flutter test`.
+WebSocketChannel defaultRelayChannelFactory(Uri url) =>
+    IOWebSocketChannel.connect(
+      url,
+      headers: {'User-Agent': ApiConfig.userAgent},
+    );
 
 /// A single relay WebSocket connection with auto-reconnect, subscription
 /// re-sending, and publish acknowledgement tracking.
@@ -55,7 +71,7 @@ WebSocketChannel _defaultChannelFactory(Uri url) =>
 class RelayConnection {
   RelayConnection(
     this.url, {
-    WebSocketChannelFactory channelFactory = _defaultChannelFactory,
+    WebSocketChannelFactory channelFactory = defaultRelayChannelFactory,
     Random? random,
     this.publishTimeout = const Duration(seconds: 10),
     Duration? backoffBase,
