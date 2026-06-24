@@ -444,7 +444,6 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
       // Picker unavailable (tests / desktop) — nothing to do.
       return;
     }
-    if (bytes == null) return;
     final url = await controller.uploadImage(bytes, contentType: contentType);
     if (url == null || url.isEmpty) return;
     if (avatar) {
@@ -648,13 +647,11 @@ class _ActionRow extends StatefulWidget {
     required this.label,
     required this.color,
     required this.onTap,
-    this.trailing,
   });
   final IconData icon;
   final String label;
   final Color color;
   final VoidCallback onTap;
-  final Widget? trailing;
 
   @override
   State<_ActionRow> createState() => _ActionRowState();
@@ -693,7 +690,6 @@ class _ActionRowState extends State<_ActionRow> {
                   ),
                 ),
               ),
-              if (widget.trailing != null) widget.trailing!,
             ],
           ),
         ),

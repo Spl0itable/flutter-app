@@ -159,7 +159,7 @@ String? validateTransferPubkey(String input, {required String selfPubkey}) {
 /// `navigator.storage.estimate()`, which has no native analogue here.
 ///
 /// Returns the same human strings:
-///  * `"<size> cached on device — N channels, N PM/group threads, N profiles,
+///  * `"{size} cached on device — N channels, N PM/group threads, N profiles,
 ///    N reaction records"`
 ///  * `"No cached data on device yet"` when nothing is cached.
 String cacheReadoutFor(AppState s) {

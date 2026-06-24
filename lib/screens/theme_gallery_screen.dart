@@ -76,7 +76,7 @@ class ThemeGalleryScreen extends ConsumerWidget {
                 children: [
                   Switch(
                     value: settings.transparencyEnabled,
-                    activeColor: c.primary,
+                    activeThumbColor: c.primary,
                     onChanged: ctrl.setTransparencyEnabled,
                   ),
                   Text('Transparency (glass UI)',

@@ -168,7 +168,7 @@ class GroupManager {
 
   /// Sends the NIP-17 `group-leave` notification to the remaining members
   /// (self excluded; groups.js `leaveGroup`). No-op (returns false) when there
-  /// are no other members. [content] is the "<nym> left the group." line.
+  /// are no other members. [content] is the "{nym} left the group." line.
   Future<bool> sendLeave({
     required Group group,
     required String selfPubkey,
@@ -200,7 +200,7 @@ class GroupManager {
   /// `members` list must already include the new pubkeys; groups.js
   /// `addMemberToGroup`). Advertises the self ephemeral key (current, not
   /// rotated) so existing members and the new joiners learn it. [content] is the
-  /// "<nym> was added by <nym>." line. Newly-added members have no ephemeral key
+  /// "{nym} was added by {nym}." line. Newly-added members have no ephemeral key
   /// yet, so their wrap targets their real pubkey via [encryptionPubkeyFor].
   Future<bool> addMembers({
     required Group group,
