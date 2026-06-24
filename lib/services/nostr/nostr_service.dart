@@ -8,6 +8,7 @@ import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
 import '../../core/crypto/bitchat.dart' as bitchat;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
+import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/pow.dart';
 import '../../core/crypto/schnorr.dart' as schnorr;
@@ -230,6 +231,18 @@ class NostrHandlers {
 /// to the channel/profile/reaction kinds and publishes channel messages.
 /// (docs/specs/01 §4.5, 03 §2.2)
 class NostrService {
+  /// Process-wide off-thread signature verifier, shared by every transport this
+  /// service builds (proxy, direct-fallback, restore probe) so a burst of
+  /// inbound EVENTs across them coalesces into one isolate hop. Mirrors the
+  /// PWA's single shared `verify-worker.js`. Stateless, so one instance is safe.
+  static final IsolateVerifier _verifier = IsolateVerifier();
+
+  /// The [EventVerifier] handed to every pool: verify each inbound event off
+  /// the main thread (batched). Preserves the per-event keep/drop contract the
+  /// relay layer relies on — see [IsolateVerifier].
+  static Future<bool> _verifyOffThread(NostrEvent event) =>
+      _verifier.verify(event);
+
   /// Default constructor. [useProxy] selects the transport: when true (the
   /// native default per spec §4.2) the service runs over the multiplexed
   /// `RelayPoolProxy` (`wss://<host>/api/relay-pool`); when false it uses the
@@ -257,12 +270,12 @@ class NostrService {
                 ? RelayPoolProxy(
                     relays: relays ?? RelayConfig.defaultRelays,
                     dmRelays: RelayConfig.defaultRelays,
-                    verify: (e) async => schnorr.verifyEvent(e),
+                    verify: _verifyOffThread,
                   )
                 : RelayPool(
                     relays: relays ?? RelayConfig.defaultRelays,
                     writeOnlyRelays: RelayConfig.writeOnlyRelays,
-                    verify: (e) async => schnorr.verifyEvent(e),
+                    verify: _verifyOffThread,
                   )) {
     // Route every ApiClient's /api traffic into our persistent api-stats object
     // so the Network Stats "App data" section is populated (mirrors the PWA's
@@ -466,7 +479,7 @@ class NostrService {
     final direct = RelayPool(
       relays: _relays ?? RelayConfig.defaultRelays,
       writeOnlyRelays: RelayConfig.writeOnlyRelays,
-      verify: (e) async => schnorr.verifyEvent(e),
+      verify: _verifyOffThread,
     );
     unawaited(_swapToDirect(direct));
   }
@@ -573,7 +586,7 @@ class NostrService {
     probe = RelayPoolProxy(
       relays: _relays ?? RelayConfig.defaultRelays,
       dmRelays: RelayConfig.defaultRelays,
-      verify: (e) async => schnorr.verifyEvent(e),
+      verify: _verifyOffThread,
       onProxyUnreachable: () {
         // Probe failed to reach the host — drop it and schedule the next try.
         _bgRestoreInFlight = false;
