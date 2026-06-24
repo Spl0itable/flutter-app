@@ -765,11 +765,12 @@ class _NavBtnState extends State<_NavBtn> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // Compact (mobile) shrinks nav buttons to 24×24 (`styles-themes-responsive
-    // .css:316-319`); desktop is 28×28.
-    final compact =
-        MediaQuery.of(context).size.width <= NymDimens.tabletBreakpoint;
-    final size = compact ? 24.0 : 28.0;
+    // `.channel-nav-btn` is 28×28; only the ≤768 phone breakpoint shrinks it to
+    // 24×24 (styles-themes-responsive.css:316, inside the max-width:768 block) —
+    // the 769–1024 tablet range keeps 28×28.
+    final phone =
+        MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint;
+    final size = phone ? 24.0 : 28.0;
 
     final color = widget.disabled
         ? c.textDim.withValues(alpha: 0.3)
@@ -786,9 +787,11 @@ class _NavBtnState extends State<_NavBtn> {
           height: size,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            // `.channel-nav-btn:hover { background: rgba(255,255,255,0.08) }`.
+            // `.channel-nav-btn:hover` is white@0.08 (dark) / black@0.06
+            // (`body.light-mode …`, styles-themes-responsive.css:1288) — exactly
+            // `hoverOverlay`, so the hover stays visible in light mode.
             color: (_hover && !widget.disabled)
-                ? Colors.white.withValues(alpha: 0.08)
+                ? c.hoverOverlay
                 : Colors.transparent,
             borderRadius: const BorderRadius.all(Radius.circular(4)),
           ),

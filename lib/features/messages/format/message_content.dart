@@ -4,7 +4,6 @@
 
 import 'dart:ui' show ImageFilter;
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,12 +12,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/nym_colors.dart';
 import '../../../core/theme/nym_metrics.dart';
+import '../../../core/theme/nym_theme.dart' show kEmojiFontFallback;
 import '../../../services/api/api_client.dart';
 import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
 import '../../../widgets/common/app_dialog.dart';
+import '../inline_network_image.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
 import 'video_message.dart';
@@ -283,6 +284,11 @@ class _RichInline extends StatelessWidget {
       height: 1.4,
       shadows: shadows,
       fontFamily: monospace ? 'monospace' : null,
+      // Bundled color-emoji fallback so unicode emoji in message bodies render
+      // as color glyphs instead of tofu (□) on devices Flutter can't reach the
+      // system emoji font on. Set on the body base so every span (and the
+      // enlarged emoji-only path) inherits it. (BUG: emoji → boxes on Android.)
+      fontFamilyFallback: kEmojiFontFallback,
     );
     return Text.rich(
       TextSpan(
@@ -378,13 +384,16 @@ class _RichInline extends StatelessWidget {
           alignment: PlaceholderAlignment.middle,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 1),
-            child: CachedNetworkImage(
-              imageUrl: proxiedMedia(url, emoji: true),
+            // Many NIP-30 custom emoji are SVG (and some hosts serve formats the
+            // raster decoder can't handle); InlineNetworkImage renders SVG via
+            // flutter_svg and otherwise falls back to the `:shortcode:` text so a
+            // broken/undecodable emoji never throws. (BUG: custom emoji + decode.)
+            child: InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
               width: side,
               height: side,
               fit: BoxFit.contain,
-              errorWidget: (_, __, ___) =>
-                  Text(':$shortcode:', style: base),
+              errorChild: Text(':$shortcode:', style: base),
             ),
           ),
         );
@@ -842,16 +851,19 @@ class _MediaTile extends StatelessWidget {
       );
     }
 
-    final image = CachedNetworkImage(
-      imageUrl: proxiedMedia(item.url),
+    // SVG-aware + decode-safe: SVG images render via flutter_svg, and any
+    // undecodable image (`ImageDecoder unimplemented`, broken URL) shows the
+    // broken-image placeholder instead of throwing. (BUG: image decode failures.)
+    final image = InlineNetworkImage(
+      url: proxiedMedia(item.url),
       fit: BoxFit.cover,
       width: maxSize,
-      placeholder: (_, __) => Container(
+      placeholder: Container(
         width: maxSize,
         height: maxSize,
         color: Colors.white.withValues(alpha: 0.05),
       ),
-      errorWidget: (_, __, ___) => Container(
+      errorChild: Container(
         width: maxSize,
         height: 80,
         color: Colors.white.withValues(alpha: 0.05),

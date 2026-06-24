@@ -1178,7 +1178,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.lastSeen = m.timestamp;
     }
     if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
-      state.unreadCounts[gid] = (state.unreadCounts[gid] ?? 0) + 1;
+      // Key the unread count by the group's storage key (== `key`), NOT the bare
+      // gid — the sidebar group row reads `unread[groupStorageKey(id)]`, so a
+      // bare-gid write never surfaced as a badge.
+      state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
     state = state.copyWith();
   }
@@ -1749,7 +1752,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// For PM/group sends, pass [nymMessageId] so inbound receipts can match it
   /// and advance the delivery ticks. Returns the appended [Message].
   Message? sendLocal(String text,
-      {String? nymMessageId, String? pubkeyOverride, String? authorOverride}) {
+      {String? nymMessageId,
+      String? pubkeyOverride,
+      String? authorOverride,
+      Map<String, dynamic>? fileOffer}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return null;
     final view = state.view;
@@ -1777,6 +1783,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       nymMessageId: nymMessageId,
       deliveryStatus: DeliveryStatus.sent,
       senderVerified: true,
+      // A P2P share echoes as a file-offer card (p2p.js:171 sets
+      // isFileOffer:true + fileOffer on the local displayMessage).
+      isFileOffer: fileOffer != null,
+      fileOffer: fileOffer,
     );
     list.add(m);
     m.optimistic = true;

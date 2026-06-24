@@ -247,24 +247,8 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // The "nymchat" wordmark. The PWA's 6px ASCII-art logo is
-                    // illegible on a phone, so the native app shows a clean
-                    // wordmark instead; it still doubles as the login affordance.
-                    GestureDetector(
-                      onTap: _login,
-                      child: Text(
-                        'nymchat',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: c.primary,
-                          fontSize: 30,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 2,
-                          fontFamily: 'monospace',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
+                    // (The "nymchat" wordmark was removed per request; the
+                    // "Login with nsec…" link below still carries the login tap.)
                     if (invite != null) ...[
                       _InviteBanner(text: invite, c: c),
                       const SizedBox(height: 16),

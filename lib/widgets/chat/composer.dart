@@ -850,14 +850,22 @@ class _ComposerState extends ConsumerState<Composer> {
     });
 
     final input = _inputWithChips(context);
-    final toolbar = _toolbar(context, sendEnabled);
+    // `.input-container` is `padding: 12px 16px` (desktop/tablet); the phone
+    // breakpoint (≤768) collapses it to a flat `padding: 10px`
+    // (styles-themes-responsive.css:221/304). `compact` spans the whole ≤1024
+    // off-canvas range, so key the 10px override off the real phone width.
+    final phone =
+        MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint;
+    final toolbar = _toolbar(context, sendEnabled, phone);
 
     return Container(
       decoration: BoxDecoration(
         color: c.glassBg,
         border: Border(top: BorderSide(color: c.glassBorder)),
       ),
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      padding: phone
+          ? const EdgeInsets.all(10)
+          : const EdgeInsets.fromLTRB(16, 12, 16, 12),
       child: SafeArea(
         top: false,
         child: Column(
@@ -938,12 +946,14 @@ class _ComposerState extends ConsumerState<Composer> {
         : 'Uploading $kind...';
     final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
     return Container(
-      // `.upload-progress`: bg var(--glass-bg) (#14141e solid-ui), border 1px
-      // glass, radius-sm/radius-sm/0/0, padding 12, margin-bottom 8.
+      // `.upload-progress`: bg var(--bg-tertiary) (rgba(20,20,35,0.9) dark /
+      // #1c1c2c solid-ui); `body.light-mode .upload-progress` → white@0.92
+      // (styles-themes-responsive.css:1179). border 1px glass, radius-sm top
+      // corners, padding 12, margin-bottom 8.
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: c.glassBg,
+        color: c.isLight ? Colors.white.withValues(alpha: 0.92) : c.bgTertiary,
         border: Border.all(color: c.glassBorder),
         borderRadius:
             const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
@@ -1090,10 +1100,13 @@ class _ComposerState extends ConsumerState<Composer> {
     final hasText = _controller.text.trim().isNotEmpty;
     final focused = _focus.hasFocus;
     // `.composer-popout .message-input`: elevated rounded box vs the flat field.
-    // `.message-input:focus` lifts the flat fill from white@0.05 → white@0.07.
-    final fill = _popout
-        ? c.bgTertiary
+    // `.message-input` flat fill is white@0.05 → white@0.07 on focus (dark); in
+    // light mode `body.light-mode div.message-input` flips to black@0.04 →
+    // black@0.02 on focus (styles-themes-responsive.css:62-67).
+    final flatFill = c.isLight
+        ? Colors.black.withValues(alpha: focused ? 0.02 : 0.04)
         : Colors.white.withValues(alpha: focused ? 0.07 : 0.05);
+    final fill = _popout ? c.bgTertiary : flatFill;
     // `.message-input` rounds ONLY the bottom corners when flat (chips/dropdowns
     // sit `bottom:100%` flush above it — styles-chat.css:1666); the popout box
     // uses full radius-md (styles-chat.css:1737).
@@ -1119,7 +1132,10 @@ class _ComposerState extends ConsumerState<Composer> {
         ref.read(nostrControllerProvider).sendTypingStart();
       },
       style: TextStyle(
-        color: Colors.white,
+        // `.message-input` text is forced pure white (dark) / pure black (light)
+        // — `color:#ffffff !important` / `body.light-mode … color:#000000`
+        // (styles-themes-responsive.css:578-593), NOT the accent `--text`.
+        color: c.isLight ? Colors.black : Colors.white,
         fontSize: widget.compact ? 16 : 15,
       ),
       cursorColor: c.primary,
@@ -1128,8 +1144,10 @@ class _ComposerState extends ConsumerState<Composer> {
         // PWA `data-placeholder` teaches the `/` and `?` affordances (F9).
         hintText: 'Message, / for commands, ? for Nymbot...',
         hintStyle: TextStyle(
-            // `div.message-input:empty::before` → rgba(255,255,255,0.4).
-            color: Colors.white.withValues(alpha: 0.4),
+            // `div.message-input:empty::before` → white@0.4 (dark) /
+            // black@0.4 (`body.light-mode …`, styles-themes-responsive.css:58).
+            color: (c.isLight ? Colors.black : Colors.white)
+                .withValues(alpha: 0.4),
             fontSize: widget.compact ? 16 : 15),
         filled: true,
         fillColor: fill,
@@ -1382,7 +1400,7 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// `.input-buttons`: image / file / emoji / GIF icon buttons + SEND.
-  Widget _toolbar(BuildContext context, bool sendEnabled) {
+  Widget _toolbar(BuildContext context, bool sendEnabled, bool phone) {
     final buttons = <Widget>[
       _IconBtn(
         icon: Icons.image_outlined,
@@ -1408,6 +1426,9 @@ class _ComposerState extends ConsumerState<Composer> {
         // identities (ephemeral geohash keys are already anonymous).
         onAnon: _anonEligible ? _sendAnon : null,
         expand: widget.compact,
+        // Phone (≤768) shrinks SEND to `padding:10px` / `font-size:11px`
+        // (styles-themes-responsive.css:341).
+        phone: phone,
       ),
     ];
 
@@ -1417,8 +1438,9 @@ class _ComposerState extends ConsumerState<Composer> {
           for (var i = 0; i < buttons.length; i++) ...[
             // SEND gets flex:2, others flex:1.
             Expanded(flex: i == buttons.length - 1 ? 2 : 1, child: buttons[i]),
-            // `.input-buttons { gap:5px }` (styles-chat.css:1914).
-            if (i != buttons.length - 1) const SizedBox(width: 5),
+            // Stacked `.input-buttons` is `gap:10px` (≤1024 + ≤768 overrides,
+            // styles-themes-responsive.css:325/487), not the desktop 5px.
+            if (i != buttons.length - 1) const SizedBox(width: 10),
           ],
         ],
       );
@@ -1493,6 +1515,13 @@ class _ComposerState extends ConsumerState<Composer> {
     required VoidCallback onDismiss,
     required Widget child,
   }) {
+    final media = MediaQuery.of(context);
+    // `.emoji-picker`/`.gif-picker` @media (max-width:768): `position: fixed;
+    // left: 50%; transform: translateX(-50%); bottom: 60px; max-width: 90%` —
+    // centered above the input bar on phones (vs anchored above the button on
+    // desktop, base `bottom: 100%`).
+    final isPhone = media.size.width <= NymDimens.mobileBreakpoint;
+    final picker = Material(type: MaterialType.transparency, child: child);
     return Stack(
       children: [
         Positioned.fill(
@@ -1501,20 +1530,32 @@ class _ComposerState extends ConsumerState<Composer> {
             onTap: onDismiss,
           ),
         ),
-        CompositedTransformFollower(
-          link: link,
-          targetAnchor: Alignment.topRight,
-          followerAnchor: Alignment.bottomRight,
-          offset: const Offset(0, -8),
-          showWhenUnlinked: false,
-          child: Align(
-            alignment: Alignment.bottomRight,
-            child: Material(
-              type: MaterialType.transparency,
-              child: child,
+        if (isPhone)
+          Positioned(
+            left: 8,
+            right: 8,
+            // 60px above the bar, lifted above the keyboard when it's open.
+            bottom: 60 + media.viewInsets.bottom,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: picker,
+              ),
+            ),
+          )
+        else
+          CompositedTransformFollower(
+            link: link,
+            targetAnchor: Alignment.topRight,
+            followerAnchor: Alignment.bottomRight,
+            offset: const Offset(0, -8),
+            showWhenUnlinked: false,
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: picker,
             ),
           ),
-        ),
       ],
     );
   }
@@ -1590,6 +1631,7 @@ class _SendButton extends StatefulWidget {
     required this.onTap,
     this.onAnon,
     this.expand = false,
+    this.phone = false,
   });
   final bool enabled;
   final VoidCallback onTap;
@@ -1598,6 +1640,9 @@ class _SendButton extends StatefulWidget {
   /// does nothing special; a tap still sends normally).
   final VoidCallback? onAnon;
   final bool expand;
+
+  /// Phone (≤768) shrinks the button to `padding:10px` / `font-size:11px`.
+  final bool phone;
 
   @override
   State<_SendButton> createState() => _SendButtonState();
@@ -1708,13 +1753,17 @@ class _SendButtonState extends State<_SendButton> {
                 borderRadius: NymRadius.rsm,
                 child: Container(
                   height: 42,
-                  padding: const EdgeInsets.symmetric(horizontal: 22),
+                  // Desktop `.send-btn`: `padding:10px 22px` / `font-size:12px`.
+                  // Phone (≤768): `padding:10px` / `font-size:11px`
+                  // (styles-themes-responsive.css:341).
+                  padding: EdgeInsets.symmetric(
+                      horizontal: widget.phone ? 10 : 22),
                   alignment: Alignment.center,
                   child: Text(
                     _anonFired ? 'ANON' : 'SEND',
                     style: TextStyle(
                       color: c.primary,
-                      fontSize: 12,
+                      fontSize: widget.phone ? 11 : 12,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 1.5,
                     ),
@@ -1914,13 +1963,22 @@ class _ChipCloseButtonState extends State<_ChipCloseButton> {
           child: Container(
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
-              color: _hover ? Colors.white.withValues(alpha: 0.1) : null,
+              // `.quote-preview-close:hover` is white@0.1 fill + #fff icon
+              // (dark); `body.light-mode` flips to black@0.08 fill + `--text`
+              // icon (styles-themes-responsive.css:1074). Use mode-aware values.
+              color: _hover
+                  ? (c.isLight
+                      ? Colors.black.withValues(alpha: 0.08)
+                      : Colors.white.withValues(alpha: 0.1))
+                  : null,
               borderRadius: NymRadius.rxs,
             ),
             child: Icon(
               Icons.close,
               size: 16,
-              color: _hover ? Colors.white : c.textDim,
+              color: _hover
+                  ? (c.isLight ? c.text : Colors.white)
+                  : c.textDim,
             ),
           ),
         ),

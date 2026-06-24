@@ -52,14 +52,22 @@ class ChannelListItem extends ConsumerWidget {
     final location =
         entry.isGeohash ? geohashLocationLabel(entry.geohash) : '';
 
+    // `.channel-item.active` fill is primary@0.10 + a primary@0.05 glow (dark);
+    // `body.light-mode` neutralises it to black@0.06 with `box-shadow:none`
+    // (styles-themes-responsive.css:1139), keeping the primary@0.20 border +
+    // primary accent bar. The pinned (grey) treatment has no light override.
+    final Color activeFill =
+        c.isLight ? Colors.black.withValues(alpha: 0.06) : c.primaryA(0.10);
     final Color fill = active
-        ? c.primaryA(0.10)
+        ? activeFill
         : (showPinned ? _pinnedGrey.withValues(alpha: 0.10) : Colors.transparent);
     final Color borderColor = active
         ? c.primaryA(0.20)
         : (showPinned ? _pinnedGrey.withValues(alpha: 0.20) : Colors.transparent);
     final List<BoxShadow>? glow = active
-        ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
+        ? (c.isLight
+            ? null
+            : [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)])
         : (showPinned
             ? [BoxShadow(color: _pinnedGrey.withValues(alpha: 0.05), blurRadius: 12)]
             : null);

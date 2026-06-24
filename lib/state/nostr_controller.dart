@@ -441,8 +441,6 @@ class NostrController {
 
   bool _readReceiptsAllowed() =>
       _ref.read(settingsProvider).readReceiptsScope != 'disabled';
-  bool _typingAllowed() =>
-      _ref.read(settingsProvider).typingIndicatorsScope != 'disabled';
 
   // ---------------------------------------------------------------------------
   // Inbound routing
@@ -500,6 +498,18 @@ class NostrController {
       // `:shortcode:` tokens render as images (emoji.js `ingestEmojiTags`).
       if (event.tags.isNotEmpty) {
         _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
+      }
+      // Register an inbound P2P file offer with the service so the rendered
+      // file-offer card's download button can request it (nostr-core.js:434 —
+      // `parseFileOfferTag` populates `p2pFileOffers`, the store `requestP2PFile`
+      // reads). The mapper sets the message's isFileOffer/fileOffer (so the card
+      // renders); this side makes the card actionable. Skip our own echo — the
+      // offer is registered at share time by `shareP2PFile`.
+      if (event.pubkey != (_identity?.pubkey ?? '')) {
+        final offer = parseFileOfferTag(event.tags, event.pubkey);
+        if (offer != null) {
+          _ref.read(p2pServiceProvider).registerOffer(offer);
+        }
       }
       _maybeNotifyChannel(event);
       // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
@@ -1235,6 +1245,12 @@ class NostrController {
     final identity = _identity;
     if (service == null || identity == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Mirror calls.js `_sendCallSignal` (line 146): the rumor content is
+    // `{ ...payload, nym }` — the sender's display name is injected into EVERY
+    // signal so the recipient's incoming-call UI can label the caller even
+    // before a kind-0 profile arrives. Without it an invite shows a truncated
+    // pubkey instead of the nym.
+    final content = <String, dynamic>{...payload, 'nym': identity.nym};
     final rumor = UnsignedEvent(
       pubkey: identity.pubkey,
       createdAt: nowSec,
@@ -1242,7 +1258,7 @@ class NostrController {
       tags: [
         ['p', to],
       ],
-      content: jsonEncode(payload),
+      content: jsonEncode(content),
     );
     return service.publishGiftWrappedRumor(rumor: rumor, recipients: [to]);
   }
@@ -2653,18 +2669,39 @@ class NostrController {
 
   /// Signals typing in the current PM/group view (throttled ~1/s).
   Future<void> sendTypingStart() async {
-    if (!_typingAllowed()) return;
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
     final state = _ref.read(appStateProvider);
     final view = state.view;
-    if (view.kind == ViewKind.channel) return;
+    // Context-aware scope gate (PWA `isIndicatorAllowedFor`): a typing scope of
+    // 'pms' / 'groups' / 'pms-groups' restricts indicators to those surfaces and
+    // 'disabled' suppresses them; channels require the default 'everywhere'.
+    final scope = _ref.read(settingsProvider).typingIndicatorsScope;
+    final ctx = view.kind == ViewKind.pm
+        ? 'pm'
+        : view.kind == ViewKind.group
+            ? 'group'
+            : 'channel';
+    if (!_indicatorScopeAllows(scope, ctx)) return;
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - (_typingThrottle[key] ?? 0) < 1000) return;
     _typingThrottle[key] = now;
+
+    if (view.kind == ViewKind.channel) {
+      // Public channel typing (kind 24420) — only for geohash channels, exactly
+      // like the PWA `handleChannelTypingSignal` (gated on `currentGeohash`).
+      final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
+      if (entry.isEmpty || !entry.first.isGeohash) return;
+      await service.publishChannelTyping(
+        status: 'start',
+        geohash: entry.first.geohash,
+        nym: identity.nym,
+      );
+      return;
+    }
 
     if (view.kind == ViewKind.pm) {
       await service.publishTyping(status: 'start', recipients: [view.id]);
@@ -2680,6 +2717,25 @@ class NostrController {
         groupId: group.id,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
       );
+    }
+  }
+
+  /// Mirrors the PWA `isIndicatorAllowedFor`: a typing / read-receipt scope of
+  /// 'pms', 'groups', or 'pms-groups' limits indicators to those contexts,
+  /// 'disabled' suppresses them, and anything else ('everywhere') allows all
+  /// surfaces — including public channels.
+  bool _indicatorScopeAllows(String scope, String context) {
+    switch (scope) {
+      case 'disabled':
+        return false;
+      case 'pms':
+        return context == 'pm';
+      case 'groups':
+        return context == 'group';
+      case 'pms-groups':
+        return context == 'pm' || context == 'group';
+      default:
+        return true;
     }
   }
 
@@ -3275,6 +3331,13 @@ class NostrController {
     }
   }
 
+  /// App returned to the foreground. Re-hydrate the open conversation from D1 so
+  /// the active channel/group immediately catches up on anything missed while
+  /// backgrounded — the native equivalent of the PWA's `visibilitychange →
+  /// backfillFromD1OnReconnect`. Live relay feeds resume via the service's own
+  /// socket reconnect, so this only needs the per-view archive top-up.
+  void onAppResumed() => _onViewOpened(_ref.read(appStateProvider).view);
+
   /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
   /// 60s freshness window lives in [StorageSync.channelGet]; this set just
   /// avoids redundant in-flight calls within the same tight switch loop.
@@ -3767,8 +3830,12 @@ class NostrController {
     final content =
         'Sharing file through Nymchat: ${offer.name} (${formatFileSize(offer.size)})';
 
-    // Local echo as a file-offer message (displayMessage isFileOffer path).
-    final echo = _ref.read(appStateProvider.notifier).sendLocal(content);
+    // Local echo as a file-offer message (displayMessage isFileOffer path,
+    // p2p.js:158-173: own send sets isFileOffer:true + fileOffer so the sender
+    // sees the same card peers do).
+    final echo = _ref
+        .read(appStateProvider.notifier)
+        .sendLocal(content, fileOffer: offer.toJson());
 
     if (identity == null || service == null) return;
     if (view.kind != ViewKind.channel) {

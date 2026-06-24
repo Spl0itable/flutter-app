@@ -960,8 +960,12 @@ class CallService {
     final peer = ac.peers[sender];
     final c = data['candidate'];
     if (peer == null || c is! Map) return;
+    // calls.js `_onCallIce` requires `data.candidate`; ignore an empty
+    // end-of-gathering marker so it can't wedge the add-candidate path.
+    final candStr = c['candidate'] as String?;
+    if (candStr == null || candStr.isEmpty) return;
     final candidate = RTCIceCandidate(
-      c['candidate'] as String?,
+      candStr,
       c['sdpMid'] as String?,
       (c['sdpMLineIndex'] as num?)?.toInt(),
     );
@@ -1052,11 +1056,17 @@ class CallService {
 
     pc.onIceCandidate = (candidate) {
       if (_active != ac) return;
+      // calls.js `onicecandidate` guards `if (e.candidate ...)`: only trickle a
+      // real candidate. flutter_webrtc fires a final event with an empty
+      // candidate string at end-of-gathering; forwarding it would make the peer
+      // `addIceCandidate` an empty candidate (a no-op at best, an error at worst).
+      final c = candidate.candidate;
+      if (c == null || c.isEmpty) return;
       _send(
           peerPubkey,
           CallSignal.ice(
             callId: ac.callId,
-            candidate: candidate.candidate ?? '',
+            candidate: c,
             sdpMid: candidate.sdpMid,
             sdpMLineIndex: candidate.sdpMLineIndex,
           ));

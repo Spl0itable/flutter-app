@@ -292,7 +292,9 @@ class P2PService extends ChangeNotifier {
     _connections[connectionId] = conn;
 
     pc.onIceCandidate = (c) {
-      if (c.candidate == null) return;
+      // p2p.js `onicecandidate` guards `if (event.candidate)`: skip the empty
+      // end-of-gathering marker flutter_webrtc emits.
+      if (c.candidate == null || c.candidate!.isEmpty) return;
       final sig = iceSignal(candidate: {
         'candidate': c.candidate,
         'sdpMid': c.sdpMid,
@@ -617,8 +619,12 @@ class P2PService extends ChangeNotifier {
     final conn = _connections['$senderPubkey-$transferId'];
     final c = data['candidate'];
     if (conn == null || c is! Map) return;
+    // p2p.js `handleP2PIceCandidate` requires a truthy candidate; drop the empty
+    // end-of-gathering marker.
+    final candStr = c['candidate'] as String?;
+    if (candStr == null || candStr.isEmpty) return;
     final candidate = RTCIceCandidate(
-      c['candidate'] as String?,
+      candStr,
       c['sdpMid'] as String?,
       (c['sdpMLineIndex'] as num?)?.toInt(),
     );

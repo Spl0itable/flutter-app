@@ -1,8 +1,12 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/crypto/gift_wrap.dart' as giftwrap;
 import 'package:nym_bar/core/crypto/keys.dart' as keys;
 import 'package:nym_bar/core/crypto/schnorr.dart' as schnorr;
 import 'package:nym_bar/features/channels/channel_manager.dart';
+import 'package:nym_bar/features/p2p/p2p_models.dart';
 import 'package:nym_bar/features/polls/poll_logic.dart';
 import 'package:nym_bar/features/zaps/zap_logic.dart';
 import 'package:nym_bar/models/channel.dart';
@@ -398,6 +402,83 @@ void main() {
       expect(res.seal.pubkey, senderPub);
       expect(res.rumor['pubkey'], senderPub);
       expect(schnorr.verifyEvent(res.seal), isTrue);
+    });
+  });
+
+  // ===========================================================================
+  // Inbound P2P file offer → file-offer card (#84). nostr-core.js:434/502:
+  // parseFileOfferTag off a channel message sets isFileOffer/fileOffer so the
+  // row renders a FileOfferCard. Verified through the real ingest path.
+  // ===========================================================================
+  group('inbound file offer mapping', () {
+    // A legitimate share stamps seederPubkey == sender (p2p.js shareP2PFile);
+    // parseFileOfferTag then re-binds it to the actual sender on receipt.
+    final offer = FileOffer.fromBytes(
+      bytes: Uint8List.fromList(utf8.encode('hello p2p')),
+      name: 'doc.pdf',
+      type: 'application/pdf',
+      seederPubkey: 'peerpk',
+    );
+
+    NostrEvent geoMsgWithOffer(String sender, {bool withOffer = true}) =>
+        NostrEvent(
+          id: 'off_${sender}_$withOffer',
+          pubkey: sender,
+          createdAt: 2000,
+          kind: 20000,
+          tags: [
+            ['n', 'peer'],
+            if (withOffer) fileOfferTag(offer),
+            ['g', '9q8y'],
+          ],
+          content: 'Sharing file through Nymchat: doc.pdf',
+        );
+
+    test('a channel message carrying an offer tag maps to a file-offer card',
+        () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(geoMsgWithOffer('peerpk'));
+
+      final list = n.state.messages['#9q8y']!;
+      final msg = list.single;
+      expect(msg.isFileOffer, isTrue);
+      expect(msg.fileOffer, isNotNull);
+      expect(msg.fileOffer!['name'], 'doc.pdf');
+      // seederPubkey is rebound to the actual sender (anti-spoof).
+      expect(msg.fileOffer!['seederPubkey'], 'peerpk');
+    });
+
+    test('a plain channel message is NOT a file offer', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(geoMsgWithOffer('peerpk', withOffer: false));
+      final msg = n.state.messages['#9q8y']!.single;
+      expect(msg.isFileOffer, isFalse);
+      expect(msg.fileOffer, isNull);
+    });
+
+    test('an offer whose seederPubkey ≠ sender is rejected (no card)', () {
+      // Spoof: a message from "attacker" claiming someone else seeds the file.
+      final spoofed = FileOffer.fromBytes(
+        bytes: Uint8List.fromList(utf8.encode('x')),
+        name: 'evil.bin',
+        type: '',
+        seederPubkey: 'victimpk',
+      );
+      final ev = NostrEvent(
+        pubkey: 'attackerpk',
+        createdAt: 3000,
+        kind: 20000,
+        tags: [
+          ['n', 'atk'],
+          fileOfferTag(spoofed),
+          ['g', '9q8y'],
+        ],
+        content: 'evil',
+      );
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(ev);
+      final msg = n.state.messages['#9q8y']!.single;
+      expect(msg.isFileOffer, isFalse);
     });
   });
 }

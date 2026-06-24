@@ -397,6 +397,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         ? message.content.substring(4)
         : message.content;
     final suffix = getPubkeySuffix(message.pubkey);
+    // The pill's usable content width = screen − outer padding (8·2) − pill
+    // padding (16·2). Both the author header and the action are capped to it so
+    // a long nym ellipsises and a long action wraps onto its own line (the PWA
+    // renders `* author flair action *` as inline text in a wrapping pill) —
+    // never overflowing the centered `.me-message` pill.
+    final maxW =
+        (MediaQuery.of(context).size.width - 48).clamp(120.0, double.infinity);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
@@ -414,45 +421,74 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               fontStyle: FontStyle.italic,
               height: 1.3,
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
+            // `.me-message` is inline text in a wrapping pill (`* author flair
+            // action *`). A `Wrap` reproduces that: the author header is one
+            // width-capped unit (a long nym ellipsises) and the action flows
+            // onto the next line when the two can't sit together — so neither
+            // the fixed flair/supporter badges nor a long action can overflow.
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 2,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                const Text('* '),
-                NymAvatar(
-                    seed: message.pubkey,
-                    size: fontSize + 2,
-                    imageUrl: _authorPicture),
-                const SizedBox(width: 4),
-                GestureDetector(
-                  onTap: () => _openContextMenu(context),
-                  // The whole `/me` line (incl. the nym + suffix) is italic
-                  // (`.system-message.me-message { font-style: italic }`); the
-                  // author keeps secondary/600 but inherits the italic.
-                  child: Text.rich(TextSpan(children: [
-                    TextSpan(
-                      text: stripPubkeySuffix(message.author),
-                      style: TextStyle(
-                        color: c.secondary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (suffix.isNotEmpty)
-                      TextSpan(
-                        text: '#$suffix',
-                        style: TextStyle(
-                          color: c.secondaryA(0.6),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxW),
+                  child: GestureDetector(
+                    onTap: () => _openContextMenu(context),
+                    // The whole `/me` line (incl. the nym + suffix) is italic
+                    // (`.system-message.me-message { font-style: italic }`); the
+                    // author keeps secondary/600 but inherits the italic.
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        const Text('* '),
+                        NymAvatar(
+                            seed: message.pubkey,
+                            size: fontSize + 2,
+                            imageUrl: _authorPicture),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text.rich(
+                            TextSpan(children: [
+                              TextSpan(
+                                text: stripPubkeySuffix(message.author),
+                                style: TextStyle(
+                                  color: c.secondary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (suffix.isNotEmpty)
+                                TextSpan(
+                                  text: '#$suffix',
+                                  style: TextStyle(color: c.secondaryA(0.6)),
+                                ),
+                            ]),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
+                        _nymBadges(context, flairSize: fontSize + 2),
+                      ],
+                    ),
+                  ),
+                ),
+                // The action text (formatted), capped so it wraps within the
+                // pill; the closing star trails it.
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxW),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child:
+                            MessageContent(content: action, fontSize: fontSize),
                       ),
-                  ])),
+                      const Text(' *'),
+                    ],
+                  ),
                 ),
-                _nymBadges(context, flairSize: fontSize + 2),
-                const SizedBox(width: 4),
-                // The action text (formatted). Kept inline; italic inherited.
-                Flexible(
-                  child: MessageContent(content: action, fontSize: fontSize),
-                ),
-                const Text(' *'),
               ],
             ),
           ),
@@ -674,9 +710,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // (the bubble): a translucent style background plus a soft glow halo.
     final auras = _auras;
     final lastAura = auras.isNotEmpty ? auras.last : null;
+    // `.message-content` bubble fill. Dark mode: self primary@0.25, others
+    // white@0.14. Light mode (`body.light-mode.chat-bubbles`): self primary@0.20,
+    // others/PM black@0.10 — a translucent *white* over a light surface is
+    // invisible, so the PWA flips others to a dark wash. A style/aura background
+    // still takes precedence.
     final bubbleColor = deco?.contentBackground ??
         lastAura?.background ??
-        (self ? c.primaryA(0.25) : Colors.white.withValues(alpha: 0.14));
+        (self
+            ? c.primaryA(c.isLight ? 0.20 : 0.25)
+            : (c.isLight
+                ? const Color(0x1A000000) // black @ 0.10
+                : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
     final innerContent = Column(

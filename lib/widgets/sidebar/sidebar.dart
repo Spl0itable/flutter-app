@@ -543,11 +543,16 @@ class _SidebarState extends ConsumerState<Sidebar> {
   /// scramble overlay.
   Widget _header(BuildContext context, String nym) {
     final c = context.nym;
-    // `.sidebar-header`: padding 20/16, bottom hairline, bg black@0.15.
+    // `.sidebar-header`: padding 20/16, bottom hairline. bg is black@0.15
+    // (dark) and `body.light-mode .sidebar-header` → white@0.3
+    // (styles-themes-responsive.css:1226) so it reads as a light wash, not a
+    // dark scrim, in light mode.
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.15),
+        color: c.isLight
+            ? Colors.white.withValues(alpha: 0.3)
+            : Colors.black.withValues(alpha: 0.15),
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: _PanicHoldDetector(
@@ -1190,13 +1195,21 @@ class _GroupListItem extends ConsumerWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                   decoration: BoxDecoration(
-                    color: active ? c.primaryA(0.10) : Colors.transparent,
+                    // `.pm-item.active` (shared by group rows): primary@0.10 fill
+                    // + primary@0.05 glow (dark); `body.light-mode` neutralises to
+                    // black@0.06 with `box-shadow:none` (styles-themes-responsive
+                    // .css:1139), border + accent bar stay primary.
+                    color: active
+                        ? (c.isLight
+                            ? Colors.black.withValues(alpha: 0.06)
+                            : c.primaryA(0.10))
+                        : Colors.transparent,
                     borderRadius: NymRadius.rxs,
                     border: Border.all(
                       color: active ? c.primaryA(0.20) : Colors.transparent,
                       width: 1,
                     ),
-                    boxShadow: active
+                    boxShadow: active && !c.isLight
                         ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
                         : null,
                   ),

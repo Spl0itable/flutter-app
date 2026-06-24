@@ -158,6 +158,36 @@ NymColors resolveNymColors({
 /// The monospace stack the PWA uses (`--font-mono`).
 const String kMonoFont = 'monospace';
 
+/// The bundled color-emoji family (declared in `pubspec.yaml`). Used as a
+/// `fontFamilyFallback` everywhere text is rendered so unicode emoji codepoints
+/// resolve to color glyphs instead of tofu (□) on devices whose system emoji
+/// font Flutter can't reach (de-Googled / minimal Android images).
+const String kEmojiFont = 'Noto Color Emoji';
+
+/// The app-wide text fallback chain appended to every text style: the bundled
+/// color-emoji font first (emoji codepoints → color glyphs, not tofu), then the
+/// common platform CJK / Arabic / Hebrew / Thai / Indic family names so other
+/// languages' characters fall back to the device's system fonts where present.
+/// Family names absent on a given platform are simply skipped, so the one list
+/// is safe cross-platform; the theme + message renderer share it to stay in sync.
+const List<String> kEmojiFontFallback = [
+  kEmojiFont,
+  // CJK — Android Noto, then iOS PingFang / Hiragino / Apple Gothic.
+  'Noto Sans CJK SC',
+  'Noto Sans CJK TC',
+  'Noto Sans CJK JP',
+  'Noto Sans CJK KR',
+  'PingFang SC',
+  'Hiragino Sans',
+  'Apple SD Gothic Neo',
+  // RTL + other scripts — Android Noto, then iOS system equivalents.
+  'Noto Sans Arabic',
+  'Geeza Pro',
+  'Noto Sans Hebrew',
+  'Noto Sans Thai',
+  'Noto Sans Devanagari',
+];
+
 /// Builds Flutter [ThemeData] wrapping a [NymColors]. Most custom widgets read
 /// tokens via `context.nym`; this provides sensible Material defaults +
 /// the [NymColors] extension.
@@ -176,12 +206,23 @@ ThemeData buildNymThemeData(NymColors c) {
     error: c.danger,
   );
 
+  // Append the bundled color-emoji font to every text style's fallback chain so
+  // emoji codepoints render as color glyphs app-wide (not tofu) without
+  // changing the primary family. `.apply(fontFamilyFallback:)` REPLACES the
+  // per-style fallback list; the base Material themes don't set one, so this is
+  // purely additive here. (BUG: unicode emoji → □ on some Android devices.)
+  final textTheme = base.textTheme.apply(fontFamilyFallback: kEmojiFontFallback);
+  final primaryTextTheme =
+      base.primaryTextTheme.apply(fontFamilyFallback: kEmojiFontFallback);
+
   return base.copyWith(
     colorScheme: scheme,
     scaffoldBackgroundColor: c.bg,
     canvasColor: c.bg,
     dividerColor: c.glassBorder,
     splashFactory: InkRipple.splashFactory,
+    textTheme: textTheme,
+    primaryTextTheme: primaryTextTheme,
     textSelectionTheme: TextSelectionThemeData(
       cursorColor: c.primary,
       selectionColor: c.primary.withValues(alpha: 0.3),
