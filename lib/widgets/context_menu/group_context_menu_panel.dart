@@ -1130,7 +1130,8 @@ class _AddMembersDialogState extends ConsumerState<_AddMembersDialog> {
                                   contentPadding: const EdgeInsets.symmetric(
                                       horizontal: 12, vertical: 11),
                                   filled: true,
-                                  fillColor: c.subtleFill,
+                                  // `body.light-mode input` → black@0.04 fill.
+                                  fillColor: c.insetFill,
                                   border: OutlineInputBorder(
                                     borderRadius: NymRadius.rxs,
                                     borderSide:

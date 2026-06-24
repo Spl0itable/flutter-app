@@ -471,7 +471,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     Color? barColor;
     if (self) {
       bg = c.secondaryA(0.05);
-      barColor = Colors.white.withValues(alpha: 0.30);
+      // `.message.self::before` accent bar: white@0.3 dark; light-mode →
+      // black@0.25.
+      barColor = c.isLight
+          ? const Color(0x40000000) // black @ 0.25
+          : const Color(0x4DFFFFFF); // white @ 0.30
     } else if (widget.mentioned) {
       bg = c.secondaryA(0.06);
       barColor = c.secondary;

@@ -31,8 +31,12 @@ class MessagesList extends ConsumerWidget {
     final reactions = ref.watch(reactionsProvider);
     final polls = ref.watch(pollsForCurrentViewProvider);
 
-    // `.messages-container`: bg rgba(0,0,0,0.15), padding 8px 20px 16px.
-    final containerColor = Colors.black.withValues(alpha: 0.15);
+    // `.messages-container`: bg rgba(0,0,0,0.15) dark; light-mode flips it to
+    // rgba(255,255,255,0.3) (a light wash over the page), so it must be
+    // mode-aware or the message area looks dark-tinted in light mode.
+    final containerColor = c.isLight
+        ? const Color(0x4DFFFFFF) // white @ 0.3
+        : const Color(0x26000000); // black @ 0.15
 
     if (messages.isEmpty && polls.isEmpty) {
       // PWA settles an empty channel/PM to "No recent messages"
