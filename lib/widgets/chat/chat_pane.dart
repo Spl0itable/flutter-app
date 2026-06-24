@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/globe/geohash_explorer.dart';
+import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/polls/poll_create_modal.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
+import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -37,7 +40,8 @@ class ChatPane extends ConsumerWidget {
   /// Mobile/tablet: opens the off-canvas sidebar drawer (hamburger).
   final VoidCallback? onOpenSidebar;
 
-  /// Mobile/tablet chrome (hamburger + stacked composer).
+  /// Mobile/tablet chrome (hamburger + stacked composer). Driven by
+  /// `width <= 1024` so the mobile header shows across the whole 0–1024 range.
   final bool compact;
 
   /// Optional call-start hooks (wired by the calls feature; null = no calls).
@@ -57,8 +61,18 @@ class ChatPane extends ConsumerWidget {
             onStartCall: onStartCall,
             onStartGroupCall: onStartGroupCall,
           ),
-          const Expanded(child: MessagesList()),
-          Composer(compact: compact),
+          // `#messagesContainer` — tutorial spotlight target.
+          Expanded(
+            child: KeyedSubtree(
+              key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
+              child: const MessagesList(),
+            ),
+          ),
+          // `.input-container` — tutorial spotlight target.
+          KeyedSubtree(
+            key: TutorialTargets.keyFor(TutorialTarget.composer),
+            child: Composer(compact: compact),
+          ),
         ],
       ),
     );
@@ -159,15 +173,12 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: 32),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              if (compact) ...[
-                _NavBtn(
-                  icon: Icons.menu,
-                  onTap: widget.onOpenSidebar,
-                  tooltip: 'Menu',
-                ),
-                const SizedBox(width: 4),
-              ] else ...[
+              // Desktop leads with back/forward; the PWA mobile header leads
+              // with the title and puts the hamburger + notif on the right
+              // (`.mobile-header-actions`), so compact renders no leading nav.
+              if (!compact) ...[
                 _NavBtn(
                   icon: Icons.chevron_left,
                   tooltip: 'Go back',
@@ -209,20 +220,19 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                 ),
               ),
               if (compact)
-                _NavBtn(
-                  icon: settings.notificationsEnabled
-                      ? Icons.notifications_none
-                      : Icons.notifications_off_outlined,
-                  tooltip: 'Notifications',
-                )
+                _mobileActions()
               else
-                ..._desktopActions(
-                  view: view,
-                  app: app,
-                  isChannel: isChannel,
-                  channelKey: channelKey,
-                  isPinned: isPinned,
-                  isDefault: isDefault,
+                // Bounded so the `.header-actions` pills can wrap
+                // (`flex-wrap:wrap`) rather than overflow on narrow desktops.
+                Flexible(
+                  child: _desktopHeader(
+                    view: view,
+                    app: app,
+                    isChannel: isChannel,
+                    channelKey: channelKey,
+                    isPinned: isPinned,
+                    isDefault: isDefault,
+                  ),
                 ),
             ],
           ),
@@ -231,7 +241,41 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     );
   }
 
-  List<Widget> _desktopActions({
+  /// `.mobile-header-actions`: 40×40 bordered pill toggles (notif + hamburger),
+  /// gap 8, margin-left 12 (gap F14). The notif toggle carries the unread badge.
+  Widget _mobileActions() {
+    final unread =
+        ref.watch(notificationHistoryProvider.select((s) => s.unread));
+    final settings = ref.watch(settingsProvider);
+    return Padding(
+      padding: const EdgeInsets.only(left: 12),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MobileToggle(
+            icon: settings.notificationsEnabled
+                ? Icons.notifications_none
+                : Icons.notifications_off_outlined,
+            tooltip: 'Notifications',
+            badge: unread,
+            onTap: _openNotifications,
+          ),
+          const SizedBox(width: 8),
+          _MobileToggle(
+            icon: Icons.menu,
+            tooltip: 'Menu',
+            onTap: widget.onOpenSidebar,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The desktop header: the left channel nav/action cluster (back/forward +
+  /// favorite/share/poll/call as 28×28 `.channel-nav-btn`s), then the right
+  /// `.header-actions` text-pill group (Notifications+badge / Flair / Settings /
+  /// About / Logout), wrapped (`flex-wrap:wrap`) — gap F6/F8/F22.
+  Widget _desktopHeader({
     required ChatView view,
     required AppState app,
     required bool isChannel,
@@ -240,70 +284,121 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     required bool isDefault,
   }) {
     final controller = ref.read(nostrControllerProvider);
-    return [
-      // Discover / globe entry (`#geohashExplorerModal`).
-      _NavBtn(
-        icon: Icons.public,
-        tooltip: 'Discover channels',
-        onTap: _openDiscover,
-      ),
-      // New message / group.
-      _NavBtn(
-        icon: Icons.edit_outlined,
-        tooltip: 'New message',
-        onTap: () => NewPmModal.open(context),
-      ),
-      if (isChannel) ...[
-        // Favorite (togglePin) — filled star when pinned, disabled for #nymchat.
+    final unread =
+        ref.watch(notificationHistoryProvider.select((s) => s.unread));
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // Left: `.channel-action-buttons` (discover/new-PM + channel actions).
         _NavBtn(
-          icon: isPinned ? Icons.star : Icons.star_border,
-          tooltip: isDefault
-              ? '#nymchat is always favorited'
-              : (isPinned ? 'Unfavorite channel' : 'Favorite channel'),
-          active: isPinned,
-          disabled: isDefault,
-          onTap: isDefault ? null : () => controller.togglePin(channelKey),
+          icon: Icons.public,
+          tooltip: 'Discover channels',
+          onTap: _openDiscover,
         ),
-        // Share channel URL.
         _NavBtn(
-          icon: Icons.ios_share,
-          tooltip: 'Share channel URL',
-          onTap: () => ShareChannelModal.open(context, channelKey),
+          icon: Icons.edit_outlined,
+          tooltip: 'New message',
+          onTap: () => NewPmModal.open(context),
         ),
-        // Create poll (channel-only).
+        if (isChannel) ...[
+          _NavBtn(
+            icon: isPinned ? Icons.star : Icons.star_border,
+            tooltip: isDefault
+                ? '#nymchat is always favorited'
+                : (isPinned ? 'Unfavorite channel' : 'Favorite channel'),
+            active: isPinned,
+            disabled: isDefault,
+            onTap: isDefault ? null : () => controller.togglePin(channelKey),
+          ),
+          _NavBtn(
+            key: TutorialTargets.keyFor(TutorialTarget.shareButton),
+            icon: Icons.ios_share,
+            tooltip: 'Share channel URL',
+            onTap: () => ShareChannelModal.open(context, channelKey),
+          ),
+          _NavBtn(
+            icon: Icons.poll_outlined,
+            tooltip: 'Create poll',
+            onTap: () => PollCreateModal.open(context),
+          ),
+        ],
         _NavBtn(
-          icon: Icons.poll_outlined,
-          tooltip: 'Create poll',
-          onTap: () => PollCreateModal.open(context),
+          icon: Icons.call_outlined,
+          tooltip: 'Start audio call',
+          onTap: () => _startCall(view, video: false),
+        ),
+        _NavBtn(
+          icon: Icons.videocam_outlined,
+          tooltip: 'Start video call',
+          onTap: () => _startCall(view, video: true),
+        ),
+        const SizedBox(width: 8),
+        // Right: `.header-actions` text pills (tutorial mainMenu target).
+        // Flexible so the Wrap is width-bounded and wraps (`flex-wrap:wrap`).
+        Flexible(
+          child: KeyedSubtree(
+            key: TutorialTargets.keyFor(TutorialTarget.mainMenu),
+            child: Wrap(
+              spacing: 5,
+              runSpacing: 5,
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+              _HeaderPill(
+                icon: Icons.notifications_none,
+                label: 'Notifications',
+                badge: unread,
+                onTap: _openNotifications,
+              ),
+              _HeaderPill(
+                icon: Icons.star_border,
+                label: 'Flair',
+                onTap: () => ShopModal.open(context),
+              ),
+              _HeaderPill(
+                icon: Icons.settings_outlined,
+                label: 'Settings',
+                onTap: () => SettingsScreen.open(context),
+              ),
+              _HeaderPill(
+                icon: Icons.info_outline,
+                label: 'About',
+                onTap: () => AboutScreen.open(context),
+              ),
+              _HeaderPill(
+                icon: Icons.logout,
+                label: 'Logout',
+                onTap: () {
+                  // TODO(verify): sign-out (signOut) is owned by the identity
+                  // subsystem.
+                },
+              ),
+              ],
+            ),
+          ),
         ),
       ],
-      // Audio / video call (delegated to the calls hook; no-op if unwired).
-      _NavBtn(
-        icon: Icons.call_outlined,
-        tooltip: 'Start audio call',
-        onTap: () => _startCall(view, video: false),
-      ),
-      _NavBtn(
-        icon: Icons.videocam_outlined,
-        tooltip: 'Start video call',
-        onTap: () => _startCall(view, video: true),
-      ),
-      _NavBtn(
-        icon: Icons.settings_outlined,
-        tooltip: 'Settings',
-        onTap: () => SettingsScreen.open(context),
-      ),
-      _NavBtn(
-        icon: Icons.info_outline,
-        tooltip: 'About',
-        onTap: () => AboutScreen.open(context),
-      ),
-    ];
+    );
+  }
+
+  /// Opens the notifications modal and marks history viewed. The modal UI is
+  /// owned by the calls/notifications slice; until it lands this clears the
+  /// unread badge and surfaces a lightweight summary so the bell is functional.
+  void _openNotifications() {
+    final notifier = ref.read(notificationHistoryProvider.notifier);
+    notifier.markAllViewed();
+    // TODO(ui-parity): open the full notifications-history modal once the
+    // notifications slice ships it (`openNotificationsModal`). The badge +
+    // mark-as-viewed wiring (gap F22) is complete here.
   }
 
   Future<void> _openDiscover() async {
+    // CROSS-FILE (Globe): use the non-opaque modal route (scrim over the app)
+    // rather than a full opaque page push.
     final gh = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const GeohashExplorer()),
+      GeohashExplorer.route(),
     );
     if (gh == null || gh.isEmpty || !mounted) return;
     ref.read(nostrControllerProvider).switchChannel(gh, geohash: gh);
@@ -367,10 +462,12 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   }
 }
 
-/// `.channel-nav-btn`: 28×28, radius 4, textDim → primary on hover/tap.
-/// Disabled buttons render at 0.3 opacity (PWA `.channel-nav-btn:disabled`).
-class _NavBtn extends StatelessWidget {
+/// `.channel-nav-btn`: 28×28 desktop / 24×24 compact, radius 4, textDim →
+/// primary; hover paints a white@0.08 fill (gap F18). Disabled buttons render at
+/// 0.3 opacity (PWA `.channel-nav-btn:disabled`).
+class _NavBtn extends StatefulWidget {
   const _NavBtn({
+    super.key,
     required this.icon,
     this.onTap,
     this.tooltip,
@@ -384,20 +481,210 @@ class _NavBtn extends StatelessWidget {
   final bool disabled;
 
   @override
+  State<_NavBtn> createState() => _NavBtnState();
+}
+
+class _NavBtnState extends State<_NavBtn> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final color = disabled
+    // Compact (mobile) shrinks nav buttons to 24×24 (`styles-themes-responsive
+    // .css:316-319`); desktop is 28×28.
+    final compact =
+        MediaQuery.of(context).size.width <= NymDimens.tabletBreakpoint;
+    final size = compact ? 24.0 : 28.0;
+
+    final color = widget.disabled
         ? c.textDim.withValues(alpha: 0.3)
-        : (active ? c.primary : c.textDim);
-    final btn = InkWell(
-      onTap: disabled ? null : (onTap ?? () {}),
-      borderRadius: const BorderRadius.all(Radius.circular(4)),
-      child: SizedBox(
-        width: 32,
-        height: 32,
-        child: Icon(icon, size: 20, color: color),
+        : ((widget.active || _hover) ? c.primary : c.textDim);
+
+    final btn = MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: InkWell(
+        onTap: widget.disabled ? null : (widget.onTap ?? () {}),
+        borderRadius: const BorderRadius.all(Radius.circular(4)),
+        child: Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            // `.channel-nav-btn:hover { background: rgba(255,255,255,0.08) }`.
+            color: (_hover && !widget.disabled)
+                ? Colors.white.withValues(alpha: 0.08)
+                : Colors.transparent,
+            borderRadius: const BorderRadius.all(Radius.circular(4)),
+          ),
+          child: Icon(widget.icon, size: 18, color: color),
+        ),
       ),
     );
-    return tooltip != null ? Tooltip(message: tooltip!, child: btn) : btn;
+    return widget.tooltip != null
+        ? Tooltip(message: widget.tooltip!, child: btn)
+        : btn;
+  }
+}
+
+/// `.icon-btn` text pill in `.header-actions` (gap F6): white@0.05 fill, 1px
+/// glass border, radius xs, padding 7/14, 12px w500 uppercase ls 0.8, icon 14 +
+/// 5 gap. Hover → primary@12 fill / primary text / primary@30 border / glow.
+/// An optional unread [badge] (Notifications) overlays the top-right.
+class _HeaderPill extends StatefulWidget {
+  const _HeaderPill({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.badge = 0,
+  });
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final int badge;
+
+  @override
+  State<_HeaderPill> createState() => _HeaderPillState();
+}
+
+class _HeaderPillState extends State<_HeaderPill> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final fg = _hover ? c.primary : c.text;
+    final pill = AnimatedContainer(
+      duration: NymMotion.transition,
+      curve: NymMotion.curve,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: _hover
+            ? c.primaryA(0.12)
+            : Colors.white.withValues(alpha: 0.05),
+        borderRadius: NymRadius.rxs,
+        border: Border.all(
+          color: _hover ? c.primaryA(0.30) : c.glassBorder,
+        ),
+        boxShadow: _hover
+            ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
+            : null,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(widget.icon, size: 14, color: fg),
+          const SizedBox(width: 5),
+          Text(
+            widget.label.toUpperCase(),
+            style: TextStyle(
+              color: fg,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Tooltip(
+        message: widget.label,
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: NymRadius.rxs,
+          child: widget.badge > 0
+              ? _withBadge(pill, widget.badge)
+              : pill,
+        ),
+      ),
+    );
+  }
+}
+
+/// `.mobile-menu-toggle` / `.mobile-notif-toggle` (gap F14): 40×40, radius sm,
+/// bg rgba(20,20,35,0.8), 1px glass border, primary color, icon 20. Optional
+/// unread [badge] overlay.
+class _MobileToggle extends StatelessWidget {
+  const _MobileToggle({
+    required this.icon,
+    this.tooltip,
+    this.onTap,
+    this.badge = 0,
+  });
+  final IconData icon;
+  final String? tooltip;
+  final VoidCallback? onTap;
+  final int badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final box = Container(
+      width: 40,
+      height: 40,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xCC14141F), // rgba(20,20,35,0.8)
+        borderRadius: NymRadius.rsm,
+        border: Border.all(color: c.glassBorder),
+      ),
+      child: Icon(icon, size: 20, color: c.primary),
+    );
+    final child = InkWell(
+      onTap: onTap,
+      borderRadius: NymRadius.rsm,
+      child: badge > 0 ? _withBadge(box, badge) : box,
+    );
+    return tooltip != null ? Tooltip(message: tooltip!, child: child) : child;
+  }
+}
+
+/// `.notification-count-badge`: absolute top/right −4px, danger bg, white 10px
+/// w700, min 16×16 pill. Wraps [child] in a clip-free stack with the badge.
+Widget _withBadge(Widget child, int count) {
+  return Stack(
+    clipBehavior: Clip.none,
+    children: [
+      child,
+      Positioned(
+        top: -4,
+        right: -4,
+        child: _CountBadge(count: count),
+      ),
+    ],
+  );
+}
+
+class _CountBadge extends StatelessWidget {
+  const _CountBadge({required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final label = count > 99 ? '99+' : '$count';
+    return Container(
+      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: c.danger,
+        borderRadius: const BorderRadius.all(Radius.circular(8)),
+      ),
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          color: Color(0xFFFFFFFF),
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
   }
 }

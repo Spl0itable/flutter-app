@@ -7,9 +7,18 @@
 import 'package:flutter/material.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../emoji/custom_emoji.dart';
 import '../../models/user.dart';
+import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/context_menu/profile_badges.dart';
+import '../emoji/custom_emoji.dart';
 import 'autocomplete_queries.dart';
+
+/// Per-pubkey badge flags resolved by the host (the composer holds `ref`):
+/// whether the pubkey is a verified developer/bot and/or a friend. The pure
+/// query layer can't reach the controller, so these are looked up at render
+/// time (mirrors autocomplete.js:406-414 `isVerifiedDeveloper`/`isVerifiedBot`/
+/// `getFriendBadgeHtml`).
+typedef MentionBadges = ({bool verified, bool friend});
 
 /// Which dropdown content to render + its flat selectable items.
 class AutocompleteView {
@@ -73,6 +82,7 @@ class AutocompleteDropdown extends StatelessWidget {
     required this.onSelectEmoji,
     required this.onSelectKaomoji,
     this.custom = CustomEmojiState.empty,
+    this.badgesFor,
   });
 
   final AutocompleteView view;
@@ -82,6 +92,10 @@ class AutocompleteDropdown extends StatelessWidget {
   final void Function(EmojiResult) onSelectEmoji;
   final void Function(String kaomoji) onSelectKaomoji;
   final CustomEmojiState custom;
+
+  /// Resolves the verified/friend badge flags for a mention-row pubkey. When
+  /// null (e.g. tests), rows render avatar + name without badges.
+  final MentionBadges Function(String pubkey)? badgesFor;
 
   @override
   Widget build(BuildContext context) {
@@ -158,28 +172,48 @@ class AutocompleteDropdown extends StatelessWidget {
     );
   }
 
-  Widget _statusDot(NymColors c, UserStatus status) {
-    final color = switch (status) {
-      UserStatus.online => const Color(0xFF22C55E),
-      UserStatus.away => const Color(0xFFEAB308),
-      _ => c.textDim,
-    };
-    return Container(
-      width: 8,
-      height: 8,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+  /// 18×18 avatar with the status dot overlaid bottom-right
+  /// (`.user-avatar-wrap` + `.user-status-dot`, styles-components.css:745-750).
+  /// When the user is `hidden` the PWA marks the wrap `.no-status` (no dot).
+  Widget _mentionAvatar(NymColors c, MentionResult m) {
+    final hidden = m.status == UserStatus.hidden;
+    return SizedBox(
+      width: 18,
+      height: 18,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          NymAvatar(seed: m.pubkey, size: 18, imageUrl: m.avatarUrl, label: m.baseNym.isNotEmpty ? m.baseNym[0] : null),
+          if (!hidden)
+            Positioned(
+              right: -1,
+              bottom: -1,
+              child: Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: statusColor(m.status),
+                  shape: BoxShape.circle,
+                  // Hairline ring so the dot reads against the avatar.
+                  border: Border.all(color: c.bgTertiary, width: 1),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
   Widget _mentionRow(NymColors c, MentionResult m, bool selected) {
+    final badges = badgesFor?.call(m.pubkey);
     return _selectable(
       c,
       selected: selected,
       onTap: () => onSelectMention(m),
       child: Row(
         children: [
-          _statusDot(c, m.status),
-          const SizedBox(width: 8),
+          _mentionAvatar(c, m),
+          const SizedBox(width: 4),
           Flexible(
             child: RichText(
               overflow: TextOverflow.ellipsis,
@@ -199,6 +233,14 @@ class AutocompleteDropdown extends StatelessWidget {
               ),
             ),
           ),
+          if (badges != null && badges.verified) ...[
+            const SizedBox(width: 4),
+            const VerifiedBadge(size: 14),
+          ],
+          if (badges != null && badges.friend) ...[
+            const SizedBox(width: 2),
+            const FriendBadge(size: 14),
+          ],
         ],
       ),
     );
@@ -211,25 +253,59 @@ class AutocompleteDropdown extends StatelessWidget {
       onTap: () => onSelectChannel(ch),
       child: Row(
         children: [
-          Text('#${ch.name}',
-              style: TextStyle(color: c.primary, fontWeight: FontWeight.bold)),
-          if (ch.isCurrent) ...[
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: c.primary,
-                borderRadius: const BorderRadius.all(Radius.circular(8)),
-              ),
-              child: Text('current',
-                  style: TextStyle(color: c.bg, fontSize: 10)),
+          // Name (+ current badge + location) take the available width and
+          // shrink-with-ellipsis; the message count is pinned right
+          // (`.channel-ac-count { margin-left:auto }`).
+          Expanded(
+            child: Row(
+              children: [
+                Flexible(
+                  child: Text('#${ch.name}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          color: c.primary, fontWeight: FontWeight.bold)),
+                ),
+                if (ch.isCurrent) ...[
+                  const SizedBox(width: 6),
+                  // `.channel-ac-badge`: 0.7em, primary bg, bg text, radius-xs.
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: c.primary,
+                      borderRadius:
+                          const BorderRadius.all(Radius.circular(8)),
+                    ),
+                    child: Text('current',
+                        style: TextStyle(color: c.bg, fontSize: 10)),
+                  ),
+                ],
+                // `.channel-ac-location`: 0.8em, opacity 0.5 — decoded place.
+                if (ch.location.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      ch.location,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: c.textDim.withValues(alpha: 0.5),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
-          ],
+          ),
+          // `.channel-ac-count`: 0.75em, opacity 0.4, pushed to the right edge.
           if (ch.messageCount > 0) ...[
-            const Spacer(),
+            const SizedBox(width: 8),
             Text(
               '${ch.messageCount} msg${ch.messageCount != 1 ? 's' : ''}',
-              style: TextStyle(color: c.textDim, fontSize: 11),
+              style: TextStyle(
+                color: c.textDim.withValues(alpha: 0.4),
+                fontSize: 11,
+              ),
             ),
           ],
         ],

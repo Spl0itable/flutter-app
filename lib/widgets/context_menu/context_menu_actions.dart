@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart';
+
 import '../../models/message.dart';
 
 /// The identity of a context-menu action (mirrors the `#ctxXxx` items in
@@ -214,6 +216,61 @@ String ctxActionLabel(CtxAction a, CtxTarget t) {
       return t.isBlocked ? 'Unblock User' : 'Block User';
     case CtxAction.editProfile:
       return 'Edit Profile';
+  }
+}
+
+/// The leading 16px icon for an action row, mirroring the PWA's per-item SVGs
+/// (index.html:94-266; the injected Slap/Hug glyphs at ui-context.js:504/524).
+/// Reused by the quick-context-menu (F3) for the shared items. Material
+/// equivalents chosen to read like the PWA glyphs (smiley/@/envelope/fish/two-
+/// heads/person+/bolt/gift/quote/copy/translate/person✓/!/pencil/trash/star/
+/// transfer/person−/∅).
+IconData ctxActionIcon(CtxAction a) {
+  switch (a) {
+    case CtxAction.react:
+      return Icons.sentiment_satisfied_outlined;
+    case CtxAction.mention:
+      return Icons.alternate_email;
+    case CtxAction.privateMessage:
+      return Icons.mail_outline;
+    case CtxAction.slap:
+      return Icons.set_meal; // fish/trout
+    case CtxAction.hug:
+      return Icons.favorite_border;
+    case CtxAction.addToGroup:
+      return Icons.group_add_outlined;
+    case CtxAction.zap:
+      return Icons.bolt;
+    case CtxAction.giftCredits:
+      return Icons.card_giftcard;
+    case CtxAction.quote:
+      return Icons.format_quote;
+    case CtxAction.copyMessage:
+      return Icons.content_copy;
+    case CtxAction.translate:
+      return Icons.translate;
+    case CtxAction.friend:
+      return Icons.person_add_alt;
+    case CtxAction.report:
+      return Icons.error_outline;
+    case CtxAction.edit:
+      return Icons.edit_outlined;
+    case CtxAction.delete:
+      return Icons.delete_outline;
+    case CtxAction.makeMod:
+      return Icons.star_outline;
+    case CtxAction.revokeMod:
+      return Icons.star_border;
+    case CtxAction.transferOwner:
+      return Icons.swap_horiz;
+    case CtxAction.kick:
+      return Icons.person_remove_outlined;
+    case CtxAction.ban:
+      return Icons.block;
+    case CtxAction.block:
+      return Icons.block;
+    case CtxAction.editProfile:
+      return Icons.manage_accounts_outlined;
   }
 }
 

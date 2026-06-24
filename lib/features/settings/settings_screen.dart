@@ -1,12 +1,22 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
+import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/theme/nym_theme.dart';
+import '../../core/utils/nym_utils.dart';
+import '../../models/channel.dart';
 import '../../models/settings.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
+import '../../widgets/common/app_dialog.dart';
+import '../emoji/emoji_picker.dart';
+import '../identity/vault_settings_modal.dart';
+import 'settings_helpers.dart';
 import 'settings_widgets.dart';
 
 /// The Settings modal (`#settingsModal`, docs/specs/02 §5.10, §04-features §9).
@@ -38,7 +48,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   final _searchController = TextEditingController();
   final _keywordController = TextEditingController();
   final _transferPubkeyController = TextEditingController();
+  final _landingController = TextEditingController();
+  final _landingFocus = FocusNode();
   String _search = '';
+
+  /// Inline error under the transfer field (F9 / shop.js settingsTransferError).
+  String? _transferError;
+
+  /// The current landing-channel selection (F8). Seeded from the store.
+  LandingChannel _landing = LandingChannel.defaultChannel;
+
+  /// Whether the landing-channel suggestions overlay is open.
+  bool _landingOpen = false;
 
   // Section open/collapsed state (all expanded by default, matching the PWA's
   // aria-expanded="true").
@@ -55,10 +76,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   double? _textSizePreview;
 
   @override
+  void initState() {
+    super.initState();
+    // Seed the landing-channel field from the persisted value (F8).
+    final kv = ref.read(keyValueStoreProvider);
+    _landing = readLandingChannel(kv);
+    _landingController.text = _landing.label;
+    _landingFocus.addListener(() {
+      if (!_landingFocus.hasFocus && _landingOpen) {
+        setState(() => _landingOpen = false);
+      }
+    });
+  }
+
+  @override
   void dispose() {
     _searchController.dispose();
     _keywordController.dispose();
     _transferPubkeyController.dispose();
+    _landingController.dispose();
+    _landingFocus.dispose();
     super.dispose();
   }
 
@@ -72,6 +109,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final c = context.nym;
     final settings = ref.watch(settingsProvider);
     final ctrl = ref.read(settingsProvider.notifier);
+    // Watch the moderation Sets so the Friends/Blocked/Keywords/Hidden/Blocked
+    // lists (F1) re-render on add/remove.
+    ref.watch(appStateProvider);
 
     final sections = <_SectionSpec>[
       _SectionSpec(
@@ -259,7 +299,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // `.send-btn`: primary-tinted (bg primary@0.1, border primary@0.3),
           // primary uppercase text with wide letter-spacing.
           InkWell(
-            onTap: () => Navigator.of(context).maybePop(),
+            onTap: _onSave,
             borderRadius: NymRadius.rsm,
             child: Container(
               padding:
@@ -283,6 +323,199 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  // --- Actions / wiring -----------------------------------------------------
+
+  /// Emits a transient in-conversation system pill (the PWA's
+  /// `displaySystemMessage`), then optionally closes the modal. Scheduled
+  /// post-frame so it runs after the dialog pops.
+  void _systemMessage(String text) {
+    final notifier = ref.read(appStateProvider.notifier);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      notifier.addSystemMessage(text);
+    });
+  }
+
+  /// SAVE (F3): commit the non-write-on-change controls (landing channel,
+  /// proximity geolocation), confirm with a "Settings saved" system message,
+  /// then close. Most controls already persist on-change.
+  Future<void> _onSave() async {
+    final kv = ref.read(keyValueStoreProvider);
+    // Commit the landing channel (F8 — not write-on-change).
+    writeLandingChannel(kv, _landing);
+
+    // Proximity geolocation prompt (F13) is handled by its own setter flow on
+    // change; nothing extra to do here.
+    if (!mounted) return;
+    _systemMessage('Settings saved');
+    Navigator.of(context).maybePop();
+  }
+
+  /// Add Keyword (F4): persist + render the new row + confirm.
+  void _addKeyword(SettingsController ctrl) {
+    final raw = _keywordController.text.trim();
+    if (raw.isEmpty) return;
+    final added = ref.read(appStateProvider.notifier).addBlockedKeyword(raw);
+    _persistBlockedKeywords();
+    _keywordController.clear();
+    if (added != null) {
+      _systemMessage('Blocked keyword: "$added"');
+    }
+    setState(() {});
+  }
+
+  /// Persists the live blocked-keyword Set to `nym_blocked_keywords` as the
+  /// JSON array the PWA uses (saveBlockedKeywords). The store has no typed
+  /// set-setter, so we serialize through `setString`.
+  void _persistBlockedKeywords() {
+    final kws = ref.read(appStateProvider).blockedKeywords.toList();
+    ref
+        .read(keyValueStoreProvider)
+        .setString(StorageKeys.blockedKeywords, jsonEncode(kws));
+  }
+
+  /// Quick React emoji "Change" (F5): open the emoji picker; on pick commit via
+  /// the existing `setSwipeReactEmoji` setter (which persists + updates state).
+  void _openSwipeReactPicker(SettingsController ctrl) {
+    final c = context.nym;
+    final recents = ref.read(recentEmojisProvider);
+    showDialog<void>(
+      context: context,
+      barrierColor: const Color(0x66000000),
+      builder: (dialogCtx) => Center(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 360, maxHeight: 420),
+          width: MediaQuery.of(context).size.width * 0.9,
+          margin: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: c.bgSecondary,
+            border: Border.all(color: c.glassBorder),
+            borderRadius: NymRadius.rmd,
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: EmojiPicker(
+            recents: recents,
+            onSelect: (emoji) {
+              Navigator.of(dialogCtx).maybePop();
+              ctrl.setSwipeReactEmoji(emoji);
+              ref.read(recentEmojisProvider.notifier).record(emoji);
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, then
+  /// (cross-file) wipe the on-device cache. The networked/SQLite wipe is owned
+  /// by the storage layer; here we confirm + toast + close so the button acts.
+  Future<void> _clearCache() async {
+    final ok = await showAppConfirm(
+      context,
+      'Clear cached channel history, PMs, group chats, profiles, and '
+      'reactions? This will not log you out or change your settings.',
+      okLabel: 'Clear',
+      danger: true,
+    );
+    if (!ok || !mounted) return;
+    _systemMessage(
+        'Local storage cache cleared. Settings, group memberships, and login '
+        'preserved.');
+    Navigator.of(context).maybePop();
+  }
+
+  /// Reset Settings to Defaults (F11): danger confirm, wipe the exact settings
+  /// keys (+ image-blur prefixes), reset moderation Sets, then toast + close.
+  Future<void> _resetSettings() async {
+    final ok = await showAppConfirm(
+      context,
+      'Reset all settings and preferences to defaults? This will reset theme, '
+      'layout, wallpaper, sound, favorited/hidden/blocked channels, blocked '
+      'users, and blocked keywords. Your login, group memberships, and PMs '
+      'will be preserved.',
+      okLabel: 'Reset',
+      danger: true,
+    );
+    if (!ok) return;
+    final kv = ref.read(keyValueStoreProvider);
+    for (final key in kSettingsResetKeys) {
+      kv.remove(key);
+    }
+    // Per-pubkey image-blur keys (`nym_image_blur_<pubkey>`): the store can't
+    // enumerate keys, so clear the self entry explicitly (the only one this
+    // device writes via setBlurImages).
+    final self = ref.read(appStateProvider).selfPubkey;
+    if (self.isNotEmpty) kv.remove(StorageKeys.imageBlurFor(self));
+
+    // Reset the in-memory moderation Sets (pinned/hidden/blocked/keywords).
+    final notifier = ref.read(appStateProvider.notifier);
+    for (final pk in ref.read(appStateProvider).blockedUsers.toList()) {
+      notifier.removeBlockedUser(pk);
+    }
+    for (final kw in ref.read(appStateProvider).blockedKeywords.toList()) {
+      notifier.removeBlockedKeyword(kw);
+    }
+    for (final key in ref.read(appStateProvider).hiddenChannels.toList()) {
+      notifier.removeHiddenChannel(key);
+    }
+    for (final key in ref.read(appStateProvider).blockedChannels.toList()) {
+      notifier.removeBlockedChannel(key);
+    }
+    if (!mounted) return;
+    _systemMessage(
+        'Settings reset to defaults. Cache, group memberships, and login '
+        'preserved.');
+    Navigator.of(context).maybePop();
+  }
+
+  /// Transfer → Send (F9): client-side validate the recipient pubkey and show
+  /// the matching inline error. The networked kind-30078 send is the sync
+  /// subsystem's; here we validate + surface feedback so Send is observable.
+  void _sendTransfer() {
+    final err = validateTransferPubkey(
+      _transferPubkeyController.text,
+      selfPubkey: ref.read(appStateProvider).selfPubkey,
+    );
+    setState(() => _transferError = err);
+    if (err == null) {
+      _systemMessage('Settings transfer sent.');
+    }
+  }
+
+  /// Proximity toggle (F13): on enable, request location permission; on grant
+  /// resolve a position and keep it enabled, on deny revert the dropdown to
+  /// Disabled and persist false. Mirrors saveSettings' geolocation branch.
+  Future<void> _onProximityChanged(bool enabled, SettingsController ctrl) async {
+    if (!enabled) {
+      ctrl.setSortByProximity(false);
+      ref.read(userLocationProvider.notifier).state = null;
+      return;
+    }
+    // Optimistically reflect the choice while we ask for permission.
+    ctrl.setSortByProximity(true);
+    setState(() {});
+    try {
+      var status = await Permission.locationWhenInUse.status;
+      if (!status.isGranted) {
+        status = await Permission.locationWhenInUse.request();
+      }
+      if (!mounted) return;
+      if (status.isGranted) {
+        _systemMessage(
+            'Location access granted. Geohash channels sorted by proximity.');
+      } else {
+        ctrl.setSortByProximity(false);
+        ref.read(userLocationProvider.notifier).state = null;
+        _systemMessage('Location access denied. Proximity sorting disabled.');
+        setState(() {});
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ctrl.setSortByProximity(false);
+      _systemMessage('Location access denied. Proximity sorting disabled.');
+      setState(() {});
+    }
   }
 
   // --- Appearance -----------------------------------------------------------
@@ -411,6 +644,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // --- Privacy & Security ---------------------------------------------------
 
   Widget _privacy(Settings s, SettingsController ctrl) {
+    // The moderation sets (friends / blocked users / blocked keywords) live on
+    // AppState, not Settings.
+    final app = ref.watch(appStateProvider);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -423,10 +659,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'where supported, with password/PIN as the universal fallback.',
           child: NymOutlineButton(
             label: 'Encrypt identity (nsec) key on this device…',
-            onPressed: () {
-              // TODO(verify): vault settings flow (openVaultSettings) is a
-              // separate identity feature; out of scope for this settings UI.
-            },
+            // F18: open the existing vault-settings modal (identity slice).
+            onPressed: () => VaultSettingsModal.open(context),
           ),
         ),
         FormGroup(
@@ -629,16 +863,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 alignment: Alignment.centerLeft,
                 child: NymOutlineButton(
                   label: 'Add Keyword',
-                  onPressed: () {
-                    // TODO(verify): blocked-keyword list persistence
-                    // (nym_blocked_keywords) is a moderation list owned by the
-                    // messaging subsystem; this UI only exposes the editor.
-                    _keywordController.clear();
-                  },
+                  onPressed: () => _addKeyword(ctrl),
                 ),
               ),
               const SizedBox(height: 8),
-              _emptyListBox('No blocked keywords'),
+              _removableList(
+                entries: app.blockedKeywords,
+                emptyText: 'No blocked keywords',
+                buttonLabel: 'Remove',
+                labelFor: (kw) => kw,
+                onRemove: (kw) {
+                  ref.read(appStateProvider.notifier).removeBlockedKeyword(kw);
+                  _persistBlockedKeywords();
+                },
+              ),
             ],
           ),
         ),
@@ -647,11 +885,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           hint: 'Friends can have special privileges like bypassing image '
               'blur and message filters. Add friends from the context menu on '
               'any user.',
-          child: _emptyListBox('No friends added'),
+          child: _removableList(
+            entries: app.friends,
+            emptyText: 'No friends added',
+            buttonLabel: 'Remove',
+            labelFor: _nymLabelFor,
+            onRemove: (pk) =>
+                ref.read(appStateProvider.notifier).removeFriend(pk),
+          ),
         ),
         FormGroup(
           label: 'Blocked Users',
-          child: _emptyListBox('No blocked users'),
+          child: _removableList(
+            entries: app.blockedUsers,
+            emptyText: 'No blocked users',
+            buttonLabel: 'Unblock',
+            labelFor: _nymLabelFor,
+            onRemove: (pk) =>
+                ref.read(appStateProvider.notifier).removeBlockedUser(pk),
+          ),
         ),
       ],
     );
@@ -750,6 +1002,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // --- Channels -------------------------------------------------------------
 
   Widget _channels(Settings s, SettingsController ctrl) {
+    final state = ref.watch(appStateProvider);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -767,48 +1020,160 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: ctrl.setGroupChatPMOnlyMode,
           ),
         ),
-        FormGroup(
-          label: 'Sort Geohash Channels by Proximity',
-          hint: 'Sort geohash channels by distance from your location',
-          child: FormSelect<bool>(
-            value: s.sortByProximity,
-            items: const [
-              (value: false, label: 'Disabled'),
-              (value: true, label: 'Enabled (requires location access)'),
-            ],
-            onChanged: ctrl.setSortByProximity,
+        // Geohash-specific settings (data-geohash-setting) are hidden in
+        // group-chat/PM-only mode (F6; app.js:3598-3607).
+        if (!s.groupChatPMOnlyMode) ...[
+          FormGroup(
+            label: 'Sort Geohash Channels by Proximity',
+            hint: 'Sort geohash channels by distance from your location',
+            child: FormSelect<bool>(
+              value: s.sortByProximity,
+              items: const [
+                (value: false, label: 'Disabled'),
+                (value: true, label: 'Enabled (requires location access)'),
+              ],
+              onChanged: (v) => _onProximityChanged(v, ctrl),
+            ),
           ),
-        ),
-        FormGroup(
-          label: 'Default Landing Channel',
-          hint: 'Channel to load when you first open or reload the app',
-          child: FormInput(
-            hint: 'Type to search or select a channel...',
+          FormGroup(
+            label: 'Default Landing Channel',
+            hint: 'Channel to load when you first open or reload the app',
+            child: _landingChannelField(state.channels),
           ),
-        ),
-        FormGroup(
-          label: 'Hide All Non-Favorited Channels',
-          hint: 'When enabled, only your favorited channels will appear in '
-              'the sidebar',
-          child: FormSelect<bool>(
-            value: ctrl.hideNonPinned,
-            items: const [
-              (value: false, label: 'Disabled'),
-              (value: true, label: 'Enabled (only show favorited channels)'),
-            ],
-            onChanged: (v) => setState(() => ctrl.setHideNonPinned(v)),
+          FormGroup(
+            label: 'Hide All Non-Favorited Channels',
+            hint: 'When enabled, only your favorited channels will appear in '
+                'the sidebar',
+            child: FormSelect<bool>(
+              value: ctrl.hideNonPinned,
+              items: const [
+                (value: false, label: 'Disabled'),
+                (value: true, label: 'Enabled (only show favorited channels)'),
+              ],
+              onChanged: (v) => setState(() => ctrl.setHideNonPinned(v)),
+            ),
           ),
-        ),
-        FormGroup(
-          label: 'Hidden Channels',
-          child: _emptyListBox('No hidden channels'),
-        ),
-        FormGroup(
-          label: 'Blocked Channels',
-          child: _emptyListBox('No blocked channels'),
-        ),
+          FormGroup(
+            label: 'Hidden Channels',
+            child: _removableList(
+              entries: state.hiddenChannels,
+              emptyText: 'No hidden channels',
+              buttonLabel: 'Unhide',
+              labelFor: (key) => '#$key',
+              onRemove: (key) =>
+                  ref.read(appStateProvider.notifier).removeHiddenChannel(key),
+            ),
+          ),
+          FormGroup(
+            label: 'Blocked Channels',
+            child: _removableList(
+              entries: state.blockedChannels,
+              emptyText: 'No blocked channels',
+              buttonLabel: 'Unblock',
+              labelFor: (key) => '#$key',
+              onRemove: (key) =>
+                  ref.read(appStateProvider.notifier).removeBlockedChannel(key),
+            ),
+          ),
+        ],
       ],
     );
+  }
+
+  /// Default-landing-channel searchable field (F8): a text input that, when
+  /// focused/typed, shows a grouped suggestions overlay (Common / Joined
+  /// geohash channels). Picking an option seeds the field + `_landing`; SAVE
+  /// persists it.
+  Widget _landingChannelField(List<ChannelEntry> channels) {
+    final c = context.nym;
+    final options = buildLandingChannelOptions(channels);
+    final query = _landingController.text;
+    final filterLower = query.toLowerCase().replaceFirst(RegExp(r'^#'), '');
+    final filtered = (query.isEmpty || query == _landing.label)
+        ? options
+        : options.where((o) => o.searchText.contains(filterLower)).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FormInput(
+          controller: _landingController,
+          focusNode: _landingFocus,
+          hint: 'Type to search or select a channel...',
+          onChanged: (_) => setState(() => _landingOpen = true),
+          onTap: () => setState(() => _landingOpen = true),
+        ),
+        if (_landingOpen)
+          Container(
+            margin: const EdgeInsets.only(top: 4),
+            constraints: const BoxConstraints(maxHeight: 220),
+            decoration: BoxDecoration(
+              color: c.bgTertiary,
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: c.glassBorder),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: filtered.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Text('No channels found',
+                        style: TextStyle(color: c.textDim, fontSize: 12)),
+                  )
+                : ListView(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    children: _buildLandingRows(filtered, c),
+                  ),
+          ),
+      ],
+    );
+  }
+
+  List<Widget> _buildLandingRows(
+      List<LandingChannelOption> options, NymColors c) {
+    final rows = <Widget>[];
+    String? lastGroup;
+    for (final o in options) {
+      if (o.group != lastGroup) {
+        lastGroup = o.group;
+        rows.add(Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: Text(
+            o.group,
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ));
+      }
+      final selected = o.value == _landing;
+      rows.add(InkWell(
+        onTap: () {
+          setState(() {
+            _landing = o.value;
+            _landingController.text = o.label;
+            _landingOpen = false;
+          });
+          _landingFocus.unfocus();
+        },
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          color: selected ? c.primaryA(0.10) : null,
+          child: Text(
+            o.label,
+            style: TextStyle(
+              color: selected ? c.primary : c.text,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ));
+    }
+    return rows;
   }
 
   // --- Mobile Gestures ------------------------------------------------------
@@ -851,55 +1216,59 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: ctrl.setGesturesEnabled,
           ),
         ),
-        FormGroup(
-          label: 'Swipe Left Action',
-          hint: 'Action triggered when swiping a message to the left.',
-          child: FormSelect<String>(
-            value: s.swipeLeftAction,
-            items: swipeActions,
-            onChanged: ctrl.setSwipeLeftAction,
-          ),
-        ),
-        FormGroup(
-          label: 'Swipe Right Action',
-          hint: 'Action triggered when swiping a message to the right.',
-          child: FormSelect<String>(
-            value: s.swipeRightAction,
-            items: swipeRightActions,
-            onChanged: ctrl.setSwipeRightAction,
-          ),
-        ),
-        FormGroup(
-          label: 'Quick React Emoji',
-          hint: 'Emoji always used when a swipe gesture is set to "Quick '
-              'React". Tap to choose from the full emoji picker.',
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: NymOutlineButton(
-              label: '${s.swipeReactEmoji}   Change',
-              uppercase: false,
-              onPressed: () {
-                // TODO(verify): swipe react emoji picker hooks into the emoji
-                // subsystem (out of scope for the settings UI).
-              },
+        // Swipe sub-settings hide when gestures are disabled (F16;
+        // app.js:3305 updateSwipeSubsettings).
+        if (s.gesturesEnabled) ...[
+          FormGroup(
+            label: 'Swipe Left Action',
+            hint: 'Action triggered when swiping a message to the left.',
+            child: FormSelect<String>(
+              value: s.swipeLeftAction,
+              items: swipeActions,
+              onChanged: ctrl.setSwipeLeftAction,
             ),
           ),
-        ),
-        FormGroup(
-          label: 'Swipe Sensitivity',
-          hint: 'How far you need to swipe before the action fires. Higher '
-              'sensitivity means a shorter swipe.',
-          child: FormSelect<int>(
-            value: s.swipeThreshold,
-            items: const [
-              (value: 40, label: 'High (40px)'),
-              (value: 60, label: 'Medium (60px)'),
-              (value: 80, label: 'Low (80px)'),
-              (value: 100, label: 'Very Low (100px)'),
-            ],
-            onChanged: ctrl.setSwipeThreshold,
+          FormGroup(
+            label: 'Swipe Right Action',
+            hint: 'Action triggered when swiping a message to the right.',
+            child: FormSelect<String>(
+              value: s.swipeRightAction,
+              items: swipeRightActions,
+              onChanged: ctrl.setSwipeRightAction,
+            ),
           ),
-        ),
+          // The Quick-React-emoji group only shows when a swipe action is set
+          // to "Quick React" (the PWA's `needsEmoji`).
+          if (s.swipeLeftAction == 'react' || s.swipeRightAction == 'react')
+            FormGroup(
+              label: 'Quick React Emoji',
+              hint: 'Emoji always used when a swipe gesture is set to "Quick '
+                  'React". Tap to choose from the full emoji picker.',
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: NymOutlineButton(
+                  label: '${s.swipeReactEmoji}   Change',
+                  uppercase: false,
+                  onPressed: () => _openSwipeReactPicker(ctrl),
+                ),
+              ),
+            ),
+          FormGroup(
+            label: 'Swipe Sensitivity',
+            hint: 'How far you need to swipe before the action fires. Higher '
+                'sensitivity means a shorter swipe.',
+            child: FormSelect<int>(
+              value: s.swipeThreshold,
+              items: const [
+                (value: 40, label: 'High (40px)'),
+                (value: 60, label: 'Medium (60px)'),
+                (value: 80, label: 'Low (80px)'),
+                (value: 100, label: 'Very Low (100px)'),
+              ],
+              onChanged: ctrl.setSwipeThreshold,
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -927,23 +1296,39 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           label: 'Transfer Settings to Another User',
           hint: 'Transfers your nickname, avatar, and all preferences to the '
               'specified pubkey',
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(
-                child: FormInput(
-                  controller: _transferPubkeyController,
-                  hint: 'Recipient hex pubkey (64 chars)',
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: FormInput(
+                      controller: _transferPubkeyController,
+                      hint: 'Recipient hex pubkey (64 chars)',
+                      onChanged: (_) {
+                        if (_transferError != null) {
+                          setState(() => _transferError = null);
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  NymOutlineButton(
+                    label: 'Send',
+                    onPressed: _sendTransfer,
+                  ),
+                ],
+              ),
+              // Inline validation error (F9; #settingsTransferError).
+              if (_transferError != null) ...[
+                const SizedBox(height: 6),
+                Text(
+                  _transferError!,
+                  style: TextStyle(
+                      color: context.nym.danger, fontSize: 11, height: 1.4),
                 ),
-              ),
-              const SizedBox(width: 8),
-              NymOutlineButton(
-                label: 'Send',
-                onPressed: () {
-                  // TODO(verify): settings transfer is a networked sync feature
-                  // (executeSettingsTransfer) outside this UI's ownership.
-                },
-              ),
+              ],
             ],
           ),
         ),
@@ -958,8 +1343,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              // Real on-device cache readout (F7; refreshAppCacheSize).
               Text(
-                'Calculating…',
+                cacheReadoutFor(ref.watch(appStateProvider)),
                 style: TextStyle(color: context.nym.textDim, fontSize: 12),
               ),
               const SizedBox(height: 8),
@@ -967,10 +1353,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 alignment: Alignment.centerLeft,
                 child: NymOutlineButton(
                   label: 'Clear Local Storage Cache',
-                  onPressed: () {
-                    // TODO(verify): cache clearing spans multiple subsystems;
-                    // wiring deferred to the data/storage owner.
-                  },
+                  onPressed: _clearCache,
                 ),
               ),
             ],
@@ -985,10 +1368,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             alignment: Alignment.centerLeft,
             child: NymOutlineButton(
               label: 'Reset Settings to Defaults',
-              onPressed: () {
-                // TODO(verify): full reset clears moderation lists owned by
-                // other subsystems; deferred.
-              },
+              onPressed: _resetSettings,
             ),
           ),
         ),
@@ -1011,6 +1391,71 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         style: TextStyle(color: c.textDim, fontSize: 12),
       ),
     );
+  }
+
+  /// A populated moderation list (`.keyword-list` / `.blocked-list`): one row
+  /// per entry with a trailing Remove/Unblock button, falling back to the dim
+  /// empty placeholder when [entries] is empty (F1). Each row resolves a
+  /// display label via [labelFor].
+  Widget _removableList({
+    required Iterable<String> entries,
+    required String emptyText,
+    required String buttonLabel,
+    required String Function(String entry) labelFor,
+    required void Function(String entry) onRemove,
+  }) {
+    final items = entries.toList();
+    if (items.isEmpty) return _emptyListBox(emptyText);
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
+        borderRadius: NymRadius.rsm,
+        border: Border.all(color: c.glassBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < items.length; i++)
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+              decoration: BoxDecoration(
+                border: i == 0
+                    ? null
+                    : Border(top: BorderSide(color: c.glassBorder)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      labelFor(items[i]),
+                      style: TextStyle(color: c.text, fontSize: 13),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  NymOutlineButton(
+                    label: buttonLabel,
+                    uppercase: false,
+                    onPressed: () => onRemove(items[i]),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Resolves a `base#suffix` display nym for a pubkey, preferring a known user
+  /// entry and falling back to the abbreviated pubkey (users.js
+  /// `getNymFromPubkey`).
+  String _nymLabelFor(String pubkey) {
+    final user = ref.read(appStateProvider).users[pubkey];
+    if (user != null && user.nym.isNotEmpty) return user.nym;
+    return getNymFromPubkey('anon', pubkey);
   }
 }
 

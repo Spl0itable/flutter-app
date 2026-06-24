@@ -77,6 +77,7 @@ class P2PTransfersModal extends StatelessWidget {
                     _TransferRow(
                       transfer: t,
                       onCancel: () => service.cancelTransfer(t.transferId),
+                      onRetry: () => service.requestFile(t.offerId),
                     ),
                 ],
               ],
@@ -132,15 +133,37 @@ class _SeedingRow extends StatelessWidget {
 }
 
 class _TransferRow extends StatelessWidget {
-  const _TransferRow({required this.transfer, required this.onCancel});
+  const _TransferRow({
+    required this.transfer,
+    required this.onCancel,
+    required this.onRetry,
+  });
   final P2PTransfer transfer;
   final VoidCallback onCancel;
+  final VoidCallback onRetry;
+
+  /// The progress line: `pct% • speed/s` while transferring (matching the PWA's
+  /// `updateFileOfferProgress`: `bytesReceived / elapsed`), else the status
+  /// message coloured by state.
+  String _progressLine(double pct) {
+    final transferring = transfer.status == P2PStatus.transferring;
+    if (transferring) {
+      final n = transfer.isOutgoing ? transfer.bytesSent : transfer.bytesReceived;
+      final elapsed =
+          (DateTime.now().millisecondsSinceEpoch - transfer.startTime) / 1000.0;
+      if (elapsed > 0 && n > 0) {
+        final speed = (n / elapsed).round();
+        return '${pct.toStringAsFixed(1)}% • ${formatFileSize(speed)}/s';
+      }
+    }
+    final statusText = transfer.message ?? p2pStatusWire(transfer.status);
+    return '${pct.toStringAsFixed(1)}% • $statusText';
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final pct = transfer.progress;
-    final statusText = transfer.message ?? p2pStatusWire(transfer.status);
     final statusColor = transfer.status == P2PStatus.error
         ? c.danger
         : transfer.status == P2PStatus.complete
@@ -184,10 +207,25 @@ class _TransferRow extends StatelessWidget {
           Row(
             children: [
               Expanded(
-                child: Text('${pct.toStringAsFixed(1)}% • $statusText',
+                child: Text(_progressLine(pct),
                     style: TextStyle(color: statusColor, fontSize: 12)),
               ),
-              if (transfer.status != P2PStatus.complete)
+              // Terminal affordances (PWA `updateTransferStatus`):
+              //   complete → "Downloaded" label; error → "Retry" button
+              //   (re-arms requestFile); otherwise → "Cancel".
+              if (transfer.status == P2PStatus.complete)
+                Text('Downloaded',
+                    style: TextStyle(color: c.primary, fontSize: 12))
+              else if (transfer.status == P2PStatus.error)
+                GestureDetector(
+                  onTap: onRetry,
+                  child: Text('Retry',
+                      style: TextStyle(
+                          color: c.primary,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600)),
+                )
+              else
                 GestureDetector(
                   onTap: onCancel,
                   child: Text('Cancel',

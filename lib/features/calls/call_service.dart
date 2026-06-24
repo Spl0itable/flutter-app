@@ -17,6 +17,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -70,12 +71,34 @@ class _ActiveCall {
   bool cameraOff = false;
   String facingMode = 'user';
   bool sharing = false;
+  bool switchingCamera = false;
   MediaStream? screenStream;
   int startedAt = 0;
   Timer? ringTimeout;
   Timer? timerInterval;
   final List<CallChatMessage> chatLog = [];
   int chatUnread = 0;
+
+  // --- chat reactions / receipts / typing (calls.js _initCallExtras) --------
+  /// mid → emoji → set of reactor pubkeys.
+  final Map<String, Map<String, Set<String>>> chatReactions = {};
+
+  /// mid → pubkey → nym (peers that read our self message).
+  final Map<String, Map<String, String>> chatReaders = {};
+
+  /// mids we've already sent a chat-read for (dedupe).
+  final Set<String> sentChatReads = {};
+
+  /// pubkey → typing-stop timer (incoming typers).
+  final Map<String, Timer> chatTypers = {};
+
+  // --- presenter / screen-share moderation ----------------------------------
+  bool shareRestricted = false;
+  String? presenter;
+  final Set<String> presentRequests = {};
+
+  // --- video device gating --------------------------------------------------
+  int videoInputCount = 0;
 }
 
 /// Internal incoming-call record (calls.js `incomingCall`).
@@ -115,8 +138,55 @@ class CallService {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   bool _localRendererReady = false;
 
+  /// Outgoing-typing throttle/stop timers (calls.js `_callTypingThrottle` /
+  /// `_callTypingStopTimer`).
+  int _callTypingThrottle = 0;
+  Timer? _callTypingStopTimer;
+
+  /// Monotonic id for floating reactions (overlay keys them).
+  int _flyReactionSeq = 0;
+
+  /// Live floating reactions (self + incoming); each is dropped after ~3.2s.
+  final List<CallFlyReaction> _flyReactions = [];
+
+  /// In-chat / toast system-message sink. Routed by [call_providers] to
+  /// `appStateProvider.addSystemMessage` (the centered `.system-message` pill);
+  /// mirrors calls.js `displaySystemMessage`. P2P has the same sink shape.
+  void Function(String message)? onSystemMessage;
+
   /// The published snapshot.
   final ValueNotifier<CallState> state = ValueNotifier(CallState.idle);
+
+  /// Emits the centered system-message pill (calls.js `displaySystemMessage`).
+  void _system(String message) => onSystemMessage?.call(message);
+
+  /// Pushes a missed-call entry into the notification history (calls.js
+  /// `_recordMissedCall`). [callerNym] is the decorated-or-base caller name.
+  void _recordMissedCall({
+    required String callerPubkey,
+    required String callerNym,
+    required CallKind kind,
+    bool isGroup = false,
+    String? groupId,
+  }) {
+    if (callerPubkey.isEmpty) return;
+    final niceKind = kind == CallKind.video ? 'video' : 'audio';
+    var body = 'Missed $niceKind call';
+    if (isGroup && groupId != null) {
+      final g = _groupById(groupId);
+      if (g != null && g.name.isNotEmpty) body += ' in ${g.name}';
+    }
+    try {
+      _ref.read(notificationHistoryProvider.notifier).record(
+            type: 'call',
+            title: callerNym.isNotEmpty ? callerNym : _nymFor(callerPubkey),
+            body: body,
+            route: isGroup ? (groupId ?? '') : callerPubkey,
+          );
+    } catch (_) {
+      // History store may be unavailable in a teardown; best-effort.
+    }
+  }
 
   /// Local self-preview renderer (the overlay shows it muted).
   RTCVideoRenderer get localRenderer => _localRenderer;
@@ -133,7 +203,14 @@ class CallService {
     if (_self.isEmpty) {
       _self = _ref.read(nostrControllerProvider).identity?.pubkey ?? '';
     }
-    if (_active != null || _incoming != null) return; // already in a call
+    if (_self.isEmpty) {
+      _system('Must be connected to start a call');
+      return;
+    }
+    if (_active != null || _incoming != null) {
+      _system('Already in a call');
+      return;
+    }
     await _begin(
       kind: video ? CallKind.video : CallKind.audio,
       isGroup: false,
@@ -148,11 +225,21 @@ class CallService {
     if (_self.isEmpty) {
       _self = _ref.read(nostrControllerProvider).identity?.pubkey ?? '';
     }
-    if (_active != null || _incoming != null) return;
+    if (_self.isEmpty) {
+      _system('Must be connected to start a call');
+      return;
+    }
+    if (_active != null || _incoming != null) {
+      _system('Already in a call');
+      return;
+    }
     final group = _groupById(groupId);
     if (group == null) return;
     final targets = group.members.where((pk) => pk != _self).toList();
-    if (targets.isEmpty) return;
+    if (targets.isEmpty) {
+      _system('No one to call in this group');
+      return;
+    }
     await _begin(
       kind: video ? CallKind.video : CallKind.audio,
       isGroup: true,
@@ -247,16 +334,21 @@ class CallService {
   Future<void> switchCamera() async {
     final ac = _active;
     if (ac == null || ac.kind != CallKind.video || ac.sharing) return;
+    if (ac.switchingCamera) return;
     final track = ac.localStream.getVideoTracks().isNotEmpty
         ? ac.localStream.getVideoTracks().first
         : null;
     if (track == null) return;
+    ac.switchingCamera = true;
+    _publish();
     try {
       await Helper.switchCamera(track);
       ac.facingMode = ac.facingMode == 'environment' ? 'user' : 'environment';
-      _publish();
     } catch (_) {
       // ignore — camera may not support switching
+    } finally {
+      ac.switchingCamera = false;
+      _publish();
     }
   }
 
@@ -267,9 +359,15 @@ class CallService {
     if (ac == null) return;
     if (ac.sharing) {
       await _stopScreenShare();
-    } else {
-      await _startScreenShare();
+      return;
     }
+    // Restricted group call + not the presenter → request to present instead
+    // (calls.js `toggleScreenShare`).
+    if (!_canShareScreen(ac)) {
+      requestToPresent();
+      return;
+    }
+    await _startScreenShare();
   }
 
   /// Send an in-call chat message. calls.js `sendCallChat`.
@@ -286,21 +384,210 @@ class CallService {
     _publish();
   }
 
-  /// Send a floating reaction. calls.js `sendCallReaction`.
+  /// Send a floating reaction. calls.js `sendCallReaction`: broadcasts the emoji
+  /// AND surfaces a local self-fly.
   void sendReaction(String emoji) {
     final ac = _active;
     if (ac == null || emoji.isEmpty) return;
+    // Bump the shared recents so the bar surfaces this emoji next time.
+    try {
+      _ref.read(recentEmojisProvider.notifier).record(emoji);
+    } catch (_) {}
     for (final pk in ac.members.where((pk) => pk != _self)) {
       _send(pk, CallSignal.reaction(callId: ac.callId, emoji: emoji));
     }
+    _pushFly(emoji, who: 'You');
   }
 
-  /// Mark in-call chat as read (clears the unread badge). calls.js
-  /// `toggleCallChat` open branch.
+  void _onReaction(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    final emoji = data['emoji'];
+    if (ac == null || ac.callId != data['callId'] || emoji is! String) return;
+    if (emoji.isEmpty) return;
+    _pushFly(emoji, pubkey: sender);
+  }
+
+  /// Appends a floating reaction (self or incoming) and schedules its removal
+  /// after ~3.2s (calls.js `_showFlyReaction`). Random horizontal 8–82%.
+  void _pushFly(String emoji, {String? who, String? pubkey}) {
+    final id = _flyReactionSeq++;
+    final left = 8 + _rng.nextDouble() * 74;
+    _flyReactions.add(CallFlyReaction(
+      id: id,
+      emoji: emoji.length > 64 ? emoji.substring(0, 64) : emoji,
+      leftPercent: left,
+      who: who,
+      pubkey: pubkey,
+    ));
+    _publish();
+    Timer(const Duration(milliseconds: 3200), () {
+      _flyReactions.removeWhere((f) => f.id == id);
+      if (_active != null) _publish();
+    });
+  }
+
+  /// Mark in-call chat as read (clears the unread badge) and flush read receipts
+  /// for every received message (calls.js `toggleCallChat` open branch +
+  /// `_flushCallChatReads`).
   void markChatRead() {
     final ac = _active;
     if (ac == null) return;
     ac.chatUnread = 0;
+    _flushChatReads();
+    _publish();
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-call chat reactions (calls.js _toggleCallChatReaction / _onCallChatReaction)
+  // ---------------------------------------------------------------------------
+
+  /// Toggle our reaction [emoji] on chat message [mid]; broadcasts add/remove.
+  void toggleChatReaction(String mid, String emoji) {
+    final ac = _active;
+    if (ac == null || mid.isEmpty || emoji.isEmpty) return;
+    final map = ac.chatReactions.putIfAbsent(mid, () => {});
+    final set = map.putIfAbsent(emoji, () => <String>{});
+    final String op;
+    if (set.contains(_self)) {
+      set.remove(_self);
+      if (set.isEmpty) map.remove(emoji);
+      op = 'remove';
+    } else {
+      set.add(_self);
+      op = 'add';
+      try {
+        _ref.read(recentEmojisProvider.notifier).record(emoji);
+      } catch (_) {}
+    }
+    for (final pk in ac.members.where((pk) => pk != _self)) {
+      _send(pk,
+          CallSignal.chatReaction(callId: ac.callId, mid: mid, emoji: emoji, op: op));
+    }
+    _publish();
+  }
+
+  void _onChatReaction(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    final mid = data['mid'];
+    final emoji = data['emoji'];
+    if (ac == null ||
+        ac.callId != data['callId'] ||
+        mid is! String ||
+        emoji is! String) {
+      return;
+    }
+    final map = ac.chatReactions.putIfAbsent(mid, () => {});
+    final set = map.putIfAbsent(emoji, () => <String>{});
+    if (data['op'] == 'remove') {
+      set.remove(sender);
+      if (set.isEmpty) map.remove(emoji);
+    } else {
+      set.add(sender);
+    }
+    _publish();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Typing indicator (calls.js _sendCallTypingSignal / _onCallChatTyping)
+  // ---------------------------------------------------------------------------
+
+  /// Notify peers we're typing in call chat (throttled to 3s, auto-stop after
+  /// 4s), respecting the typing-indicator privacy pref.
+  void sendTyping() {
+    final ac = _active;
+    if (ac == null) return;
+    if (!_typingAllowed(ac)) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _callTypingThrottle < 3000) {
+      _armTypingStop();
+      return;
+    }
+    _callTypingThrottle = now;
+    for (final pk in ac.members.where((pk) => pk != _self)) {
+      _send(pk, CallSignal.chatTyping(callId: ac.callId, status: 'start'));
+    }
+    _armTypingStop();
+  }
+
+  void _armTypingStop() {
+    _callTypingStopTimer?.cancel();
+    _callTypingStopTimer = Timer(const Duration(seconds: 4), _sendTypingStop);
+  }
+
+  void _sendTypingStop() {
+    _callTypingStopTimer?.cancel();
+    _callTypingStopTimer = null;
+    _callTypingThrottle = 0;
+    final ac = _active;
+    if (ac == null) return;
+    for (final pk in ac.members.where((pk) => pk != _self)) {
+      _send(pk, CallSignal.chatTyping(callId: ac.callId, status: 'stop'));
+    }
+  }
+
+  void _onChatTyping(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    if (ac == null || ac.callId != data['callId'] || sender == _self) return;
+    if (!_typingAllowed(ac)) return;
+    if (data['status'] == 'stop') {
+      ac.chatTypers.remove(sender)?.cancel();
+    } else {
+      ac.chatTypers.remove(sender)?.cancel();
+      ac.chatTypers[sender] = Timer(const Duration(seconds: 5), () {
+        ac.chatTypers.remove(sender);
+        if (_active == ac) _publish();
+      });
+    }
+    _publish();
+  }
+
+  void _clearTyping(String pubkey) {
+    final ac = _active;
+    if (ac == null) return;
+    ac.chatTypers.remove(pubkey)?.cancel();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Read receipts (calls.js _sendCallChatRead / _onCallChatRead)
+  // ---------------------------------------------------------------------------
+
+  void _sendChatRead(String senderPubkey, String mid) {
+    final ac = _active;
+    if (ac == null || mid.isEmpty || senderPubkey.isEmpty || senderPubkey == _self) {
+      return;
+    }
+    if (!_readReceiptAllowed(ac)) return;
+    if (ac.sentChatReads.contains(mid)) return;
+    ac.sentChatReads.add(mid);
+    for (final pk in ac.members.where((pk) => pk != _self)) {
+      _send(pk, CallSignal.chatRead(callId: ac.callId, mid: mid));
+    }
+  }
+
+  void _flushChatReads() {
+    final ac = _active;
+    if (ac == null) return;
+    for (final m in ac.chatLog) {
+      if (!m.isSelf && m.pubkey.isNotEmpty && m.mid.isNotEmpty) {
+        _sendChatRead(m.pubkey, m.mid);
+      }
+    }
+  }
+
+  void _onChatRead(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    final mid = data['mid'];
+    if (ac == null || ac.callId != data['callId'] || mid is! String) return;
+    if (sender == _self) return;
+    final idx = ac.chatLog.indexWhere((m) => m.mid == mid && m.isSelf);
+    if (idx < 0) return;
+    final readers = ac.chatReaders.putIfAbsent(mid, () => {});
+    readers[sender] = _nymFor(sender);
+    // Mirror readers + delivery state onto the chat-log entry for the UI.
+    ac.chatLog[idx] = ac.chatLog[idx].copyWith(
+      readers: Map.of(readers),
+      delivery: CallChatDelivery.read,
+    );
     _publish();
   }
 
@@ -354,12 +641,14 @@ class CallService {
     }
     _publish(statusText: isGroup ? 'Ringing group…' : 'Calling…');
 
-    // 45s ring timeout — cancel the call if nobody answered (calls.js).
+    // 45s ring timeout — cancel the call if nobody answered (calls.js
+    // `startCall`: broadcasts cancel, surfaces "No answer", then ends).
     active.ringTimeout = Timer(kCallRingTimeout, () {
       if (_active == active && active.status == 'outgoing') {
         for (final pk in targets) {
           _send(pk, CallSignal.cancel(callId));
         }
+        _system('No answer');
         _endCall();
       }
     });
@@ -374,6 +663,9 @@ class CallService {
   void handleSignal(Map<String, dynamic> rumor) {
     final sender = rumor['pubkey'] as String?;
     if (sender == null || sender == _self) return;
+    // A blocked user can't ring, join, or signal into a call at all
+    // (calls.js `handleCallSignalingEvent` line 172).
+    if (_isBlocked(sender)) return;
     final data = _decodePayload(rumor);
     if (data == null) return;
     switch (data['type']) {
@@ -404,11 +696,26 @@ class CallService {
       case 'share':
         _onShare(sender, data);
         break;
+      case 'present-state':
+        _onPresentState(sender, data);
+        break;
+      case 'present-request':
+        _onPresentRequest(sender, data);
+        break;
       case 'reaction':
-        // Floating reactions are visual only; surfaced via state if desired.
+        _onReaction(sender, data);
         break;
       case 'chat':
         _onChat(sender, data);
+        break;
+      case 'chat-reaction':
+        _onChatReaction(sender, data);
+        break;
+      case 'chat-typing':
+        _onChatTyping(sender, data);
+        break;
+      case 'chat-read':
+        _onChatRead(sender, data);
         break;
     }
   }
@@ -478,6 +785,15 @@ class CallService {
     inc.timeout = Timer(kCallRingTimeout, () {
       if (_incoming == inc) {
         _incoming = null;
+        // calls.js: surfaces "Missed call from X" + records it to history.
+        _system('Missed call from ${inc.nym}');
+        _recordMissedCall(
+          callerPubkey: inc.from,
+          callerNym: inc.nym,
+          kind: inc.kind,
+          isGroup: inc.isGroup,
+          groupId: inc.groupId,
+        );
         _publishIdle();
       }
     });
@@ -507,6 +823,8 @@ class CallService {
     if (ac == null || ac.callId != data['callId']) return;
     if (!ac.members.contains(sender)) return;
     if (!ac.isGroup) {
+      // calls.js `_onCallReject`: busy peer vs explicit decline.
+      _system(data['reason'] == 'busy' ? 'User is busy' : 'Call declined');
       _endCall();
     }
   }
@@ -516,6 +834,15 @@ class CallService {
     if (inc != null && inc.callId == data['callId'] && sender == inc.from) {
       inc.timeout?.cancel();
       _incoming = null;
+      // calls.js `_onCallCancel`: a cancelled ring is a missed call.
+      _system('Missed call from ${inc.nym}');
+      _recordMissedCall(
+        callerPubkey: inc.from,
+        callerNym: inc.nym,
+        kind: inc.kind,
+        isGroup: inc.isGroup,
+        groupId: inc.groupId,
+      );
       _publishIdle();
     }
   }
@@ -526,6 +853,7 @@ class CallService {
     if (!ac.members.contains(sender)) return;
     _removePeer(sender);
     if (!ac.isGroup || ac.peers.isEmpty) {
+      _system('Call ended');
       _endCall();
     } else {
       _publish();
@@ -607,9 +935,13 @@ class CallService {
     final ac = _active;
     final text = data['text'];
     if (ac == null || ac.callId != data['callId'] || text is! String) return;
+    if (_isBlocked(sender)) return;
+    // An inbound message ends that peer's "typing…" state (calls.js
+    // `_clearCallChatTyping`).
+    _clearTyping(sender);
     ac.chatLog.add(CallChatMessage(
       pubkey: sender,
-      text: text,
+      text: text.length > 2000 ? text.substring(0, 2000) : text,
       isSelf: false,
       mid: (data['mid'] as String?) ?? genCallId(),
     ));
@@ -636,6 +968,35 @@ class CallService {
     for (final track in ac.localStream.getTracks()) {
       final sender = await pc.addTrack(track, ac.localStream);
       if (track.kind == 'video') peer.videoSender = sender;
+    }
+
+    // If we're already sharing our screen, push that track to the new peer and
+    // tell them we're presenting (calls.js `_connectToPeer` 512-520).
+    if (ac.sharing && ac.screenStream != null) {
+      final st = ac.screenStream!.getVideoTracks().isNotEmpty
+          ? ac.screenStream!.getVideoTracks().first
+          : null;
+      if (st != null) {
+        try {
+          if (peer.videoSender != null) {
+            await peer.videoSender!.replaceTrack(st);
+          } else {
+            peer.videoSender = await pc.addTrack(st, ac.screenStream!);
+          }
+        } catch (_) {}
+      }
+      _send(peerPubkey, CallSignal.share(callId: ac.callId, on: true));
+    }
+    // As a mod, sync the presenter/restriction state to the new peer (calls.js
+    // `_connectToPeer` 522-524).
+    if (_isCallMod(ac) && (ac.shareRestricted || ac.presenter != null)) {
+      _send(
+          peerPubkey,
+          CallSignal.presentState(
+            callId: ac.callId,
+            restricted: ac.shareRestricted,
+            presenter: ac.presenter,
+          ));
     }
 
     pc.onIceCandidate = (candidate) {
@@ -815,6 +1176,13 @@ class CallService {
     if (ac != null) {
       ac.ringTimeout?.cancel();
       ac.timerInterval?.cancel();
+      for (final t in ac.chatTypers.values) {
+        t.cancel();
+      }
+      ac.chatTypers.clear();
+      _callTypingStopTimer?.cancel();
+      _callTypingStopTimer = null;
+      _callTypingThrottle = 0;
       for (final peer in ac.peers.values) {
         try {
           peer.pc.close();
@@ -838,6 +1206,7 @@ class CallService {
       }
     }
     _active = null;
+    _flyReactions.clear();
     if (_localRendererReady) _localRenderer.srcObject = null;
     _publishIdle();
   }
@@ -861,6 +1230,10 @@ class CallService {
       return await navigator.mediaDevices.getUserMedia(constraints);
     } catch (e) {
       debugPrint('CallService getUserMedia error: $e');
+      // calls.js `_getLocalMedia` surfaces a media-error system message.
+      _system(
+        'Could not access ${kind == CallKind.video ? 'camera/microphone' : 'microphone'}: $e',
+      );
       return null;
     }
   }
@@ -871,6 +1244,9 @@ class CallService {
       _localRendererReady = true;
     }
     _localRenderer.srcObject = stream;
+    // Gate the switch-camera button on multi-camera availability (calls.js
+    // `_updateCameraSwitchBtn`). Fire-and-forget; updates state when it lands.
+    unawaited(_refreshVideoInputCount());
   }
 
   Future<bool> _send(String to, Map<String, dynamic> payload) {
@@ -888,17 +1264,176 @@ class CallService {
   }
 
   bool _isFriend(String pubkey) {
-    // Friends aren't modeled on the native store yet; default false so the
-    // 'friends' acceptCalls pref errs safe.
-    // TODO(verify): wire to the engine's isFriend() once friends land natively.
-    return false;
+    // Friends now live on the shared app store (Foundations).
+    return _ref.read(appStateProvider).friends.contains(pubkey);
   }
+
+  bool _isBlocked(String pubkey) =>
+      _ref.read(appStateProvider).blockedUsers.contains(pubkey);
 
   String _nymFor(String pubkey) {
     final users = _ref.read(usersProvider);
     final u = users[pubkey];
     if (u != null && u.nym.isNotEmpty) return u.nym;
     return pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
+  }
+
+  /// Random source for floating-reaction positions (seedable in tests).
+  final Random _rng = Random();
+
+  // ---------------------------------------------------------------------------
+  // Privacy gates — mirror settings.js isIndicatorAllowedFor(scope, context)
+  // ---------------------------------------------------------------------------
+
+  bool _typingAllowed(_ActiveCall ac) =>
+      _indicatorAllowed(_ref.read(settingsProvider).typingIndicatorsScope, ac.isGroup);
+
+  bool _readReceiptAllowed(_ActiveCall ac) =>
+      _indicatorAllowed(_ref.read(settingsProvider).readReceiptsScope, ac.isGroup);
+
+  /// scope ∈ disabled|everywhere|pms|groups|pms-groups; context = group|pm.
+  static bool _indicatorAllowed(String scope, bool isGroup) {
+    switch (scope) {
+      case 'disabled':
+        return false;
+      case 'everywhere':
+        return true;
+      case 'pms':
+        return !isGroup;
+      case 'groups':
+        return isGroup;
+      case 'pms-groups':
+        return true;
+      default:
+        return true;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Presenter / screen-share moderation (calls.js 1033-1099)
+  // ---------------------------------------------------------------------------
+
+  /// True when we can moderate this group call (owner/mod of the group).
+  bool _isCallMod([_ActiveCall? call]) {
+    final ac = call ?? _active;
+    if (ac == null || !ac.isGroup || ac.groupId == null) return false;
+    final g = _groupById(ac.groupId!);
+    return g != null && g.canModerate(_self);
+  }
+
+  bool _peerCanModerate(_ActiveCall ac, String pubkey) {
+    if (!ac.isGroup || ac.groupId == null) return false;
+    final g = _groupById(ac.groupId!);
+    return g != null && g.canModerate(pubkey);
+  }
+
+  /// Whether the local user may screen-share right now (calls.js
+  /// `canShareScreen`).
+  bool _canShareScreen([_ActiveCall? call]) {
+    final ac = call ?? _active;
+    if (ac == null) return false;
+    if (!ac.isGroup) return true;
+    if (_isCallMod(ac)) return true;
+    if (!ac.shareRestricted) return true;
+    return ac.presenter == _self;
+  }
+
+  /// A non-mod taps share when restricted → request to present instead.
+  void requestToPresent() {
+    final ac = _active;
+    if (ac == null || !ac.isGroup) return;
+    final mods = ac.members
+        .where((pk) => pk != _self && _peerCanModerate(ac, pk))
+        .toList();
+    if (mods.isEmpty) {
+      _system('No moderator available to grant presenting');
+      return;
+    }
+    for (final pk in mods) {
+      _send(pk, CallSignal.presentRequest(ac.callId));
+    }
+    _system('Requested to present');
+  }
+
+  void _onPresentRequest(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    if (ac == null || ac.callId != data['callId'] || !_isCallMod(ac)) return;
+    ac.presentRequests.add(sender);
+    _system('${_nymFor(sender)} requested to present');
+    _publish();
+  }
+
+  void _broadcastPresentState() {
+    final ac = _active;
+    if (ac == null) return;
+    for (final pk in ac.members.where((pk) => pk != _self)) {
+      _send(
+          pk,
+          CallSignal.presentState(
+            callId: ac.callId,
+            restricted: ac.shareRestricted,
+            presenter: ac.presenter,
+          ));
+    }
+  }
+
+  void _onPresentState(String sender, Map<String, dynamic> data) {
+    final ac = _active;
+    if (ac == null || ac.callId != data['callId'] || !ac.isGroup) return;
+    if (!_peerCanModerate(ac, sender)) return;
+    final wasPresenter = ac.presenter == _self;
+    ac.shareRestricted = data['restricted'] == true;
+    ac.presenter = data['presenter'] as String?;
+    _enforceShareRestriction();
+    if (!wasPresenter && ac.presenter == _self) {
+      _system('You can now share your screen');
+    }
+    _publish();
+  }
+
+  /// Mod toggles "only the presenter can share".
+  void setScreenShareRestricted(bool on) {
+    final ac = _active;
+    if (ac == null || !_isCallMod(ac)) return;
+    ac.shareRestricted = on;
+    _broadcastPresentState();
+    _enforceShareRestriction();
+    _publish();
+  }
+
+  /// Mod assigns (or clears, with null) the presenter.
+  void assignPresenter(String? pubkey) {
+    final ac = _active;
+    if (ac == null || !_isCallMod(ac)) return;
+    ac.presenter = pubkey;
+    if (pubkey != null) ac.presentRequests.remove(pubkey);
+    _broadcastPresentState();
+    _publish();
+  }
+
+  void _enforceShareRestriction() {
+    final ac = _active;
+    if (ac != null && ac.sharing && !_canShareScreen(ac)) {
+      unawaited(_stopScreenShare());
+    }
+  }
+
+  /// Re-enumerates video input devices and updates the switch-cam gating count
+  /// (calls.js `_updateCameraSwitchBtn`). Best-effort; keeps the prior count on
+  /// failure.
+  Future<void> _refreshVideoInputCount() async {
+    final ac = _active;
+    if (ac == null || ac.kind != CallKind.video) return;
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      final n = devices.where((d) => d.kind == 'videoinput').length;
+      if (_active == ac) {
+        ac.videoInputCount = n;
+        _publish();
+      }
+    } catch (_) {
+      // Keep showing — enumerate may be unavailable on some platforms.
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -953,6 +1488,16 @@ class CallService {
         ? null
         : ac.members.firstWhere((pk) => pk != _self, orElse: () => '');
 
+    // Merge per-mid reactions (kept separately on `ac.chatReactions`) into each
+    // chat-log entry so the overlay renders the count badges per message.
+    final chatLog = ac.chatLog.map((m) {
+      final r = ac.chatReactions[m.mid];
+      if (r == null || r.isEmpty) return m;
+      return m.copyWith(
+        reactions: {for (final e in r.entries) e.key: Set<String>.of(e.value)},
+      );
+    }).toList();
+
     state.value = CallState(
       phase: phase,
       callId: ac.callId,
@@ -965,6 +1510,8 @@ class CallService {
       muted: ac.muted,
       cameraOff: ac.cameraOff,
       sharing: ac.sharing,
+      switchingCamera: ac.switchingCamera,
+      videoInputCount: ac.videoInputCount,
       facingMode: ac.facingMode,
       statusText: statusText ??
           (phase == CallPhase.active
@@ -973,8 +1520,15 @@ class CallService {
                   ? (ac.isGroup ? 'Ringing group…' : 'Calling…')
                   : 'Connecting…')),
       elapsedSeconds: elapsed,
-      chatLog: List.of(ac.chatLog),
+      chatLog: chatLog,
       chatUnread: ac.chatUnread,
+      typingPubkeys: ac.chatTypers.keys.toList(),
+      flyReactions: List.of(_flyReactions),
+      shareRestricted: ac.shareRestricted,
+      presenter: ac.presenter,
+      presentRequests: Set.of(ac.presentRequests),
+      isMod: _isCallMod(ac),
+      canShareScreen: _canShareScreen(ac),
     );
   }
 

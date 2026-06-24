@@ -42,6 +42,12 @@ class TutorialTargets {
   static GlobalKey keyFor(TutorialTarget target) =>
       _keys.putIfAbsent(target, () => GlobalKey(debugLabel: 'tutorial_$target'));
 
+  /// Drop all registered keys so the next shell mount allocates fresh ones.
+  /// Called from `HomeShell.initState` — a single live shell never shares a
+  /// [GlobalKey] with a previously-disposed one (which would otherwise reparent
+  /// across sequential mounts, e.g. in widget tests, and corrupt teardown).
+  static void reset() => _keys.clear();
+
   /// The global on-screen rect of [target]'s widget, or null when the target
   /// isn't mounted/laid-out (mirrors the PWA's "no element" → center fallback).
   static Rect? rectOf(TutorialTarget target) {

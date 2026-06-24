@@ -54,6 +54,51 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
 
   late final Map<String, List<String>> _emojiToNames = buildEmojiToNames();
 
+  // Favorite-star state (emoji.js `nym_emoji_category_favorites` /
+  // `nym_emoji_pack_favorites`). Loaded lazily once prefs resolve; toggling a
+  // star reorders that block to the top live and persists.
+  EmojiFavoritesStore? _catFavStore;
+  EmojiFavoritesStore? _packFavStore;
+  List<String> _categoryFavorites = const [];
+  List<String> _packFavorites = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFavorites();
+  }
+
+  Future<void> _loadFavorites() async {
+    try {
+      final prefs = await ref.read(emojiPrefsProvider.future);
+      if (!mounted) return;
+      setState(() {
+        _catFavStore = EmojiFavoritesStore(prefs, kEmojiCategoryFavoritesKey);
+        _packFavStore = EmojiFavoritesStore(prefs, kEmojiPackFavoritesKey);
+        _categoryFavorites = _catFavStore!.load();
+        _packFavorites = _packFavStore!.load();
+      });
+    } catch (_) {
+      // Favorites are best-effort; an unavailable store leaves stars inactive.
+    }
+  }
+
+  Future<void> _toggleCategoryFavorite(String category) async {
+    final store = _catFavStore;
+    if (store == null) return;
+    final next = await store.toggle(category);
+    if (!mounted) return;
+    setState(() => _categoryFavorites = next);
+  }
+
+  Future<void> _togglePackFavorite(String packKey) async {
+    final store = _packFavStore;
+    if (store == null) return;
+    final next = await store.toggle(packKey);
+    if (!mounted) return;
+    setState(() => _packFavorites = next);
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -125,8 +170,16 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ));
     }
 
-    // Custom NIP-30 packs.
-    for (final pack in custom.packs) {
+    // Custom NIP-30 packs, favorited packs first (emoji.js rank: fav→own→
+    // subscribed→rest; own/subscribed flags aren't reachable from the cache, so
+    // we rank favorites first then keep the cache's recency order — see report
+    // F5 sub-deferral).
+    final packFavSet = _packFavorites.toSet();
+    final orderedPacks = [
+      ...custom.packs.where((p) => packFavSet.contains(p.key)),
+      ...custom.packs.where((p) => !packFavSet.contains(p.key)),
+    ];
+    for (final pack in orderedPacks) {
       final cells = <Widget>[];
       for (final e in pack.emojis) {
         if (!custom.codeToUrl.containsKey(e.shortcode)) continue;
@@ -134,11 +187,18 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         cells.add(_customCell(e.shortcode, custom.codeToUrl[e.shortcode]!));
       }
       if (cells.isEmpty) continue;
-      sections.add(_section(c, title: pack.title, children: cells));
+      sections.add(_section(
+        c,
+        title: pack.title,
+        children: cells,
+        isFavorite: packFavSet.contains(pack.key),
+        onToggleFavorite:
+            _packFavStore == null ? null : () => _togglePackFavorite(pack.key),
+      ));
     }
 
-    // Default categories.
-    for (final category in kEmojiCategoryOrder) {
+    // Default categories, favorited categories hoisted to the top of the block.
+    for (final category in orderedEmojiCategories(_categoryFavorites)) {
       final list = kEmojisByCategory[category]!;
       final cells = <Widget>[
         for (final e in list)
@@ -149,6 +209,10 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         c,
         title: '${category[0].toUpperCase()}${category.substring(1)}',
         children: cells,
+        isFavorite: _categoryFavorites.contains(category),
+        onToggleFavorite: _catFavStore == null
+            ? null
+            : () => _toggleCategoryFavorite(category),
       ));
     }
 
@@ -279,9 +343,19 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
 
   /// `.emoji-picker-section` + `.emoji-picker-section-title` (10px uppercase
   /// dim, letter-spacing 1) wrapping a grid (styles-components.css:2137-2154).
+  /// [onToggleFavorite]/[isFavorite] add the trailing favorite-star button on
+  /// default-category and custom-pack titles (emoji.js:446-451, 510-512).
   _Section _section(NymColors c,
-      {required String title, required List<Widget> children}) {
-    return _Section(title: title, cells: children);
+      {required String title,
+      required List<Widget> children,
+      bool isFavorite = false,
+      VoidCallback? onToggleFavorite}) {
+    return _Section(
+      title: title,
+      cells: children,
+      isFavorite: isFavorite,
+      onToggleFavorite: onToggleFavorite,
+    );
   }
 
   /// `.emoji-btn`: 23px glyph, transparent, hover highlight (here a tap target).
@@ -317,9 +391,18 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
 /// A single emoji section (title + flat list of cells); laid out into a grid by
 /// [_GridSection] which knows the column count.
 class _Section {
-  const _Section({required this.title, required this.cells});
+  const _Section({
+    required this.title,
+    required this.cells,
+    this.isFavorite = false,
+    this.onToggleFavorite,
+  });
   final String title;
   final List<Widget> cells;
+  final bool isFavorite;
+
+  /// When non-null, a favorite star is shown at the end of the title row.
+  final VoidCallback? onToggleFavorite;
 }
 
 /// Renders one [_Section] as a titled responsive grid.
@@ -338,14 +421,28 @@ class _GridSection extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 2),
-            child: Text(
-              section.title.toUpperCase(),
-              style: TextStyle(
-                fontSize: 10,
-                color: c.textDim,
-                letterSpacing: 1,
-                fontWeight: FontWeight.w500,
-              ),
+            // `.emoji-default-cat-title` / `.emoji-pack-title`: flex
+            // space-between, the star button trailing.
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    section.title.toUpperCase(),
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: c.textDim,
+                      letterSpacing: 1,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                if (section.onToggleFavorite != null)
+                  _FavStar(
+                    active: section.isFavorite,
+                    onTap: section.onToggleFavorite!,
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: 4),
@@ -358,6 +455,37 @@ class _GridSection extends StatelessWidget {
             children: section.cells,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// `.emoji-category-fav-btn` / `.emoji-pack-fav-btn`: a 14px star, dim by
+/// default (hover → primary), filled `#F5C518` when active
+/// (styles-components.css:1350-1380).
+class _FavStar extends StatelessWidget {
+  const _FavStar({required this.active, required this.onTap});
+  final bool active;
+  final VoidCallback onTap;
+
+  static const Color _activeColor = Color(0xFFF5C518);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Tooltip(
+      message: active ? 'Unfavorite' : 'Favorite',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: NymRadius.rxs,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Icon(
+            active ? Icons.star : Icons.star_border,
+            size: 14,
+            color: active ? _activeColor : c.textDim,
+          ),
+        ),
       ),
     );
   }
