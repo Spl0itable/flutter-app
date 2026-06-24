@@ -843,6 +843,23 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Track last activity for the channel sort (`channelLastActivity`).
     state.channelLastActivity[key] = m.timestamp;
 
+    // Surface the channel in the sidebar on first activity. The PWA lists
+    // discovered/active channels (channels.js `addChannelToList`), so any channel
+    // we actually receive a message for — live from relays OR from the D1 archive
+    // backfill — must appear, unless the user blocked or hid it. Mirrors
+    // `addChannel`'s entry/key shape (registry key is the bare lowercase value).
+    final isGeo = (m.geohash ?? '').isNotEmpty;
+    final regKey = (isGeo ? m.geohash! : (m.channel ?? '')).toLowerCase();
+    if (regKey.isNotEmpty &&
+        !state.blockedChannels.contains(regKey) &&
+        !state.hiddenChannels.contains(regKey) &&
+        !state.channels.any((c) => c.key == regKey)) {
+      state.channels.add(ChannelEntry(
+        channel: m.channel ?? (isGeo ? m.geohash! : regKey),
+        geohash: isGeo ? m.geohash! : '',
+      ));
+    }
+
     // Bump unread when the message isn't for the active view, isn't ours, and
     // isn't from a blocked user / keyword-filtered (the PWA's unread recompute
     // skips `blockedUsers` — channels.js `_recomputeUnreadCount`).
