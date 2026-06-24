@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
+import '../../core/crypto/bitchat.dart' as bitchat;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/schnorr.dart' as schnorr;
@@ -787,8 +788,18 @@ class NostrService {
 
     // NIP-59 sender auth: native seals must be signed by the claimed author.
     var senderVerified = true;
+    var emitRumor = rumor;
     if (isBitchat) {
       senderVerified = false;
+      // bitchat-app PMs carry a `bitchat1:` BitchatPacket as the rumor content
+      // (NoisePayload TLV), not plain text. Decode it the way the PWA's
+      // `parseBitchatMessage` does so the actual message text reaches the UI;
+      // without this the message renders as the raw `bitchat1:…` blob.
+      // Non-message payloads (delivery/read receipts) are not rumors to show —
+      // drop them rather than ingesting a blank PM.
+      final decoded = _decodeBitchatRumor(rumor);
+      if (decoded == null) return;
+      emitRumor = decoded;
     } else {
       if (seal.pubkey != rumorPubkey || !schnorr.verifyEvent(seal)) {
         return; // forged
@@ -798,11 +809,44 @@ class NostrService {
     handlers.onGiftWrap!(GiftWrapUnwrapped(
       wrapId: wrap.id,
       wrapCreatedAt: wrap.createdAt,
-      rumor: rumor,
+      rumor: emitRumor,
       senderVerified: senderVerified,
       isBitchat: isBitchat,
       rawWrap: wrap.toJson(),
     ));
+  }
+
+  /// Normalizes a bitchat-app rumor for emission. When the rumor `content` is a
+  /// `bitchat1:` BitchatPacket it is decoded (PWA `parseBitchatMessage`): a
+  /// PRIVATE_MESSAGE yields a copy whose `content` is the decoded text (with the
+  /// bitchat message id added as an `['x', id]` tag for dedup/receipts when the
+  /// rumor lacks one); a receipt/other payload returns null so the caller drops
+  /// it instead of surfacing a blank message. A non-`bitchat1:` content (e.g. a
+  /// Nymchat rumor delivered over a bitchat wrap) is returned unchanged.
+  Map<String, dynamic>? _decodeBitchatRumor(Map<String, dynamic> rumor) {
+    final content = rumor['content'];
+    if (content is! String || !bitchat.isBitchatPacket(content)) return rumor;
+    final packet = bitchat.decodeBitchatPacket(content);
+    if (packet == null || !packet.isPrivateMessage) return null;
+
+    final next = Map<String, dynamic>.of(rumor);
+    next['content'] = packet.content ?? '';
+    final id = packet.messageId;
+    if (id != null && id.isNotEmpty) {
+      final tags = (rumor['tags'] as List?)
+              ?.whereType<List>()
+              .map((t) => t.map((e) => e.toString()).toList())
+              .toList() ??
+          <List<String>>[];
+      final hasX = tags.any((t) => t.isNotEmpty && t[0] == 'x');
+      if (!hasX) {
+        next['tags'] = [
+          ...tags,
+          ['x', id],
+        ];
+      }
+    }
+    return next;
   }
 
   /// Requests recent kind-0 profiles for [pubkeys] (best-effort, auto-closing).

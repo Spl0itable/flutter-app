@@ -346,4 +346,197 @@ void main() {
       );
     });
   });
+
+  // Regression for the bug where PMs/group messages never reached the bell:
+  // the PWA RECORDS every qualifying message to history regardless of age (a
+  // fresh one loudly, an old/gift-wrapped one silently) — so the record gate
+  // must NOT include the historical condition that the alert gate has.
+  group('shouldRecordNotification (history-record gate)', () {
+    test('a historical PM is still recorded (unlike shouldNotify)', () {
+      // The whole bug: gift-wrapped PM/group backlog always arrives "old", so
+      // gating the record on historical dropped it from the bell entirely.
+      expect(
+        shouldRecordNotification(
+          kind: NotifyKind.pm,
+          isOwn: false,
+          notificationsEnabled: true,
+        ),
+        isTrue,
+      );
+      // The alert gate, by contrast, suppresses a historical message.
+      expect(
+        shouldNotify(
+          kind: NotifyKind.pm,
+          isOwn: false,
+          isHistorical: true,
+          notificationsEnabled: true,
+        ),
+        isFalse,
+      );
+    });
+
+    test('a historical group message is still recorded', () {
+      expect(
+        shouldRecordNotification(
+          kind: NotifyKind.group,
+          isOwn: false,
+          notificationsEnabled: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('record gate keeps the non-age gates (own/blocked/bot/active/friends)',
+        () {
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm, isOwn: true, notificationsEnabled: true),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm,
+            isOwn: false,
+            notificationsEnabled: true,
+            isBlocked: true),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm,
+            isOwn: false,
+            notificationsEnabled: true,
+            isBot: true),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm,
+            isOwn: false,
+            notificationsEnabled: true,
+            isActiveView: true),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm,
+            isOwn: false,
+            notificationsEnabled: true,
+            friendsOnly: true,
+            isFriend: false),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.pm, isOwn: false, notificationsEnabled: false),
+        isFalse,
+      );
+    });
+
+    test('group mentions-only suppresses a non-mention; a mention records', () {
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.group,
+            isOwn: false,
+            notificationsEnabled: true,
+            groupMentionsOnly: true,
+            isMention: false),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.group,
+            isOwn: false,
+            notificationsEnabled: true,
+            groupMentionsOnly: true,
+            isMention: true),
+        isTrue,
+      );
+    });
+
+    test('a channel source only records on an @-mention', () {
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.channel,
+            isOwn: false,
+            notificationsEnabled: true,
+            isMention: false),
+        isFalse,
+      );
+      expect(
+        shouldRecordNotification(
+            kind: NotifyKind.channel,
+            isOwn: false,
+            notificationsEnabled: true,
+            isMention: true),
+        isTrue,
+      );
+    });
+  });
+
+  // The notifications modal reads this store directly, so the PM/group entries
+  // must land here with the right type/route/context to be rendered + routed.
+  group('NotificationHistoryNotifier (the modal store)', () {
+    test('records a PM and a group entry the modal can render + route', () {
+      final n = NotificationHistoryNotifier();
+      n.record(
+        type: 'pm',
+        title: 'alice',
+        body: 'hi there',
+        route: other,
+        senderPubkey: other,
+        eventId: 'pm-evt-1',
+      );
+      n.record(
+        type: 'group',
+        title: 'bob',
+        body: 'gm all',
+        route: 'group-123',
+        senderPubkey: other,
+        contextLabel: 'in My Group',
+        eventId: 'grp-evt-1',
+      );
+      expect(n.state.entries.length, 2);
+      expect(n.state.unread, 2);
+      // Newest-first: the group message was recorded last.
+      final group = n.state.entries.first;
+      final pm = n.state.entries.last;
+      expect(group.type, 'group');
+      expect(group.route, 'group-123');
+      expect(group.contextLabel, 'in My Group');
+      expect(group.senderPubkey, other); // drives the avatar + decorated author
+      expect(pm.type, 'pm');
+      expect(pm.route, other);
+    });
+
+    test('dedupes a replayed copy by eventId', () {
+      final n = NotificationHistoryNotifier();
+      n.record(type: 'pm', title: 'a', body: 'x', eventId: 'evt-dup');
+      n.record(type: 'pm', title: 'a', body: 'x', eventId: 'evt-dup');
+      expect(n.state.entries.length, 1);
+    });
+
+    test('markAllViewed clears unread + flips every entry viewed', () {
+      final n = NotificationHistoryNotifier();
+      n.record(type: 'pm', title: 'a', body: 'x', eventId: 'e1');
+      n.record(type: 'group', title: 'b', body: 'y', eventId: 'e2');
+      expect(n.state.unread, 2);
+      n.markAllViewed();
+      expect(n.state.unread, 0);
+      expect(n.state.entries.every((e) => e.viewed), isTrue);
+    });
+
+    test('trims entries older than 24h on record', () {
+      final n = NotificationHistoryNotifier();
+      final old = DateTime.now()
+              .subtract(const Duration(hours: 25))
+              .millisecondsSinceEpoch;
+      n.record(type: 'pm', title: 'old', body: 'stale', ts: old, eventId: 'o1');
+      // The stale entry is outside the 24h window; recording a fresh one drops
+      // it (matching the PWA's 24h cutoff).
+      n.record(type: 'pm', title: 'new', body: 'fresh', eventId: 'n1');
+      expect(n.state.entries.length, 1);
+      expect(n.state.entries.first.title, 'new');
+    });
+  });
 }
