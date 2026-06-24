@@ -291,34 +291,41 @@ class _ZapModalState extends ConsumerState<ZapModal> {
             BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
           ],
         ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _header(c),
-              const SizedBox(height: 24), // `.modal-header` margin-bottom
-              // `#zapRecipientInfo` (`.nm-h-75`) — centered, body-size, mb20.
-              Text(
-                widget.messageId != null
-                    ? 'Zapping @${widget.recipientNym}'
-                    : "Zapping @${widget.recipientNym}'s profile",
-                textAlign: TextAlign.center,
-                style: TextStyle(color: c.textDim, fontSize: 15),
-              ),
-              const SizedBox(height: 20),
-              if (_phase == _Phase.amount) ..._amountSection(c),
-              if (_phase == _Phase.generating) _status(c, checking: true),
-              if (_phase == _Phase.error) _status(c),
-              if (_phase == _Phase.invoice) ..._invoiceSection(c),
-              if (_phase == _Phase.invoice && _statusText.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                _status(c, checking: _checkingManual),
+        // `showDialog` does not insert a Material, so the InkWell-based buttons
+        // (amount grid, close, generate, copy/wallet, "I've paid") would fail
+        // `debugCheckHasMaterial`. A transparent Material supplies the ink
+        // ancestor without painting over the Container's own decoration.
+        child: Material(
+          type: MaterialType.transparency,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _header(c),
+                const SizedBox(height: 24), // `.modal-header` margin-bottom
+                // `#zapRecipientInfo` (`.nm-h-75`) — centered, body-size, mb20.
+                Text(
+                  widget.messageId != null
+                      ? 'Zapping @${widget.recipientNym}'
+                      : "Zapping @${widget.recipientNym}'s profile",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: c.textDim, fontSize: 15),
+                ),
+                const SizedBox(height: 20),
+                if (_phase == _Phase.amount) ..._amountSection(c),
+                if (_phase == _Phase.generating) _status(c, checking: true),
+                if (_phase == _Phase.error) _status(c),
+                if (_phase == _Phase.invoice) ..._invoiceSection(c),
+                if (_phase == _Phase.invoice && _statusText.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _status(c, checking: _checkingManual),
+                ],
+                if (_phase == _Phase.paid) _paidSection(c),
+                const SizedBox(height: 20),
+                _actions(c),
               ],
-              if (_phase == _Phase.paid) _paidSection(c),
-              const SizedBox(height: 20),
-              _actions(c),
-            ],
+            ),
           ),
         ),
       ),
