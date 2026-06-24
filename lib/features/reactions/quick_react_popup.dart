@@ -63,12 +63,20 @@ class QuickContextMenu extends StatelessWidget {
         constraints: const BoxConstraints(minWidth: 200),
         padding: const EdgeInsets.all(4),
         decoration: BoxDecoration(
-          color: const Color(0xEB141423), // rgba(20,20,35,0.92)
+          // `.quick-context-menu` is `rgba(20,20,35,0.92)` by default, but
+          // `body.solid-ui` (default ON) overrides it to `var(--glass-bg)` — the
+          // opaque sidebar/header surface (#14141e dark, #ffffff light). Use the
+          // mode-aware token so the menu is a light card in light mode instead of
+          // a hardcoded dark slab.
+          color: c.glassBg,
           border: Border.all(color: c.glassBorder),
           borderRadius: const BorderRadius.all(Radius.circular(14)),
-          boxShadow: const [
+          // `--shadow-lg` softens in light mode (rgba(0,0,0,0.15) vs 0.4).
+          boxShadow: [
             BoxShadow(
-                color: Color(0x66000000), blurRadius: 32, offset: Offset(0, 8)),
+                color: c.isLight ? const Color(0x26000000) : const Color(0x66000000),
+                blurRadius: 32,
+                offset: const Offset(0, 8)),
           ],
         ),
         child: Column(
@@ -112,8 +120,10 @@ class _QuickContextRowState extends State<_QuickContextRow> {
         break;
     }
     final hoverBg = widget.item.color == QuickContextItemColor.danger
-        ? const Color(0x1FFF4444) // rgba(255,68,68,0.12)
-        : Colors.white.withValues(alpha: 0.08);
+        ? const Color(0x1FFF4444) // rgba(255,68,68,0.12) — both modes
+        // `.quick-context-item:hover`: white@0.08 dark → black@0.06 light
+        // (`body.light-mode .quick-context-item:hover`).
+        : c.hoverOverlay;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -172,11 +182,19 @@ class QuickReactPopup extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         decoration: BoxDecoration(
-          color: const Color(0xEB141423), // rgba(20,20,35,0.92)
+          // `.quick-react-popup` is `rgba(20,20,35,0.92)` by default, but
+          // `body.solid-ui` (default ON) overrides it to `var(--glass-bg)`
+          // (#14141e dark, #ffffff light) — mode-aware so the pill is a light
+          // surface in light mode.
+          color: c.glassBg,
           border: Border.all(color: c.glassBorder),
           borderRadius: const BorderRadius.all(Radius.circular(24)),
-          boxShadow: const [
-            BoxShadow(color: Color(0x66000000), blurRadius: 32, offset: Offset(0, 8)),
+          // `--shadow-lg` softens in light mode (rgba(0,0,0,0.15) vs 0.4).
+          boxShadow: [
+            BoxShadow(
+                color: c.isLight ? const Color(0x26000000) : const Color(0x66000000),
+                blurRadius: 32,
+                offset: const Offset(0, 8)),
           ],
         ),
         child: Row(
@@ -184,12 +202,17 @@ class QuickReactPopup extends StatelessWidget {
           children: [
             for (final e in emojis)
               _EmojiButton(emoji: e, onTap: () => onReact(e)),
-            // `.quick-react-expand`: chevron with a 1px left divider.
+            // `.quick-react-expand`: chevron with a 1px left divider
+            // (white@0.1 dark → black@0.1 light,
+            // `body.light-mode .quick-react-expand`).
             Container(
               margin: const EdgeInsets.only(left: 2),
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 border: Border(
-                  left: BorderSide(color: Color(0x1AFFFFFF)), // rgba(255,255,255,0.1)
+                  left: BorderSide(
+                      color: c.isLight
+                          ? const Color(0x1A000000) // rgba(0,0,0,0.1)
+                          : const Color(0x1AFFFFFF)), // rgba(255,255,255,0.1)
                 ),
               ),
               child: _btn(

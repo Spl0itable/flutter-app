@@ -72,13 +72,21 @@ class PMListItem extends ConsumerWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                 decoration: BoxDecoration(
-                  color: active ? c.primaryA(0.10) : Colors.transparent,
+                  // `.pm-item.active` fill is primary@0.10 + a primary@0.05 glow
+                  // (dark); `body.light-mode` neutralises it to black@0.06 with
+                  // `box-shadow:none` (styles-themes-responsive.css:1139), the
+                  // primary@0.20 border + primary accent bar stay.
+                  color: active
+                      ? (c.isLight
+                          ? Colors.black.withValues(alpha: 0.06)
+                          : c.primaryA(0.10))
+                      : Colors.transparent,
                   borderRadius: NymRadius.rxs,
                   border: Border.all(
                     color: active ? c.primaryA(0.20) : Colors.transparent,
                     width: 1,
                   ),
-                  boxShadow: active
+                  boxShadow: active && !c.isLight
                       ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
                       : null,
                 ),

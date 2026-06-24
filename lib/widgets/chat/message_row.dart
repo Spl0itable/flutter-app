@@ -710,9 +710,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // (the bubble): a translucent style background plus a soft glow halo.
     final auras = _auras;
     final lastAura = auras.isNotEmpty ? auras.last : null;
+    // `.message-content` bubble fill. Dark mode: self primary@0.25, others
+    // white@0.14. Light mode (`body.light-mode.chat-bubbles`): self primary@0.20,
+    // others/PM black@0.10 — a translucent *white* over a light surface is
+    // invisible, so the PWA flips others to a dark wash. A style/aura background
+    // still takes precedence.
     final bubbleColor = deco?.contentBackground ??
         lastAura?.background ??
-        (self ? c.primaryA(0.25) : Colors.white.withValues(alpha: 0.14));
+        (self
+            ? c.primaryA(c.isLight ? 0.20 : 0.25)
+            : (c.isLight
+                ? const Color(0x1A000000) // black @ 0.10
+                : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
     final innerContent = Column(

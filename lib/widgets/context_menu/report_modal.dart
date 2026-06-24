@@ -277,7 +277,9 @@ class _ReportModalState extends State<ReportModal> {
         alignment: Alignment.center,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          color: Colors.white.withValues(alpha: 0.05),
+          // `.icon-btn` fill: white@0.05 dark → black@0.03 light
+          // (`body.light-mode .icon-btn`), else invisible on a light modal.
+          color: c.subtleFill,
           border: Border.all(color: c.glassBorder),
         ),
         child: Icon(Icons.close, size: 16, color: c.textDim),
@@ -294,7 +296,9 @@ class _ReportModalState extends State<ReportModal> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
+          // `.icon-btn` fill: white@0.05 dark → black@0.03 light
+          // (`body.light-mode .icon-btn`).
+          color: c.subtleFill,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rxs,
         ),
