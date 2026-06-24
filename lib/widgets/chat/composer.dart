@@ -529,10 +529,10 @@ class _ComposerState extends ConsumerState<Composer> {
     final quote = _pendingQuote;
     if (quote != null) {
       final lines = quote.text.split('\n');
-      final quoteLine = '> @${quote.author}: ${lines.first}' +
-          (lines.length > 1
-              ? '\n${lines.skip(1).map((l) => '> $l').join('\n')}'
-              : '');
+      final quoteRest = lines.length > 1
+          ? '\n${lines.skip(1).map((l) => '> $l').join('\n')}'
+          : '';
+      final quoteLine = '> @${quote.author}: ${lines.first}$quoteRest';
       content = content.isNotEmpty ? '$quoteLine\n\n$content' : quoteLine;
       _pendingQuote = null;
     }

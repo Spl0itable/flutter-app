@@ -250,7 +250,7 @@ class AutocompleteDropdown extends StatelessWidget {
           if (hasFlair) ...[
             const SizedBox(width: 4),
             CosmeticNymBadges(
-              cosmetics: cosmetics!,
+              cosmetics: cosmetics,
               flairSize: 14,
               supporterHeight: 14,
             ),

@@ -153,7 +153,7 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
         Text('Method', style: TextStyle(color: c.text, fontSize: 12)),
         const SizedBox(height: 6),
         DropdownButtonFormField<String>(
-          value: _method,
+          initialValue: _method,
           dropdownColor: c.bgTertiary,
           style: TextStyle(color: c.text, fontSize: 14),
           decoration: _decoration(c, ''),
