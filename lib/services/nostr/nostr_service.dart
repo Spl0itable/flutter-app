@@ -322,6 +322,15 @@ class NostrService {
           't': [AppDataTopic.presence],
         },
       ),
+      // NIP-30 custom emoji: discover emoji packs (kind 30030) + the user's own
+      // emoji-pack list (kind 10030, our author only). Mirrors the PWA's REQ
+      // filters (relays.js:2546/2552) so custom emoji actually arrive.
+      NostrFilter(kinds: [EventKind.emojiPack], limit: 300),
+      NostrFilter(
+        kinds: [EventKind.userEmojiList],
+        authors: [self],
+        limit: 1,
+      ),
     ];
 
     _mainSub = pool.subscribe(filters);
@@ -525,6 +534,7 @@ class NostrService {
     required String content,
     required String nym,
     String? geohash,
+    List<List<String>> emojiTags = const [],
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -538,6 +548,9 @@ class NostrService {
       ['n', nym],
       ['ms', '$nowMs'],
       [isGeo ? 'g' : 'd', isGeo ? geohash : channelKey],
+      // NIP-30: declare any custom emoji used in the message so other clients
+      // render them (messages.js `customEmojiTagsForContent`).
+      ...emojiTags,
     ];
 
     final signed = await sig.sign(

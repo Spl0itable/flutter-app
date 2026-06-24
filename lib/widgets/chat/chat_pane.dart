@@ -4,18 +4,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_share.dart';
-import '../../features/globe/geohash_explorer.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
-import '../../features/pms/new_pm_modal.dart';
-import '../../features/polls/poll_create_modal.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
+import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../common/app_dialog.dart';
 import 'composer.dart';
 import 'messages_list.dart';
 
@@ -152,6 +151,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
 
     final title = _titleFor(app, view);
     final meta = _metaFor(app, view);
+    final metaText = meta.text;
     final titleSize = settings.textSize + 3.0;
 
     final isChannel = view.kind == ViewKind.channel;
@@ -176,24 +176,18 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Desktop leads with back/forward; the PWA mobile header leads
-              // with the title and puts the hamburger + notif on the right
-              // (`.mobile-header-actions`), so compact renders no leading nav.
-              if (!compact) ...[
-                _NavBtn(
-                  icon: Icons.chevron_left,
-                  tooltip: 'Go back',
-                  onTap: _canBack ? _back : null,
-                  disabled: !_canBack,
-                ),
-                _NavBtn(
-                  icon: Icons.chevron_right,
-                  tooltip: 'Go forward',
-                  onTap: _canForward ? _forward : null,
-                  disabled: !_canForward,
-                ),
-                const SizedBox(width: 8),
-              ],
+              // `.channel-header-controls`: the back/forward + favorite/share
+              // (channel) or audio/video (PM/group) cluster, LEFT of the title
+              // at ALL widths (no breakpoint hides it; the PWA shows it on
+              // mobile too — gap, MISSING). 28×28 desktop / 24×24 compact.
+              _channelControls(
+                view: view,
+                isChannel: isChannel,
+                channelKey: channelKey,
+                isPinned: isPinned,
+                isDefault: isDefault,
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -210,12 +204,25 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                         letterSpacing: 0.3,
                       ),
                     ),
-                    if (meta.isNotEmpty)
-                      Text(
-                        meta,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: c.textDim, fontSize: 11),
+                    if (metaText.isNotEmpty)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Lock glyph prefix for E2E PM/group meta (PWA
+                          // `lockSvg`, 12px). Channel meta has no glyph.
+                          if (meta.icon != null) ...[
+                            Icon(meta.icon, size: 12, color: c.textDim),
+                            const SizedBox(width: 4),
+                          ],
+                          Flexible(
+                            child: Text(
+                              metaText,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(color: c.textDim, fontSize: 11),
+                            ),
+                          ),
+                        ],
                       ),
                   ],
                 ),
@@ -223,18 +230,9 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
               if (compact)
                 _mobileActions()
               else
-                // Bounded so the `.header-actions` pills can wrap
+                // `.header-actions`: bounded so the text pills can wrap
                 // (`flex-wrap:wrap`) rather than overflow on narrow desktops.
-                Flexible(
-                  child: _desktopHeader(
-                    view: view,
-                    app: app,
-                    isChannel: isChannel,
-                    channelKey: channelKey,
-                    isPinned: isPinned,
-                    isDefault: isDefault,
-                  ),
-                ),
+                Flexible(child: _headerActionPills()),
             ],
           ),
         ),
@@ -242,7 +240,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     );
   }
 
-  /// `.mobile-header-actions`: 40×40 bordered pill toggles (notif + hamburger),
+  /// `.mobile-header-actions`: the `.icon-btn`-class notif + hamburger toggles,
   /// gap 8, margin-left 12 (gap F14). The notif toggle carries the unread badge.
   Widget _mobileActions() {
     final unread =
@@ -272,59 +270,55 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     );
   }
 
-  /// The desktop header: the left channel nav/action cluster (back/forward +
-  /// favorite/share/poll/call as 28×28 `.channel-nav-btn`s), then the right
-  /// `.header-actions` text-pill group (Notifications+badge / Flair / Settings /
-  /// About / Logout), wrapped (`flex-wrap:wrap`) — gap F6/F8/F22.
-  Widget _desktopHeader({
+  /// `.channel-header-controls` (LEFT of the title, all widths): a 2-column grid
+  /// (`grid-template-columns:auto auto; row-gap:12; column-gap:2`) into which
+  /// `.channel-nav-buttons` (back/forward) and `.channel-action-buttons` flow
+  /// (both `display:contents`). The action buttons are **favorite + share** in a
+  /// channel; **audio + video** in a PM/group (the PWA `calls.js` keeps the call
+  /// buttons hidden unless `inPMMode && (currentPM||currentGroup)` — they are
+  /// `nm-call-hidden` in channel view). No discover/new-PM/poll buttons live
+  /// here — those are sidebar/composer actions in the PWA.
+  Widget _channelControls({
     required ChatView view,
-    required AppState app,
     required bool isChannel,
     required String channelKey,
     required bool isPinned,
     required bool isDefault,
   }) {
     final controller = ref.read(nostrControllerProvider);
-    final unread =
-        ref.watch(notificationHistoryProvider.select((s) => s.unread));
+    final isCall = view.kind == ViewKind.pm || view.kind == ViewKind.group;
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        // Left: `.channel-action-buttons` (discover/new-PM + channel actions).
+    final buttons = <Widget>[
+      _NavBtn(
+        icon: Icons.chevron_left,
+        tooltip: 'Go back',
+        onTap: _canBack ? _back : null,
+        disabled: !_canBack,
+      ),
+      _NavBtn(
+        icon: Icons.chevron_right,
+        tooltip: 'Go forward',
+        onTap: _canForward ? _forward : null,
+        disabled: !_canForward,
+      ),
+      if (isChannel) ...[
         _NavBtn(
-          icon: Icons.public,
-          tooltip: 'Discover channels',
-          onTap: _openDiscover,
+          icon: isPinned ? Icons.star : Icons.star_border,
+          tooltip: isDefault
+              ? '#nymchat is always favorited'
+              : (isPinned ? 'Unfavorite channel' : 'Favorite channel'),
+          active: isPinned,
+          disabled: isDefault,
+          onTap: isDefault ? null : () => controller.togglePin(channelKey),
         ),
         _NavBtn(
-          icon: Icons.edit_outlined,
-          tooltip: 'New message',
-          onTap: () => NewPmModal.open(context),
+          key: TutorialTargets.keyFor(TutorialTarget.shareButton),
+          icon: Icons.ios_share,
+          tooltip: 'Share channel URL',
+          onTap: () => ShareChannelModal.open(context, channelKey),
         ),
-        if (isChannel) ...[
-          _NavBtn(
-            icon: isPinned ? Icons.star : Icons.star_border,
-            tooltip: isDefault
-                ? '#nymchat is always favorited'
-                : (isPinned ? 'Unfavorite channel' : 'Favorite channel'),
-            active: isPinned,
-            disabled: isDefault,
-            onTap: isDefault ? null : () => controller.togglePin(channelKey),
-          ),
-          _NavBtn(
-            key: TutorialTargets.keyFor(TutorialTarget.shareButton),
-            icon: Icons.ios_share,
-            tooltip: 'Share channel URL',
-            onTap: () => ShareChannelModal.open(context, channelKey),
-          ),
-          _NavBtn(
-            icon: Icons.poll_outlined,
-            tooltip: 'Create poll',
-            onTap: () => PollCreateModal.open(context),
-          ),
-        ],
+      ] else if (isCall) ...[
+        // PM/group only: audio + video (mirrors `_refreshCallButtons`).
         _NavBtn(
           icon: Icons.call_outlined,
           tooltip: 'Start audio call',
@@ -335,53 +329,90 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           tooltip: 'Start video call',
           onTap: () => _startCall(view, video: true),
         ),
-        const SizedBox(width: 8),
-        // Right: `.header-actions` text pills (tutorial mainMenu target).
-        // Flexible so the Wrap is width-bounded and wraps (`flex-wrap:wrap`).
-        Flexible(
-          child: KeyedSubtree(
-            key: TutorialTargets.keyFor(TutorialTarget.mainMenu),
-            child: Wrap(
-              spacing: 5,
-              runSpacing: 5,
-              alignment: WrapAlignment.end,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-              _HeaderPill(
-                icon: Icons.notifications_none,
-                label: 'Notifications',
-                badge: unread,
-                onTap: _openNotifications,
-              ),
-              _HeaderPill(
-                icon: Icons.star_border,
-                label: 'Flair',
-                onTap: () => ShopModal.open(context),
-              ),
-              _HeaderPill(
-                icon: Icons.settings_outlined,
-                label: 'Settings',
-                onTap: () => SettingsScreen.open(context),
-              ),
-              _HeaderPill(
-                icon: Icons.info_outline,
-                label: 'About',
-                onTap: () => AboutScreen.open(context),
-              ),
-              _HeaderPill(
-                icon: Icons.logout,
-                label: 'Logout',
-                onTap: () {
-                  // TODO(verify): sign-out (signOut) is owned by the identity
-                  // subsystem.
-                },
-              ),
+      ],
+    ];
+
+    // 2-column grid: each run holds up to two buttons (column-gap 2); runs stack
+    // with a 12px row-gap (`.channel-header-controls` grid). Pairing the buttons
+    // into per-run Rows keeps the 2-wide wrap regardless of available width.
+    return Wrap(
+      runSpacing: 12,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        for (var i = 0; i < buttons.length; i += 2)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              buttons[i],
+              if (i + 1 < buttons.length) ...[
+                const SizedBox(width: 2),
+                buttons[i + 1],
               ],
-            ),
+            ],
           ),
-        ),
       ],
     );
+  }
+
+  /// `.header-actions` (desktop, RIGHT): the text-pill group (Notifications +
+  /// badge / Flair / Settings / About / Logout), wrapped (`flex-wrap:wrap`) —
+  /// tutorial `mainMenu` target.
+  Widget _headerActionPills() {
+    final unread =
+        ref.watch(notificationHistoryProvider.select((s) => s.unread));
+    return KeyedSubtree(
+      key: TutorialTargets.keyFor(TutorialTarget.mainMenu),
+      child: Wrap(
+        spacing: 5,
+        runSpacing: 5,
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _HeaderPill(
+            icon: Icons.notifications_none,
+            label: 'Notifications',
+            badge: unread,
+            onTap: _openNotifications,
+          ),
+          _HeaderPill(
+            icon: Icons.star_border,
+            label: 'Flair',
+            onTap: () => ShopModal.open(context),
+          ),
+          _HeaderPill(
+            icon: Icons.settings_outlined,
+            label: 'Settings',
+            onTap: () => SettingsScreen.open(context),
+          ),
+          _HeaderPill(
+            icon: Icons.info_outline,
+            label: 'About',
+            onTap: () => AboutScreen.open(context),
+          ),
+          _HeaderPill(
+            icon: Icons.logout,
+            label: 'Logout',
+            // `data-action="signOut"` → confirm, then real sign-out (app.js
+            // `signOut`, 6740-6741). `signOut()` clears the identity and bumps
+            // the boot generation so the app remounts the first-run gate.
+            onTap: _confirmSignOut,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Confirms then signs out (app.js `signOut`: `showAppConfirm('Sign out and
+  /// disconnect from Nymchat?', { okLabel: 'Sign out', danger: true })`).
+  Future<void> _confirmSignOut() async {
+    final ok = await showAppConfirm(
+      context,
+      'Sign out and disconnect from Nymchat?',
+      okLabel: 'Sign out',
+      danger: true,
+    );
+    if (!ok) return;
+    await ref.read(nostrControllerProvider).signOut();
   }
 
   /// Opens the notifications modal and marks history viewed. The modal UI is
@@ -390,16 +421,6 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   void _openNotifications() {
     showNotificationsPanel(context);
     ref.read(notificationHistoryProvider.notifier).markAllViewed();
-  }
-
-  Future<void> _openDiscover() async {
-    // CROSS-FILE (Globe): use the non-opaque modal route (scrim over the app)
-    // rather than a full opaque page push.
-    final gh = await Navigator.of(context).push<String>(
-      GeohashExplorer.route(),
-    );
-    if (gh == null || gh.isEmpty || !mounted) return;
-    ref.read(nostrControllerProvider).switchChannel(gh, geohash: gh);
   }
 
   void _startCall(ChatView view, {required bool video}) {
@@ -433,30 +454,42 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     }
   }
 
-  String _metaFor(AppState app, ChatView view) {
+  /// The `#channelMeta` line (11px text-dim). Channel: the live online-nym count
+  /// `"<n> online nyms"` (users.js `_renderUserList`, 1451). PM: lock glyph +
+  /// `"End-to-end encrypted private message"` (pms.js:2940). Group: lock glyph +
+  /// `"End-to-end encrypted group chat"` (groups.js:3264).
+  ({IconData? icon, String text}) _metaFor(AppState app, ChatView view) {
     switch (view.kind) {
       case ViewKind.channel:
-        final ch = app.channels.firstWhere(
-          (c) => c.key == view.id,
-          orElse: () => ChannelEntry(channel: view.id),
-        );
-        if (ch.isGeohash) {
-          final loc = decodeGeohash(ch.geohash);
-          final ns = loc.lat >= 0 ? 'N' : 'S';
-          final ew = loc.lng >= 0 ? 'E' : 'W';
-          return '${loc.lat.abs().toStringAsFixed(2)}°$ns, '
-              '${loc.lng.abs().toStringAsFixed(2)}°$ew · geohash';
-        }
-        return 'public channel';
+        // `channelUserCount`: online/away nyms, excluding self (matches the
+        // sidebar "Nyms (N online)" active set).
+        final count = app.users.values.where((u) {
+          if (u.pubkey == app.selfPubkey) return false;
+          final st = u.effectiveStatus();
+          return st == UserStatus.online || st == UserStatus.away;
+        }).length;
+        return (icon: null, text: '${_abbreviateCount(count)} online nyms');
       case ViewKind.pm:
-        return 'private message · end-to-end encrypted';
-      case ViewKind.group:
-        final g = app.groups.firstWhere(
-          (g) => g.id == view.id,
-          orElse: () => app.groups.first,
+        return (
+          icon: Icons.lock_outline,
+          text: 'End-to-end encrypted private message',
         );
-        return '${g.members.length} members';
+      case ViewKind.group:
+        return (
+          icon: Icons.lock_outline,
+          text: 'End-to-end encrypted group chat',
+        );
     }
+  }
+
+  /// Mirrors the PWA `abbreviateNumber` (users.js:2069): <1000 raw; <1M → "N.Nk"
+  /// (1 decimal under 10k, 0 above); else "N.NM".
+  String _abbreviateCount(int n) {
+    if (n < 1000) return '$n';
+    if (n < 1000000) {
+      return '${(n / 1000).toStringAsFixed(n < 10000 ? 1 : 0)}k';
+    }
+    return '${(n / 1000000).toStringAsFixed(1)}M';
   }
 }
 
@@ -525,10 +558,49 @@ class _NavBtnState extends State<_NavBtn> {
   }
 }
 
+/// Resolved `.icon-btn` fill/border/foreground for the current mode + hover.
+@immutable
+class _IconBtnStyle {
+  const _IconBtnStyle({
+    required this.fill,
+    required this.border,
+    required this.foreground,
+  });
+  final Color fill;
+  final Color border;
+  final Color foreground;
+}
+
+/// The shared `.icon-btn` token set (`styles-shell.css:912-935` +
+/// `styles-themes-responsive.css:595-605`). Used by both `_HeaderPill` and
+/// `_MobileToggle`.
+///
+/// - Dark base: fill white@0.05, border `--glass-border`, fg `--text`.
+/// - Dark hover: fill `--primary`@0.12, border `--primary`@0.3, fg `--primary`.
+/// - Light base: fill black@0.03, border black@0.1, fg `--primary`.
+/// - Light hover: fill black@0.06, border `--primary`, fg `--primary`.
+_IconBtnStyle _iconBtnStyle(NymColors c, bool hover) {
+  if (c.isLight) {
+    return _IconBtnStyle(
+      fill: hover
+          ? Colors.black.withValues(alpha: 0.06)
+          : Colors.black.withValues(alpha: 0.03),
+      border: hover ? c.primary : Colors.black.withValues(alpha: 0.1),
+      foreground: c.primary,
+    );
+  }
+  return _IconBtnStyle(
+    fill: hover ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05),
+    border: hover ? c.primaryA(0.30) : c.glassBorder,
+    foreground: hover ? c.primary : c.text,
+  );
+}
+
 /// `.icon-btn` text pill in `.header-actions` (gap F6): white@0.05 fill, 1px
 /// glass border, radius xs, padding 7/14, 12px w500 uppercase ls 0.8, icon 14 +
 /// 5 gap. Hover → primary@12 fill / primary text / primary@30 border / glow.
-/// An optional unread [badge] (Notifications) overlays the top-right.
+/// Light mode mirrors `body.light-mode .icon-btn` (black@0.03 fill / black@0.1
+/// border / `--primary` text). An optional unread [badge] overlays the top-right.
 class _HeaderPill extends StatefulWidget {
   const _HeaderPill({
     required this.icon,
@@ -551,19 +623,16 @@ class _HeaderPillState extends State<_HeaderPill> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final fg = _hover ? c.primary : c.text;
+    final style = _iconBtnStyle(c, _hover);
+    final fg = style.foreground;
     final pill = AnimatedContainer(
       duration: NymMotion.transition,
       curve: NymMotion.curve,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       decoration: BoxDecoration(
-        color: _hover
-            ? c.primaryA(0.12)
-            : Colors.white.withValues(alpha: 0.05),
+        color: style.fill,
         borderRadius: NymRadius.rxs,
-        border: Border.all(
-          color: _hover ? c.primaryA(0.30) : c.glassBorder,
-        ),
+        border: Border.all(color: style.border),
         boxShadow: _hover
             ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
             : null,
@@ -603,9 +672,12 @@ class _HeaderPillState extends State<_HeaderPill> {
   }
 }
 
-/// `.mobile-menu-toggle` / `.mobile-notif-toggle` (gap F14): 40×40, radius sm,
-/// bg rgba(20,20,35,0.8), 1px glass border, primary color, icon 20. Optional
-/// unread [badge] overlay.
+/// `.mobile-menu-toggle` / `.mobile-notif-toggle` in `.mobile-header-actions`
+/// (gap F14): these are plain `.icon-btn`-class buttons — bg white@0.05 (dark) /
+/// black@0.03 (light), 1px glass/black@0.1 border, **radius xs (8)**, color
+/// `--text`/`--primary`, padding `7px 14px`, icon 20. (NOT a fixed 40×40
+/// square, NOT rgba(20,20,35,0.8), NOT radius-sm — those were inventions.)
+/// Optional unread [badge] overlay.
 class _MobileToggle extends StatelessWidget {
   const _MobileToggle({
     required this.icon,
@@ -621,20 +693,20 @@ class _MobileToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final style = _iconBtnStyle(c, false);
     final box = Container(
-      width: 40,
-      height: 40,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: const Color(0xCC14141F), // rgba(20,20,35,0.8)
-        borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.glassBorder),
+        color: style.fill,
+        borderRadius: NymRadius.rxs,
+        border: Border.all(color: style.border),
       ),
-      child: Icon(icon, size: 20, color: c.primary),
+      child: Icon(icon, size: 20, color: style.foreground),
     );
     final child = InkWell(
       onTap: onTap,
-      borderRadius: NymRadius.rsm,
+      borderRadius: NymRadius.rxs,
       child: badge > 0 ? _withBadge(box, badge) : box,
     );
     return tooltip != null ? Tooltip(message: tooltip!, child: child) : child;

@@ -123,8 +123,10 @@ class CosmeticNymBadges extends StatelessWidget {
     super.key,
     required this.cosmetics,
     this.edition,
-    this.flairSize = 16,
-    this.supporterHeight = 16,
+    // `.flair-badge { font-size: 20px }` — the PWA-exact glyph size on every nym
+    // (styles-features.css:316-320). (Was 16, an under-sized substitute.)
+    this.flairSize = 20,
+    this.supporterHeight = 18,
   });
 
   final UserCosmetics cosmetics;
@@ -264,8 +266,10 @@ class CosmeticAura {
 
   /// `box-shadow: inset 0 0 0 {insetWidth}px {insetColor}`. Rendered as a true
   /// inner ring (stroked fully INSIDE the bubble edge — not an outset glow) by
-  /// [CosmeticOverlayPainter] when [insetRing] is set, else as the inner
-  /// `Border.all(insetColor, insetWidth)` `message_row` already applies.
+  /// [CosmeticOverlayPainter] when [insetRing] is set (which, via [hasOverlay],
+  /// is the path `message_row` takes for every inset-ring aura). See the
+  /// CROSS-FILE NOTE on [CosmeticOverlayPainter] re: the redundant `Border.all`
+  /// `message_row` should drop so the ring isn't drawn twice.
   final Color? insetColor;
   final double insetWidth;
 
@@ -294,9 +298,10 @@ class CosmeticAura {
   /// Render the `inset 0 0 0 {insetWidth}px {insetColor}` box-shadow as a true
   /// inner ring (+ a soft inward feather) via [CosmeticOverlayPainter]. Set for
   /// the aura ids whose CSS box-shadow has an `inset` part
-  /// (gold/neon/phoenix/cosmic/frost/hologram). `prismRing`/`hologram` already
-  /// route through the overlay; the others currently fall back to the inner
-  /// `Border.all` (see the CROSS-FILE NOTE on [CosmeticOverlayPainter]).
+  /// (gold/neon/phoenix/cosmic/frost/hologram). All of these reach the painter
+  /// today (via [hasOverlay]); see the CROSS-FILE NOTE on
+  /// [CosmeticOverlayPainter] for the `message_row` `Border.all` that must be
+  /// suppressed to avoid a double ring.
   final bool insetRing;
 
   /// True when this aura should be painted by [CosmeticOverlayPainter] (it has a
@@ -598,7 +603,7 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     id: 'cosmetic-frost',
     insetColor: const Color(0x8CE1F6FF), // rgba(225,246,255,.55)
     insetRing: true,
-    glowColor: const Color(0x33BEE6FF), // rgba(150,210,255,.2) approx
+    glowColor: const Color(0x3396D2FF), // rgba(150,210,255,.2) — outer glow hue
     glowBlur: 10,
     background: const Color(0x29BEE6FF), // rgba(190,230,255,.16)
     watermark: StyleWatermark.svg(_frostSnowflakeSvg, const Size(18, 18)),
@@ -734,16 +739,22 @@ class _TiledSvg extends StatelessWidget {
 /// inner ring (stroked fully inside the bubble edge) plus a soft inward feather,
 /// instead of the outset glow `BoxShadow` can only approximate.
 ///
-/// CROSS-FILE NOTE (no edit made here): `message_row.dart` only routes auras
-/// with `prismRing || hologram` through this painter (its `overlays` filter at
-/// `_decorateBubble`, ~line 581). So hologram + rainbow get the painter today;
-/// the four pure-ring auras (gold/neon/phoenix/cosmic/frost) still fall back to
-/// the inner `Border.all(insetColor, insetWidth)` `_decorateBubble` already
-/// applies — a faithful inner ring, but a *centred* 1px stroke rather than a
-/// fully-inset one. For pixel-identical insets on those four, widen that filter
-/// to `a.prismRing || a.hologram || a.insetRing` (or `a.hasOverlay`) so every
-/// inset-ring aura reaches this painter. Nothing else in `message_row` needs to
-/// change — the painter no-ops for auras without an overlay/ring.
+/// CROSS-FILE NOTE (needs a one-line `message_row.dart` edit — outside this
+/// slice's owned files): `message_row.dart._decorateBubble` now routes
+/// `auras.where((a) => a.hasOverlay)` through this painter (its `overlays`
+/// filter, ~line 590), and [CosmeticAura.hasOverlay] includes `insetRing`. So
+/// every inset-ring aura (gold/neon/phoenix/cosmic/frost + hologram) DOES reach
+/// this painter and gets its fully-inset ring drawn here. BUT `_decorateBubble`
+/// ALSO still sets `border: Border.all(inset.insetColor, inset.insetWidth)`
+/// (~line 605) whenever the last aura carries an `insetColor` — i.e. the same
+/// four pure-ring auras now get BOTH a centred `Border.all` AND this painter's
+/// inset ring → two overlapping rings of the same hue (a visible double ring).
+/// FIX (in `message_row.dart`, not here): suppress that `Border.all` for auras
+/// routed through the painter, e.g. guard it with `inset != null &&
+/// inset.insetColor != null && !inset.hasOverlay`. Every aura with an
+/// `insetColor` today is an `insetRing`/`hasOverlay` aura, so this leaves only
+/// the painter's single inset ring. Nothing else needs to change — the painter
+/// already strokes the ring for all `insetRing` auras.
 class CosmeticOverlayPainter extends CustomPainter {
   CosmeticOverlayPainter({
     required this.aura,

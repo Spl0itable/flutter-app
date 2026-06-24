@@ -120,11 +120,19 @@ class HomeShellState extends ConsumerState<HomeShell>
     // Deck (multi-column) vs single chat view (`nym_chat_view_mode`).
     final useColumns =
         ref.watch(settingsProvider.select((s) => s.useColumns));
+    // Ghost swaps the ambient glow to white tints with no vignette
+    // (`body.theme-ghost::before`).
+    final isGhost = ref.watch(
+        settingsProvider.select((s) => s.theme == NymThemeKey.ghost));
 
     return Scaffold(
       backgroundColor: c.bg,
       body: Stack(
         children: [
+          // `body::before` — always-on ambient corner glows + center vignette,
+          // painted beneath the wallpaper (styles-core.css:130-144, with
+          // ghost/light overrides). pointer-events:none.
+          Positioned.fill(child: _AmbientGlow(c: c, isGhost: isGhost)),
           // `#wallpaperLayer` — fixed, behind all content, pointer-events:none.
           const Positioned.fill(child: WallpaperLayer()),
           Positioned.fill(
@@ -169,7 +177,9 @@ class HomeShellState extends ConsumerState<HomeShell>
           child: _content(context, useColumns, compact: true),
         ),
 
-        // Dim backdrop (`.mobile-overlay`, black @0.6), tap to close.
+        // Dim backdrop (`.mobile-overlay`). With solid-ui (default ON) the alpha
+        // is mode-dependent: dark 0.6, light 0.35
+        // (styles-themes-responsive.css:1638-1646). Tap to close.
         IgnorePointer(
           ignoring: !_drawerOpen,
           child: AnimatedOpacity(
@@ -177,7 +187,10 @@ class HomeShellState extends ConsumerState<HomeShell>
             opacity: _drawerOpen ? 1 : 0,
             child: GestureDetector(
               onTap: () => setState(() => _drawerOpen = false),
-              child: Container(color: Colors.black.withValues(alpha: 0.6)),
+              child: Container(
+                color: Colors.black
+                    .withValues(alpha: context.nym.isLight ? 0.35 : 0.6),
+              ),
             ),
           ),
         ),
@@ -190,9 +203,21 @@ class HomeShellState extends ConsumerState<HomeShell>
           child: SizedBox(
             width: NymDimens.sidebarDrawerWidth,
             height: double.infinity,
-            child: Material(
-              elevation: _drawerOpen ? 16 : 0,
-              shadowColor: Colors.black.withValues(alpha: 0.5),
+            // `.sidebar.open { box-shadow: 10px 0 40px rgba(0,0,0,0.5) }` — a
+            // directional (rightward-only) drop shadow, not a Material ambient
+            // elevation (styles-themes-responsive.css:198-201).
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                boxShadow: _drawerOpen
+                    ? [
+                        BoxShadow(
+                          offset: const Offset(10, 0),
+                          blurRadius: 40,
+                          color: Colors.black.withValues(alpha: 0.5),
+                        ),
+                      ]
+                    : const [],
+              ),
               child: Sidebar(
                 compact: true,
                 onItemSelected: () => setState(() => _drawerOpen = false),
@@ -203,4 +228,98 @@ class HomeShellState extends ConsumerState<HomeShell>
       ],
     );
   }
+}
+
+/// `body::before`: the always-on ambient layer — two corner radial glows plus a
+/// center→edge vignette (styles-core.css:130-144). Ghost swaps to white tints
+/// with no vignette (`body.theme-ghost::before`, :520-524); light mode lowers
+/// the corner alphas and also drops the vignette (`body.light-mode::before`,
+/// :540-544). pointer-events:none.
+class _AmbientGlow extends StatelessWidget {
+  const _AmbientGlow({required this.c, required this.isGhost});
+  final NymColors c;
+  final bool isGhost;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _AmbientGlowPainter(c: c, isGhost: isGhost),
+      ),
+    );
+  }
+}
+
+class _AmbientGlowPainter extends CustomPainter {
+  _AmbientGlowPainter({required this.c, required this.isGhost});
+  final NymColors c;
+  final bool isGhost;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+
+    // Corner glow colors per variant. CSS specificity ties resolve by source
+    // order, so for ghost-LIGHT `body.light-mode::before` (line 540) wins over
+    // `body.theme-ghost::before` (line 520) → the light primary/secondary tints,
+    // not white. Hence: light first (covers ghost-light), then ghost-dark white,
+    // then dark non-ghost.
+    //   Light: primary@0.03 / secondary@0.02; ghost-dark: white@0.02 / 0.015;
+    //   dark: primary@0.04 / secondary@0.03.
+    final Color glow20, glow80;
+    if (c.isLight) {
+      glow20 = c.primary.withValues(alpha: 0.03);
+      glow80 = c.secondary.withValues(alpha: 0.02);
+    } else if (isGhost) {
+      glow20 = Colors.white.withValues(alpha: 0.02);
+      glow80 = Colors.white.withValues(alpha: 0.015);
+    } else {
+      glow20 = c.primary.withValues(alpha: 0.04);
+      glow80 = c.secondary.withValues(alpha: 0.03);
+    }
+
+    // `radial-gradient(ellipse at 20% 20%, color 0%, transparent 50%)`. Flutter
+    // stretches the radial to the rect (→ ellipse); stops [0,0.5] put the fade
+    // halfway out, matching CSS `transparent 50%`. radius 1.0 ≈ farthest-corner.
+    void corner(Alignment center, Color color) {
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..shader = RadialGradient(
+            center: center,
+            radius: 1.0,
+            colors: [color, color.withValues(alpha: 0)],
+            stops: const [0.0, 0.5],
+          ).createShader(rect),
+      );
+    }
+
+    corner(const Alignment(-0.6, -0.6), glow20); // 20% 20%
+    corner(const Alignment(0.6, 0.6), glow80); // 80% 80%
+
+    // Center vignette (dark non-ghost only): rgba(0,0,0,0) center → 0.2 edge.
+    if (!isGhost && !c.isLight) {
+      canvas.drawRect(
+        rect,
+        Paint()
+          ..shader = RadialGradient(
+            center: Alignment.center,
+            radius: 0.75,
+            colors: [
+              const Color(0x00000000),
+              Colors.black.withValues(alpha: 0.2),
+            ],
+            stops: const [0.0, 1.0],
+          ).createShader(rect),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_AmbientGlowPainter old) =>
+      old.c.primary != c.primary ||
+      old.c.secondary != c.secondary ||
+      old.c.isLight != c.isLight ||
+      old.isGhost != isGhost;
 }

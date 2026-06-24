@@ -11,6 +11,7 @@ import '../core/utils/nym_utils.dart';
 import '../features/commands/action_rate_limit.dart';
 import '../features/commands/command_handler.dart';
 import '../features/commands/command_registry.dart';
+import '../features/emoji/custom_emoji.dart';
 import '../features/groups/group_logic.dart';
 import '../features/groups/group_manager.dart';
 import '../features/notifications/notifications_service.dart';
@@ -180,6 +181,11 @@ class NostrController {
       // Restore friends / blocked users / blocked keywords from KV.
       _hydrateSocialState(appState);
 
+      // Touch the live custom-emoji store so it hydrates the persisted NIP-30
+      // cache (`nym_custom_emojis` / `nym_custom_emoji_packs`) at boot, mirroring
+      // the PWA's `_loadCustomEmojiCache`; live 30030/10030 events then top it up.
+      _ref.read(liveCustomEmojiProvider);
+
       // Hydrate channel/profile/reaction caches before connecting (raced
       // ≤1500ms so a slow disk never blocks boot — mirrors app.js
       // `Promise.race([hydrateFromCache(), 1500ms])`).
@@ -240,6 +246,128 @@ class NostrController {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Sign out / disconnect (app.js `signOut`, 6740). Clears the active identity +
+  // in-memory secrets, drops the persisted login + auto-ephemeral state so the
+  // boot gate falls back to first-run setup, disconnects relays, and resets the
+  // in-memory store. The UI call site (chat_pane / sidebar) is responsible for
+  // confirming and then returning to the boot/setup gate (e.g. remounting it),
+  // mirroring the PWA's post-`cmdQuit` reload to a pristine first-run state.
+  // ---------------------------------------------------------------------------
+
+  /// Signs out: forgets the identity, disconnects, and resets local state.
+  ///
+  /// Removes the same persisted keys the PWA's `signOut()` clears
+  /// (`nym_nostr_login_*`, the session/dev/login nsec secrets, the auto-ephemeral
+  /// prefs, and the per-identity profile/cosmetic caches) so the next launch (or
+  /// the boot gate re-check) shows the setup modal instead of restoring the old
+  /// identity. Stops the relay service + presence/flush/sync timers, tears down
+  /// the storage sync, and resets [AppState] plus the notification history /
+  /// pending settings transfers / live custom-emoji state that were scoped to the
+  /// signed-out identity. Idempotent and safe to call before [init].
+  ///
+  /// After this returns the controller is back in its pre-boot state ([_started]
+  /// is reset), so a fresh identity created through the setup flow can [init]
+  /// again on the same provider instance.
+  Future<void> signOut() async {
+    // 1) Tear down the live session: cancel timers, close subs, flush + close the
+    //    cache, and stop the relay service. (Mirrors `cmdQuit` + the page reload
+    //    dropping all in-memory NYM state.)
+    _flushTimer?.cancel();
+    _presenceTimer?.cancel();
+    _settingsSyncTimer?.cancel();
+    _flushScheduled = false;
+    _dirtyChannelKeys.clear();
+    _dirtyPmKeys.clear();
+    if (_p2pSub != null) {
+      _service?.pool.closeSubscription(_p2pSub!);
+      _p2pSub = null;
+    }
+    try {
+      await _flush();
+    } catch (_) {}
+    try {
+      await _cache?.close();
+    } catch (_) {}
+    _cache = null;
+    try {
+      await _service?.stop();
+    } catch (_) {}
+    _api?.dispose();
+    _api = null;
+
+    // 2) Drop in-memory identity + signer + group/service/storage-sync handles
+    //    (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
+    _identity = null;
+    _signer = null;
+    _service = null;
+    _groups = null;
+    _storageSync = null;
+    _lastPresenceBroadcast = 0;
+    _presenceTimestamps.clear();
+    _typingThrottle.clear();
+    _reactionToggleTracker.clear();
+
+    // 3) Stop syncing settings on change (the binding captured the old signer).
+    _ref.read(settingsProvider.notifier).onSyncedChange = null;
+
+    // 4) Remove the persisted login + auto-ephemeral + per-identity caches the
+    //    PWA's `signOut()` clears (app.js:6743-6761).
+    final kv = _ref.read(keyValueStoreProvider);
+    for (final k in const [
+      StorageKeys.autoEphemeral,
+      StorageKeys.autoEphemeralNick,
+      StorageKeys.autoEphemeralChannel,
+      StorageKeys.randomKeypairPerSession,
+      StorageKeys.colorMode,
+      StorageKeys.purchasesCache,
+      StorageKeys.activeStyle,
+      StorageKeys.activeFlair,
+      StorageKeys.nostrLoginMethod,
+      StorageKeys.nostrLoginPubkey,
+      StorageKeys.nostrLoginNpub,
+      StorageKeys.nostrLoginProfile,
+      StorageKeys.nip46RemotePubkey,
+      StorageKeys.bio,
+      StorageKeys.lightningAddressGlobal,
+      StorageKeys.avatarUrl,
+      StorageKeys.bannerUrl,
+      StorageKeys.customNick,
+    ]) {
+      await kv.remove(k);
+    }
+    // Identity secrets live in the platform keystore (the PWA's `nymSecretRemove`
+    // → vault). Clear the session/dev/login keys; leave the NIP-46 client secret
+    // removal to the keystore wipe so a half-removed key can't linger.
+    final secure = SecureStore();
+    for (final s in SecretKeys.all) {
+      try {
+        await secure.remove(s);
+      } catch (_) {}
+    }
+
+    // 5) Reset the in-memory store + identity-scoped UI state.
+    _ref.read(appStateProvider.notifier).reset();
+    try {
+      _ref.read(notificationHistoryProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(pendingSettingsTransfersProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(liveCustomEmojiProvider.notifier).clearAll();
+    } catch (_) {}
+
+    // 6) Allow a fresh identity to boot again on this provider instance.
+    _started = false;
+
+    // 7) Drive the UI back to a pristine first-run gate. The PWA reloads the
+    //    page here; we bump the boot generation so `app.dart` remounts a fresh
+    //    BootGate (which re-checks setup-needed — now true — and tears down the
+    //    signed-out HomeShell + any modals stacked above it).
+    _ref.read(bootEpochProvider.notifier).state++;
+  }
+
   MessagingSettings get _msgSettings {
     final s = _ref.read(settingsProvider);
     return MessagingSettings(
@@ -263,6 +391,15 @@ class NostrController {
       _ingestPresence(event);
       return;
     }
+    // NIP-30 custom emoji packs / the user's emoji-pack list (nostr-core.js:595).
+    if (event.kind == EventKind.emojiPack) {
+      _ingestEmojiPack(event);
+      return;
+    }
+    if (event.kind == EventKind.userEmojiList) {
+      _ingestUserEmojiList(event);
+      return;
+    }
     // A live kind-0 from relays refreshes the D1 profile cache so we don't
     // re-issue a `profile-get` for a profile we just received (mirrors the PWA's
     // `profileFetchedAt` freshness gate).
@@ -270,13 +407,93 @@ class NostrController {
       _storageSync?.markProfileCached(event.pubkey);
     }
     appState.ingestEvent(event);
+    // Public reaction (kind 7) to our message → notify + record (reactions.js
+    // `handleReaction` notify block). Skip removals.
+    if (event.kind == EventKind.reaction) {
+      final removed =
+          event.tagsNamed('action').any((t) => t.length > 1 && t[1] == 'remove');
+      if (!removed) {
+        final target = event.tagValue('e');
+        final author = event.tagValue('p');
+        if (target != null && author != null) {
+          _maybeNotifyReaction(
+            messageId: target,
+            reactorPubkey: event.pubkey,
+            targetAuthorPubkey: author,
+            emoji: event.content,
+            tsSec: event.createdAt,
+            eventId: event.id,
+            route: event.pubkey,
+          );
+        }
+      }
+    }
     // Channel-message notification: a public channel message that @-mentions us
     // (nostr-core.js channel `shouldNotify`). Runs after ingest so the store is
     // current; gating happens in `_maybeNotifyChannel`.
     if (event.kind == EventKind.geoChannel ||
         event.kind == EventKind.namedChannel) {
+      // Register any NIP-30 custom emoji declared on the message so its
+      // `:shortcode:` tokens render as images (emoji.js `ingestEmojiTags`).
+      if (event.tags.isNotEmpty) {
+        _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
+      }
       _maybeNotifyChannel(event);
     }
+  }
+
+  /// Ingests a kind-30030 emoji-pack event into the live custom-emoji store
+  /// (emoji.js `handleEmojiPackEvent`): parse the `d`/`title`/`emoji` tags into a
+  /// pack (≤120 emoji, deduped) and store it (newest-wins per pubkey:identifier).
+  void _ingestEmojiPack(NostrEvent e) {
+    final emojis = <({String shortcode, String url})>[];
+    final seen = <String>{};
+    for (final t in e.tags) {
+      if (t.length >= 3 && t[0] == 'emoji') {
+        final sc = t[1];
+        final url = t[2];
+        if (sc.isEmpty || url.isEmpty || seen.contains(sc)) continue;
+        seen.add(sc);
+        emojis.add((shortcode: sc, url: url));
+        if (emojis.length >= 120) break;
+      }
+    }
+    if (emojis.isEmpty) return;
+    final identifier = e.tagValue('d') ?? '';
+    final title = e.tagValue('title') ??
+        (identifier.isNotEmpty ? identifier : 'Emoji pack');
+    _ref.read(liveCustomEmojiProvider.notifier).storePack(
+          CustomEmojiPack(
+            pubkey: e.pubkey,
+            identifier: identifier,
+            title: title,
+            createdAt: e.createdAt,
+            emojis: emojis,
+          ),
+        );
+  }
+
+  /// Ingests the user's kind-10030 emoji-pack list (emoji.js
+  /// `handleUserEmojiListEvent`): our author only; record the `a`-tag pack refs
+  /// (`30030:<pubkey>:<id>`) + any inline `emoji` tags (newest event wins).
+  void _ingestUserEmojiList(NostrEvent e) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey;
+    if (self != null && e.pubkey != self) return;
+    final refs = <String>[];
+    final inlineEmoji = <List<String>>[];
+    for (final t in e.tags) {
+      if (t.isEmpty) continue;
+      if (t[0] == 'a' && t.length > 1 && t[1].startsWith('30030:')) {
+        refs.add(t[1]);
+      } else if (t[0] == 'emoji' && t.length >= 3) {
+        inlineEmoji.add(t);
+      }
+    }
+    _ref.read(liveCustomEmojiProvider.notifier).setUserPackRefs(
+          refs,
+          e.createdAt,
+          inlineEmojiTags: inlineEmoji,
+        );
   }
 
   // ---------------------------------------------------------------------------
@@ -353,6 +570,12 @@ class NostrController {
       senderPubkey: e.pubkey,
       isFriend: appState.isFriend(e.pubkey),
       isMention: mention,
+      // A channel notification only fires on an @-mention; record it as such so
+      // the panel labels it "Mention" and routes to the sender's PM/profile.
+      historyType: 'mention',
+      route: e.pubkey,
+      eventId: e.id,
+      tsMs: e.createdAt * 1000,
     );
   }
 
@@ -382,16 +605,34 @@ class NostrController {
     );
     if (!notify) return;
     _dispatchNotification(
-      title: _nymDisplayFor(m.pubkey),
+      title: isGroup ? '${_groupNameFor(m.groupId)}: ${m.author}' : m.author,
       body: m.content,
       senderPubkey: m.pubkey,
       isFriend: appState.isFriend(m.pubkey),
       isMention: mention,
       isGroup: isGroup,
+      // PM → routes to the peer pubkey; group → routes to the group id (groups
+      // aren't avatar-keyed by a pubkey, so the panel falls back to a text row).
+      historyType: isGroup ? 'group' : 'pm',
+      route: isGroup ? (m.groupId ?? '') : m.pubkey,
+      eventId: m.nymMessageId ?? m.id,
+      tsMs: m.timestamp,
     );
   }
 
-  /// Fires the notification (sound + local) via the notifications service.
+  /// Group display name for a notification title/context (falls back to "Group").
+  String _groupNameFor(String? groupId) {
+    if (groupId == null) return 'Group';
+    final g = _ref.read(appStateProvider.notifier).groupById(groupId);
+    return (g != null && g.name.isNotEmpty) ? g.name : 'Group';
+  }
+
+  /// Fires the notification (sound + local popup) AND records it into the
+  /// in-app notification history (`notificationHistoryProvider`). Mirrors the
+  /// PWA's `showNotification` (notifications.js), which is the single entry point
+  /// that both alerts and pushes to history. [historyType] is the panel category
+  /// ('pm' | 'group' | 'mention' | 'reaction'); [route] is the tap target
+  /// (peer pubkey or group id); [eventId] dedupes live + replayed copies.
   void _dispatchNotification({
     required String title,
     required String body,
@@ -399,6 +640,10 @@ class NostrController {
     required bool isFriend,
     required bool isMention,
     bool isGroup = false,
+    String historyType = 'pm',
+    String? route,
+    String? eventId,
+    int? tsMs,
   }) {
     unawaited(_ref.read(notificationsServiceProvider).notify(
           title: title,
@@ -412,6 +657,82 @@ class NostrController {
             isGroup: isGroup,
           ),
         ));
+    // The verified Nymbot never records to history (notifications.js:14).
+    if (isVerifiedBot(senderPubkey)) return;
+    try {
+      _ref.read(notificationHistoryProvider.notifier).record(
+            type: historyType,
+            title: title,
+            body: body,
+            route: route ?? senderPubkey,
+            ts: tsMs,
+            eventId: eventId,
+            senderPubkey: senderPubkey,
+          );
+    } catch (_) {
+      // History store may be unavailable in teardown; alerting still happened.
+    }
+  }
+
+  /// Notifies + records history when someone reacts to OUR message (reactions.js
+  /// `handleReaction` notify block, lines 336-427). [messageId] is the reacted
+  /// message (`e` tag), [reactorPubkey] the reactor, [targetAuthorPubkey] the
+  /// reacted message's author (the `p` tag). Fires only when the target is us and
+  /// the reactor isn't us (and isn't blocked / notifications are enabled). The
+  /// body mirrors the PWA: `reacted <emoji> to: "<preview>"` (or `…to your
+  /// message`). [route] is the conversation to open on tap.
+  void _maybeNotifyReaction({
+    required String messageId,
+    required String reactorPubkey,
+    required String targetAuthorPubkey,
+    required String emoji,
+    required int tsSec,
+    String? eventId,
+    String? route,
+  }) {
+    if (emoji.isEmpty || messageId.isEmpty) return;
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty) return;
+    // Only notify for reactions to our message, and not our own reaction.
+    if (targetAuthorPubkey != self || reactorPubkey == self) return;
+    if (!_notificationsEnabled) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(reactorPubkey)) return;
+    if (_notifyFriendsOnly && !appState.isFriend(reactorPubkey)) return;
+
+    // Preview of the reacted message (first non-quoted line, ≤80 chars).
+    String? preview;
+    for (final list in appState.messages.values) {
+      for (final m in list) {
+        if (m.id == messageId || m.nymMessageId == messageId) {
+          preview = m.content
+              .split('\n')
+              .where((l) => !l.startsWith('>'))
+              .join(' ')
+              .trim();
+          break;
+        }
+      }
+      if (preview != null) break;
+    }
+    if (preview != null && preview.length > 80) {
+      preview = '${preview.substring(0, 80)}…';
+    }
+    final body = (preview != null && preview.isNotEmpty)
+        ? 'reacted $emoji to: "$preview"'
+        : 'reacted $emoji to your message';
+
+    _dispatchNotification(
+      title: _nymDisplayFor(reactorPubkey),
+      body: body,
+      senderPubkey: reactorPubkey,
+      isFriend: appState.isFriend(reactorPubkey),
+      isMention: false,
+      historyType: 'reaction',
+      route: route ?? reactorPubkey,
+      eventId: eventId,
+      tsMs: tsSec * 1000,
+    );
   }
 
   void _ingestPresence(NostrEvent e) {
@@ -531,6 +852,12 @@ class NostrController {
     final groupId = _tagValue(tags, 'g');
     final type = _tagValue(tags, 'type');
     final senderPubkey = rumor['pubkey'] as String? ?? '';
+
+    // Register any NIP-30 custom emoji declared on the PM/group rumor so its
+    // `:shortcode:` tokens render (emoji.js `ingestEmojiTags` runs on every event).
+    if (tags.isNotEmpty) {
+      _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(tags);
+    }
 
     // Track an advertised group ephemeral key.
     if (groupId != null) {
@@ -652,6 +979,25 @@ class NostrController {
         inviteEpoch: int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0,
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
+      // Group invite notification (groups.js:868 `Group invite: <name>`).
+      if (_notificationsEnabled &&
+          !_ref.read(appStateProvider).blockedUsers.contains(senderPubkey)) {
+        final inviter = _nymDisplayFor(senderPubkey);
+        _dispatchNotification(
+          title: 'Group invite: ${name.isNotEmpty ? name : 'group'}',
+          body: '$inviter added you to ${name.isNotEmpty ? name : 'a group'}',
+          senderPubkey: senderPubkey,
+          isFriend: _ref.read(appStateProvider).isFriend(senderPubkey),
+          isMention: false,
+          isGroup: true,
+          historyType: 'group',
+          route: groupId,
+          eventId: u.wrapId,
+          tsMs: (rumor['created_at'] as num?)?.toInt() != null
+              ? (rumor['created_at'] as num).toInt() * 1000
+              : null,
+        );
+      }
       return;
     }
 
@@ -701,18 +1047,35 @@ class NostrController {
     final content = rumor['content'] as String? ?? '';
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
     final action = tags.any((t) => t.length > 1 && t[0] == 'action' && t[1] == 'remove');
+    // The reacted message's author (`p` tag); reaction targets us when this is
+    // our pubkey. Group reactions also carry the group id (`g`) for routing.
+    final targetAuthor = _tagValue(tags, 'p') ?? '';
+    final groupId = _tagValue(tags, 'g');
     final synthetic = NostrEvent(
       pubkey: pubkey,
       createdAt: ts,
       kind: EventKind.reaction,
       tags: [
         ['e', target],
-        ['p', pubkey],
+        ['p', targetAuthor.isNotEmpty ? targetAuthor : pubkey],
         if (action) ['action', 'remove'],
       ],
       content: content,
     );
     appState.ingestEvent(synthetic);
+
+    // Notify + record when someone reacts to OUR PM/group message (pms.js:2032 /
+    // groups reaction notify). Skip removals.
+    if (!action) {
+      _maybeNotifyReaction(
+        messageId: target,
+        reactorPubkey: pubkey,
+        targetAuthorPubkey: targetAuthor,
+        emoji: content,
+        tsSec: ts,
+        route: groupId ?? pubkey,
+      );
+    }
   }
 
   /// Routes a gift-wrapped private zap announcement (kind 9735 rumor, sent to
@@ -815,16 +1178,37 @@ class NostrController {
     _markDirty(view.storageKey);
 
     if (view.kind == ViewKind.channel) {
-      appState.sendLocal(trimmed);
+      // Optimistic local echo with a temp `_optim_*` id (messages.js sendMessage).
+      final echo = appState.sendLocal(trimmed);
       if (service == null || identity == null) return;
       final isGeo = state.channels
           .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
-      await service.publishChannelMessage(
-        channelKey: view.id,
-        content: trimmed,
-        nym: identity.nym,
-        geohash: isGeo ? view.id : null,
-      );
+      try {
+        final signed = await service.publishChannelMessage(
+          channelKey: view.id,
+          content: trimmed,
+          nym: identity.nym,
+          geohash: isGeo ? view.id : null,
+          emojiTags: _ref
+              .read(liveCustomEmojiProvider.notifier)
+              .emojiTagsForContent(trimmed),
+        );
+        // Swap the temp id for the real signed-event id IN PLACE and register
+        // it so the relay echo is deduped — never shown twice (the PWA's
+        // `_replaceOptimisticMessage`). Without a signer `signed` is null and the
+        // echo simply stays (no relay round-trip will echo it back).
+        if (signed != null && echo != null) {
+          appState.replaceOptimistic(
+            echo.id,
+            signed.id,
+            realCreatedAt: signed.createdAt,
+            realMs: int.tryParse(signed.tagValue('ms') ?? ''),
+          );
+        }
+      } catch (_) {
+        // Publish failed: flip the placeholder to failed (`_markOptimisticFailed`).
+        if (echo != null) appState.markOptimisticFailed(echo.id);
+      }
       return;
     }
 
@@ -1098,10 +1482,65 @@ class NostrController {
     return group;
   }
 
-  /// Stub: join via an invite link (parsed token). Wired in a later slice — the
-  /// approver-side `group-join-request` flow is not yet implemented.
+  /// Joiner side of the group invite-link flow (groups.js
+  /// `requestJoinGroupViaInvite`, 449-492): gift-wrap a single
+  /// `group-join-request` (kind-14) to the link's sharer (`approver`), who
+  /// auto-admits us when invite links are enabled and our `invite_epoch`
+  /// matches. Short-circuits when we already have the group (just opens it) or
+  /// the link is our own, and degrades to a system message when no signer is
+  /// available yet (the PWA prompts setup and resumes after onboarding).
   Future<void> joinGroupViaInvite(GroupInviteToken token) async {
-    debugPrint('joinGroupViaInvite not yet implemented: ${token.groupId}');
+    final appState = _ref.read(appStateProvider.notifier);
+    // Already a member → just open it (groups.js:453).
+    if (appState.groupById(token.groupId) != null) {
+      appState.switchView(ChatView.group(token.groupId));
+      return;
+    }
+    final identity = _identity;
+    final service = _service;
+    // Your own invite link (groups.js:458).
+    if (identity != null && token.approver == identity.pubkey) {
+      _emitSystemMessage('That is your own invite link.');
+      return;
+    }
+    final sanitized = _sanitizeGroupName(token.name);
+    final name = sanitized.isEmpty ? 'this group' : sanitized;
+    // No identity / signer yet (groups.js:466 `_canSendGiftWraps`).
+    if (identity == null || service == null || !service.canSign) {
+      _emitSystemMessage(
+          'Pick a nym or log in to join "$name", then you\'ll be added.');
+      return;
+    }
+    // Build + gift-wrap the join request to the sharer (groups.js:480-491).
+    recordOwnActivity();
+    final subject = token.name.isEmpty
+        ? 'Group'
+        : (token.name.length > 80 ? token.name.substring(0, 80) : token.name);
+    final rumor = UnsignedEvent(
+      pubkey: identity.pubkey,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: EventKind.dmRumor, // 14
+      tags: [
+        ['p', token.approver],
+        ['g', token.groupId],
+        ['subject', subject],
+        ['type', GroupControlType.joinRequest],
+        ['invite_epoch', '${token.epoch}'],
+        ['x', PmLogic.generateSharedEventId()],
+      ],
+      content: 'requested to join via invite link',
+    );
+    try {
+      await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: [token.approver],
+      );
+      _emitSystemMessage(
+          'Join request sent for "$name". You\'ll be added once a member is '
+          'online.');
+    } catch (_) {
+      _emitSystemMessage('Failed to send join request. Please try again.');
+    }
   }
 
   /// Sends [body] as a gift-wrapped kind-14 PM to the verified developer
@@ -1523,6 +1962,63 @@ class NostrController {
     _emitSystemMessage(allow
         ? 'Group members can now add new users.'
         : 'Only the group owner can add new users now.');
+    return true;
+  }
+
+  /// Owner-only: turns joining [groupId] via an invite link on or off
+  /// (groups.js `setGroupInviteEnabled`, 2288). Mutates the group locally and
+  /// broadcasts a `group-metadata` control so members pick up the new
+  /// `invite_enabled` flag. Returns true if the value changed.
+  Future<bool> setGroupInviteEnabled(String groupId, bool enabled) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.isOwner(group, identity.pubkey)) {
+      _emitSystemMessage('Only the group owner can change this setting.');
+      return false;
+    }
+    if (enabled == group.inviteEnabled) return false;
+
+    group.inviteEnabled = enabled;
+    group.metaUpdatedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    appState.upsertGroup(group);
+    await groups.sendMetadata(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _emitSystemMessage(enabled
+        ? 'Joining via invite link is now enabled.'
+        : 'Joining via invite link is now disabled.');
+    return true;
+  }
+
+  /// Owner-only: rotates [groupId]'s invite epoch, revoking every outstanding
+  /// invite link (groups.js `rotateGroupInviteEpoch`, 2309). Mutates the group
+  /// locally and broadcasts a `group-metadata` control. Returns true on success.
+  Future<bool> rotateGroupInviteEpoch(String groupId) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.isOwner(group, identity.pubkey)) {
+      _emitSystemMessage('Only the group owner can reset the invite link.');
+      return false;
+    }
+
+    group.inviteEpoch = group.inviteEpoch + 1;
+    group.metaUpdatedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    appState.upsertGroup(group);
+    await groups.sendMetadata(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _emitSystemMessage(
+        'Previous invite links revoked. A new link is now active.');
     return true;
   }
 
@@ -2891,7 +3387,7 @@ class NostrController {
         'Sharing file through Nymchat: ${offer.name} (${formatFileSize(offer.size)})';
 
     // Local echo as a file-offer message (displayMessage isFileOffer path).
-    _ref.read(appStateProvider.notifier).sendLocal(content);
+    final echo = _ref.read(appStateProvider.notifier).sendLocal(content);
 
     if (identity == null || service == null) return;
     if (view.kind != ViewKind.channel) {
@@ -2922,6 +3418,16 @@ class NostrController {
     if (sig == null) return;
     final signed = await sig.sign(unsigned);
     await service.pool.publish(signed);
+    // Reconcile the optimistic echo with the real id so the relay echo is
+    // deduped (same one-message guarantee as a normal channel send).
+    if (echo != null) {
+      _ref.read(appStateProvider.notifier).replaceOptimistic(
+            echo.id,
+            signed.id,
+            realCreatedAt: signed.createdAt,
+            realMs: nowMs,
+          );
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -3347,6 +3853,14 @@ final nostrControllerProvider = Provider<NostrController>((ref) {
   ref.onDispose(c.dispose);
   return c;
 });
+
+/// Monotonically increasing "boot generation". The PWA's `signOut()` ends with
+/// a full page reload to a pristine first-run state; Flutter has no reload, so
+/// [NostrController.signOut] bumps this counter and the root (`app.dart`)
+/// remounts a fresh [BootGate] keyed on it — tearing down the whole `HomeShell`
+/// subtree and re-running the setup-needed check (which now passes because the
+/// login keys were cleared). Starts at 0 (first boot needs no remount).
+final bootEpochProvider = StateProvider<int>((ref) => 0);
 
 /// Holds the inbound settings-transfer offers (cross-device settings sections
 /// newer than this device's last applied sync) for the settings UI's

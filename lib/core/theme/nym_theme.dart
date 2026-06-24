@@ -107,6 +107,20 @@ NymColors resolveNymColors({
     blue = _hex('#bbbbbb');
   }
 
+  // --- ghost LIGHT non-accent greys (`body.light-mode.theme-ghost`,
+  // styles-themes-responsive.css:652-675). The class wins over the generic
+  // `.light-mode` block above: warning is set to #666666 then overridden to
+  // #555555 (:673), danger #888888, purple #777777, blue #666666, border
+  // #999999. (primary/secondary/text/textDim/textBright/lightning already come
+  // from the correct ghost-light `_themeAccents` entry.)
+  if (theme == NymThemeKey.ghost && isLight) {
+    warning = _hex('#555555');
+    danger = _hex('#888888');
+    purple = _hex('#777777');
+    blue = _hex('#666666');
+    border = _hex('#999999');
+  }
+
   // --- solid-ui (opaque surfaces; default ON) ---
   if (solidUi) {
     if (isLight) {

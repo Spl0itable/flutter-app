@@ -16,7 +16,6 @@ import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../chat/message_row.dart';
 import '../common/nym_avatar.dart';
-import '../wallpaper/wallpaper_layer.dart';
 
 /// Fixed dimensions from `css/styles-columns.css`.
 class _CvDimens {
@@ -132,10 +131,11 @@ class _ColumnDesc {
 /// `settings.chatViewMode == 'columns'`.
 ///
 /// Desktop (width > 768): a horizontally-scrollable strip of 360px-wide columns
-/// — channel, PM, or group (gap F1) — each draggable by a 6-dot grip to reorder
-/// (`_cvAttachDnd`/`cv-drag-ghost`, gap F4), with left/right move buttons
-/// (`_cvMoveColumn`) and a centered pager (`.cv-pager`/`.cv-pdot`) above the
-/// strip. Ends in a 220px dashed "+ Add column".
+/// — channel, PM, or group (gap F1) — each draggable by its header to reorder
+/// (`_cvAttachDnd`/`cv-drag-ghost`, gap F4) and clickable to focus
+/// (`.cv-column.focused` primary border + glow), with a centered pager
+/// (`.cv-pager`/`.cv-pdot`) above the strip. Ends in a 220px dashed
+/// "+ Add column".
 ///
 /// Mobile (width <= 768): a full-width [PageView] snap carousel (one column per
 /// screen, `scroll-snap-type:x mandatory` / `flex:0 0 100%`), each header
@@ -148,8 +148,8 @@ class _ColumnDesc {
 /// none is saved, `#nymchat` + the most-recent PM + the most-recent group
 /// (`_cvSeedDefaults`); the order/layout is persisted on every mutation
 /// (`_cvSaveLayout`). When `settings.columnsWallpaper` is on, the per-column
-/// backgrounds go transparent so the [WallpaperLayer] behind the deck shows
-/// through (`.columns-wallpaper`).
+/// backgrounds go transparent so the wallpaper drawn by the shell behind the
+/// deck shows through (`.columns-wallpaper`).
 class ColumnsDeck extends ConsumerStatefulWidget {
   const ColumnsDeck({super.key});
 
@@ -281,17 +281,12 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     _scrollToIndex(_focused);
   }
 
-  /// Move a column one slot left/right (`_cvMoveColumn`, desktop arrows).
-  void _moveColumn(int index, int dir) {
-    final to = index + dir;
-    if (to < 0 || to >= _columns.length) return;
-    setState(() {
-      final moved = _columns.removeAt(index);
-      _columns.insert(to, moved);
-      _focused = to;
-    });
-    _saveLayout();
-    _scrollToIndex(to);
+  /// Desktop "click a column to focus it" (`columns.js:175-179` →
+  /// `_cvOpenConversation`/`_cvFocusColumn`): clicking a non-focused column
+  /// marks it focused so its header shows the primary border + `--shadow-glow`.
+  void _focusColumn(int index) {
+    if (index < 0 || index >= _columns.length) return;
+    if (_focused != index) setState(() => _focused = index);
   }
 
   /// Step the visible column one slot left/right (`_cvStepFocused`, mobile
@@ -463,14 +458,24 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     }
   }
 
-  /// Resolves a column's header icon (`_cvColIcon`): `#` glyph for channels, a
-  /// 20px PM/group avatar otherwise.
+  /// Resolves a column's header icon (`_cvColIcon`): a `#` text glyph for
+  /// channels, a multi-person SVG for groups without an avatar (both in
+  /// `--text-dim`), and a 20px round avatar for PMs / avatar-bearing groups.
   Widget _columnIcon(BuildContext context, _ColumnDesc d, {double size = 20}) {
     final c = context.nym;
     final app = ref.read(appStateProvider);
     switch (d.kind) {
       case _ColumnKind.channel:
-        return Icon(Icons.tag, size: 18, color: c.secondary);
+        // `_cvColIcon` returns the literal text '#'; `.cv-col-icon` is text-dim.
+        return Text(
+          '#',
+          style: TextStyle(
+            color: c.textDim,
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        );
       case _ColumnKind.pm:
         final u = app.users[d.pubkey];
         return NymAvatar(
@@ -488,7 +493,12 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
             imageUrl: avatar,
           );
         }
-        return Icon(Icons.groups_outlined, size: 18, color: c.secondary);
+        // Group fallback: the 16×16 multi-person SVG, stroked in text-dim.
+        return SizedBox(
+          width: 16,
+          height: 16,
+          child: CustomPaint(painter: _GroupGlyphPainter(color: c.textDim)),
+        );
     }
   }
 
@@ -502,7 +512,6 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         ref.watch(settingsProvider.select((s) => s.groupChatPMOnlyMode));
     final transparentColumns =
         ref.watch(settingsProvider.select((s) => s.columnsWallpaper));
-    final unread = ref.watch(unreadCountsProvider);
     _seedIfNeeded(channels, pms, groups, pmOnly);
 
     if (_focused >= _columns.length) {
@@ -513,10 +522,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       key: const Key('columnsStrip'),
       color: Colors.transparent,
       child: _isMobile
-          ? _buildMobile(c, channels, pms, groups, pmOnly, unread,
-              transparentColumns)
-          : _buildDesktop(c, channels, pms, groups, pmOnly, unread,
-              transparentColumns),
+          ? _buildMobile(c, channels, pms, groups, pmOnly, transparentColumns)
+          : _buildDesktop(c, channels, pms, groups, pmOnly, transparentColumns),
     );
   }
 
@@ -528,7 +535,6 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     List<PMConversation> pms,
     List<Group> groups,
     bool pmOnly,
-    Map<String, int> unread,
     bool transparentColumns,
   ) {
     return Column(
@@ -557,10 +563,10 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                       desc: _columns[i],
                       title: _columnTitle(context, _columns[i]),
                       icon: _columnIcon(context, _columns[i]),
-                      unread: unread[_columns[i].key] ?? 0,
+                      focused: i == _focused,
                       transparent: transparentColumns,
                       onClose: () => _removeColumn(_columns[i]),
-                      onMove: (dir) => _moveColumn(i, dir),
+                      onFocus: () => _focusColumn(i),
                       onReorder: _reorderColumn,
                     ),
                     const SizedBox(width: _CvDimens.gap),
@@ -587,7 +593,6 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     List<PMConversation> pms,
     List<Group> groups,
     bool pmOnly,
-    Map<String, int> unread,
     bool transparentColumns,
   ) {
     // The "+ Add column" tile is the trailing page (PWA: it stays in the snap
@@ -618,7 +623,6 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           index: i,
           total: _columns.length,
           desc: desc,
-          unread: unread[desc.key] ?? 0,
           transparent: transparentColumns,
           onClose: () => _removeColumn(desc),
           onPrev: () => _stepFocused(-1),
@@ -642,10 +646,10 @@ class _DesktopColumnSlot extends StatefulWidget {
     required this.desc,
     required this.title,
     required this.icon,
-    required this.unread,
+    required this.focused,
     required this.transparent,
     required this.onClose,
-    required this.onMove,
+    required this.onFocus,
     required this.onReorder,
   });
 
@@ -654,10 +658,10 @@ class _DesktopColumnSlot extends StatefulWidget {
   final _ColumnDesc desc;
   final String title;
   final Widget icon;
-  final int unread;
+  final bool focused;
   final bool transparent;
   final VoidCallback onClose;
-  final ValueChanged<int> onMove; // -1 / +1
+  final VoidCallback onFocus;
   final void Function(int from, int to) onReorder;
 
   @override
@@ -668,24 +672,25 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
   bool _dragging = false;
   bool _dragOver = false;
 
-  /// Builds a `_DeckColumn` for this slot. When [draggable] is true the 6-dot
-  /// grip is wrapped in a [Draggable]; the drag feedback passes false so the
-  /// floating clone has a plain (non-draggable) grip.
+  /// Builds a `_DeckColumn` for this slot. When [draggable] is true the column
+  /// header is the drag source (`_cvAttachDnd` attaches `mousedown` to the whole
+  /// header, excluding close/move/dots); the floating drag clone passes false so
+  /// it isn't itself draggable.
   Widget _buildColumn({required bool draggable}) {
     return _DeckColumn(
       desc: widget.desc,
       title: widget.title,
       icon: widget.icon,
-      unread: widget.unread,
+      focused: widget.focused,
       transparent: widget.transparent,
       mobile: false,
       index: widget.index,
       total: widget.total,
       onClose: widget.onClose,
-      onMove: widget.onMove,
-      // The 6-dot grip starts the drag (live column on the strip only).
-      dragHandleBuilder: draggable
-          ? (handle) => Draggable<int>(
+      // The whole header (grip + icon + title) starts the drag — matches the
+      // PWA `cursor:grab` header (live column on the strip only).
+      headerDragBuilder: draggable
+          ? (header) => Draggable<int>(
                 data: widget.index,
                 axis: Axis.horizontal,
                 dragAnchorStrategy: childDragAnchorStrategy,
@@ -697,8 +702,8 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
                   width: _CvDimens.column,
                   child: _buildColumn(draggable: false),
                 ),
-                childWhenDragging: handle,
-                child: handle,
+                childWhenDragging: header,
+                child: header,
               )
           : null,
     );
@@ -706,7 +711,13 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
 
   @override
   Widget build(BuildContext context) {
-    final column = _buildColumn(draggable: true);
+    // Clicking anywhere on the column focuses it (`columns.js:175-179`); the
+    // header drag-source sits above this so a grab doesn't read as a click.
+    final column = GestureDetector(
+      onTap: widget.onFocus,
+      behavior: HitTestBehavior.deferToChild,
+      child: _buildColumn(draggable: true),
+    );
 
     // The whole column is a drop target; dropping before its midpoint inserts
     // the dragged column at this slot (`_cvStartColumnDrag`'s live reorder).
@@ -773,7 +784,6 @@ class _MobileColumn extends StatelessWidget {
     required this.index,
     required this.total,
     required this.desc,
-    required this.unread,
     required this.transparent,
     required this.onClose,
     required this.onPrev,
@@ -784,7 +794,6 @@ class _MobileColumn extends StatelessWidget {
   final int index;
   final int total;
   final _ColumnDesc desc;
-  final int unread;
   final bool transparent;
   final VoidCallback onClose;
   final VoidCallback onPrev;
@@ -798,7 +807,8 @@ class _MobileColumn extends StatelessWidget {
       // Title/icon are hidden on mobile; the dots take the title's slot.
       title: '',
       icon: const SizedBox.shrink(),
-      unread: unread,
+      // Mobile columns reset `.cv-column.focused` border/shadow to none.
+      focused: false,
       transparent: transparent,
       mobile: true,
       index: index,
@@ -818,31 +828,30 @@ class _DeckColumn extends ConsumerStatefulWidget {
     required this.desc,
     required this.title,
     required this.icon,
-    required this.unread,
+    required this.focused,
     required this.transparent,
     required this.mobile,
     required this.index,
     required this.total,
     required this.onClose,
-    this.onMove,
     this.onPrev,
     this.onNext,
     this.onOpenTabs,
-    this.dragHandleBuilder,
+    this.headerDragBuilder,
   });
 
   final _ColumnDesc desc;
   final String title;
   final Widget icon;
-  final int unread;
+
+  /// Desktop only: the focused column shows a primary border + `--shadow-glow`
+  /// (`.cv-column.focused`). Always false on mobile (the PWA resets it to none).
+  final bool focused;
   final bool transparent;
   final bool mobile;
   final int index;
   final int total;
   final VoidCallback onClose;
-
-  /// Desktop left/right move (`_cvMoveColumn`), arg -1 / +1.
-  final ValueChanged<int>? onMove;
 
   /// Mobile prev/next carousel step (`_cvStepFocused`).
   final VoidCallback? onPrev;
@@ -851,9 +860,9 @@ class _DeckColumn extends ConsumerStatefulWidget {
   /// Mobile: tapping the dot indicator opens the "Columns" tabs sheet.
   final VoidCallback? onOpenTabs;
 
-  /// Desktop: wraps the 6-dot grip in a [Draggable] so the column can be
-  /// dragged to reorder.
-  final Widget Function(Widget handle)? dragHandleBuilder;
+  /// Desktop: wraps the whole header (the drag region) in a [Draggable] so the
+  /// column can be dragged anywhere on its header to reorder (`_cvAttachDnd`).
+  final Widget Function(Widget header)? headerDragBuilder;
 
   @override
   ConsumerState<_DeckColumn> createState() => _DeckColumnState();
@@ -862,6 +871,7 @@ class _DeckColumn extends ConsumerStatefulWidget {
 class _DeckColumnState extends ConsumerState<_DeckColumn> {
   final ScrollController _scroll = ScrollController();
   bool _atBottom = true;
+  bool _showScrollButton = false;
 
   @override
   void initState() {
@@ -878,9 +888,19 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
 
   void _onScroll() {
     if (!_scroll.hasClients) return;
-    // Reversed list: offset 0 == newest at the bottom.
-    final atBottom = _scroll.offset <= 24;
-    if (atBottom != _atBottom) setState(() => _atBottom = atBottom);
+    // Reversed list: offset 0 == newest at the bottom, so offset is the distance
+    // from the bottom. The PWA decouples the two thresholds
+    // (`_cvAttachColumnScroll`): at-bottom (autoscroll/mark-read) at <120, and
+    // the scroll-to-bottom button shows at >150.
+    final distanceFromBottom = _scroll.offset;
+    final atBottom = distanceFromBottom < 120;
+    final showButton = distanceFromBottom > 150;
+    if (atBottom != _atBottom || showButton != _showScrollButton) {
+      setState(() {
+        _atBottom = atBottom;
+        _showScrollButton = showButton;
+      });
+    }
   }
 
   void _scrollToBottom() {
@@ -903,67 +923,100 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final messages = [...(app.messages[widget.desc.storageKey] ?? const <Message>[])];
     messages.sort(compareMessages);
 
+    // Per-column typing indicator (`.cv-typing`): the pubkeys typing in this
+    // column's conversation, keyed off `app.typing` (`<storageKey>|<pubkey>`,
+    // matching the focused-view `typingForCurrentViewProvider`).
+    final typingPubkeys = _typingFor(app);
+
+    // `.cv-column.focused` (desktop): primary border + `--shadow-glow`
+    // (`0 0 20px primary@0.1`). Mobile resets focused styling to none.
+    final showFocus = widget.focused && !mobile;
+
     final body = Container(
       decoration: BoxDecoration(
         color: transparent ? Colors.transparent : c.bgSecondary,
         // Mobile columns drop the border/radius/shadow (`flex:0 0 100%`,
         // `border:none; border-radius:0; box-shadow:none`).
         borderRadius: mobile ? null : NymRadius.rmd,
-        border: mobile ? null : Border.all(color: c.glassBorder),
-        // .cv-column box-shadow: --shadow-md (0 4px 16px black@0.4).
-        boxShadow: (transparent || mobile)
+        border: mobile
             ? null
-            : [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.4),
-                  offset: const Offset(0, 4),
-                  blurRadius: 16,
-                ),
-              ],
+            : Border.all(color: showFocus ? c.primary : c.glassBorder),
+        // .cv-column box-shadow: focused → --shadow-glow (0 0 20px primary@0.1,
+        // desktop only); else --shadow-md (0 4px 16px black@0.4), dropped on
+        // mobile / under the columns wallpaper.
+        boxShadow: showFocus
+            ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 20)]
+            : (transparent || mobile)
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      offset: const Offset(0, 4),
+                      blurRadius: 16,
+                    ),
+                  ],
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           _buildHeader(c, mobile),
           // .cv-column-scroller / .cv-list (padding 10) + scroll-to-bottom.
+          // .messages-container background rgba(0,0,0,0.15) (transparent only
+          // under the columns wallpaper).
           Expanded(
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: messages.isEmpty
-                      ? Center(
-                          child: Text('No messages yet',
-                              style:
-                                  TextStyle(color: c.textDim, fontSize: 12)),
-                        )
-                      : ListView.builder(
-                          controller: _scroll,
-                          reverse: true,
-                          padding: const EdgeInsets.all(10),
-                          itemCount: messages.length,
-                          itemBuilder: (context, revIndex) {
-                            final m =
-                                messages[messages.length - 1 - revIndex];
-                            return MessageRow(
-                              message: m,
-                              settings: settings,
-                              reactions: reactions[m.id] ?? const [],
-                              showAvatar: false,
-                            );
-                          },
-                        ),
-                ),
-                // .cv-scroll-bottom: 36×36 circle, bottom/right 16, shown when
-                // not at bottom (gap F10).
-                if (!_atBottom && messages.isNotEmpty)
-                  Positioned(
-                    right: 16,
-                    bottom: 16,
-                    child: _ScrollBottomButton(onTap: _scrollToBottom),
+            child: ColoredBox(
+              color: transparent
+                  ? Colors.transparent
+                  : Colors.black.withValues(alpha: 0.15),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: messages.isEmpty
+                        ? Center(
+                            // `.msg-empty-note`: text-dim, 13px, "No recent
+                            // messages[ in #channel]".
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 24),
+                              child: Text(
+                                _emptyNoteText(),
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    color: c.textDim, fontSize: 13),
+                              ),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: _scroll,
+                            reverse: true,
+                            padding: const EdgeInsets.all(10),
+                            itemCount: messages.length,
+                            itemBuilder: (context, revIndex) {
+                              final m =
+                                  messages[messages.length - 1 - revIndex];
+                              return MessageRow(
+                                message: m,
+                                settings: settings,
+                                reactions: reactions[m.id] ?? const [],
+                                showAvatar: false,
+                              );
+                            },
+                          ),
                   ),
-              ],
+                  // .cv-scroll-bottom: 36×36 circle, bottom/right 16, shown when
+                  // scrolled >150px from the bottom (gap F10).
+                  if (_showScrollButton && messages.isNotEmpty)
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: _ScrollBottomButton(onTap: _scrollToBottom),
+                    ),
+                ],
+              ),
             ),
           ),
+          // `.cv-typing` per-column typing indicator (animated 0→24, black@0.15).
+          _TypingRow(pubkeys: typingPubkeys),
         ],
       ),
     );
@@ -971,9 +1024,36 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     return mobile ? body : SizedBox(width: _CvDimens.column, child: body);
   }
 
+  /// The empty-state text (`_appendEmptyNote`): "No recent messages in
+  /// #channel" for channels (`messages.js:2840`), else "No recent messages".
+  String _emptyNoteText() {
+    final d = widget.desc;
+    if (d.kind == _ColumnKind.channel) {
+      final name = d.geohash.isNotEmpty ? d.geohash : d.channel;
+      return 'No recent messages in #$name';
+    }
+    return 'No recent messages';
+  }
+
+  /// Resolves the pubkeys currently typing in this column's conversation from
+  /// `app.typing` (keyed `<storageKey>|<pubkey>`, non-expired).
+  List<String> _typingFor(AppState app) {
+    final prefix = '${widget.desc.storageKey}|';
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final out = <String>[];
+    app.typing.forEach((k, expiry) {
+      if (k.startsWith(prefix) && expiry > now) {
+        out.add(k.substring(prefix.length));
+      }
+    });
+    return out;
+  }
+
   /// The `.cv-column-header` (padding 10/12, bottom border, gap 8). On desktop:
-  /// 6-dot grip + icon + title + unread + close. On mobile: prev arrow + dots
-  /// (in the title's slot) + next arrow + unread + close.
+  /// 6-dot grip + icon + title (all draggable to reorder, `cursor:grab`) + a
+  /// close button. On mobile: prev arrow + position dots (in the title's slot) +
+  /// next arrow + close. The `.cv-col-unread` pill and the desktop move arrows
+  /// are intentionally omitted (dead/desktop-hidden in the PWA).
   Widget _buildHeader(NymColors c, bool mobile) {
     final children = <Widget>[];
 
@@ -1004,65 +1084,76 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
         enabled: widget.index < widget.total - 1,
         onTap: widget.onNext,
       ));
-    } else {
-      // `.cv-drag-handle` (6-dot grip), wrapped as the drag source.
-      final handle = _DragHandle(color: c.textDim);
-      children.add(widget.dragHandleBuilder != null
-          ? widget.dragHandleBuilder!(handle)
-          : handle);
+      // `.cv-col-close`.
       children.add(const SizedBox(width: 8));
-      children.add(widget.icon);
-      children.add(const SizedBox(width: 8));
-      children.add(Expanded(
-        child: Text(
-          widget.title,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: c.secondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ));
-      // Desktop left/right move buttons (`_cvMoveColumn`).
-      if (widget.onMove != null) {
-        children.add(_HeaderIconButton(
-          icon: Icons.chevron_left,
-          tooltip: 'Move left',
-          enabled: widget.index > 0,
-          onTap: () => widget.onMove!(-1),
-        ));
-        children.add(_HeaderIconButton(
-          icon: Icons.chevron_right,
-          tooltip: 'Move right',
-          enabled: widget.index < widget.total - 1,
-          onTap: () => widget.onMove!(1),
-        ));
-      }
+      children.add(_buildCloseButton(c));
+      return _headerContainer(c, Row(children: children));
     }
 
-    // `.cv-col-unread` (gap F9).
-    if (widget.unread > 0) {
-      children.add(const SizedBox(width: 8));
-      children.add(_CvUnreadPill(count: widget.unread));
-    }
+    // Desktop: the whole header is the drag source (`_cvAttachDnd` mousedown on
+    // the header, excluding the close button). The grip + icon + title form the
+    // draggable region; `.cv-col-move` arrows are desktop-hidden (reorder is
+    // drag-only) and the unread pill is never shown (`.cv-col-unread:empty`).
+    children.add(_DragHandle(color: c.textDim));
     children.add(const SizedBox(width: 8));
-    children.add(IconButton(
+    children.add(widget.icon);
+    children.add(const SizedBox(width: 8));
+    children.add(Expanded(
+      child: Text(
+        widget.title,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: c.secondary,
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    ));
+
+    Widget dragRegion = Row(children: children);
+    if (widget.headerDragBuilder != null) {
+      dragRegion = widget.headerDragBuilder!(dragRegion);
+    }
+    // `.cv-column-header { cursor: grab }` over the draggable region.
+    dragRegion = MouseRegion(
+      cursor: SystemMouseCursors.grab,
+      child: dragRegion,
+    );
+
+    return _headerContainer(
+      c,
+      Row(
+        children: [
+          Expanded(child: dragRegion),
+          const SizedBox(width: 8),
+          _buildCloseButton(c),
+        ],
+      ),
+    );
+  }
+
+  /// The `.cv-col-close` button (text-dim → danger on hover).
+  Widget _buildCloseButton(NymColors c) {
+    return IconButton(
       tooltip: 'Remove column',
       icon: Icon(Icons.close, size: 16, color: c.textDim),
+      hoverColor: c.danger.withValues(alpha: 0.12),
       onPressed: widget.onClose,
       visualDensity: VisualDensity.compact,
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(),
-    ));
+    );
+  }
 
+  /// The `.cv-column-header` chrome (padding 10/12, glass bg, bottom border).
+  Widget _headerContainer(NymColors c, Widget child) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: widget.transparent ? Colors.transparent : c.glassBg,
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
-      child: Row(children: children),
+      child: child,
     );
   }
 }
@@ -1122,6 +1213,55 @@ class _SixDotPainter extends CustomPainter {
   bool shouldRepaint(_SixDotPainter old) => old.color != color;
 }
 
+/// The group-header fallback glyph (`_cvColIcon` multi-person SVG): three heads
+/// + shoulders, stroked (no fill), `stroke-width 1.75` in a 24×24 viewBox.
+class _GroupGlyphPainter extends CustomPainter {
+  _GroupGlyphPainter({required this.color});
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final s = size.width / 24; // uniform scale (16×16 box).
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.75 * s
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    Offset p(double x, double y) => Offset(x * s, y * s);
+
+    // Center head + shoulders: circle cx12 cy7 r2.75; M5 21v-1.5 a7 7 0 0 1 14 0 V21.
+    canvas.drawCircle(p(12, 7), 2.75 * s, paint);
+    final centre = Path()
+      ..moveTo(5 * s, 21 * s)
+      ..relativeLineTo(0, -1.5 * s)
+      ..arcToPoint(p(19, 19.5), radius: Radius.circular(7 * s), clockwise: true)
+      ..lineTo(19 * s, 21 * s);
+    canvas.drawPath(centre, paint);
+
+    // Left figure: circle cx4.5 cy9.5 r2; M1 20v-1 a4.5 4.5 0 0 1 5.5-4.35.
+    canvas.drawCircle(p(4.5, 9.5), 2 * s, paint);
+    final left = Path()
+      ..moveTo(1 * s, 20 * s)
+      ..relativeLineTo(0, -1 * s)
+      ..relativeArcToPoint(p(5.5, -4.35),
+          radius: Radius.circular(4.5 * s), clockwise: true);
+    canvas.drawPath(left, paint);
+
+    // Right figure: circle cx19.5 cy9.5 r2; M23 20v-1 a4.5 4.5 0 0 0-5.5-4.35.
+    canvas.drawCircle(p(19.5, 9.5), 2 * s, paint);
+    final right = Path()
+      ..moveTo(23 * s, 20 * s)
+      ..relativeLineTo(0, -1 * s)
+      ..relativeArcToPoint(p(-5.5, -4.35),
+          radius: Radius.circular(4.5 * s), clockwise: false);
+    canvas.drawPath(right, paint);
+  }
+
+  @override
+  bool shouldRepaint(_GroupGlyphPainter old) => old.color != color;
+}
+
 /// The mobile per-column position dots (`.cv-hdot`): 6px circles, 2px h-margin,
 /// the active one primary/opaque (`styles-columns.css:573-587`).
 class _HeaderDots extends StatelessWidget {
@@ -1154,9 +1294,9 @@ class _HeaderDots extends StatelessWidget {
   }
 }
 
-/// A small header control button used for the `.cv-col-move` arrows (mobile
-/// prev/next, desktop move-left/right). text-dim → text-bright on hover,
-/// dimmed when disabled.
+/// A small header control button used for the mobile `.cv-col-move` prev/next
+/// carousel arrows (`_cvStepFocused`). text-dim → text-bright on hover, dimmed
+/// when disabled. (Desktop move arrows don't exist — reorder is drag-only.)
 class _HeaderIconButton extends StatefulWidget {
   const _HeaderIconButton({
     required this.icon,
@@ -1323,21 +1463,28 @@ class _TabsSheetState extends State<_TabsSheet> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final maxHeight = MediaQuery.of(context).size.height * 0.75;
+    final size = MediaQuery.of(context).size;
+    // `@media(min-width:769px)`: the overlay centers the sheet, which gets an
+    // all-corner `--radius-lg` and a 70vh cap. Below that it's a bottom sheet
+    // with top-only radius and a 75vh cap.
+    final desktop = size.width >= 769;
+    final maxHeight = size.height * (desktop ? 0.70 : 0.75);
     return SafeArea(
       top: false,
       child: Align(
-        alignment: Alignment.bottomCenter,
+        alignment: desktop ? Alignment.center : Alignment.bottomCenter,
         child: ConstrainedBox(
-          // `.cv-tabs-sheet`: max-width 520, max-height 75vh.
+          // `.cv-tabs-sheet`: max-width 520.
           constraints: BoxConstraints(maxWidth: 520, maxHeight: maxHeight),
           child: Container(
             decoration: BoxDecoration(
               color: c.bgSecondary,
               border: Border.all(color: c.glassBorder),
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(NymRadius.lg),
-              ),
+              borderRadius: desktop
+                  ? NymRadius.rlg
+                  : const BorderRadius.vertical(
+                      top: Radius.circular(NymRadius.lg),
+                    ),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.5),
@@ -1528,29 +1675,81 @@ class _TabRow extends StatelessWidget {
   }
 }
 
-/// `.cv-col-unread`: bg primary, color bg, pill, 10px w600, tabular-nums (F9).
-class _CvUnreadPill extends StatelessWidget {
-  const _CvUnreadPill({required this.count});
-  final int count;
+/// The per-column typing indicator (`.typing-indicator.cv-typing`): hidden
+/// (height 0 / opacity 0) until someone is typing, then animates to a 24px-tall
+/// row (`padding 4px 20px`, 12px text-dim, bg `rgba(0,0,0,0.15)`) showing up to
+/// 3 overlapping 18px avatars + "X is typing" / "X and Y are typing" /
+/// "N people are typing" (`_renderTypingInto`, `styles-features.css:4227`).
+class _TypingRow extends ConsumerWidget {
+  const _TypingRow({required this.pubkeys});
+  final List<String> pubkeys;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    return Container(
-      constraints: const BoxConstraints(minWidth: 24),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.primary,
-        borderRadius: const BorderRadius.all(Radius.circular(20)),
-      ),
-      child: Text(
-        count > 99 ? '99+' : '$count',
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          color: c.bg,
-          fontSize: 10,
-          fontWeight: FontWeight.w600,
-          fontFeatures: const [FontFeature.tabularFigures()],
+    final active = pubkeys.isNotEmpty;
+    final app = ref.watch(appStateProvider);
+
+    String nymOf(String pk) {
+      final u = app.users[pk];
+      final nym = u?.nym;
+      return (nym != null && nym.isNotEmpty) ? nym : 'Someone';
+    }
+
+    final style = TextStyle(color: c.textDim, fontSize: 12, height: 1);
+
+    Widget content;
+    if (!active) {
+      content = const SizedBox.shrink();
+    } else {
+      final visible = pubkeys.take(3).toList();
+      final String text;
+      if (pubkeys.length == 1) {
+        text = '${nymOf(pubkeys[0])} is typing';
+      } else if (pubkeys.length == 2) {
+        text = '${nymOf(pubkeys[0])} and ${nymOf(pubkeys[1])} are typing';
+      } else {
+        text = '${pubkeys.length} people are typing';
+      }
+      content = Padding(
+        // `.typing-indicator.active` padding: 4px 20px (trimmed to 3px vertical
+        // so the 18px avatars sit inside the 24px row without overflow).
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 3),
+        child: Row(
+          children: [
+            // `.typing-indicator-avatars`: 18px round, +img margin-left -6.
+            for (var i = 0; i < visible.length; i++)
+              Transform.translate(
+                offset: Offset(-6.0 * i, 0),
+                child: NymAvatar(
+                  seed: nymOf(visible[i]),
+                  size: 18,
+                  imageUrl: app.users[visible[i]]?.profile?.picture,
+                ),
+              ),
+            // The avatars overlap by 6px each (Transform doesn't shrink layout),
+            // so claw back the shifted gap before the 8px text gap.
+            if (visible.isNotEmpty)
+              SizedBox(
+                  width: (8 - 6.0 * (visible.length - 1)).clamp(0, 8).toDouble()),
+            Expanded(child: Text(text, style: style, maxLines: 1)),
+          ],
+        ),
+      );
+    }
+
+    // Animate the 0↔24 height + opacity, matching the CSS transition.
+    return ClipRect(
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.ease,
+        height: active ? 24 : 0,
+        width: double.infinity,
+        color: Colors.black.withValues(alpha: 0.15),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 200),
+          opacity: active ? 1 : 0,
+          child: content,
         ),
       ),
     );

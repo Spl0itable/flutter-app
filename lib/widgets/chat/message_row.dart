@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
 import '../../features/messages/flood_tracker.dart';
@@ -14,6 +17,7 @@ import '../../features/reactions/quick_react_popup.dart';
 import '../../features/reactions/reaction_burst.dart';
 import '../../features/reactions/reactors_modal.dart';
 import '../../features/translate/message_translation.dart';
+import '../../features/zaps/zap_badge.dart';
 import '../../models/message.dart';
 import '../../models/settings.dart';
 import '../../state/app_state.dart';
@@ -23,6 +27,7 @@ import '../common/nym_avatar.dart';
 import '../context_menu/context_menu_actions.dart';
 import '../context_menu/context_menu_panel.dart';
 import '../context_menu/interaction_hooks.dart';
+import '../context_menu/profile_badges.dart';
 
 /// Formats a [DateTime] per the user's time-format setting (docs/specs/02 §4).
 String formatTime(DateTime t, String timeFormat) {
@@ -34,6 +39,40 @@ String formatTime(DateTime t, String timeFormat) {
   final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
   final ampm = h24 < 12 ? 'AM' : 'PM';
   return '$h12:$m $ampm';
+}
+
+/// Relative-time label for the in-bubble timestamp (a 1:1 port of
+/// `_formatRelativeTime`, `messages.js:3308-3325`): `now` / `1m ago` /
+/// `{m}m ago` / `{h}h ago` / `{d}d ago` / `Mon D[, YYYY]`.
+String formatRelativeTime(DateTime t, {DateTime? now}) {
+  final ref = now ?? DateTime.now();
+  final diffMs = ref.difference(t).inMilliseconds;
+  final s = (diffMs < 0 ? 0 : diffMs) ~/ 1000;
+  if (s < 45) return 'now';
+  if (s < 90) return '1m ago';
+  final m = s ~/ 60;
+  if (m < 60) return '${m}m ago';
+  final h = m ~/ 60;
+  if (h < 24) return '${h}h ago';
+  final d = h ~/ 24;
+  if (d < 7) return '${d}d ago';
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  final mo = months[t.month - 1];
+  return t.year == ref.year ? '$mo ${t.day}' : '$mo ${t.day}, ${t.year}';
+}
+
+/// Abbreviates a count for badges/footers (a 1:1 port of `abbreviateNumber`,
+/// `users.js:2069-2073`): `<1000` verbatim, `1.2k` / `12k`, `1.2M`.
+String abbreviateNumber(int n) {
+  if (n < 1000) return '$n';
+  if (n < 1000000) {
+    final v = n / 1000;
+    return '${v.toStringAsFixed(n < 10000 ? 1 : 0)}k';
+  }
+  return '${(n / 1000000).toStringAsFixed(1)}M';
 }
 
 /// Renders a single message in either IRC or bubble layout.
@@ -87,9 +126,53 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   bool _showTranslation = false;
   String? _translateLangOverride;
 
+  /// Refreshes the in-bubble relative time ("2m ago") on a cadence, mirroring
+  /// `_ensureBubbleRelativeTimer` / `_refreshBubbleRelativeTimes`
+  /// (`messages.js:1051,3347`).
+  Timer? _relativeTimer;
+
+  @override
+  void dispose() {
+    _relativeTimer?.cancel();
+    super.dispose();
+  }
+
   Message get message => widget.message;
   Settings get settings => widget.settings;
   List<MessageReaction> get reactions => widget.reactions;
+
+  /// The author's kind-0 profile picture (`profile.picture`) for [NymAvatar];
+  /// null → identicon fallback (Rule 4).
+  String? get _authorPicture =>
+      ref.watch(usersProvider)[message.pubkey]?.profile?.picture;
+
+  /// True when this message's author is the verified developer or the Nymbot
+  /// (`isVerifiedDeveloper` / `isVerifiedBot`) — the blue ✓ badge.
+  bool get _isVerified {
+    final controller = ref.read(nostrControllerProvider);
+    return controller.isVerifiedDeveloper(message.pubkey) ||
+        controller.isVerifiedBot(message.pubkey);
+  }
+
+  /// True when the author is a (non-self) friend — the cyan friend glyph.
+  bool get _isFriendAuthor =>
+      !message.isOwn && ref.watch(appStateProvider).isFriend(message.pubkey);
+
+  /// True when this message has accrued zaps (`zapsProvider`), so the reactions
+  /// row must render to host the `⚡ N` zap badge even without reactions.
+  bool get _hasZaps {
+    final z = ref.watch(zapsProvider)[message.id];
+    return z != null && z.totalSats > 0;
+  }
+
+  /// Starts (once) a low-frequency timer that re-renders the in-bubble relative
+  /// time. Recent messages tick every ~10s; older ones drift slowly, so a 30s
+  /// cadence is plenty (the PWA refreshes on a similar interval).
+  void _ensureRelativeTimer() {
+    _relativeTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
 
   /// The author's active flair-shop cosmetics (style / flair / supporter),
   /// resolved from the shop controller (self) or presence (`usersProvider`).
@@ -117,6 +200,60 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       cosmetics: _cosmetics,
       flairSize: flairSize,
       supporterHeight: flairSize,
+    );
+  }
+
+  /// The author label rendered in BOTH layouts: `<` nym `#suffix` `>` (brackets
+  /// IRC-only) followed by the flair, verified ✓, and friend badges. The nym is
+  /// ellipsized; the `#suffix` is dimmed (`.nym-suffix` opacity 0.7 / 0.9em /
+  /// weight 100), and the `<…>` brackets inherit the author (secondary) color.
+  /// (`messages.js:803,937`; `styles-chat.css:706-710`.)
+  Widget _authorLine(
+    NymColors c, {
+    required bool self,
+    required double size,
+    required double flairSize,
+    bool brackets = false,
+  }) {
+    final style = _authorStyle(c, self: self, size: size);
+    final bracketColor = style.color;
+    final suffix = getPubkeySuffix(message.pubkey);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (brackets)
+          Text('<', style: TextStyle(color: bracketColor, fontSize: size)),
+        Flexible(
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: message.author, style: style),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: '#$suffix',
+                  style: style.copyWith(
+                    color: style.color?.withValues(alpha: 0.7),
+                    fontSize: size * 0.9,
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+            ]),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        _nymBadges(context, flairSize: flairSize),
+        // Blue ✓ for the verified developer / Nymbot (after flair/supporter).
+        if (_isVerified) ...[
+          const SizedBox(width: 4),
+          VerifiedBadge(size: flairSize),
+        ],
+        // Cyan friend glyph for non-self friends.
+        if (_isFriendAuthor) ...[
+          const SizedBox(width: 4),
+          FriendBadge(size: flairSize),
+        ],
+        if (brackets)
+          Text('>', style: TextStyle(color: bracketColor, fontSize: size)),
+      ],
     );
   }
 
@@ -154,16 +291,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         service: p2p,
       );
     }
-    // cosmetic-redacted: content replaced with █ blocks (`shop.js:498-503`).
-    // TODO(ui-parity): the PWA reveals for 10s then blanks; we redact upfront.
+    // cosmetic-redacted (`shop.js:498-512`): the REAL text shows for 10s, then a
+    // `.cosmetic-redacted-message` translucent bar replaces it (bg white@0.15,
+    // radius-xs, min-width 120, min-height 1.2em, content hidden).
     if (_cosmetics.isRedacted) {
-      return Text(
-        '████████',
-        style: TextStyle(
-          color: color.withValues(alpha: 0.5),
-          fontSize: fontSize,
-          letterSpacing: 1,
-        ),
+      return _RedactedReveal(
+        fontSize: fontSize,
+        child: _content(context, color, fontSize, deco: deco),
       );
     }
     return _content(context, color, fontSize, deco: deco);
@@ -195,28 +329,34 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final c = context.nym;
     final isAction = message.kind == MessageKind.action;
     final size = settings.textSize.toDouble() - 3;
+    // `.action-message` is BARE purple-italic text — no pill bg/border/radius
+    // (`styles-chat.css:1357-1360`), distinct from `.system-message`.
+    final text = Text(
+      message.content,
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: isAction ? c.purple : c.textDim,
+        fontSize: size,
+        fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
+        // `.system-message { font-weight: 450 }` (w500 is the nearest weight).
+        fontWeight: isAction ? FontWeight.w400 : FontWeight.w500,
+        height: 1.3,
+      ),
+    );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.03),
-            border: Border.all(color: c.glassBorder),
-            borderRadius: const BorderRadius.all(Radius.circular(20)),
-          ),
-          child: Text(
-            message.content,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: isAction ? c.purple : c.textDim,
-              fontSize: size,
-              fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
-              fontWeight: FontWeight.w400,
-              height: 1.3,
-            ),
-          ),
-        ),
+        child: isAction
+            ? text
+            : Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.03),
+                  border: Border.all(color: c.glassBorder),
+                  borderRadius: const BorderRadius.all(Radius.circular(20)),
+                ),
+                child: text,
+              ),
       ),
     );
   }
@@ -253,17 +393,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const Text('* '),
-                NymAvatar(seed: message.author, size: fontSize + 2),
+                NymAvatar(
+                    seed: message.author,
+                    size: fontSize + 2,
+                    imageUrl: _authorPicture),
                 const SizedBox(width: 4),
                 GestureDetector(
                   onTap: () => _openContextMenu(context),
+                  // The whole `/me` line (incl. the nym + suffix) is italic
+                  // (`.system-message.me-message { font-style: italic }`); the
+                  // author keeps secondary/600 but inherits the italic.
                   child: Text.rich(TextSpan(children: [
                     TextSpan(
                       text: message.author,
                       style: TextStyle(
                         color: c.secondary,
                         fontWeight: FontWeight.w600,
-                        fontStyle: FontStyle.normal,
                       ),
                     ),
                     if (suffix.isNotEmpty)
@@ -271,7 +416,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                         text: '#$suffix',
                         style: TextStyle(
                           color: c.secondaryA(0.6),
-                          fontStyle: FontStyle.normal,
                         ),
                       ),
                   ])),
@@ -330,20 +474,32 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       runSpacing: 4,
       children: [
         ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
+          // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
+          // the author flows inline and the line wraps. We keep a generous cap
+          // so the fixed badges (a ~116px supporter pill + flair/verified/friend)
+          // always fit and the nym ellipsizes within the remainder; the message
+          // body wraps to the next run when the author is wide.
+          constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
           child: GestureDetector(
             onTap: () => _openContextMenu(context),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // IRC author leads with an 18px inline avatar (`.avatar-message`,
+                // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
+                NymAvatar(
+                    seed: message.author, size: 18, imageUrl: _authorPicture),
+                const SizedBox(width: 4),
                 Flexible(
-                  child: Text(
-                    message.author,
-                    overflow: TextOverflow.ellipsis,
-                    style: _authorStyle(c, self: self, size: fontSize),
+                  child: _authorLine(
+                    c,
+                    self: self,
+                    size: fontSize,
+                    // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                    flairSize: 20,
+                    brackets: true,
                   ),
                 ),
-                _nymBadges(context),
               ],
             ),
           ),
@@ -385,7 +541,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     ),
                   ),
                 ),
-              if (reactions.isNotEmpty || widget.onReactionPicker != null)
+              // Reactions row renders only when reactions OR zaps exist (the PWA
+              // `updateMessageReactions` early-returns on an empty reaction set;
+              // the add-reaction pill is NOT drawn standalone — the first react
+              // is via long-press quick-react). The zap badge sits at its front.
+              if (reactions.isNotEmpty || _hasZaps)
                 Padding(
                   padding: const EdgeInsets.only(top: 5),
                   child: _reactionsRow(context),
@@ -399,13 +559,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
-    final content = Container(
-      decoration: BoxDecoration(
-        color: bg,
-        border: barColor != null
-            ? Border(left: BorderSide(color: barColor, width: 3))
-            : null,
-      ),
+    // `.message` is radius-12; a self/mention/style-tinted row is a 12px-rounded
+    // block. The accent is a `::before` bar 3px × 60% height, vertically
+    // centered, `border-radius:0 3px 3px 0`; mentions add a secondary glow.
+    final body = Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
       child: watermark != null
           ? Stack(
@@ -416,8 +573,48 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             )
           : rowChildren,
     );
+    final content = Container(
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: bg != null ? NymRadius.rsm : null,
+      ),
+      clipBehavior: bg != null ? Clip.antiAlias : Clip.none,
+      child: barColor != null
+          ? Stack(
+              children: [
+                body,
+                // 3px × ~60%-height rounded accent bar, vertically centered.
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: FractionallySizedBox(
+                      heightFactor: 0.6,
+                      child: Container(
+                        width: 3,
+                        decoration: BoxDecoration(
+                          color: barColor,
+                          borderRadius: const BorderRadius.only(
+                            topRight: Radius.circular(3),
+                            bottomRight: Radius.circular(3),
+                          ),
+                          boxShadow: widget.mentioned
+                              ? [BoxShadow(color: c.secondaryA(0.4), blurRadius: 8)]
+                              : null,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : body,
+    );
     return GestureDetector(
       onLongPress: () => _onMessageLongPress(context),
+      // Desktop right-click → context menu (PWA `contextmenu` handler).
+      onSecondaryTap: () => _openContextMenu(context),
       child: content,
     );
   }
@@ -460,9 +657,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 style: TextStyle(
                     color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
               ),
+            // `.bubble-time-inner`: RELATIVE time ("now"/"2m ago"), not clock.
             Text(
-              formatTime(message.dateTime, settings.timeFormat),
-              style: TextStyle(color: c.textDim, fontSize: 10),
+              formatRelativeTime(message.dateTime),
+              style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
             ),
             if (self && message.isPM && !message.isGroup) ...[
               const SizedBox(width: 4),
@@ -473,11 +671,17 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
+    // Re-render the relative time on a cadence (cheap; matches the PWA timer).
+    _ensureRelativeTimer();
+
     final bubble = GestureDetector(
       onLongPress: () => _onMessageLongPress(context),
+      // Desktop right-click → context menu (PWA `contextmenu` handler).
+      onSecondaryTap: () => _openContextMenu(context),
       child: ConstrainedBox(
+        // `.message-content` bubble: `min-width:180px; max-width:85%`.
         constraints: BoxConstraints(
-          minWidth: 0,
+          minWidth: 180,
           maxWidth: MediaQuery.of(context).size.width * 0.85,
         ),
         child: _decorateBubble(
@@ -486,6 +690,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           glow: deco?.glow,
           gradient: lastAura?.gradient,
           auras: auras,
+          // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
+          // — rendered as a 1px secondary@0.25 inner border on the bubble.
+          mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
             child: innerContent,
@@ -502,24 +709,20 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
             child: GestureDetector(
               onTap: () => _openContextMenu(context),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      message.author,
-                      overflow: TextOverflow.ellipsis,
-                      style: _authorStyle(c, self: self, size: 11),
-                    ),
-                  ),
-                  _nymBadges(context, flairSize: 14),
-                ],
+              // Name above the bubble: nym `#suffix` + flair/verified/friend,
+              // no `<…>` brackets (bubble hides them).
+              child: _authorLine(
+                c,
+                self: self,
+                size: 11,
+                // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                flairSize: 20,
               ),
             ),
           ),
         bubble,
         if (_showReaderAvatars) _readerAvatars(context),
-        if (reactions.isNotEmpty || widget.onReactionPicker != null)
+        if (reactions.isNotEmpty || _hasZaps)
           Padding(
             padding: const EdgeInsets.only(top: 5),
             child: _reactionsRow(context),
@@ -539,7 +742,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             child: widget.showAvatar && !widget.grouped
                 ? GestureDetector(
                     onTap: () => _openContextMenu(context),
-                    child: NymAvatar(seed: message.author, size: 32),
+                    child: NymAvatar(
+                        seed: message.author,
+                        size: 32,
+                        imageUrl: _authorPicture),
                   )
                 : const SizedBox.shrink(),
           ),
@@ -566,6 +772,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     required List<Color>? gradient,
     required List<CosmeticAura> auras,
     required Widget child,
+    Color? mentionRing,
   }) {
     final shadows = <BoxShadow>[];
     if (glow != null) {
@@ -578,8 +785,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         shadows.add(BoxShadow(color: a.glowColor!, blurRadius: a.glowBlur));
       }
     }
-    // The strongest inset ring (last aura) is drawn as a hairline inner border.
-    final inset = auras.isNotEmpty ? auras.last : null;
+    // The strongest inset ring (last aura) is drawn as a hairline inner border
+    // ONLY when the overlay painter isn't already stroking it: `insetRing` auras
+    // route through `CosmeticOverlayPainter` (via `hasOverlay`), so drawing the
+    // border here too would double the ring (gold/neon/phoenix/cosmic/frost).
+    final lastAura = auras.isNotEmpty ? auras.last : null;
+    final inset =
+        (lastAura != null && lastAura.insetColor != null && !lastAura.hasOverlay)
+            ? lastAura
+            : null;
 
     // Watermark from the active style or a frost/cosmic aura.
     final watermark = _styleDecoration?.watermark ??
@@ -602,9 +816,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               )
             : null,
         borderRadius: radius,
+        // The aura inset ring takes precedence; otherwise a @-mention bubble
+        // gets a 1px secondary@0.25 inner ring.
         border: inset?.insetColor != null
             ? Border.all(color: inset!.insetColor!, width: inset.insetWidth)
-            : null,
+            : (mentionRing != null
+                ? Border.all(color: mentionRing, width: 1)
+                : null),
         boxShadow: shadows.isEmpty ? null : shadows,
       ),
       child: ClipRRect(
@@ -658,6 +876,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final visible = entries.take(maxVisible).toList();
     final overflow = entries.length - visible.length;
     final c = context.nym;
+    final users = ref.watch(usersProvider);
     return GestureDetector(
       onLongPress: () => _showSeenBy(context),
       child: Padding(
@@ -676,7 +895,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   ),
                   child: Opacity(
                     opacity: 0.85,
-                    child: NymAvatar(seed: visible[i].value, size: 14),
+                    child: NymAvatar(
+                      seed: visible[i].value,
+                      size: 14,
+                      imageUrl: users[visible[i].key]?.profile?.picture,
+                    ),
                   ),
                 ),
               ),
@@ -684,7 +907,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               Padding(
                 padding: const EdgeInsets.only(left: 3),
                 child: Text(
-                  '+$overflow',
+                  '+${abbreviateNumber(overflow)}',
                   style: TextStyle(
                       color: c.textDim, fontSize: 9, height: 14 / 9),
                 ),
@@ -696,12 +919,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   void _showSeenBy(BuildContext context) {
+    final users = ref.read(usersProvider);
     final reactors = <ReactorEntry>[
       for (final e in message.readers.entries)
         ReactorEntry(
           pubkey: e.key,
           nym: _baseNym(e.value),
           suffix: getPubkeySuffix(e.key),
+          imageUrl: users[e.key]?.profile?.picture,
         ),
     ];
     // Reuse the reactors modal as the "seen by" list (mirror the PWA's readers
@@ -721,15 +946,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       runSpacing: 5,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        // The `⚡ N` zap badge + quick-zap button are inserted at the FRONT of
+        // the row (`updateMessageZaps` insertBefore firstChild). Renders nothing
+        // until the message has zaps.
+        ZapBadge(message: message),
         for (final r in reactions)
           _ReactionBadge(
             reaction: r,
             onTap: (rect) => _toggleReaction(context, r),
             onLongPress: (rect) => _showReactors(context, r, rect),
           ),
-        // `.add-reaction-btn` affordance (always present so users can react).
-        if (widget.onReactionPicker != null)
-          _AddReactionBtn(onTap: () => widget.onReactionPicker!(message)),
       ],
     );
   }
@@ -753,18 +979,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
-    // The engine exposes only aggregate tallies publicly (count + userReacted),
-    // so we render the self row when applicable plus an anonymous count.
-    // TODO(verify): show real reactor nyms once AppState exposes the reactor
-    // pubkey/nym map (`_reactors`) publicly.
-    final self = ref.read(appStateProvider);
+    // The real reactor map (`reactorsFor` → pubkey → nym), each row carrying its
+    // avatar picture so the modal loads faces (mirrors `showReactorsModal`).
+    final app = ref.read(appStateProvider);
+    final users = ref.read(usersProvider);
+    final map =
+        ref.read(appStateProvider.notifier).reactorsFor(message.id, r.emoji) ??
+            const {};
     final reactors = <ReactorEntry>[
-      if (r.userReacted)
+      for (final e in map.entries)
         ReactorEntry(
-          pubkey: self.selfPubkey,
-          nym: _baseNym(self.selfNym),
-          suffix: getPubkeySuffix(self.selfPubkey),
-          isYou: true,
+          pubkey: e.key,
+          nym: _baseNym(e.value),
+          suffix: getPubkeySuffix(e.key),
+          isYou: e.key == app.selfPubkey,
+          imageUrl: users[e.key]?.profile?.picture,
         ),
     ];
     showReactorsModal(
@@ -786,7 +1015,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
-      onMenu: message.isOwn ? null : () => _openContextMenu(context),
       // The PWA long-press surface also carries the labelled quick actions
       // (Slap/Hug/Zap/Quote/Copy/Translate/Edit/Delete) below the emoji pill.
       contextItems: buildQuickContextItems(
@@ -1034,11 +1262,11 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
                 : null,
           ),
           child: Text(
-            '${r.emoji} ${r.count}',
-            style: TextStyle(
-              color: r.userReacted ? c.primary : c.text,
-              fontSize: 12,
-            ),
+            // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge
+            // label stays `--text` even when user-reacted (only bg/border/glow
+            // change — `styles-chat.css:439-443`).
+            '${r.emoji} ${abbreviateNumber(r.count)}',
+            style: TextStyle(color: c.text, fontSize: 12),
           ),
         ),
       ),
@@ -1046,28 +1274,48 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
   }
 }
 
-/// The `.add-reaction-btn` affordance (a dim "+ smiley" pill that opens the
-/// emoji picker).
-class _AddReactionBtn extends StatelessWidget {
-  const _AddReactionBtn({required this.onTap});
-  final VoidCallback onTap;
+/// The cosmetic-redacted body (`shop.js:498-512`): shows the real message
+/// [child] for 10 seconds, then swaps to a `.cosmetic-redacted-message`
+/// translucent bar (bg white@0.15, radius-xs, min-width 120, min-height 1.2em,
+/// content hidden / unselectable).
+class _RedactedReveal extends StatefulWidget {
+  const _RedactedReveal({required this.child, required this.fontSize});
+  final Widget child;
+  final double fontSize;
+
+  @override
+  State<_RedactedReveal> createState() => _RedactedRevealState();
+}
+
+class _RedactedRevealState extends State<_RedactedReveal> {
+  Timer? _timer;
+  bool _blanked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 10), () {
+      if (mounted) setState(() => _blanked = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final c = context.nym;
-    return GestureDetector(
-      onTap: onTap,
-      child: Opacity(
-        opacity: 0.6,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.04),
-            borderRadius: const BorderRadius.all(Radius.circular(20)),
-            border: Border.all(color: c.glassBorder),
-          ),
-          child: Icon(Icons.add_reaction_outlined, size: 16, color: c.text),
-        ),
+    if (!_blanked) return widget.child;
+    return Container(
+      constraints: BoxConstraints(
+        minWidth: 120,
+        minHeight: widget.fontSize * 1.2,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.15),
+        borderRadius: NymRadius.rxs,
       ),
     );
   }

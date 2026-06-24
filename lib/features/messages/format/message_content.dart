@@ -12,9 +12,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/nym_colors.dart';
+import '../../../core/theme/nym_metrics.dart';
 import '../../../services/api/api_client.dart';
+import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
+import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
+import '../../../widgets/common/app_dialog.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
 import 'video_message.dart';
@@ -100,13 +104,25 @@ class MessageContent extends ConsumerWidget {
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
     final previewUrls = _collectPreviewUrls(blocks);
 
+    // Tapping a `#ref` / `app.nym.bar/#…` link switches the active channel
+    // (`channelLink` / `channelReference` data-actions).
+    void onChannelRef(String name, bool isGeohash) {
+      final controller = ref.read(nostrControllerProvider);
+      if (isGeohash) {
+        controller.switchChannel(name, geohash: name);
+      } else {
+        controller.switchChannel(name);
+      }
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(height: 4),
-          _block(context, c, blocks[i], color, size, emojiOnly: emojiOnly),
+          _block(context, c, blocks[i], color, size,
+              emojiOnly: emojiOnly, onChannelRef: onChannelRef),
         ],
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
@@ -166,6 +182,7 @@ class MessageContent extends ConsumerWidget {
     Color color,
     double size, {
     bool emojiOnly = false,
+    void Function(String name, bool isGeohash)? onChannelRef,
   }) {
     switch (block) {
       case ParagraphBlock(:final inlines):
@@ -176,14 +193,17 @@ class MessageContent extends ConsumerWidget {
           emojiOnly: emojiOnly,
           shadows: glyphShadows,
           monospace: monospace,
+          onChannelRef: onChannelRef,
         );
       case HeadingBlock(:final level, :final inlines):
         final scale = level == 1 ? 1.5 : (level == 2 ? 1.3 : 1.15);
+        // `h1,h2,h3 { color: var(--primary) }` (styles-chat.css:1312-1317).
         return _RichInline(
           inlines: inlines,
-          color: c.textBright,
+          color: c.primary,
           size: size * scale,
           weight: FontWeight.w700,
+          onChannelRef: onChannelRef,
         );
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size);
@@ -230,6 +250,7 @@ class _RichInline extends StatelessWidget {
     this.emojiOnly = false,
     this.shadows,
     this.monospace = false,
+    this.onChannelRef,
   });
 
   final List<InlineNode> inlines;
@@ -245,6 +266,9 @@ class _RichInline extends StatelessWidget {
 
   /// Render glyphs in a monospace family (CRT).
   final bool monospace;
+
+  /// Switches the active channel when a `#ref` / `app.nym.bar/#…` link is tapped.
+  final void Function(String name, bool isGeohash)? onChannelRef;
 
   @override
   Widget build(BuildContext context) {
@@ -276,9 +300,12 @@ class _RichInline extends StatelessWidget {
       case TextSpanNode(:final text):
         return TextSpan(text: text, style: base);
       case BoldNode(:final children):
+        // `strong { color: var(--text-bright); font-weight:bold }`
+        // (styles-chat.css:1074-1077).
         return TextSpan(children: [
           for (final ch in children)
-            _span(context, c, ch, base.merge(const TextStyle(fontWeight: FontWeight.w700))),
+            _span(context, c, ch,
+                base.merge(TextStyle(fontWeight: FontWeight.w700, color: c.textBright))),
         ]);
       case ItalicNode(:final children):
         return TextSpan(children: [
@@ -286,18 +313,25 @@ class _RichInline extends StatelessWidget {
             _span(context, c, ch, base.merge(const TextStyle(fontStyle: FontStyle.italic))),
         ]);
       case StrikeNode(:final children):
+        // `del { text-decoration:line-through; color: var(--text-dim) }`
+        // (styles-chat.css:1325-1328).
         return TextSpan(children: [
           for (final ch in children)
             _span(context, c, ch,
-                base.merge(const TextStyle(decoration: TextDecoration.lineThrough))),
+                base.merge(TextStyle(
+                    decoration: TextDecoration.lineThrough, color: c.textDim))),
         ]);
       case InlineCodeNode(:final code):
+        // `code { background: rgba(255,255,255,0.06); color: var(--secondary);
+        //  font-size:0.9em }` (styles-chat.css:1084-1092). Padding/radius need a
+        // WidgetSpan; kept as the styled span (color/bg/size).
         return TextSpan(
           text: code,
           style: base.merge(TextStyle(
             fontFamily: 'monospace',
-            color: c.textBright,
-            backgroundColor: Colors.white.withValues(alpha: 0.08),
+            color: c.secondary,
+            fontSize: size * 0.9,
+            backgroundColor: Colors.white.withValues(alpha: 0.06),
           )),
         );
       case LinkNode(:final url):
@@ -310,24 +344,33 @@ class _RichInline extends StatelessWidget {
           recognizer: _LinkTap(url),
         );
       case EmojiNode(:final unicode):
-        // `.emoji-only .emoji { font-size: 2.5em }`, else inline `1.25em`.
+        // `.emoji` has no font-size (inherits 1em); only `.emoji-only .emoji` is
+        // 2.5em (styles-chat.css:824-837).
         return TextSpan(
           text: unicode,
-          style: base.merge(TextStyle(fontSize: size * (emojiOnly ? 2.5 : 1.25))),
+          style: base.merge(TextStyle(fontSize: size * (emojiOnly ? 2.5 : 1.0))),
         );
       case MentionNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: _MentionChip(node: node, size: size),
         );
-      case ChannelRefNode():
-        return WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: _ChannelChip(node: node, size: size),
+      case ChannelRefNode(:final name, :final isGeohash):
+        // `.channel-reference`: underlined, inherits BODY text color (no tint),
+        // no background/box, no active-state fill (styles-chat.css:933-939).
+        // Hover→primary is desktop-only and omitted on touch.
+        return TextSpan(
+          text: '#$name',
+          style: base.merge(const TextStyle(decoration: TextDecoration.underline)),
+          recognizer: onChannelRef == null
+              ? null
+              : _ChannelRefTap(name, isGeohash, onChannelRef!),
         );
       case CustomEmojiNode(:final url, :final shortcode):
-        // `.emoji-only .custom-emoji { width/height: 2.75em }`, else 22px.
-        final side = emojiOnly ? size * 2.75 : 22.0;
+        // `.custom-emoji { width/height: 1.75em }`; emoji-only `2.75em`
+        // (styles-chat.css:839-852). The HTML `width=30` attr is overridden by
+        // the CSS, so inline is `1.75em` (≈26px at 15), not 22px.
+        final side = emojiOnly ? size * 2.75 : size * 1.75;
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: Padding(
@@ -343,14 +386,24 @@ class _RichInline extends StatelessWidget {
           ),
         );
       case ChannelLinkChip(:final ref, :final label):
-        return WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: _LinkChip(label: label, ref: ref, size: size),
+        // `.channel-link`: plain underlined secondary text (full URL label),
+        // no background/border/padding (styles-chat.css:895-903). Hover→primary
+        // is desktop-only.
+        return TextSpan(
+          text: label,
+          style: base.merge(TextStyle(
+            color: c.secondary,
+            decoration: TextDecoration.underline,
+          )),
+          recognizer:
+              onChannelRef == null ? null : _ChannelLinkTap(ref, onChannelRef!),
         );
-      case GroupInviteChip(:final name):
+      case GroupInviteChip(:final name, :final token):
+        // The chip renders to spec; tapping to JOIN needs the group-invite
+        // decode that lives in NostrController (cross-file) — left inert here.
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
-          child: _InviteChip(name: name, size: size),
+          child: _InviteChip(name: name, token: token, size: size),
         );
       default:
         // _MediaInline is flattened to blocks and never reaches here.
@@ -406,86 +459,124 @@ class _MentionChip extends StatelessWidget {
   }
 }
 
-class _ChannelChip extends StatelessWidget {
-  const _ChannelChip({required this.node, required this.size});
-  final ChannelRefNode node;
+/// Taps a `#channel` reference → switch to that channel (geohash or named).
+class _ChannelRefTap extends TapGestureRecognizer {
+  _ChannelRefTap(
+      String name, bool isGeohash, void Function(String name, bool isGeohash) cb) {
+    onTap = () => cb(name, isGeohash);
+  }
+}
+
+/// Taps an `app.nym.bar/#…` channel link → switch to the referenced channel.
+/// [ref] is `g:<geohash>` or `c:<name>` (the PWA `data-channel-ref`).
+class _ChannelLinkTap extends TapGestureRecognizer {
+  _ChannelLinkTap(String ref, void Function(String name, bool isGeohash) cb) {
+    onTap = () {
+      final colon = ref.indexOf(':');
+      final prefix = colon > 0 ? ref.substring(0, colon) : '';
+      final id = colon > 0 ? ref.substring(colon + 1) : ref;
+      cb(id, prefix == 'g');
+    };
+  }
+}
+
+/// `.group-invite-chip` (`styles-chat.css:905-919`): a no-fill pill with a
+/// solid 1px `--secondary` border, radius 12, padding `2px 8px`, a 1em stroked
+/// group glyph, and secondary text at body size. Tapping confirms, then sends a
+/// `group-join-request` to the link's sharer (groups.js `requestJoinGroupViaInvite`).
+class _InviteChip extends ConsumerWidget {
+  const _InviteChip(
+      {required this.name, required this.token, required this.size});
+  final String name;
+  final String token;
   final double size;
 
+  /// Decode the token, confirm, then hand off to the controller's joiner-side
+  /// flow (mirrors the PWA's `Join "<name>"?` confirm before `_sendGiftWraps`).
+  Future<void> _join(BuildContext context, WidgetRef ref) async {
+    final parsed = parseGroupInvite(token);
+    if (parsed == null) return;
+    final controller = ref.read(nostrControllerProvider);
+    final ok = await showAppConfirm(
+      context,
+      'Join "$name"? A join request will be sent to a group member.',
+      title: 'Join Group',
+      okLabel: 'Join',
+    );
+    if (!ok) return;
+    await controller.joinGroupViaInvite(parsed);
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    final fg = node.isGeohash ? c.warning : c.secondary;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: node.isActive ? fg.withValues(alpha: 0.18) : null,
-        borderRadius: const BorderRadius.all(Radius.circular(4)),
-      ),
-      child: Text(
-        '#${node.name}',
-        style: TextStyle(
-          color: fg,
-          fontSize: size,
-          fontWeight: FontWeight.w500,
-          decoration: TextDecoration.underline,
+    return GestureDetector(
+      onTap: () => _join(context, ref),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          // No background fill; solid full-opacity secondary 1px border, r12.
+          borderRadius: const BorderRadius.all(Radius.circular(12)),
+          border: Border.all(color: c.secondary),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // `.inline-group-ico` ≈ 1em multi-person outline.
+            SizedBox(
+              width: size,
+              height: size,
+              child: CustomPaint(painter: _GroupIcoPainter(c.secondary)),
+            ),
+            SizedBox(width: size * 0.35),
+            Text(
+              'Join $name',
+              style: TextStyle(color: c.secondary, fontSize: size),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _LinkChip extends StatelessWidget {
-  const _LinkChip({required this.label, required this.ref, required this.size});
-  final String label;
-  final String ref;
-  final double size;
+/// A small multi-person ("group") outline glyph, ≈ the PWA `inlineGroupSvg`.
+class _GroupIcoPainter extends CustomPainter {
+  _GroupIcoPainter(this.color);
+  final Color color;
 
   @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: c.secondaryA(0.12),
-        borderRadius: const BorderRadius.all(Radius.circular(6)),
-        border: Border.all(color: c.secondaryA(0.3)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(color: c.secondary, fontSize: size * 0.92),
-      ),
-    );
+  void paint(Canvas canvas, Size size) {
+    // Authored in a 24×24 box; scale to [size].
+    final s = size.width / 24.0;
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2 * s
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
+    // Front person: head + shoulders.
+    canvas.drawCircle(Offset(9 * s, 8 * s), 3.2 * s, stroke);
+    final body = Path()
+      ..moveTo(3.5 * s, 19 * s)
+      ..cubicTo(3.5 * s, 14.5 * s, 6 * s, 13 * s, 9 * s, 13 * s)
+      ..cubicTo(12 * s, 13 * s, 14.5 * s, 14.5 * s, 14.5 * s, 19 * s);
+    canvas.drawPath(body, stroke);
+    // Back person: partial head + shoulder behind/right.
+    final back = Path()
+      ..moveTo(15.5 * s, 5.2 * s)
+      ..cubicTo(17.4 * s, 5.6 * s, 18.6 * s, 7.2 * s, 18.3 * s, 9.1 * s)
+      ..cubicTo(18.1 * s, 10.3 * s, 17.3 * s, 11.2 * s, 16.3 * s, 11.7 * s);
+    canvas.drawPath(back, stroke);
+    final backBody = Path()
+      ..moveTo(17 * s, 13.2 * s)
+      ..cubicTo(19 * s, 13.6 * s, 20.5 * s, 15.3 * s, 20.5 * s, 19 * s);
+    canvas.drawPath(backBody, stroke);
   }
-}
-
-class _InviteChip extends StatelessWidget {
-  const _InviteChip({required this.name, required this.size});
-  final String name;
-  final double size;
 
   @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: c.secondaryA(0.12),
-        borderRadius: const BorderRadius.all(Radius.circular(6)),
-        border: Border.all(color: c.secondaryA(0.3)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.group, size: size, color: c.secondary),
-          const SizedBox(width: 4),
-          Text(
-            'Join $name',
-            style: TextStyle(color: c.secondary, fontSize: size * 0.92),
-          ),
-        ],
-      ),
-    );
-  }
+  bool shouldRepaint(covariant _GroupIcoPainter old) => old.color != color;
 }
 
 /// Monospace code box with an optional language label and a copy affordance.
@@ -498,42 +589,21 @@ class _CodeBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `pre` radius is `--radius-sm` (=12), wrapper `padding-top:22px`
+    // (styles-chat.css:1097, 1141-1143). The lang label + Copy pill are
+    // absolutely positioned (top-left / top-right), so we Stack them over the
+    // top-padded code body.
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: const BorderRadius.all(Radius.circular(8)),
+        borderRadius: NymRadius.rsm,
         border: Border.all(color: c.glassBorder),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Stack(
         children: [
-          Row(
-            children: [
-              if (lang != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(10, 6, 0, 0),
-                  child: Text(
-                    lang!,
-                    style: TextStyle(color: c.textDim, fontSize: 11),
-                  ),
-                ),
-              const Spacer(),
-              IconButton(
-                visualDensity: VisualDensity.compact,
-                iconSize: 16,
-                padding: const EdgeInsets.all(4),
-                constraints: const BoxConstraints(),
-                tooltip: 'Copy',
-                color: c.textDim,
-                onPressed: () =>
-                    Clipboard.setData(ClipboardData(text: code)),
-                icon: const Icon(Icons.copy),
-              ),
-            ],
-          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+            padding: const EdgeInsets.fromLTRB(10, 22, 10, 10),
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Text(
@@ -543,6 +613,41 @@ class _CodeBox extends StatelessWidget {
                   fontSize: size - 1,
                   fontFamily: 'monospace',
                   height: 1.4,
+                ),
+              ),
+            ),
+          ),
+          // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`.
+          if (lang != null && lang!.isNotEmpty)
+            Positioned(
+              top: 4,
+              left: 8,
+              child: Text(
+                lang!.toUpperCase(),
+                style: TextStyle(
+                  color: c.text.withValues(alpha: 0.55),
+                  fontSize: size * 0.7,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          // `.code-copy-btn`: top:6 right:6, primary@0.15 bg / primary@0.3
+          // border / radius-xs(8), "Copy" text 0.75em in `--primary`.
+          Positioned(
+            top: 6,
+            right: 6,
+            child: GestureDetector(
+              onTap: () => Clipboard.setData(ClipboardData(text: code)),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: c.primaryA(0.15),
+                  borderRadius: NymRadius.rxs,
+                  border: Border.all(color: c.primaryA(0.3)),
+                ),
+                child: Text(
+                  'Copy',
+                  style: TextStyle(color: c.primary, fontSize: size * 0.75),
                 ),
               ),
             ),
@@ -563,11 +668,17 @@ class _QuoteBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
+    // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
     return Container(
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
       decoration: BoxDecoration(
-        color: c.secondaryA(0.05),
-        border: Border(left: BorderSide(color: c.secondaryA(0.6), width: 2)),
+        color: c.secondaryA(0.1),
+        border: Border(left: BorderSide(color: c.primaryA(0.4), width: 3)),
+        borderRadius: const BorderRadius.only(
+          topRight: Radius.circular(8),
+          bottomRight: Radius.circular(8),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -712,7 +823,10 @@ class _MediaTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final radius = const BorderRadius.all(Radius.circular(8));
+    // Single image: radius `--radius-sm` (=12); gallery cell: square (radius 0,
+    // the grid clips). (styles-chat.css:941-950, 1012-1023.)
+    final radius =
+        inGallery ? BorderRadius.zero : NymRadius.rsm;
 
     if (item.isVideo) {
       // Inline playable video (`F16`): single → bordered max-300 radius-sm;
@@ -743,12 +857,22 @@ class _MediaTile extends StatelessWidget {
       ),
     );
 
-    return ClipRRect(
+    final clipped = ClipRRect(
       borderRadius: radius,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
         child: blur ? _BlurReveal(child: image) : image,
       ),
+    );
+    // A lone image carries a 1px glass border (`.message-content img`); gallery
+    // cells have none.
+    if (inGallery) return clipped;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        border: Border.all(color: c.glassBorder),
+      ),
+      child: clipped,
     );
   }
 }
