@@ -479,7 +479,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       case _ColumnKind.pm:
         final u = app.users[d.pubkey];
         return NymAvatar(
-          seed: _columnTitle(context, d),
+          seed: d.pubkey,
           size: size,
           imageUrl: u?.profile?.picture,
         );
@@ -1727,7 +1727,7 @@ class _TypingRow extends ConsumerWidget {
               Transform.translate(
                 offset: Offset(-6.0 * i, 0),
                 child: NymAvatar(
-                  seed: nymOf(visible[i]),
+                  seed: visible[i],
                   size: 18,
                   imageUrl: app.users[visible[i]]?.profile?.picture,
                 ),

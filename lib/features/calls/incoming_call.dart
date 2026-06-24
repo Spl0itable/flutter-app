@@ -26,8 +26,13 @@ class IncomingCallModal extends ConsumerWidget {
     final c = context.nym;
     final service = ref.read(callServiceProvider);
     final nym = call.peerNym ?? 'Someone';
+    final hasPubkey = call.peerPubkey != null && call.peerPubkey!.isNotEmpty;
+    // Identicon seed is the caller PUBKEY (stable across nym changes, matches
+    // the PWA `generateAvatarSvg(pubkey)`); fall back to the nym only when no
+    // pubkey is known for the inbound call.
+    final avatarSeed = hasPubkey ? call.peerPubkey! : nym;
     // Real caller avatar (Rule 4).
-    final picture = (call.peerPubkey != null && call.peerPubkey!.isNotEmpty)
+    final picture = hasPubkey
         ? ref.watch(usersProvider)[call.peerPubkey!]?.profile?.picture
         : null;
     final label =
@@ -67,7 +72,8 @@ class IncomingCallModal extends ConsumerWidget {
             children: [
               // Pulsing avatar ring (`.incoming-call-avatar` incomingCallPulse:
               // a 1.6s primary box-shadow ring expanding 0→12px).
-              _PulsingAvatar(seed: nym, primary: c.primary, imageUrl: picture),
+              _PulsingAvatar(
+                  seed: avatarSeed, primary: c.primary, imageUrl: picture),
               const SizedBox(height: 16),
               // Decorated caller name (#suffix + badges/flair), `_callNymHtml`.
               DefaultTextStyle(

@@ -9,6 +9,7 @@ import '../../models/poll.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import 'message_row.dart';
+import 'typing_indicator.dart';
 
 /// The scrolling message list (`.messages-container`, column-reverse). Renders
 /// `messagesForCurrentViewProvider` newest-at-bottom via a reversed ListView,
@@ -35,14 +36,22 @@ class MessagesList extends ConsumerWidget {
 
     if (messages.isEmpty && polls.isEmpty) {
       // PWA settles an empty channel/PM to "No recent messages"
-      // (`messages.js:3043-3052`, `.msg-empty-note`).
+      // (`messages.js:3043-3052`, `.msg-empty-note`). The typing row still
+      // animates in below it for an empty PM/group where the peer is typing.
       return ColoredBox(
         color: containerColor,
-        child: Center(
-          child: Text(
-            'No recent messages',
-            style: TextStyle(color: c.textDim, fontSize: 13),
-          ),
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: Text(
+                  'No recent messages',
+                  style: TextStyle(color: c.textDim, fontSize: 13),
+                ),
+              ),
+            ),
+            const TypingIndicatorRow(),
+          ],
         ),
       );
     }
@@ -79,32 +88,41 @@ class MessagesList extends ConsumerWidget {
       for (final p in polls) _PollItem(p),
     ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
-    // Reversed list: index 0 = newest at the bottom.
+    // Reversed list: index 0 = newest at the bottom; the typing row is pinned
+    // below the newest message, above the composer (`.typing-indicator`).
     return ColoredBox(
       color: containerColor,
-      child: ListView.builder(
-        reverse: true,
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-        itemCount: items.length,
-        itemBuilder: (context, revIndex) {
-          final item = items[items.length - 1 - revIndex];
-          if (item is _PollItem) {
-            return PollCard(poll: item.poll, settings: settings);
-          }
-          final mi = item as _MessageItem;
-          final m = mi.message;
-          final mentioned = !m.isOwn && m.content.contains(mentionToken);
-          return MessageRow(
-            message: m,
-            settings: settings,
-            reactions: reactions[m.id] ?? const [],
-            mentioned: mentioned,
-            grouped: mi.grouped,
-            showAvatar: mi.showAvatar,
-            showName: !mi.grouped,
-            onReactionPicker: (msg) => showReactionPicker(context, ref, msg),
-          );
-        },
+      child: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              reverse: true,
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+              itemCount: items.length,
+              itemBuilder: (context, revIndex) {
+                final item = items[items.length - 1 - revIndex];
+                if (item is _PollItem) {
+                  return PollCard(poll: item.poll, settings: settings);
+                }
+                final mi = item as _MessageItem;
+                final m = mi.message;
+                final mentioned = !m.isOwn && m.content.contains(mentionToken);
+                return MessageRow(
+                  message: m,
+                  settings: settings,
+                  reactions: reactions[m.id] ?? const [],
+                  mentioned: mentioned,
+                  grouped: mi.grouped,
+                  showAvatar: mi.showAvatar,
+                  showName: !mi.grouped,
+                  onReactionPicker: (msg) =>
+                      showReactionPicker(context, ref, msg),
+                );
+              },
+            ),
+          ),
+          const TypingIndicatorRow(),
+        ],
       ),
     );
   }
