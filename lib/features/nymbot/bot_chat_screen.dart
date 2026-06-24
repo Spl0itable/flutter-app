@@ -1350,7 +1350,10 @@ class _GitConnectModalState extends State<_GitConnectModal> {
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               value: _allowWrites,
-              activeThumbColor: c.primary,
+              thumbColor: WidgetStateProperty.resolveWith((states) {
+                if (states.contains(WidgetState.selected)) return c.primary;
+                return null;
+              }),
               title: Text('Allow writes',
                   style: TextStyle(color: c.text, fontSize: 14)),
               subtitle: Text('commit, create branches, open pull/merge requests',
