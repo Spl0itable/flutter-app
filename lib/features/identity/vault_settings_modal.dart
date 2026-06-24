@@ -170,7 +170,7 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
         ModalChrome.formLabel(c, 'Method'),
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
-          initialValue: _method,
+          value: _method,
           dropdownColor: c.bgTertiary,
           style: TextStyle(color: c.text, fontSize: 14),
           decoration: _decoration(c, ''),

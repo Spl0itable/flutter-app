@@ -1535,7 +1535,8 @@ class _TabsSheetState extends State<_TabsSheet> {
                     buildDefaultDragHandles: false,
                     padding: const EdgeInsets.all(8),
                     itemCount: _local.length,
-                    onReorderItem: (oldIndex, newIndex) {
+                    onReorder: (oldIndex, newIndex) {
+                      if (newIndex > oldIndex) newIndex -= 1;
                       setState(() {
                         final moved = _local.removeAt(oldIndex);
                         _local.insert(newIndex, moved);
