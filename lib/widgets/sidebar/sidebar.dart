@@ -329,7 +329,11 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   entry: ch,
                   active: view.kind == ViewKind.channel && view.id == ch.key,
                   pinned: pinned.contains(ch.key),
-                  unread: unread[ch.key] ?? 0,
+                  // `unreadCounts` is keyed by the `#<geohash|name>` storageKey
+                  // (app_state `_ingestChannelMessage` / `channelKeyOf`), NOT
+                  // the bare lowercase registry `key` — read with storageKey so
+                  // public-channel unread pills actually surface.
+                  unread: unread[ch.storageKey] ?? 0,
                   textSize: textSize,
                   onTap: () => select(ChatView.channel(ch.key)),
                 ),

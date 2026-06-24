@@ -118,6 +118,11 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
         height: double.infinity,
         child: Container(
           decoration: BoxDecoration(
+            // `.context-menu` under `body.solid-ui` (default) → `var(--glass-bg)`
+            // opaque surface (matches the sidebar/chat-header), painted on the
+            // full-height Container so it fills the whole viewport
+            // (`.context-menu { height: 100vh }`), not just the content.
+            color: c.glassBg,
             border: Border(left: BorderSide(color: c.glassBorder)),
             boxShadow: const [
               BoxShadow(
@@ -129,7 +134,10 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
           ),
           child: Stack(
             children: [
-              Material(color: c.bgTertiary, child: SafeArea(child: body)),
+              Material(
+                type: MaterialType.transparency,
+                child: SafeArea(child: body),
+              ),
               Positioned(top: 14, right: 14, child: CtxCloseButton(onTap: widget.onClose)),
             ],
           ),

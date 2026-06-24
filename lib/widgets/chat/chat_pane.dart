@@ -163,6 +163,16 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     final isPinned = isChannel && app.pinnedChannels.contains(channelKey);
     final isDefault = channelKey == kDefaultChannel;
 
+    // `.channel-info { gap: 15 }` (controls→title) + `.channel-title-wrap`
+    // margins: 20/20 on desktop, 10/0 below 768px (the PWA phone breakpoint —
+    // narrower than the ≤1024 `compact` chrome, so key off the real width).
+    final phone = MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint;
+    final titleLeftGap = 15.0 + (phone ? 10.0 : 20.0);
+    final titleRightGap = phone ? 0.0 : 20.0;
+    // `.channel-title { min-height: calc((user-text-size + 3) * 1.4 + 19px) }`
+    // reserves room for the title line + the meta line beneath it.
+    final headerMinHeight = titleSize * 1.4 + 19;
+
     // `.chat-header`: padding 16/24 (mobile 15/10, top 12); bg --glass-bg,
     // bottom hairline.
     return Container(
@@ -176,7 +186,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       child: SafeArea(
         bottom: false,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 32),
+          constraints: BoxConstraints(minHeight: headerMinHeight),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -191,9 +201,12 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                 isPinned: isPinned,
                 isDefault: isDefault,
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: titleLeftGap),
               Expanded(
-                child: Column(
+                // `.channel-title-wrap`: 20px (desktop) / 10px (phone) side gaps.
+                child: Padding(
+                  padding: EdgeInsets.only(right: titleRightGap),
+                  child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -223,6 +236,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                         ],
                       ),
                   ],
+                ),
                 ),
               ),
               if (compact)
