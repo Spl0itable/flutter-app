@@ -378,69 +378,126 @@ class _QuickReactOverlayState extends State<_QuickReactOverlay>
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
     final r = widget.anchorRect;
-    final spaceAbove = r.top;
-    final preferAbove = spaceAbove > 80;
-    final alignLeft = r.center.dx < size.width / 2;
 
     return Stack(
       children: [
-        // Dim scrim (F9): fade all other content to ~0.35 over 150ms; tap to
-        // dismiss (`.has-long-press-highlight`).
+        // Spotlight scrim (F9 `.has-long-press-highlight`): dim everything EXCEPT
+        // the pressed message, which shows through a rounded cutout so it reads as
+        // highlighted while the rest fades. Tap anywhere to dismiss.
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: widget.onDismiss,
             child: FadeTransition(
               opacity: _c,
-              child: Container(color: const Color(0x59000000)), // black 0.35
+              child: CustomPaint(
+                size: Size.infinite,
+                painter: _SpotlightPainter(hole: r),
+              ),
             ),
           ),
         ),
-        // Pill + (optional) quick-context-menu, anchored above/below the press.
-        Positioned(
-          left: 10,
-          right: 10,
-          top: preferAbove ? null : r.bottom + 6,
-          bottom: preferAbove ? (size.height - r.top + 6) : null,
-          child: Align(
-            alignment: alignLeft ? Alignment.centerLeft : Alignment.centerRight,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: alignLeft
-                  ? CrossAxisAlignment.start
-                  : CrossAxisAlignment.end,
-              children: [
-                // Pill: scale 0.8 / +8px → 1, opacity 0→1 (F13).
+        // Pill + (optional) quick-context-menu, anchored at the press point and
+        // clamped fully on-screen (PWA `showQuickReactPopup`: centered on clientX,
+        // top ≈ pressY − 55, never off the top/bottom/sides).
+        CustomSingleChildLayout(
+          delegate: _PressAnchorLayout(anchor: r),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Pill: scale 0.8 / +8px → 1, opacity 0→1 (F13).
+              _Enter(
+                controller: _c,
+                beginScale: 0.8,
+                beginOffsetY: 8,
+                child: QuickReactPopup(
+                  emojis: widget.emojis,
+                  onReact: widget.onReact,
+                  onMore: widget.onMore,
+                ),
+              ),
+              if (widget.contextItems.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                // Menu: scale 0.9 / -6px → 1, opacity 0→1 (F13).
                 _Enter(
                   controller: _c,
-                  beginScale: 0.8,
-                  beginOffsetY: 8,
-                  child: QuickReactPopup(
-                    emojis: widget.emojis,
-                    onReact: widget.onReact,
-                    onMore: widget.onMore,
+                  beginScale: 0.9,
+                  beginOffsetY: -6,
+                  child: ConstrainedBox(
+                    constraints:
+                        BoxConstraints(maxWidth: math.min(280, size.width - 20)),
+                    child: QuickContextMenu(items: widget.contextItems),
                   ),
                 ),
-                if (widget.contextItems.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  // Menu: scale 0.9 / -6px → 1, opacity 0→1 (F13).
-                  _Enter(
-                    controller: _c,
-                    beginScale: 0.9,
-                    beginOffsetY: -6,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: math.min(280, size.width - 20)),
-                      child: QuickContextMenu(items: widget.contextItems),
-                    ),
-                  ),
-                ],
               ],
-            ),
+            ],
           ),
         ),
       ],
     );
   }
+}
+
+/// Paints the dim scrim with a rounded-rect cutout over the pressed message, so
+/// it stays bright (spotlit) while everything else dims — the native equivalent
+/// of the PWA's `.long-press-highlight` raising the message above the dim layer.
+class _SpotlightPainter extends CustomPainter {
+  _SpotlightPainter({required this.hole});
+
+  final Rect hole;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = const Color(0x59000000); // black @ 0.35
+    if (hole == Rect.zero || hole.isEmpty) {
+      canvas.drawRect(Offset.zero & size, paint);
+      return;
+    }
+    final screen = Path()..addRect(Offset.zero & size);
+    final cut = Path()
+      ..addRRect(RRect.fromRectAndRadius(
+          hole.inflate(4), const Radius.circular(12)));
+    canvas.drawPath(
+      Path.combine(PathOperation.difference, screen, cut),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SpotlightPainter old) => old.hole != hole;
+}
+
+/// Positions the quick-react pill + context menu centered on the press point and
+/// clamped so the whole stack stays fully on-screen (mirrors the PWA's
+/// `clientX − w/2` / `pressY − 55` placement with 10px screen margins, but also
+/// guards the bottom edge so a tall menu near the foot of the list isn't cut off).
+class _PressAnchorLayout extends SingleChildLayoutDelegate {
+  _PressAnchorLayout({required this.anchor});
+
+  final Rect anchor;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
+    // Loose height (the Column sizes to content; never force-clip it), capped
+    // width so it can't exceed the viewport.
+    return BoxConstraints(
+      maxWidth: math.max(0, constraints.maxWidth - 20),
+      maxHeight: constraints.maxHeight,
+    );
+  }
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    double left = anchor.center.dx - childSize.width / 2;
+    left = left.clamp(10.0, math.max(10.0, size.width - childSize.width - 10));
+    double top = anchor.center.dy - 55;
+    top = top.clamp(10.0, math.max(10.0, size.height - childSize.height - 10));
+    return Offset(left, top);
+  }
+
+  @override
+  bool shouldRelayout(_PressAnchorLayout old) => old.anchor != anchor;
 }
 
 /// Wraps [child] with the PWA's enter transition: a scale + vertical translate

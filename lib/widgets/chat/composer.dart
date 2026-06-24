@@ -1515,6 +1515,13 @@ class _ComposerState extends ConsumerState<Composer> {
     required VoidCallback onDismiss,
     required Widget child,
   }) {
+    final media = MediaQuery.of(context);
+    // `.emoji-picker`/`.gif-picker` @media (max-width:768): `position: fixed;
+    // left: 50%; transform: translateX(-50%); bottom: 60px; max-width: 90%` —
+    // centered above the input bar on phones (vs anchored above the button on
+    // desktop, base `bottom: 100%`).
+    final isPhone = media.size.width <= NymDimens.mobileBreakpoint;
+    final picker = Material(type: MaterialType.transparency, child: child);
     return Stack(
       children: [
         Positioned.fill(
@@ -1523,20 +1530,32 @@ class _ComposerState extends ConsumerState<Composer> {
             onTap: onDismiss,
           ),
         ),
-        CompositedTransformFollower(
-          link: link,
-          targetAnchor: Alignment.topRight,
-          followerAnchor: Alignment.bottomRight,
-          offset: const Offset(0, -8),
-          showWhenUnlinked: false,
-          child: Align(
-            alignment: Alignment.bottomRight,
-            child: Material(
-              type: MaterialType.transparency,
-              child: child,
+        if (isPhone)
+          Positioned(
+            left: 8,
+            right: 8,
+            // 60px above the bar, lifted above the keyboard when it's open.
+            bottom: 60 + media.viewInsets.bottom,
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: picker,
+              ),
+            ),
+          )
+        else
+          CompositedTransformFollower(
+            link: link,
+            targetAnchor: Alignment.topRight,
+            followerAnchor: Alignment.bottomRight,
+            offset: const Offset(0, -8),
+            showWhenUnlinked: false,
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: picker,
             ),
           ),
-        ),
       ],
     );
   }
