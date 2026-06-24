@@ -57,6 +57,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// Inline error under the transfer field (F9 / shop.js settingsTransferError).
   String? _transferError;
 
+  /// Whether an outbound settings transfer is in flight (F9). Disables the Send
+  /// button + relabels it "Sending…" while the gift wrap publishes.
+  bool _transferSending = false;
+
   /// The current landing-channel selection (F8). Seeded from the store.
   LandingChannel _landing = LandingChannel.defaultChannel;
 
@@ -529,22 +533,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// Transfer → Send (F9): client-side validate the recipient pubkey and show
   /// the matching inline error (shop.js:1767 `executeSettingsTransfer`). On a
-  /// valid recipient, clear the field as the PWA does on its success path.
-  ///
-  /// The actual outbound kind-30078 gift-wrapped transfer has no controller
-  /// entry point in this wave (see CROSS-FILE NEED), so this performs the
-  /// validation + inline-error surface only — it does not (and must not) claim a
-  /// delivery that didn't happen.
-  void _sendTransfer() {
+  /// valid recipient, publish the gift-wrapped kind-30078 settings transfer via
+  /// the controller, then mirror the PWA's success/error states: clear the input
+  /// + "Settings transfer sent to <8>...!" system message on success, or the
+  /// "Failed to send settings transfer." inline error otherwise.
+  Future<void> _sendTransfer() async {
+    if (_transferSending) return;
+    final raw = _transferPubkeyController.text.trim().toLowerCase();
     final err = validateTransferPubkey(
-      _transferPubkeyController.text,
+      raw,
       selfPubkey: ref.read(appStateProvider).selfPubkey,
     );
-    setState(() => _transferError = err);
-    if (err == null) {
-      // Valid recipient: clear the input (PWA `input.value = ''`). Wire the
-      // gift-wrapped send here once the controller exposes it.
+    if (err != null) {
+      setState(() => _transferError = err);
+      return;
+    }
+    setState(() {
+      _transferError = null;
+      _transferSending = true;
+    });
+    bool ok = false;
+    try {
+      ok = await ref.read(nostrControllerProvider).sendSettingsTransfer(raw);
+    } catch (_) {
+      ok = false;
+    }
+    if (!mounted) return;
+    setState(() => _transferSending = false);
+    if (ok) {
+      // PWA success path: clear the input + confirm with the truncated pubkey.
       _transferPubkeyController.clear();
+      _systemMessage('Settings transfer sent to ${raw.substring(0, 8)}...!');
+    } else {
+      setState(() => _transferError =
+          'Failed to send settings transfer. Please try again.');
     }
   }
 
@@ -1380,8 +1402,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ),
                   const SizedBox(width: 8),
                   NymOutlineButton(
-                    label: 'Send',
-                    onPressed: _sendTransfer,
+                    label: _transferSending ? 'Sending…' : 'Send',
+                    onPressed: _transferSending ? () {} : _sendTransfer,
                   ),
                 ],
               ),

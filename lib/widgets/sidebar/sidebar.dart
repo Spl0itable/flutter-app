@@ -9,6 +9,7 @@ import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/globe/geohash_explorer.dart';
+import '../../features/groups/group_logic.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
 import '../../features/identity/panic_wipe.dart';
@@ -17,11 +18,14 @@ import '../../features/pms/new_pm_modal.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
+import '../../models/group.dart';
+import '../../models/pm_conversation.dart';
 import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
+import '../context_menu/group_context_menu_panel.dart';
 import 'channel_list_item.dart';
 import 'pm_list_item.dart';
 import 'user_list_item.dart';
@@ -187,8 +191,16 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final view = ref.watch(currentViewProvider);
     final channels = ref.watch(channelsProvider);
     final pms = ref.watch(pmListProvider);
+    final groups = ref.watch(groupsProvider);
     final users = ref.watch(usersProvider);
     final unread = ref.watch(unreadCountsProvider);
+
+    // Groups + 1:1 PMs share the PRIVATE MESSAGES list, ordered newest-first by
+    // last-message time (PWA `insertPMInOrder` keys both off `lastMessageTime`).
+    final pmEntries = <_PmEntry>[
+      for (final pm in pms) _PmEntry.pm(pm),
+      for (final g in groups) _PmEntry.group(g),
+    ]..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
 
     final notifier = ref.read(appStateProvider.notifier);
 
@@ -281,18 +293,31 @@ class _SidebarState extends ConsumerState<Sidebar> {
             ),
             searchHint: 'Search messages…',
             children: [
-              for (final pm in pms)
-                PMListItem(
-                  nym: pm.nym,
-                  pubkey: pm.pubkey,
-                  active:
-                      view.kind == ViewKind.pm && view.id == pm.pubkey,
-                  status: users[pm.pubkey]?.effectiveStatus() ??
-                      UserStatus.offline,
-                  unread: unread[pm.pubkey] ?? 0,
-                  textSize: textSize,
-                  onTap: () => select(ChatView.pm(pm.pubkey)),
-                ),
+              for (final e in pmEntries)
+                if (e.group != null)
+                  _GroupListItem(
+                    group: e.group!,
+                    active: view.kind == ViewKind.group &&
+                        view.id == e.group!.id,
+                    unread:
+                        unread[GroupLogic.groupStorageKey(e.group!.id)] ?? 0,
+                    textSize: textSize,
+                    onTap: () => select(ChatView.group(e.group!.id)),
+                    onContextMenu: () =>
+                        GroupContextMenuPanel.show(context, e.group!.id),
+                  )
+                else
+                  PMListItem(
+                    nym: e.pm!.nym,
+                    pubkey: e.pm!.pubkey,
+                    active:
+                        view.kind == ViewKind.pm && view.id == e.pm!.pubkey,
+                    status: users[e.pm!.pubkey]?.effectiveStatus() ??
+                        UserStatus.offline,
+                    unread: unread[e.pm!.pubkey] ?? 0,
+                    textSize: textSize,
+                    onTap: () => select(ChatView.pm(e.pm!.pubkey)),
+                  ),
             ],
           );
         case _SectionId.nyms:
@@ -855,6 +880,193 @@ class _MiniIcon extends StatelessWidget {
       ),
     );
     return tooltip != null ? Tooltip(message: tooltip!, child: btn) : btn;
+  }
+}
+
+/// A unified PRIVATE MESSAGES list entry: either a 1:1 PM thread or a group.
+/// Carries the `lastMessageTime` both kinds sort by.
+class _PmEntry {
+  _PmEntry.pm(PMConversation pm)
+      : pm = pm,
+        group = null,
+        lastMessageTime = pm.lastMessageTime;
+  _PmEntry.group(Group g)
+      : pm = null,
+        group = g,
+        lastMessageTime = g.lastMessageTime;
+
+  final PMConversation? pm;
+  final Group? group;
+  final int lastMessageTime;
+}
+
+/// A group conversation row in the PRIVATE MESSAGES list (`.pm-item.group-item`,
+/// groups.js `_buildGroupItemHTML`). Same box metrics as [PMListItem] with a
+/// group-glyph avatar and a member-count suffix. A tap opens the group; a
+/// long-press (mobile) or secondary-tap / right-click (desktop) opens the
+/// `#groupContextMenu` panel (PWA `showGroupContextMenu`, groups.js:2983).
+class _GroupListItem extends StatelessWidget {
+  const _GroupListItem({
+    required this.group,
+    required this.active,
+    required this.unread,
+    required this.textSize,
+    required this.onTap,
+    required this.onContextMenu,
+  });
+
+  final Group group;
+  final bool active;
+  final int unread;
+  final double textSize;
+  final VoidCallback onTap;
+  final VoidCallback onContextMenu;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final avatarUrl = proxiedAvatarUrl(group.avatar);
+    final name = group.name.isEmpty ? 'Group' : group.name;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      child: Material(
+        color: Colors.transparent,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onLongPressStart: (_) => onContextMenu(),
+          onSecondaryTapDown: (_) => onContextMenu(),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: NymRadius.rxs,
+            child: Stack(
+              children: [
+                Container(
+                  constraints: const BoxConstraints(minHeight: 36),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: active ? c.primaryA(0.10) : Colors.transparent,
+                    borderRadius: NymRadius.rxs,
+                    border: Border.all(
+                      color: active ? c.primaryA(0.20) : Colors.transparent,
+                      width: 1,
+                    ),
+                    boxShadow: active
+                        ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
+                        : null,
+                  ),
+                  child: Row(
+                    children: [
+                      // Group icon: custom avatar, else a stacked-people glyph.
+                      SizedBox(
+                        width: 26,
+                        height: 26,
+                        child: (avatarUrl != null && avatarUrl.isNotEmpty)
+                            ? ClipOval(
+                                child: NymAvatar(
+                                  seed: group.id,
+                                  size: 26,
+                                  imageUrl: group.avatar,
+                                ),
+                              )
+                            : Container(
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: c.primary.withValues(alpha: 0.18),
+                                ),
+                                alignment: Alignment.center,
+                                child: Icon(Icons.groups,
+                                    size: 15, color: c.secondary),
+                              ),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: RichText(
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          text: TextSpan(
+                            style: TextStyle(
+                              color: c.textDim,
+                              fontSize: textSize,
+                              fontWeight: FontWeight.w400,
+                              height: 1.3,
+                            ),
+                            children: [
+                              TextSpan(text: name),
+                              TextSpan(
+                                text: ' · ${group.members.length}',
+                                style: TextStyle(
+                                  color: c.textDim.withValues(alpha: 0.7),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const Spacer(),
+                      if (unread > 0) _GroupUnreadPill(count: unread),
+                    ],
+                  ),
+                ),
+                if (active)
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: Center(
+                      child: FractionallySizedBox(
+                        heightFactor: 0.6,
+                        child: Container(
+                          width: 3,
+                          decoration: BoxDecoration(
+                            color: c.primary,
+                            borderRadius: const BorderRadius.only(
+                              topRight: Radius.circular(3),
+                              bottomRight: Radius.circular(3),
+                            ),
+                            boxShadow: [
+                              BoxShadow(color: c.primaryA(0.4), blurRadius: 8),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.unread-badge` for a group row (mirrors [PMListItem]'s pill).
+class _GroupUnreadPill extends StatelessWidget {
+  const _GroupUnreadPill({required this.count});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 30),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.primary,
+        borderRadius: const BorderRadius.all(Radius.circular(20)),
+      ),
+      child: Text(
+        '$count',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: c.bg,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
   }
 }
 
