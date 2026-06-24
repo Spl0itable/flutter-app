@@ -269,6 +269,74 @@ void main() {
       expect(ev.createdAt, greaterThan(relayTs));
     });
 
+    test('a fresh pubkey (within the TTL) skips the second network read',
+        () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (
+          200,
+          '${jsonEncode([
+                pkA,
+                {
+                  'event': {
+                    'id': 'id-a',
+                    'pubkey': pkA,
+                    'kind': 0,
+                    'created_at': 100,
+                    'tags': [],
+                    'content': '{"name":"alice"}',
+                    'sig': 's'
+                  },
+                  'updatedAt': 1
+                }
+              ])}\n',
+          {'Content-Type': 'application/x-ndjson'},
+        ),
+      );
+      // First read fetches + caches pkA.
+      final first = await sync.profileGet([pkA]);
+      expect(calls, 1);
+      expect(first.containsKey(pkA), true);
+      // Second read within the 5-min TTL is served from cache (reported as a
+      // cache hit with an empty event payload) and makes NO network call.
+      final second = await sync.profileGet([pkA]);
+      expect(calls, 1, reason: 'cached pubkey should not refetch');
+      expect(second.containsKey(pkA), true);
+      expect(second[pkA], isEmpty, reason: 'cache hit carries no event');
+    });
+
+    test('markProfileCached suppresses a D1 read for that pubkey', () async {
+      var calls = 0;
+      final sync = _syncWith(
+        (_) => calls++,
+        respond: (_) => (200, '', {'Content-Type': 'application/x-ndjson'}),
+      );
+      // A live relay kind-0 arrived → controller marks it cached; the next
+      // profile-get must not re-read it (PWA `profileFetchedAt` freshness gate).
+      sync.markProfileCached(pkB);
+      final got = await sync.profileGet([pkB]);
+      expect(calls, 0, reason: 'pre-cached pubkey is not fetched');
+      expect(got.containsKey(pkB), true); // reported as found (cache hit)
+    });
+
+    test('batches at most 100 pubkeys per request', () async {
+      List<dynamic>? sentPubkeys;
+      final sync = _syncWith(
+        (b) => sentPubkeys = b['pubkeys'] as List<dynamic>,
+        respond: (_) => (200, '', {'Content-Type': 'application/x-ndjson'}),
+      );
+      // 150 distinct valid hex pubkeys; only the first 100 go in the batch
+      // (PWA `toFetch.slice(0, 100)`, nostr-core.js:236).
+      final many = List<String>.generate(
+        150,
+        (i) => i.toRadixString(16).padLeft(64, '0'),
+      );
+      await sync.profileGet(many);
+      expect(sentPubkeys, isNotNull);
+      expect(sentPubkeys!.length, 100);
+    });
+
     test('profile-set mirrors the signed kind-0 with auth', () async {
       final bodies = <Map<String, dynamic>>[];
       final sync = _syncWith(

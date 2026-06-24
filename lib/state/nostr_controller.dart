@@ -333,6 +333,10 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _profileBackfillTimer?.cancel();
+    _profileBackfillTimer = null;
+    _profileBackfillQueue.clear();
+    _profileBackfillQueued.clear();
     _flushScheduled = false;
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
@@ -498,6 +502,10 @@ class NostrController {
         _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
       }
       _maybeNotifyChannel(event);
+      // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
+      // a profile fetch for every message author it lacks a profile for —
+      // `queueProfileFetch`, nostr-core.js:1767). Debounced/batched.
+      _maybeBackfillProfiles(event.pubkey);
     }
   }
 
@@ -951,6 +959,8 @@ class NostrController {
       if (m == null) return;
       appState.ingestGroupMessage(m);
       _maybeNotifyMessage(m, isGroup: true);
+      // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
+      _maybeBackfillProfiles(m.pubkey);
       // Auto-send a delivery receipt to the sender (best-effort).
       if (!m.isOwn && m.nymMessageId != null) {
         final ek = _groups?.keysFor(groupId);
@@ -974,6 +984,8 @@ class NostrController {
     if (m == null) return;
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
+    // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
+    _maybeBackfillProfiles(m.pubkey);
     // Delivery receipt back to the sender (not for our own self-copy).
     if (!m.isOwn && m.nymMessageId != null) {
       _service?.publishReceipt(
@@ -3230,6 +3242,52 @@ class NostrController {
   /// avoids redundant in-flight calls within the same tight switch loop.
   final Set<String> _channelBackfillInFlight = <String>{};
 
+  // --- D1 profile backfill (PWA `queueProfileFetch` / `_flushProfileBatch`) ---
+
+  /// Pubkeys queued for a batched D1 `profile-get` because we ingested a
+  /// message from them but hold no kind-0 profile yet (PWA `_profileBatchQueue`,
+  /// nostr-core.js:1774). Deduped against [_profileBackfillQueued] so a busy
+  /// channel can't enqueue the same author repeatedly within a flush window.
+  final List<String> _profileBackfillQueue = <String>[];
+  final Set<String> _profileBackfillQueued = <String>{};
+  Timer? _profileBackfillTimer;
+
+  /// Enqueues [pubkey] for a debounced D1 profile fetch when we have no kind-0
+  /// profile for it yet. Mirrors the PWA's `queueProfileFetch`
+  /// (nostr-core.js:1767): a busy channel/PM/group stream only triggers ONE
+  /// batched `profile-get` per ~400ms window rather than a request per message.
+  /// No-op without storage sync, for an invalid/self pubkey, or when the user is
+  /// already known with a profile. The flush routes each returned kind-0 event
+  /// through [resolveProfiles] (same ingest path live relay kind-0 events take).
+  void _maybeBackfillProfiles(String? pubkey) {
+    if (pubkey == null || pubkey.length != 64) return;
+    if (_storageSync == null) return;
+    final self = _service?.selfPubkey ?? _identity?.pubkey;
+    if (pubkey == self) return;
+    // Already have a profile for this user → nothing to fetch.
+    if (_ref.read(appStateProvider).users[pubkey]?.profile != null) return;
+    if (!_profileBackfillQueued.add(pubkey)) return;
+    _profileBackfillQueue.add(pubkey);
+    _profileBackfillTimer ??= Timer(
+      const Duration(milliseconds: 400),
+      _flushProfileBackfill,
+    );
+  }
+
+  /// Drains the queued pubkeys and resolves their profiles D1-first
+  /// (`resolveProfiles` → `profileGet`, falling back to a relay kind-0 sub for
+  /// any D1 didn't have). Mirrors the PWA's `_flushProfileBatch`
+  /// (nostr-core.js:1784). Best-effort; failures are swallowed inside
+  /// [resolveProfiles].
+  void _flushProfileBackfill() {
+    _profileBackfillTimer = null;
+    if (_profileBackfillQueue.isEmpty) return;
+    final batch = List<String>.from(_profileBackfillQueue);
+    _profileBackfillQueue.clear();
+    _profileBackfillQueued.clear();
+    unawaited(resolveProfiles(batch));
+  }
+
   /// Fetches a single channel's D1 archive (`channel-get`) and replays each
   /// archived event through [AppStateNotifier.ingestEvent] — the SAME path the
   /// live relay subscription uses (`_onEvent`), so dedup by id (`_seenIds`),
@@ -4003,6 +4061,7 @@ class NostrController {
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
+    _profileBackfillTimer?.cancel();
     if (_p2pSub != null) {
       _service?.pool.closeSubscription(_p2pSub!);
       _p2pSub = null;
