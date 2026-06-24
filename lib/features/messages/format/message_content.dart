@@ -89,7 +89,10 @@ class MessageContent extends ConsumerWidget {
           view.kind == ViewKind.channel ? view.id.toLowerCase() : null,
       currentGeohash:
           view.kind == ViewKind.channel ? view.id.toLowerCase() : null,
-      customEmojis: const {},
+      // Live NIP-30 custom emoji (kind-30030 packs + 10030 list + inbound
+      // `emoji` tags) so `:shortcode:` renders as the custom image in messages,
+      // not literal text. Mirrors the PWA's `customEmojis` map.
+      customEmojis: ref.watch(liveCustomEmojiProvider).codeToUrl,
     );
 
     final blocks = NymFormat.format(content, ctx);
