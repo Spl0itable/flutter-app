@@ -441,8 +441,6 @@ class NostrController {
 
   bool _readReceiptsAllowed() =>
       _ref.read(settingsProvider).readReceiptsScope != 'disabled';
-  bool _typingAllowed() =>
-      _ref.read(settingsProvider).typingIndicatorsScope != 'disabled';
 
   // ---------------------------------------------------------------------------
   // Inbound routing
@@ -2653,18 +2651,39 @@ class NostrController {
 
   /// Signals typing in the current PM/group view (throttled ~1/s).
   Future<void> sendTypingStart() async {
-    if (!_typingAllowed()) return;
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
     final state = _ref.read(appStateProvider);
     final view = state.view;
-    if (view.kind == ViewKind.channel) return;
+    // Context-aware scope gate (PWA `isIndicatorAllowedFor`): a typing scope of
+    // 'pms' / 'groups' / 'pms-groups' restricts indicators to those surfaces and
+    // 'disabled' suppresses them; channels require the default 'everywhere'.
+    final scope = _ref.read(settingsProvider).typingIndicatorsScope;
+    final ctx = view.kind == ViewKind.pm
+        ? 'pm'
+        : view.kind == ViewKind.group
+            ? 'group'
+            : 'channel';
+    if (!_indicatorScopeAllows(scope, ctx)) return;
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (now - (_typingThrottle[key] ?? 0) < 1000) return;
     _typingThrottle[key] = now;
+
+    if (view.kind == ViewKind.channel) {
+      // Public channel typing (kind 24420) — only for geohash channels, exactly
+      // like the PWA `handleChannelTypingSignal` (gated on `currentGeohash`).
+      final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
+      if (entry.isEmpty || !entry.first.isGeohash) return;
+      await service.publishChannelTyping(
+        status: 'start',
+        geohash: entry.first.geohash,
+        nym: identity.nym,
+      );
+      return;
+    }
 
     if (view.kind == ViewKind.pm) {
       await service.publishTyping(status: 'start', recipients: [view.id]);
@@ -2680,6 +2699,25 @@ class NostrController {
         groupId: group.id,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
       );
+    }
+  }
+
+  /// Mirrors the PWA `isIndicatorAllowedFor`: a typing / read-receipt scope of
+  /// 'pms', 'groups', or 'pms-groups' limits indicators to those contexts,
+  /// 'disabled' suppresses them, and anything else ('everywhere') allows all
+  /// surfaces — including public channels.
+  bool _indicatorScopeAllows(String scope, String context) {
+    switch (scope) {
+      case 'disabled':
+        return false;
+      case 'pms':
+        return context == 'pm';
+      case 'groups':
+        return context == 'group';
+      case 'pms-groups':
+        return context == 'pm' || context == 'group';
+      default:
+        return true;
     }
   }
 
