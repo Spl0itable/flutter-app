@@ -243,6 +243,14 @@ class NostrController {
       // `discoverChannels`, called on connect from relays.js).
       discoverChannels();
 
+      // Immediately backfill the active channel's D1 archive on boot — the PWA
+      // loads the current channel's (e.g. #nymchat) history right away on load,
+      // not only on a later view switch (`_onViewOpened`).
+      final bootView = _ref.read(appStateProvider).view;
+      if (bootView.kind == ViewKind.channel) {
+        unawaited(_backfillChannelArchive(bootView.id));
+      }
+
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
       // identities skip the durable PM archive. All calls are best-effort.
@@ -4017,6 +4025,15 @@ const List<String> kBlossomServers = [
 final p2pServiceProvider = Provider<P2PService>((ref) {
   final controller = ref.read(nostrControllerProvider);
   final service = P2PService(_ControllerP2PTransport(controller));
+  // Route transfer status into the conversation (mirrors callServiceProvider)
+  // and start the 25051/25052 signaling subscription so a pure receiver is
+  // listening before it ever sends an offer.
+  service.onSystemMessage = (m) {
+    try {
+      ref.read(appStateProvider.notifier).addSystemMessage(m);
+    } catch (_) {}
+  };
+  service.start();
   ref.onDispose(service.dispose);
   return service;
 });
