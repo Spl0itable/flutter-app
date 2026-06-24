@@ -287,61 +287,71 @@ class AutocompleteDropdown extends StatelessWidget {
       c,
       selected: selected,
       onTap: () => onSelectChannel(ch),
+      // Flat `.channel-ac-item` row (gap 8). The name takes priority and
+      // ellipsizes (`Expanded`); the location shrinks-then-ellipsizes
+      // (`Flexible`); the badge + count are fixed, with the count pinned right
+      // (`.channel-ac-count { margin-left:auto }`).
       child: Row(
         children: [
-          // Name (+ current badge + location) take the available width and
-          // shrink-with-ellipsis; the message count is pinned right
-          // (`.channel-ac-count { margin-left:auto }`).
+          // Name + location share the flexible space (both tight `Expanded`
+          // so neither can overflow at a tight width); the name gets the
+          // larger share and both ellipsize.
           Expanded(
-            child: Row(
-              children: [
-                Flexible(
-                  child: Text('#${ch.name}',
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          color: c.primary, fontWeight: FontWeight.bold)),
-                ),
-                if (ch.isCurrent) ...[
-                  // `.channel-ac-badge`: margin-left 4px.
-                  const SizedBox(width: 4),
-                  // `.channel-ac-badge`: 0.7em, primary bg, bg text, radius-xs.
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: c.primary,
-                      borderRadius:
-                          const BorderRadius.all(Radius.circular(8)),
-                    ),
-                    child: Text('current',
-                        style: TextStyle(color: c.bg, fontSize: 10)),
-                  ),
-                ],
-                // `.channel-ac-location`: 0.8em, opacity 0.5 — decoded place.
-                if (ch.location.isNotEmpty) ...[
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      ch.location,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: c.textDim.withValues(alpha: 0.5),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
+            flex: 2,
+            child: Text('#${ch.name}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    TextStyle(color: c.primary, fontWeight: FontWeight.bold)),
           ),
-          // `.channel-ac-count`: 0.75em, opacity 0.4, pushed to the right edge.
+          if (ch.isCurrent) ...[
+            // `.channel-ac-badge`: margin-left 4px.
+            const SizedBox(width: 4),
+            // `.channel-ac-badge`: 0.7em, primary bg, bg text, radius-xs.
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: c.primary,
+                borderRadius: const BorderRadius.all(Radius.circular(8)),
+              ),
+              child: Text('current',
+                  maxLines: 1,
+                  overflow: TextOverflow.clip,
+                  style: TextStyle(color: c.bg, fontSize: 10)),
+            ),
+          ],
+          // `.channel-ac-location`: 0.8em, opacity 0.5 — decoded place.
+          if (ch.location.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 1,
+              child: Text(
+                ch.location,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: c.textDim.withValues(alpha: 0.5),
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ],
+          // `.channel-ac-count`: 0.75em, opacity 0.4, pushed to the right edge
+          // (`margin-left:auto`). Tight `Expanded` so even the count yields at
+          // an extreme width rather than forcing an overflow.
           if (ch.messageCount > 0) ...[
             const SizedBox(width: 8),
-            Text(
-              '${ch.messageCount} msg${ch.messageCount != 1 ? 's' : ''}',
-              style: TextStyle(
-                color: c.textDim.withValues(alpha: 0.4),
-                fontSize: 11,
+            Expanded(
+              flex: 1,
+              child: Text(
+                '${ch.messageCount} msg${ch.messageCount != 1 ? 's' : ''}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: c.textDim.withValues(alpha: 0.4),
+                  fontSize: 11,
+                ),
               ),
             ),
           ],
