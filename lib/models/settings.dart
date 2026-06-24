@@ -49,6 +49,7 @@ class Settings {
     this.showStatus = 'true',
     this.wallpaperType = 'geometric',
     this.notificationsEnabled = true,
+    this.hideNonPinned = false,
   });
 
   final NymThemeKey theme;
@@ -84,6 +85,12 @@ class Settings {
   final String showStatus; // 'true' | 'false' | 'friends'
   final String wallpaperType;
   final bool notificationsEnabled;
+
+  /// Hide all non-favorited channels from the sidebar (`nym_hide_non_pinned`).
+  /// Device-local-only (never cross-device synced). Held in state so the sidebar
+  /// can `ref.watch(settingsProvider.select((s) => s.hideNonPinned))` and react
+  /// live to the Channels → "Hide All Non-Favorited Channels" toggle.
+  final bool hideNonPinned;
 
   /// solid-ui is ON unless transparency is explicitly enabled.
   bool get solidUi => !transparencyEnabled;
@@ -138,6 +145,7 @@ class Settings {
     String? showStatus,
     String? wallpaperType,
     bool? notificationsEnabled,
+    bool? hideNonPinned,
   }) {
     return Settings(
       theme: theme ?? this.theme,
@@ -175,6 +183,7 @@ class Settings {
       showStatus: showStatus ?? this.showStatus,
       wallpaperType: wallpaperType ?? this.wallpaperType,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
+      hideNonPinned: hideNonPinned ?? this.hideNonPinned,
     );
   }
 
@@ -242,6 +251,8 @@ class Settings {
       notificationsEnabled: (kv.getString(StorageKeys.notificationsEnabled) ??
               'true') !=
           'false',
+      hideNonPinned:
+          kv.getBool(StorageKeys.hideNonPinned, defaultValue: false),
     );
   }
 }

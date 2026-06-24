@@ -448,7 +448,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
                 decoration: BoxDecoration(
                   color: nym.bgSecondary,
                   border: Border.all(color: nym.glassBorder),
-                  borderRadius: BorderRadius.circular(16),
+                  // `.geohash-explorer-content border-radius: var(--radius-xl)` = 24px.
+                  borderRadius: BorderRadius.circular(24),
                   boxShadow: [
                     // --shadow-lg: 0 8px 32px rgba(0,0,0,0.5)
                     const BoxShadow(
@@ -461,10 +462,26 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
                   ],
                 ),
                 clipBehavior: Clip.antiAlias,
-                child: Column(
+                // `.modal-close` is `position:absolute` within
+                // `.geohash-explorer-content`, so float it over the card via a
+                // Stack rather than inlining it in the header row.
+                child: Stack(
                   children: [
-                    _header(nym),
-                    Expanded(child: _body(style)),
+                    Column(
+                      children: [
+                        _header(nym),
+                        Expanded(child: _body(style)),
+                      ],
+                    ),
+                    // top:14 right:14, 32×32 circular chip.
+                    Positioned(
+                      top: 14,
+                      right: 14,
+                      child: _ModalCloseButton(
+                        nym: nym,
+                        onTap: () => Navigator.of(context).maybePop(),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -477,30 +494,21 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
 
   Widget _header(NymColors nym) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 16, 8, 16),
+      // `.geohash-explorer-header { padding: 16px 24px; padding-right: 56px; }`
+      // — the right gutter reserves room for the absolute `.modal-close` chip.
+      padding: const EdgeInsets.fromLTRB(24, 16, 56, 16),
       decoration: BoxDecoration(
         color: const Color(0x26000000), // rgba(0,0,0,0.15)
         border: Border(bottom: BorderSide(color: nym.glassBorder)),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'GEOHASH EXPLORER',
-              style: TextStyle(
-                fontSize: 18,
-                color: nym.primary,
-                letterSpacing: 1.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          IconButton(
-            tooltip: 'Close',
-            icon: Icon(Icons.close, color: nym.textDim, size: 18),
-            onPressed: () => Navigator.of(context).maybePop(),
-          ),
-        ],
+      child: Text(
+        'GEOHASH EXPLORER',
+        style: TextStyle(
+          fontSize: 18,
+          color: nym.primary,
+          letterSpacing: 1.5,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -702,7 +710,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
         decoration: BoxDecoration(
           color: const Color(0xB3000000), // rgba(0,0,0,0.7)
           border: Border.all(color: nym.glassBorder),
-          borderRadius: BorderRadius.circular(8),
+          // `.geohash-legend border-radius: var(--radius-sm)` = 12px.
+          borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -753,8 +762,10 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
           ),
         ),
         const SizedBox(width: 8),
+        // `.geohash-legend` sets no `color`, so the `<span>` inherits `--text`
+        // (the themed accent), not a fixed gray.
         Text(label,
-            style: TextStyle(fontSize: fontSize, color: const Color(0xFFE0E0E0))),
+            style: TextStyle(fontSize: fontSize, color: context.nym.text)),
         if (trailing != null) ...[
           const SizedBox(width: 8),
           trailing,
@@ -764,18 +775,33 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   }
 
   Widget _windowGroup(NymColors nym) {
+    // `.geohash-window-btn { border-left: 1px solid var(--glass-border); }` with
+    // `:first-child { border-left: 0; }` → a 1px hairline divider BETWEEN each
+    // button (1h|3h|6h|12h|24h), not before the first.
+    final children = <Widget>[];
+    for (var i = 0; i < kActiveWindowOptions.length; i++) {
+      if (i > 0) {
+        // A full-height 1px divider (border-left spans the button's content box).
+        children.add(Container(width: 1, color: nym.glassBorder));
+      }
+      final h = kActiveWindowOptions[i];
+      children.add(_windowBtn(h, h == _activeWindowHours, nym));
+    }
     return Container(
       decoration: BoxDecoration(
         border: Border.all(color: nym.glassBorder),
-        borderRadius: BorderRadius.circular(4),
+        // `.geohash-window-group border-radius: var(--radius-xs)` = 8px.
+        borderRadius: BorderRadius.circular(8),
       ),
       clipBehavior: Clip.antiAlias,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final h in kActiveWindowOptions)
-            _windowBtn(h, h == _activeWindowHours, nym),
-        ],
+      // IntrinsicHeight lets the 1px dividers stretch to the button height,
+      // matching the CSS `border-left` that covers the full content box.
+      child: IntrinsicHeight(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: children,
+        ),
       ),
     );
   }
@@ -789,7 +815,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
       decoration: BoxDecoration(
         color: const Color(0x0DFFFFFF), // rgba(255,255,255,0.05)
         border: Border.all(color: nym.glassBorder),
-        borderRadius: BorderRadius.circular(4),
+        // `.geohash-window-select border-radius: var(--radius-xs)` = 8px.
+        borderRadius: BorderRadius.circular(8),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<int>(
@@ -849,36 +876,29 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
       _infoRow('Messages', '${ch.messages}', nym, isLast: true),
     ];
 
-    final panel = Container(
+    final card = Container(
       width: narrow ? null : 300, // narrow: stretch via Positioned left/right.
+      // `.geohash-info-panel { padding: 16px; padding-right: 36px; }` — the right
+      // gutter reserves room for the absolute `.geohash-info-close` chip.
       padding: const EdgeInsets.fromLTRB(16, 16, 36, 16),
       decoration: BoxDecoration(
         color: const Color(0xB3000000), // rgba(0,0,0,0.7)
         border: Border.all(color: nym.glassBorder),
-        borderRadius: BorderRadius.circular(10),
+        // `.geohash-info-panel border-radius: var(--radius-md)` = 16px.
+        borderRadius: BorderRadius.circular(16),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  // `.geohash-info-title { text-transform: lowercase; }`
-                  '#${ch.geohash.toLowerCase()}',
-                  style: TextStyle(
-                    color: nym.primary,
-                    fontSize: 14,
-                    letterSpacing: 1,
-                  ),
-                ),
-              ),
-              InkWell(
-                onTap: () => setState(() => _selected = null),
-                child: Icon(Icons.close, size: 14, color: nym.textDim),
-              ),
-            ],
+          Text(
+            // `.geohash-info-title { text-transform: lowercase; }`
+            '#${ch.geohash.toLowerCase()}',
+            style: TextStyle(
+              color: nym.primary,
+              fontSize: 14,
+              letterSpacing: 1,
+            ),
           ),
           const SizedBox(height: 10),
           ...rows,
@@ -892,7 +912,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
                 backgroundColor: nym.primaryA(0.1),
                 foregroundColor: nym.primary,
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(4),
+                  // `.geohash-join-btn border-radius: var(--radius-xs)` = 8px.
+                  borderRadius: BorderRadius.circular(8),
                   side: BorderSide(color: nym.primaryA(0.3)),
                 ),
               ),
@@ -909,6 +930,23 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
           ),
         ],
       ),
+    );
+
+    // `.geohash-info-close` is `position:absolute; top:8; right:8` within the
+    // panel — float the 24×24 chip over the card via a Stack instead of inlining
+    // it in the title row.
+    final panel = Stack(
+      children: [
+        card,
+        Positioned(
+          top: 8,
+          right: 8,
+          child: _InfoCloseButton(
+            nym: nym,
+            onTap: () => setState(() => _selected = null),
+          ),
+        ),
+      ],
     );
 
     // Under 768px the panel becomes a fixed bottom bar (bottom:60 left/right:10,
@@ -976,31 +1014,157 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
     double? width,
   }) {
     final nym = context.nym;
+    // `.geohash-control-btn border-radius: var(--radius-xs)` = 8px.
+    final radius = BorderRadius.circular(8);
     return SizedBox(
       width: width,
-      child: Material(
-        color: active ? nym.primaryA(0.18) : const Color(0xB3000000),
-        borderRadius: BorderRadius.circular(4),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(4),
-          child: Container(
-            padding: width != null
-                ? const EdgeInsets.symmetric(vertical: 8)
-                : const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              border: Border.all(
-                  color: active ? nym.primaryA(0.5) : nym.glassBorder),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            alignment: Alignment.center,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: width != null ? 16 : 11,
-                fontWeight: width != null ? FontWeight.w600 : FontWeight.w500,
-                color: active ? nym.primary : nym.text,
+      // `.geohash-control-btn.active { box-shadow: 0 0 12px rgb(from primary / 0.25); }`
+      // — the outer glow lives outside the Material's clip so it renders.
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          boxShadow: active
+              ? [BoxShadow(color: nym.primaryA(0.25), blurRadius: 12)]
+              : null,
+        ),
+        child: Material(
+          color: active ? nym.primaryA(0.18) : const Color(0xB3000000),
+          borderRadius: radius,
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: radius,
+            child: Container(
+              padding: width != null
+                  ? const EdgeInsets.symmetric(vertical: 8)
+                  : const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                border: Border.all(
+                    color: active ? nym.primaryA(0.5) : nym.glassBorder),
+                borderRadius: radius,
               ),
+              alignment: Alignment.center,
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: width != null ? 16 : 11,
+                  fontWeight: width != null ? FontWeight.w600 : FontWeight.w500,
+                  color: active ? nym.primary : nym.text,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The header `✕` chip — a 32×32 circular `.modal-close` button
+/// (`styles-components.css:91-115`). Idle: `rgba(255,255,255,0.05)` fill,
+/// `glassBorder` ring, `text-dim` glyph at 16px. Hover: `rgba(255,68,68,0.12)`
+/// fill, `danger` glyph, `rgba(255,68,68,0.3)` ring.
+class _ModalCloseButton extends StatefulWidget {
+  const _ModalCloseButton({required this.nym, required this.onTap});
+
+  final NymColors nym;
+  final VoidCallback onTap;
+
+  @override
+  State<_ModalCloseButton> createState() => _ModalCloseButtonState();
+}
+
+class _ModalCloseButtonState extends State<_ModalCloseButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final nym = widget.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          // `transition: all var(--transition)` = 0.25s cubic-bezier(0.4,0,0.2,1).
+          duration: const Duration(milliseconds: 250),
+          curve: const Cubic(0.4, 0, 0.2, 1),
+          width: 32,
+          height: 32,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _hovered
+                ? const Color(0x1FFF4444) // rgba(255,68,68,0.12)
+                : const Color(0x0DFFFFFF), // rgba(255,255,255,0.05)
+            border: Border.all(
+              color: _hovered
+                  ? const Color(0x4DFF4444) // rgba(255,68,68,0.3)
+                  : nym.glassBorder,
+            ),
+          ),
+          child: Text(
+            '✕', // ✕
+            style: TextStyle(
+              fontSize: 16,
+              height: 1,
+              color: _hovered ? nym.danger : nym.textDim,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The info-panel `✕` chip — a 24×24 `.geohash-info-close` button
+/// (`styles-components.css:1800-1821`). Idle: transparent fill + transparent
+/// border, `radius-xs`(8), `text-dim` glyph at 12px. Hover: `rgba(255,255,255,0.08)`
+/// fill, `text` glyph, `glassBorder` ring.
+class _InfoCloseButton extends StatefulWidget {
+  const _InfoCloseButton({required this.nym, required this.onTap});
+
+  final NymColors nym;
+  final VoidCallback onTap;
+
+  @override
+  State<_InfoCloseButton> createState() => _InfoCloseButtonState();
+}
+
+class _InfoCloseButtonState extends State<_InfoCloseButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final nym = widget.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 250),
+          curve: const Cubic(0.4, 0, 0.2, 1),
+          width: 24,
+          height: 24,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            // `border-radius: var(--radius-xs)` = 8px.
+            borderRadius: BorderRadius.circular(8),
+            color: _hovered
+                ? const Color(0x14FFFFFF) // rgba(255,255,255,0.08)
+                : Colors.transparent,
+            border: Border.all(
+              color: _hovered ? nym.glassBorder : Colors.transparent,
+            ),
+          ),
+          child: Text(
+            '✕', // ✕
+            style: TextStyle(
+              fontSize: 12,
+              height: 1,
+              color: _hovered ? nym.text : nym.textDim,
             ),
           ),
         ),

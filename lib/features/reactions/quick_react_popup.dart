@@ -130,7 +130,8 @@ class _QuickContextRowState extends State<_QuickContextRow> {
           child: Row(
             children: [
               Icon(widget.item.icon, size: 16, color: iconColor),
-              const SizedBox(width: 10),
+              // `.nm-ico8` → margin-right:8px on the leading SVG.
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   widget.item.label,
@@ -146,24 +147,22 @@ class _QuickContextRowState extends State<_QuickContextRow> {
 }
 
 /// The quick-react popup (`.quick-react-popup`, styles-features.css
-/// :2712-2776): a pill of emoji buttons (28px) plus a "more" chevron with a
-/// left divider (opens the full picker) and, for other users' messages, a
-/// "menu" affordance (opens the context menu). Shown on long-press.
+/// :2712-2776): a pill of emoji buttons (28px) plus exactly one trailing "more"
+/// chevron with a left divider (`.quick-react-expand`) that opens the full
+/// picker. Shown on long-press. The PWA pill carries no other affordance — the
+/// labelled actions live in the separate `.quick-context-menu` card rendered
+/// below (ui-context.js:1312-1323, 1452-1475).
 class QuickReactPopup extends StatelessWidget {
   const QuickReactPopup({
     super.key,
     required this.emojis,
     required this.onReact,
     required this.onMore,
-    this.onMenu,
   });
 
   final List<String> emojis;
   final ValueChanged<String> onReact;
   final VoidCallback onMore;
-
-  /// Opens the user/message context menu; null hides the affordance (own msg).
-  final VoidCallback? onMenu;
 
   @override
   Widget build(BuildContext context) {
@@ -198,11 +197,6 @@ class QuickReactPopup extends StatelessWidget {
                 onTap: onMore,
               ),
             ),
-            if (onMenu != null)
-              _btn(
-                child: Icon(Icons.more_vert, size: 18, color: c.textDim),
-                onTap: onMenu!,
-              ),
           ],
         ),
       ),
@@ -273,6 +267,8 @@ void showQuickReactPopup(
   required List<String> emojis,
   required ValueChanged<String> onReact,
   required VoidCallback onMore,
+  @Deprecated('The PWA pill has no ⋮ menu button; this is ignored. '
+      'Remove the onMenu: argument from the message_row call site.')
   VoidCallback? onMenu,
   List<QuickContextItem> contextItems = const [],
 }) {
@@ -294,12 +290,6 @@ void showQuickReactPopup(
         close();
         onMore();
       },
-      onMenu: onMenu == null
-          ? null
-          : () {
-              close();
-              onMenu();
-            },
       contextItems: contextItems
           .map((it) => QuickContextItem(
                 label: it.label,
@@ -327,7 +317,6 @@ class _QuickReactOverlay extends StatefulWidget {
     required this.emojis,
     required this.onReact,
     required this.onMore,
-    required this.onMenu,
     required this.contextItems,
     required this.onDismiss,
   });
@@ -336,7 +325,6 @@ class _QuickReactOverlay extends StatefulWidget {
   final List<String> emojis;
   final ValueChanged<String> onReact;
   final VoidCallback onMore;
-  final VoidCallback? onMenu;
   final List<QuickContextItem> contextItems;
   final VoidCallback onDismiss;
 
@@ -408,7 +396,6 @@ class _QuickReactOverlayState extends State<_QuickReactOverlay>
                     emojis: widget.emojis,
                     onReact: widget.onReact,
                     onMore: widget.onMore,
-                    onMenu: widget.onMenu,
                   ),
                 ),
                 if (widget.contextItems.isNotEmpty) ...[

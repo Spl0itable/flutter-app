@@ -382,25 +382,31 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
             onPressed: () => Navigator.of(context).maybePop(),
           ),
           const SizedBox(width: 10),
-          // `.send-btn` style.
-          InkWell(
-            onTap: _sending ? null : _sendContact,
-            borderRadius: NymRadius.rsm,
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 22, vertical: 11),
-              decoration: BoxDecoration(
-                color: c.primaryA(0.10),
-                borderRadius: NymRadius.rsm,
-                border: Border.all(color: c.primaryA(0.30)),
-              ),
-              child: Text(
-                _sending ? 'SENDING...' : 'SEND MESSAGE',
-                style: TextStyle(
-                  color: c.primary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.5,
+          // `.send-btn` style; disabled while sending → opacity .35 (PWA
+          // `.send-btn:disabled`), height 42.
+          Opacity(
+            opacity: _sending ? 0.35 : 1.0,
+            child: InkWell(
+              onTap: _sending ? null : _sendContact,
+              borderRadius: NymRadius.rsm,
+              child: Container(
+                height: 42,
+                alignment: Alignment.center,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 22),
+                decoration: BoxDecoration(
+                  color: c.primaryA(0.10),
+                  borderRadius: NymRadius.rsm,
+                  border: Border.all(color: c.primaryA(0.30)),
+                ),
+                child: Text(
+                  _sending ? 'SENDING...' : 'SEND MESSAGE',
+                  style: TextStyle(
+                    color: c.primary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.5,
+                  ),
                 ),
               ),
             ),

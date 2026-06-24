@@ -1,10 +1,12 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../core/theme/nym_colors.dart';
+import 'cosmetics.dart' show StyleWatermarkLayer, styleWatermarks;
 import 'shop_catalog.dart';
 import 'shop_models.dart';
 
@@ -34,8 +36,19 @@ class ShopSvgIcon extends StatelessWidget {
   }
 }
 
+/// A flair's `.flair-X` glow — the CSS `text-shadow` (and, for the brighter
+/// star/flame/diamond/genesis, the additional `filter: drop-shadow`) rendered as
+/// blurred tinted copies of the glyph behind the crisp icon.
+class _FlairGlow {
+  const _FlairGlow(this.shadows);
+
+  /// Each (colour, blurRadius) pair: a blurred glyph copy in that colour.
+  final List<(Color, double)> shadows;
+}
+
 /// The `.flair-badge` — a flair item's SVG tinted to its themed colour, sized
-/// like the web (`font-size: 20px`). Genesis stamps its edition number.
+/// like the web (`font-size: 20px`), with the per-flair `.flair-X` glow. Genesis
+/// stamps its edition number.
 class FlairBadge extends StatelessWidget {
   const FlairBadge({
     super.key,
@@ -48,27 +61,67 @@ class FlairBadge extends StatelessWidget {
   final int? edition;
   final double size;
 
-  /// Themed flair colours, mirroring the `.flair-X` CSS rules.
+  /// Themed flair colours — the EXACT `.flair-X { color }` CSS hex
+  /// (`styles-features.css:323-356, 646-711, 1213`).
   static const Map<String, Color> colors = {
     'flair-crown': Color(0xFFFFD700),
     'flair-diamond': Color(0xFF00FFFF),
     'flair-skull': Color(0xFFFF0000),
     'flair-star': Color(0xFFFFFF00),
     'flair-lightning': Color(0xFFF7931A),
-    'flair-heart': Color(0xFFFF5577),
-    'flair-mask': Color(0xFFCFCFCF),
+    'flair-heart': Color(0xFFFF1493),
+    'flair-mask': Color(0xFFFFFFFF),
     'flair-rocket': Color(0xFFFF6B6B),
-    'flair-shield': Color(0xFF4ADE80),
-    'flair-flame': Color(0xFFFF8C00),
-    'flair-snowflake': Color(0xFF7DD3FC),
-    'flair-moon': Color(0xFFFFE066),
-    'flair-sun': Color(0xFFFFC300),
-    'flair-leaf': Color(0xFF4ADE80),
-    'flair-music': Color(0xFFA78BFA),
-    'flair-eye': Color(0xFFD4C5F9),
-    'flair-anchor': Color(0xFF93C5FD),
-    'flair-gem': Color(0xFFFF4D6D),
-    'flair-genesis': Color(0xFFFFC440),
+    'flair-shield': Color(0xFF52FF9D),
+    'flair-flame': Color(0xFFFF7A1A),
+    'flair-snowflake': Color(0xFF7FDFFF),
+    'flair-moon': Color(0xFFCDD6FF),
+    'flair-sun': Color(0xFFFFC93C),
+    'flair-leaf': Color(0xFF5FD35F),
+    'flair-music': Color(0xFFB388FF),
+    'flair-eye': Color(0xFFE0F7FF),
+    'flair-anchor': Color(0xFF5B9DFF),
+    'flair-gem': Color(0xFFFF3B6B),
+    'flair-genesis': Color(0xFFFFDF6B),
+  };
+
+  /// The `.flair-X` glow: the CSS `text-shadow` blur(s) (and for the brighter
+  /// star/flame/diamond/genesis the extra `filter: drop-shadow`). Each entry is
+  /// a blurred tinted copy of the glyph painted behind the crisp icon. The CSS
+  /// `0 0 Npx` blur maps directly to a Gaussian `blurRadius` of N.
+  static const Map<String, _FlairGlow> _glows = {
+    'flair-crown': _FlairGlow([(Color(0x80FFD700), 10.0)]), // rgba(255,215,0,.5)
+    'flair-diamond': _FlairGlow([
+      (Color(0x8000FFFF), 10.0), // text-shadow rgba(0,255,255,.5)
+      (Color(0xF2B4FFFF), 7.0), // drop-shadow rgba(180,255,255,.95)
+    ]),
+    'flair-skull': _FlairGlow([(Color(0x80FF0000), 10.0)]), // rgba(255,0,0,.5)
+    'flair-star': _FlairGlow([
+      (Color(0x80FFFF00), 10.0), // text-shadow rgba(255,255,0,.5)
+      (Color(0xE6FFFF00), 6.0), // drop-shadow rgba(255,255,0,.9)
+    ]),
+    'flair-lightning': _FlairGlow([(Color(0x80F7931A), 10.0)]), // (247,147,26,.5)
+    'flair-heart': _FlairGlow([(Color(0x80FF1493), 10.0)]), // (255,20,147,.5)
+    'flair-mask': _FlairGlow([(Color(0x80FFFFFF), 10.0)]), // (255,255,255,.5)
+    'flair-rocket': _FlairGlow([(Color(0x99FF6B6B), 10.0)]), // (255,107,107,.6)
+    'flair-shield': _FlairGlow([(Color(0x9952FF9D), 10.0)]), // (82,255,157,.6)
+    'flair-flame': _FlairGlow([
+      (Color(0x99FF7A1A), 10.0), // text-shadow rgba(255,122,26,.6)
+      (Color(0xE6FF8C28), 6.0), // drop-shadow rgba(255,140,40,.9)
+    ]),
+    'flair-snowflake': _FlairGlow([(Color(0x997FDFFF), 10.0)]), // (127,223,255,.6)
+    'flair-moon': _FlairGlow([(Color(0x99CDD6FF), 10.0)]), // (205,214,255,.6)
+    'flair-sun': _FlairGlow([(Color(0xB3FFC93C), 12.0)]), // (255,201,60,.7) 12px
+    'flair-leaf': _FlairGlow([(Color(0x995FD35F), 10.0)]), // (95,211,95,.6)
+    'flair-music': _FlairGlow([(Color(0x99B388FF), 10.0)]), // (179,136,255,.6)
+    'flair-eye': _FlairGlow([(Color(0x9978DCFF), 10.0)]), // (120,220,255,.6)
+    'flair-anchor': _FlairGlow([(Color(0x995B9DFF), 10.0)]), // (91,157,255,.6)
+    'flair-gem': _FlairGlow([(Color(0x99FF3B6B), 10.0)]), // (255,59,107,.6)
+    'flair-genesis': _FlairGlow([
+      (Color(0xB3FFD700), 8.0), // text-shadow rgba(255,215,0,.7)
+      (Color(0x66FFAA00), 16.0), // text-shadow rgba(255,170,0,.4)
+      (Color(0xE6FFC800), 7.0), // drop-shadow rgba(255,200,0,.9)
+    ]),
   };
 
   @override
@@ -76,9 +129,34 @@ class FlairBadge extends StatelessWidget {
     final svg = ShopCatalog.flairIcon(flairId, edition);
     if (svg.isEmpty) return const SizedBox.shrink();
     final color = colors[flairId] ?? context.nym.primary;
+    final glow = _glows[flairId];
+    final icon = ShopSvgIcon(svg: svg, size: size, color: color);
     return Padding(
       padding: const EdgeInsets.only(left: 5),
-      child: ShopSvgIcon(svg: svg, size: size, color: color),
+      child: glow == null
+          ? icon
+          : Stack(
+              alignment: Alignment.center,
+              children: [
+                // Blurred tinted glyph copies (`text-shadow`/`drop-shadow`).
+                for (final (glowColor, blur) in glow.shadows)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ImageFiltered(
+                        // Match Flutter's Shadow blur sigma (`Shadow.convertRadius
+                        // ToSigma`) so an SVG glow reads like a `text-shadow`/
+                        // `drop-shadow` of the same CSS blur radius.
+                        imageFilter: ui.ImageFilter.blur(
+                          sigmaX: Shadow.convertRadiusToSigma(blur),
+                          sigmaY: Shadow.convertRadiusToSigma(blur),
+                        ),
+                        child: ShopSvgIcon(svg: svg, size: size, color: glowColor),
+                      ),
+                    ),
+                  ),
+                icon,
+              ],
+            ),
     );
   }
 }
@@ -128,10 +206,10 @@ class SupporterBadge extends StatelessWidget {
 
 /// A live message-bubble preview for a message style (F4 / `_shopStyleDemo`):
 /// a real `.message-content`-equivalent container rendering "Preview message"
-/// in the style's colour + glow, with the translucent content background and
-/// (for the textured styles) a tiled glyph watermark — built locally from
-/// [ShopCatalog.styleVisuals]/[stylePatternGlyph] so it doesn't depend on
-/// `cosmetics.dart`.
+/// in the style's colour + glow ([ShopCatalog.styleVisuals]) with the
+/// translucent content background and — for the textured styles — the SAME tiled
+/// `--style-pattern` SVG the rendered chat message uses (cosmetics.dart
+/// [styleWatermarks] via [StyleWatermarkLayer]), so the card matches the bubble.
 class ShopStyleBubblePreview extends StatelessWidget {
   const ShopStyleBubblePreview({
     super.key,
@@ -142,11 +220,30 @@ class ShopStyleBubblePreview extends StatelessWidget {
   final String styleId;
   final String text;
 
+  /// Shop-card-only `.style-preview-*` translucent wash backgrounds
+  /// (styles-features.css:713-936). These 8 wash styles paint a denser tint
+  /// behind the CARD preview that the in-chat `.message-content` does NOT (so
+  /// `styleVisuals.contentBackground` is null for them — the rendered message is
+  /// correctly bg-less). Preview-only.
+  static const Map<String, Color> _previewWash = {
+    'style-ocean': Color(0x2938BDF8), // rgba(56,189,248,.16)
+    'style-sakura': Color(0x24FF7EB6), // rgba(255,126,182,.14)
+    'style-galaxy': Color(0x2EA855F7), // rgba(168,85,247,.18)
+    'style-toxic': Color(0x2484FF3B), // rgba(132,255,59,.14)
+    'style-blood': Color(0x33780000), // rgba(120,0,0,.2)
+    'style-royal': Color(0x2E8B5CF6), // rgba(139,92,246,.18)
+    'style-circuit': Color(0x242DD4BF), // rgba(45,212,191,.14)
+    // vapor uses background-clip:text (gradient glyphs), no solid card wash.
+  };
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final v = ShopCatalog.styleVisuals[styleId];
-    final glyph = ShopCatalog.stylePatternGlyph(styleId);
+    // The same tiled `--style-pattern` SVG the rendered message uses
+    // (cosmetics.dart `styleWatermarks`), so the shop card preview matches the
+    // chat bubble 1:1 instead of approximating with a single repeating glyph.
+    final watermark = styleWatermarks[styleId];
     if (v == null) {
       return Text(text, style: TextStyle(color: c.text, fontSize: 12));
     }
@@ -173,25 +270,17 @@ class ShopStyleBubblePreview extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: v.contentBackground,
+        // Prefer the shop-card wash for the 8 preview styles; else the in-chat
+        // content background (satoshi/eclipse/crt).
+        color: _previewWash[styleId] ?? v.contentBackground,
         borderRadius: BorderRadius.circular(8),
       ),
-      clipBehavior: glyph != null ? Clip.antiAlias : Clip.none,
+      clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
       child: Stack(
         alignment: Alignment.center,
         children: [
-          if (glyph != null)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(
-                  painter: _GlyphWatermarkPainter(
-                    glyph: glyph,
-                    color: v.color,
-                    monospace: v.monospace,
-                  ),
-                ),
-              ),
-            ),
+          if (watermark != null)
+            Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
           label,
         ],
       ),
@@ -218,17 +307,23 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // Redacted: blanked-out content (cosmetic-redacted-message).
+    // Redacted: the `.cosmetic-redacted-message` blank — a translucent white
+    // bar (`background: rgba(255,255,255,.15)`, color transparent, radius xs=8,
+    // min-width 120px, min-height 1.2em — styles-features.css:1424-1435). The
+    // shop demo applies the class immediately (shop.js:779), so the card always
+    // shows the blanked state.
     if (cosmeticId == 'cosmetic-redacted') {
       return Container(
+        constraints: const BoxConstraints(minWidth: 120),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: const Color(0xFF1A1A1A),
+          color: const Color(0x26FFFFFF), // rgba(255,255,255,.15)
           borderRadius: BorderRadius.circular(_radius),
         ),
-        child: const Text(
-          '████████',
-          style: TextStyle(color: Color(0xFF1A1A1A), fontSize: 12),
+        // Transparent text reserves the 1.2em line-height of a real message.
+        child: Text(
+          text,
+          style: const TextStyle(color: Colors.transparent, fontSize: 12),
         ),
       );
     }
@@ -365,52 +460,6 @@ class _SupporterStyleBubble extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Paints a tiled glyph watermark behind a style's preview text (F3/F7): the
-/// style's defining repeating character (`₿`, `10`, etc.) drawn faintly across
-/// the bubble. A lightweight stand-in for the PWA's repeating-SVG `--style-pattern`.
-class _GlyphWatermarkPainter extends CustomPainter {
-  _GlyphWatermarkPainter({
-    required this.glyph,
-    required this.color,
-    required this.monospace,
-  });
-
-  final String glyph;
-  final Color color;
-  final bool monospace;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final tp = TextPainter(
-      text: TextSpan(
-        text: glyph,
-        style: TextStyle(
-          color: color.withValues(alpha: 0.14),
-          fontSize: 10,
-          fontFamily: monospace ? 'monospace' : null,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    const stepX = 18.0;
-    const stepY = 14.0;
-    var rowIndex = 0;
-    for (var y = 0.0; y < size.height + stepY; y += stepY) {
-      // Offset alternate rows for a staggered tiled look.
-      final offset = rowIndex.isOdd ? stepX / 2 : 0.0;
-      for (var x = -offset; x < size.width + stepX; x += stepX) {
-        tp.paint(canvas, Offset(x, y));
-      }
-      rowIndex++;
-    }
-  }
-
-  @override
-  bool shouldRepaint(_GlyphWatermarkPainter old) =>
-      old.glyph != glyph || old.color != color || old.monospace != monospace;
 }
 
 /// Paints a conic prism ring around a bubble (F8 — `cosmetic-aura-rainbow`'s

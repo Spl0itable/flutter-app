@@ -12,6 +12,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../models/channel.dart';
 import '../../models/settings.dart';
 import '../../services/api/storage_sync.dart';
+import '../notifications/notifications_service.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -153,6 +154,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // list (F17) re-renders as offers arrive or are accepted/declined.
     ref.watch(pendingSettingsTransfersProvider);
 
+    // `.settings-section.mobile-only` is `display:none` by default and revealed
+    // only `@media (max-width:768px)` (styles-components.css:215 +
+    // styles-themes-responsive.css:70). Gate the Mobile Gestures section the
+    // same way so wide windows/tablets don't over-render it.
+    final isMobileWidth = MediaQuery.of(context).size.width <= 768;
+
     final sections = <_SectionSpec>[
       _SectionSpec(
         key: 'appearance',
@@ -185,13 +192,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             'hide non-favorited hidden blocked',
         builder: () => _channels(settings, ctrl),
       ),
-      _SectionSpec(
-        key: 'mobile',
-        title: 'Mobile Gestures',
-        keywords: 'mobile gestures swipe left right action react emoji '
-            'sensitivity threshold',
-        builder: () => _mobile(settings, ctrl),
-      ),
+      // Mobile Gestures — only on a mobile-width viewport (PWA mobile-only).
+      if (isMobileWidth)
+        _SectionSpec(
+          key: 'mobile',
+          title: 'Mobile Gestures',
+          keywords: 'mobile gestures swipe left right action react emoji '
+              'sensitivity threshold',
+          builder: () => _mobile(settings, ctrl),
+        ),
       _SectionSpec(
         key: 'data',
         title: 'Data & Backup',
@@ -217,11 +226,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 color: c.bgSecondary,
                 borderRadius: NymRadius.rxl,
                 border: Border.all(color: c.glassBorder),
+                // `.modal-content` box-shadow: --shadow-lg (0 8 32 black@.5)
+                // + --shadow-glow (faint primary) + 1px white@.05 ring.
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 40,
-                    offset: const Offset(0, 20),
+                    color: Colors.black.withValues(alpha: 0.5),
+                    blurRadius: 32,
+                    offset: const Offset(0, 8),
+                  ),
+                  BoxShadow(
+                    color: c.primaryA(0.12),
+                    blurRadius: 24,
+                  ),
+                  BoxShadow(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    spreadRadius: 1,
                   ),
                 ],
               ),
@@ -236,15 +255,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     _header(c),
                     Flexible(
                       child: SingleChildScrollView(
-                        padding: const EdgeInsets.fromLTRB(28, 0, 28, 8),
+                        // Sections are full-bleed; the search bar / no-results
+                        // text carry the `.modal-content { padding: 32px }`
+                        // horizontal inset themselves.
+                        padding: const EdgeInsets.only(bottom: 8),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            _searchBar(c),
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 32),
+                              child: _searchBar(c),
+                            ),
                             if (visibleSections.isEmpty)
                               Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    vertical: 24),
+                                padding: const EdgeInsets.fromLTRB(32, 24, 32, 24),
                                 child: Text(
                                   'No settings match your search.',
                                   style: TextStyle(
@@ -278,7 +303,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Widget _header(NymColors c) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 24, 14, 14),
+      padding: const EdgeInsets.fromLTRB(32, 24, 18, 14),
       child: Row(
         children: [
           Expanded(
@@ -300,8 +325,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               height: 32,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: c.text.withValues(alpha: 0.05),
+                // `.modal-close`: bg white@.05, 1px glass border.
+                color: Colors.white.withValues(alpha: 0.05),
                 shape: BoxShape.circle,
+                border: Border.all(color: c.glassBorder),
               ),
               child: Icon(Icons.close, size: 18, color: c.textDim),
             ),
@@ -324,7 +351,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Widget _actions(NymColors c) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(28, 12, 28, 20),
+      padding: const EdgeInsets.fromLTRB(32, 12, 32, 20),
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: c.glassBorder)),
       ),
@@ -337,13 +364,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const SizedBox(width: 10),
           // `.send-btn`: primary-tinted (bg primary@0.1, border primary@0.3),
-          // primary uppercase text with wide letter-spacing.
+          // primary uppercase text with wide letter-spacing, height 42.
           InkWell(
             onTap: _onSave,
             borderRadius: NymRadius.rsm,
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 22, vertical: 11),
+              height: 42,
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 22),
               decoration: BoxDecoration(
                 color: c.primaryA(0.10),
                 borderRadius: NymRadius.rsm,
@@ -445,6 +473,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ),
     );
+  }
+
+  /// Notification-sound change: persist the choice, then play it as an audible
+  /// preview (the PWA's `soundSelect.onchange` → `nym.playSound(value)`,
+  /// app.js:3480-3484). `'none'`/unknown is silent. (The PWA also zeroes its 2s
+  /// replay-dedupe so back-to-back previews always sound; see CROSS_FILE_NEEDS
+  /// — without it a second change within 2s is swallowed by the guard.)
+  void _onSoundChanged(SettingsController ctrl, String value) {
+    ctrl.setSound(value);
+    ref.read(notificationsServiceProvider).playSound(value);
   }
 
   /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, wipe the
@@ -633,28 +671,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: ctrl.setTheme,
           ),
         ),
-        // Chat View (single / columns).
+        // Chat View (single / columns) — two preview cards (.view-option).
         FormGroup(
           label: 'Chat View',
           hint: 'Single shows one conversation at a time. Column view shows '
               'channels, PMs, and group chats side by side in scrollable '
               'columns you can add, remove, and drag to reorder.',
-          child: FormSelect<String>(
-            value: s.chatViewMode,
-            items: const [
-              (value: 'single', label: 'Single Chat (Default)'),
-              (value: 'columns', label: 'Column View'),
-            ],
+          child: _ViewPicker(
+            value: s.useColumns ? 'columns' : 'single',
             onChanged: ctrl.setChatViewMode,
           ),
         ),
         // Reset columns to defaults (PWA index.html:1406, `resetColumnView`).
+        // `.nm-h-58` (btn-small): 11px text-dim, NOT uppercase.
         if (s.useColumns)
           Padding(
             padding: const EdgeInsets.only(top: 12),
-            child: NymOutlineButton(
-              label: 'Reset columns to defaults',
-              onPressed: ctrl.resetColumns,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: NymOutlineButton(
+                label: 'Reset columns to defaults',
+                uppercase: false,
+                onPressed: ctrl.resetColumns,
+              ),
             ),
           ),
         // Column Message Wallpaper (cv-only).
@@ -734,6 +773,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // The moderation sets (friends / blocked users / blocked keywords) live on
     // AppState, not Settings.
     final app = ref.watch(appStateProvider);
+    // `isNostrLoggedIn()` (app.js:4960): a durable Nostr identity is logged in
+    // (loginMethod != null; null = ephemeral). Locks the keypair-rotation
+    // control to 'persistent'.
+    final nostrLoggedIn =
+        ref.read(nostrControllerProvider).identity?.loginMethod != null;
+    final keypairValue = nostrLoggedIn ? 'persistent' : ctrl.keypairMode;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -755,14 +800,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           hint: 'Generate a new random keypair on every session restart for '
               'improved pseudonymity. When disabled, your generated keypair '
               'persists across reloads.',
-          warning: ctrl.keypairMode == 'hardcore'
+          warning: keypairValue == 'hardcore'
               ? '⚠ Hardcore mode changes your identity after every sent '
                   'message. PMs and group chats will not work reliably since '
                   'recipients cannot reply to a constantly changing pubkey. '
                   'Settings will not sync across devices.'
               : null,
           child: FormSelect<String>(
-            value: ctrl.keypairMode,
+            value: keypairValue,
+            // Locked at 'persistent' while logged in with a Nostr identity —
+            // rotation would conflict with it (app.js:3237-3241).
+            disabled: nostrLoggedIn,
+            tooltip: 'Not available while logged in with a Nostr identity',
             items: const [
               (value: 'persistent', label: 'Disabled (reuse same keypair)'),
               (value: 'random', label: 'Enabled (new identity each session)'),
@@ -1017,7 +1066,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: FormSelect<String>(
             value: s.sound,
             items: _soundOptions,
-            onChanged: ctrl.setSound,
+            // Persist + play an audible preview of the chosen tone.
+            onChanged: (v) => _onSoundChanged(ctrl, v),
           ),
         ),
         FormGroup(
@@ -1132,12 +1182,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             hint: 'When enabled, only your favorited channels will appear in '
                 'the sidebar',
             child: FormSelect<bool>(
-              value: ctrl.hideNonPinned,
+              value: s.hideNonPinned,
               items: const [
                 (value: false, label: 'Disabled'),
                 (value: true, label: 'Enabled (only show favorited channels)'),
               ],
-              onChanged: (v) => setState(() => ctrl.setHideNonPinned(v)),
+              onChanged: ctrl.setHideNonPinned,
             ),
           ),
           FormGroup(
@@ -1465,16 +1515,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  Widget _emptyListBox(String text) {
+  /// The list container chrome shared by the moderation lists and the
+  /// pending-transfers list (`.blocked-list,.keyword-list`): `padding:10px;
+  /// border:1px glass-border; border-radius:var(--radius-sm); background:
+  /// rgba(255,255,255,.03); max-height:200px; overflow-y:auto`.
+  Widget _listBox({required Widget child}) {
     final c = context.nym;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(maxHeight: 200),
       decoration: BoxDecoration(
-        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
+        color: c.isLight
+            ? c.bg
+            : Colors.white.withValues(alpha: 0.03),
         borderRadius: NymRadius.rsm,
         border: Border.all(color: c.glassBorder),
       ),
+      clipBehavior: Clip.antiAlias,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(10),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _emptyListBox(String text) {
+    final c = context.nym;
+    // Empty state: the dim `.nm-dim12` text inside the same padded list box.
+    return _listBox(
       child: Text(
         text,
         style: TextStyle(color: c.textDim, fontSize: 12),
@@ -1485,7 +1553,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// A populated moderation list (`.keyword-list` / `.blocked-list`): one row
   /// per entry with a trailing Remove/Unblock button, falling back to the dim
   /// empty placeholder when [entries] is empty (F1). Each row resolves a
-  /// display label via [labelFor].
+  /// display label via [labelFor]. Rows are borderless (PWA `.blocked-item`/
+  /// `.keyword-item` have no dividers), `padding:5px; margin:2px 0`.
   Widget _removableList({
     required Iterable<String> entries,
     required String emptyText,
@@ -1496,24 +1565,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final items = entries.toList();
     if (items.isEmpty) return _emptyListBox(emptyText);
     final c = context.nym;
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
-        borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.glassBorder),
-      ),
-      clipBehavior: Clip.antiAlias,
+    return _listBox(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
           for (var i = 0; i < items.length; i++)
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-              decoration: BoxDecoration(
-                border: i == 0
-                    ? null
-                    : Border(top: BorderSide(color: c.glassBorder)),
+            Padding(
+              // `.blocked-item/.keyword-item { padding: 5px; margin: 2px 0 }`.
+              padding: EdgeInsets.only(
+                top: i == 0 ? 0 : 4,
+                bottom: 4,
               ),
               child: Row(
                 children: [
@@ -1525,9 +1587,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  // `.icon-btn` (Remove/Unblock/Unhide) is uppercase.
                   NymOutlineButton(
                     label: buttonLabel,
-                    uppercase: false,
                     onPressed: () => onRemove(items[i]),
                   ),
                 ],
@@ -1615,15 +1677,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
+              // `.icon-btn` (Accept/Decline) is uppercase.
               NymOutlineButton(
                 label: 'Accept',
-                uppercase: false,
                 onPressed: () => onAccept(t.id),
               ),
               const SizedBox(width: 8),
               NymOutlineButton(
                 label: 'Decline',
-                uppercase: false,
                 danger: true,
                 onPressed: () => onDecline(t.id),
               ),
@@ -1824,65 +1885,361 @@ class _WallpaperPicker extends StatelessWidget {
   }
 }
 
-/// Message-layout picker (Bubbles / IRC) as two selectable preview cards.
-class _LayoutPicker extends StatelessWidget {
-  const _LayoutPicker({required this.value, required this.onChanged});
+/// A selectable preview card shared by the Chat-View (`.view-option`) and
+/// Message-Layout (`.layout-option`) pickers: a 2px-bordered card (radius sm)
+/// whose preview area sits above a label; selecting it switches the border to
+/// solid `--primary`, adds a `0 0 12px primary@.25` glow, and tints the label
+/// primary.
+class _PreviewCard extends StatelessWidget {
+  const _PreviewCard({
+    required this.selected,
+    required this.label,
+    required this.preview,
+    required this.onTap,
+  });
+
+  final bool selected;
+  final String label;
+  final Widget preview;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          // `.view-option/.layout-option { border: 2px solid glass-border;
+          //   border-radius: var(--radius-sm); padding: 8px }`.
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            borderRadius: NymRadius.rsm,
+            border: Border.all(
+              color: selected ? c.primary : c.glassBorder,
+              width: 2,
+            ),
+            // `.selected { box-shadow: 0 0 12px primary@.25 }`.
+            boxShadow: selected
+                ? [BoxShadow(color: c.primaryA(0.25), blurRadius: 12)]
+                : null,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              preview,
+              // `.view-label/.layout-label { padding-top: 6px; font-size: 11px;
+              //   color: text-dim }`; selected → primary.
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: selected ? c.primary : c.textDim,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One faux column in the Chat-View preview (`.vp-col`): a `bg-tertiary` box of
+/// dim bars; `bars` is the list of bar widths where `true` = full, `false` =
+/// 60% (`.vp-bar.short`). The caller controls width (Expanded for columns,
+/// FractionallySizedBox for the centered single column).
+class _VpCol extends StatelessWidget {
+  const _VpCol({required this.bars});
+  final List<bool> bars;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      // `.vp-col { padding: 5px; gap: 4px; background: bg-tertiary;
+      //   border: 1px glass-border; border-radius: 4px }`.
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        color: c.bgTertiary,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: c.glassBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (var i = 0; i < bars.length; i++) ...[
+            if (i > 0) const SizedBox(height: 4),
+            FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              // `.vp-bar.short { width: 60% }` else 100%.
+              widthFactor: bars[i] ? 1.0 : 0.6,
+              child: Container(
+                // `.vp-bar { height: 5px; border-radius: 3px; background:
+                //   text-dim; opacity: .5 }`.
+                height: 5,
+                decoration: BoxDecoration(
+                  color: c.textDim.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Chat-View picker: two `.view-option` cards with miniature column-layout
+/// previews (single = one 60%-width column; columns = three columns), mirroring
+/// index.html:1389-1404.
+class _ViewPicker extends StatelessWidget {
+  const _ViewPicker({required this.value, required this.onChanged});
   final String value;
   final ValueChanged<String> onChanged;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    Widget card(String id, String label) {
-      final selected = value == id;
-      return Expanded(
-        child: GestureDetector(
-          onTap: () => onChanged(id),
-          child: Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: selected
-                  ? c.primaryA(0.10)
-                  : c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
-              borderRadius: NymRadius.rsm,
-              border: Border.all(
-                color: selected ? c.primaryA(0.5) : c.glassBorder,
-                width: selected ? 2 : 1,
-              ),
-            ),
-            child: Column(
-              children: [
-                Icon(
-                  id == 'bubbles'
-                      ? Icons.chat_bubble_outline
-                      : Icons.format_align_left,
-                  color: selected ? c.primary : c.textDim,
-                  size: 28,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: selected ? c.primary : c.text,
-                    fontSize: 12,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-              ],
-            ),
-          ),
+
+    // `.view-preview { min-height: 90px; padding: 8px; gap: 4px; background:
+    //   rgba(0,0,0,.3); border-radius: var(--radius-xs) }`; selected →
+    //   primary@.08.
+    Widget previewBox(bool selected, MainAxisAlignment align,
+        List<Widget> cols) {
+      return Container(
+        constraints: const BoxConstraints(minHeight: 90),
+        width: double.infinity,
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: selected
+              ? c.primaryA(0.08)
+              : Colors.black.withValues(alpha: c.isLight ? 0.06 : 0.3),
+          borderRadius: NymRadius.rxs,
+        ),
+        child: Row(
+          mainAxisAlignment: align,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: cols,
         ),
       );
     }
 
+    final singleSel = value == 'single';
+    final columnsSel = value == 'columns';
+    // `.view-grid { display: flex; gap: 12px }` with equal-height cards.
     return IntrinsicHeight(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          card('bubbles', 'Bubbles (Default)'),
-          const SizedBox(width: 8),
-          card('irc', 'IRC Style'),
+          _PreviewCard(
+            selected: singleSel,
+            label: 'Single Chat (Default)',
+            onTap: () => onChanged('single'),
+            // Single: one centered column at 60% width (`.vp-col{flex:0 0 60%}`)
+            // — flex 1:3:1 spacers give the 3/5 = 60% centered column.
+            preview: previewBox(singleSel, MainAxisAlignment.center, const [
+              Spacer(),
+              Expanded(flex: 3, child: _VpCol(bars: [true, false, true, false])),
+              Spacer(),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          _PreviewCard(
+            selected: columnsSel,
+            label: 'Column View',
+            onTap: () => onChanged('columns'),
+            // Columns: three equal-flex columns (`.vp-col{flex:1}`).
+            preview: previewBox(columnsSel, MainAxisAlignment.start, const [
+              Expanded(child: _VpCol(bars: [true, false])),
+              SizedBox(width: 4),
+              Expanded(child: _VpCol(bars: [false, true])),
+              SizedBox(width: 4),
+              Expanded(child: _VpCol(bars: [true])),
+            ]),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+/// Message-layout picker (Bubbles / IRC) as two `.layout-option` cards, each
+/// previewing a realistic 3-line mini chat (bubbles or IRC), mirroring
+/// index.html:1481-1496.
+class _LayoutPicker extends StatelessWidget {
+  const _LayoutPicker({required this.value, required this.onChanged});
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  // The mock messages the PWA hardcodes into the preview.
+  static const _rows = <({String nick, String suffix, String msg, bool self})>[
+    (nick: 'alice', suffix: '#e45f', msg: 'hey there!', self: false),
+    (nick: 'you', suffix: '#6si9', msg: 'hello!', self: true),
+    (nick: 'bob', suffix: '#2t5g', msg: "what's up?", self: false),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final bubblesSel = value == 'bubbles';
+    final ircSel = value == 'irc';
+    // `.layout-grid { display: flex; gap: 12px }` with equal-height cards.
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _PreviewCard(
+            selected: bubblesSel,
+            label: 'Bubbles (Default)',
+            onTap: () => onChanged('bubbles'),
+            preview: _layoutPreviewBox(c, bubbles: true),
+          ),
+          const SizedBox(width: 12),
+          _PreviewCard(
+            selected: ircSel,
+            label: 'IRC Style',
+            onTap: () => onChanged('irc'),
+            preview: _layoutPreviewBox(c, bubbles: false),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// `.layout-preview { min-height: 72px; padding: 8px; background:
+  /// rgba(0,0,0,.3); border-radius: var(--radius-xs); gap: 3px }` (bubbles
+  /// variant: padding 6/4, gap 4).
+  Widget _layoutPreviewBox(NymColors c, {required bool bubbles}) {
+    return Container(
+      constraints: const BoxConstraints(minHeight: 72),
+      width: double.infinity,
+      padding: bubbles
+          ? const EdgeInsets.symmetric(horizontal: 4, vertical: 6)
+          : const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: c.isLight ? 0.06 : 0.3),
+        borderRadius: NymRadius.rxs,
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < _rows.length; i++) ...[
+            if (i > 0) SizedBox(height: bubbles ? 4 : 3),
+            bubbles ? _bubble(c, _rows[i]) : _ircLine(c, _rows[i]),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// A mini chat bubble (`.lp-bubble`): other = left `white@.14`, self = right
+  /// `primary@.2`; nick block in `--secondary`, text in `--text`.
+  Widget _bubble(
+      NymColors c, ({String nick, String suffix, String msg, bool self}) r) {
+    final bubble = Container(
+      // `.lp-bubble { padding: 3px 7px; border-radius: 8px; max-width: 80% }`.
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: r.self
+            ? c.primaryA(0.2)
+            : Colors.white.withValues(alpha: 0.14),
+        // radius 8, with the inner top corner squared to 2px.
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(r.self ? 8 : 2),
+          topRight: Radius.circular(r.self ? 2 : 8),
+          bottomLeft: const Radius.circular(8),
+          bottomRight: const Radius.circular(8),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // `.lp-bubble-nick { color: secondary; font-size: 7px; weight: 600 }`
+          // + the dim `.nym-suffix`.
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: r.nick),
+                TextSpan(
+                  text: r.suffix,
+                  style: TextStyle(
+                    color: c.secondary.withValues(alpha: 0.7),
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+              ],
+            ),
+            style: TextStyle(
+              color: c.secondary,
+              fontSize: 7,
+              fontWeight: FontWeight.w600,
+              height: 1.0,
+            ),
+          ),
+          const SizedBox(height: 1),
+          // `.lp-bubble-text { color: text; font-size: 8px }`.
+          Text(
+            r.msg,
+            style: TextStyle(color: c.text, fontSize: 8, height: 1.3),
+          ),
+        ],
+      ),
+    );
+    // `max-width: 80%` of the preview, aligned left (other) / right (self).
+    return FractionallySizedBox(
+      widthFactor: 0.8,
+      alignment: r.self ? Alignment.centerRight : Alignment.centerLeft,
+      child: Align(
+        alignment: r.self ? Alignment.centerRight : Alignment.centerLeft,
+        child: bubble,
+      ),
+    );
+  }
+
+  /// An IRC preview line (`.layout-line`): `<nick#suffix> msg`, mono 9px, nick
+  /// in `--secondary` (self → `--primary`), msg in `--text`.
+  Widget _ircLine(
+      NymColors c, ({String nick, String suffix, String msg, bool self}) r) {
+    final nickColor = r.self ? c.primary : c.secondary;
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '<${r.nick}',
+            style: TextStyle(color: nickColor, fontWeight: FontWeight.w600),
+          ),
+          TextSpan(
+            text: r.suffix,
+            style: TextStyle(
+              color: nickColor.withValues(alpha: 0.7),
+              fontWeight: FontWeight.w100,
+            ),
+          ),
+          TextSpan(
+            text: '> ',
+            style: TextStyle(color: nickColor, fontWeight: FontWeight.w600),
+          ),
+          TextSpan(text: r.msg, style: TextStyle(color: c.text)),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.clip,
+      softWrap: false,
+      style: TextStyle(
+        fontFamily: kMonoFont,
+        fontSize: 9,
+        height: 1.4,
       ),
     );
   }
@@ -1912,12 +2269,16 @@ class _TextSizeRow extends StatelessWidget {
         Text('A', style: TextStyle(color: c.textDim, fontSize: 12)),
         Expanded(
           child: SliderTheme(
+            // `.form-range`: track height 4px, uniform `glass-border` (no
+            // active/inactive split); thumb 16px (radius 8) `--primary`.
             data: SliderThemeData(
-              activeTrackColor: c.primary,
+              activeTrackColor: c.glassBorder,
               inactiveTrackColor: c.glassBorder,
               thumbColor: c.primary,
               overlayColor: c.primaryA(0.2),
-              trackHeight: 3,
+              trackHeight: 4,
+              thumbShape:
+                  const RoundSliderThumbShape(enabledThumbRadius: 8),
             ),
             child: Slider(
               value: value.clamp(

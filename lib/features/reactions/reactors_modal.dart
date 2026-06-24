@@ -11,6 +11,7 @@ class ReactorEntry {
     required this.nym,
     this.suffix = '',
     this.isYou = false,
+    this.imageUrl,
   });
 
   /// Reactor pubkey (used for the avatar seed + opening their context menu).
@@ -24,6 +25,10 @@ class ReactorEntry {
 
   /// Whether this reactor is the local user.
   final bool isYou;
+
+  /// The reactor's profile picture (kind-0 `picture`); identicon fallback when
+  /// null (Rule 4 — every NymAvatar receives an imageUrl).
+  final String? imageUrl;
 }
 
 /// The reactor-list popup (reactions.js `showReactorsModal`,
@@ -144,7 +149,7 @@ class ReactorsModal extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         child: Row(
           children: [
-            NymAvatar(seed: r.pubkey, size: 22),
+            NymAvatar(seed: r.pubkey, size: 22, imageUrl: r.imageUrl),
             const SizedBox(width: 8),
             Flexible(
               child: RichText(

@@ -1,17 +1,18 @@
+import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/channels/channel_share.dart' show kNymchatShareHost;
 import '../../features/pms/new_pm_modal.dart' show resolveRecipientPubkey;
 import '../../models/group.dart';
-import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../common/app_dialog.dart';
@@ -26,10 +27,14 @@ import 'context_menu_panel.dart';
 ///  * shows the group banner + icon + name + member count + description,
 ///  * renders the owner-gated metadata controls (Edit Name / Description,
 ///    Change/Remove Avatar+Banner, Transfer Ownership, the allow-member-invites
-///    toggle), the Add-Members picker (owner or invite-allowed member), and the
-///    all-members **Leave Group** danger row — all wired to [NostrController]
-///    (`updateGroupMetadata` / `setGroupAllowInvites` / `addGroupMembers` /
-///    `transferOwner` / `leaveGroup`),
+///    toggle, the allow-invite-join toggle + Reset Invite Link), the
+///    Add-Members picker (owner or invite-allowed member), and the all-members
+///    **Leave Group** danger row — wired to [NostrController]
+///    (`updateGroupMetadata` / `setGroupAllowInvites` / `setGroupInviteEnabled`
+///    / `rotateGroupInviteEpoch` / `addGroupMembers` / `transferOwner` /
+///    `leaveGroup`),
+///  * shows the owner/inviter invite-link block (selectable URL + Copy Invite
+///    Link), built locally from group state (`buildGroupInviteLink`),
 ///  * lists the members (owner → mods → members) with a role badge; tapping a
 ///    member opens that user's context menu, which carries the group's
 ///    PM / kick / ban / promote / make-owner actions gated by role (via
@@ -37,8 +42,6 @@ import 'context_menu_panel.dart';
 ///    chevron that returns here (`backToGroupId`).
 ///
 /// Role gates are read-only from group state (`group.createdBy` / `group.mods`).
-/// The invite-link join toggle + reset-link rows the PWA also offers are not
-/// surfaced here (no native invite-link join flow yet).
 class GroupContextMenuPanel extends ConsumerStatefulWidget {
   const GroupContextMenuPanel({
     super.key,
@@ -127,7 +130,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
           child: Stack(
             children: [
               Material(color: c.bgTertiary, child: SafeArea(child: body)),
-              Positioned(top: 14, right: 14, child: _closeBtn(c)),
+              Positioned(top: 14, right: 14, child: CtxCloseButton(onTap: widget.onClose)),
             ],
           ),
         ),
@@ -143,31 +146,62 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     final sorted = [...group.members]
       ..sort((a, b) => _roleRank(group, a).compareTo(_roleRank(group, b)));
 
+    final description = (group.description ?? '').trim();
+
     return SingleChildScrollView(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(c, group),
-          // Owner/member management rows (role-gated).
-          Padding(
+          // `.context-menu-bio`: a separate, left-aligned block below the header
+          // with its own bottom hairline; collapses when empty (:empty).
+          if (description.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom:
+                      BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                ),
+              ),
+              child: Text(
+                description,
+                style: TextStyle(color: c.textDim, fontSize: 13, height: 1.5),
+              ),
+            ),
+          // Owner/member management rows (role-gated). `.context-menu-actions`:
+          // 6px padding + a 1px white@0.06 top hairline.
+          Container(
             padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              border: Border(
+                top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+              ),
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: _actionRows(c, group, iAmOwner),
             ),
           ),
-          // Members section.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+          // `.group-ctx-members-title`: 12px uppercase, 0.04em tracking,
+          // text-dim, padding 10/16/4, with a 1px white@0.06 top hairline.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+            decoration: BoxDecoration(
+              border: Border(
+                top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+              ),
+            ),
             child: Text(
               _transferMode
-                  ? 'Select a member to make owner'
-                  : 'Members · ${group.members.length}',
+                  ? 'Select a member to make owner'.toUpperCase()
+                  : 'Members · ${group.members.length}'.toUpperCase(),
               style: TextStyle(
                 color: c.textDim,
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
+                fontSize: 12,
+                letterSpacing: 0.48,
               ),
             ),
           ),
@@ -182,7 +216,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
   }
 
   // ---------------------------------------------------------------------------
-  // Header (banner + icon + name + member count + description)
+  // Header (banner + icon + name + member count + invite link)
   // ---------------------------------------------------------------------------
 
   Widget _header(NymColors c, Group group) {
@@ -190,7 +224,9 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     final hasBanner = bannerUrl != null && bannerUrl.isNotEmpty;
     final avatarUrl = proxiedAvatarUrl(group.avatar);
 
-    // The group icon: custom avatar, else a stacked-people glyph (PWA groupSvg).
+    // The PWA group menu *always* carries `has-banner` (groups.js:3001): a
+    // custom banner image when set, else a default gradient banner. The icon
+    // gets a 3px rgba(20,20,35,0.95) ring + bg and overlaps the banner by -36px.
     final icon = SizedBox(
       width: 64,
       height: 64,
@@ -205,6 +241,20 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
           : _defaultGroupIcon(c),
     );
 
+    // The 140px banner: custom image, else the default 135° primary→secondary
+    // gradient (both at 0.45 alpha) — `.group-ctx-default-banner`.
+    final banner = SizedBox(
+      height: 140,
+      width: double.infinity,
+      child: hasBanner
+          ? CachedNetworkImage(
+              imageUrl: bannerUrl,
+              fit: BoxFit.cover,
+              errorWidget: (_, __, ___) => _defaultBanner(c),
+            )
+          : _defaultBanner(c),
+    );
+
     final header = Container(
       padding: const EdgeInsets.fromLTRB(14, 16, 14, 14),
       decoration: BoxDecoration(
@@ -214,13 +264,13 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
       ),
       child: Column(
         children: [
-          if (!hasBanner) ...[icon, const SizedBox(height: 8)],
+          // Group name (`.context-menu-avatar-nym`): 13px / w600 / secondary.
           Text(
             group.name.isEmpty ? 'Group' : group.name,
             textAlign: TextAlign.center,
             style: TextStyle(
               color: c.secondary,
-              fontSize: 15,
+              fontSize: 13,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -229,37 +279,22 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
             '${group.members.length} member${group.members.length == 1 ? '' : 's'}',
             style: TextStyle(color: c.textDim, fontSize: 12),
           ),
-          if ((group.description ?? '').isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(
-              group.description!,
-              textAlign: TextAlign.center,
-              style: TextStyle(color: c.textDim, fontSize: 13, height: 1.4),
-            ),
-          ],
+          // Invite-link row + Copy (owner/inviter only) — fills the same slot as
+          // the user menu's pubkey block (groups.js:3031-3041).
+          ..._inviteLinkRows(c, group),
         ],
       ),
     );
 
-    if (!hasBanner) return header;
-
     // Banner with the icon straddling its bottom edge (`margin-top:-36px`),
-    // mirroring the user menu's banner overlap.
+    // mirroring the user menu's banner overlap. The icon carries a 3px ring.
     return Stack(
       clipBehavior: Clip.none,
       children: [
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            SizedBox(
-              height: 140,
-              width: double.infinity,
-              child: CachedNetworkImage(
-                imageUrl: bannerUrl,
-                fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => const SizedBox.shrink(),
-              ),
-            ),
+            banner,
             Padding(padding: const EdgeInsets.only(top: 34), child: header),
           ],
         ),
@@ -271,6 +306,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
             child: Container(
               decoration: const BoxDecoration(
                 shape: BoxShape.circle,
+                color: Color(0xF2141423),
                 border: Border.fromBorderSide(
                   BorderSide(color: Color(0xF2141423), width: 3),
                 ),
@@ -283,14 +319,92 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     );
   }
 
-  Widget _defaultGroupIcon(NymColors c) {
-    return Container(
+  /// The `.group-ctx-default-banner`: a 135° gradient from `--primary`@0.45 to
+  /// `--secondary`@0.45.
+  Widget _defaultBanner(NymColors c) {
+    return DecoratedBox(
       decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: c.primary.withValues(alpha: 0.18),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            c.primary.withValues(alpha: 0.45),
+            c.secondary.withValues(alpha: 0.45),
+          ],
+        ),
       ),
+    );
+  }
+
+  /// The header invite-link block: a selectable `.ctx-full-pubkey`-style URL +
+  /// a "Copy Invite Link" `.context-menu-copy-pubkey` row, both shown only when
+  /// the self user can add members AND invite links are enabled
+  /// (groups.js `buildGroupInviteLink`: returns null otherwise).
+  List<Widget> _inviteLinkRows(NymColors c, Group group) {
+    final self = ref.read(appStateProvider).selfPubkey;
+    final link = _buildInviteLink(group, self);
+    if (link == null) return const [];
+    return [
+      Container(
+        margin: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.04),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: const BorderRadius.all(Radius.circular(6)),
+        ),
+        child: SelectableText(
+          link,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: c.textDim,
+            fontSize: 11,
+            fontFamily: 'monospace',
+            height: 1.35,
+          ),
+        ),
+      ),
+      _CopyInviteRow(
+        onTap: () async {
+          await Clipboard.setData(ClipboardData(text: link));
+          ref
+              .read(appStateProvider.notifier)
+              .addSystemMessage('Copied group invite link to clipboard');
+          widget.onClose();
+        },
+      ),
+    ];
+  }
+
+  /// Builds the `#gjoin=<token>` invite URL exactly as the PWA
+  /// `buildGroupInviteLink` does: null unless invites are enabled AND the self
+  /// user can add members; payload `{v,g,n,a,e}` base64url-encoded onto the
+  /// canonical web host.
+  String? _buildInviteLink(Group group, String self) {
+    if (!group.inviteEnabled) return null;
+    if (!group.canAddMembers(self)) return null;
+    final name = group.name.isEmpty ? 'Group' : group.name;
+    final payload = <String, dynamic>{
+      'v': 1,
+      'g': group.id,
+      'n': name.length > 80 ? name.substring(0, 80) : name,
+      'a': self,
+      'e': group.inviteEpoch,
+    };
+    final json = jsonEncode(payload);
+    final token = base64Url.encode(utf8.encode(json)).replaceAll('=', '');
+    return '$kNymchatShareHost/#gjoin=$token';
+  }
+
+  Widget _defaultGroupIcon(NymColors c) {
+    // `.group-ctx-icon`: `--primary` (green) 34px glyph. The base rule fills
+    // white@0.06, but the live group menu always has a banner, so
+    // `.has-banner .group-ctx-icon` overrides the bg to rgba(20,20,35,0.95)
+    // (supplied by the surrounding ring Container) — keep this transparent so
+    // that dark disc shows through behind the glyph.
+    return Container(
       alignment: Alignment.center,
-      child: Icon(Icons.groups, size: 34, color: c.secondary),
+      child: Icon(Icons.groups, size: 34, color: c.primary),
     );
   }
 
@@ -355,6 +469,29 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
         color: c.text,
         onTap: () => setState(() => _transferMode = true),
       ));
+    }
+
+    // Allow joining via invite link (owner-only checkbox row,
+    // groups.js `groupCtxToggleInviteJoin`).
+    if (iAmOwner) {
+      rows.add(_ActionRow(
+        icon: group.inviteEnabled
+            ? Icons.check_box_outlined
+            : Icons.check_box_outline_blank,
+        label: 'Allow joining via invite link',
+        color: c.text,
+        onTap: () => _toggleInviteJoin(group),
+      ));
+      // Reset Invite Link — owner-only, shown only when invite joining is on
+      // (groups.js `groupCtxResetInviteLink`).
+      if (group.inviteEnabled) {
+        rows.add(_ActionRow(
+          icon: Icons.refresh,
+          label: 'Reset Invite Link',
+          color: c.text,
+          onTap: () => _resetInviteLink(group),
+        ));
+      }
     }
 
     // Allow members to add others (owner-only checkbox row,
@@ -471,6 +608,33 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     await controller.setGroupAllowInvites(group.id, !group.allowMemberInvites);
   }
 
+  /// Owner: flip "allow joining via invite link" → `setGroupInviteEnabled`
+  /// (groups.js `groupCtxToggleInviteJoin`). Closes the menu first, mirroring
+  /// the PWA which closes then toggles. The controller mutates the group,
+  /// bumps `metaUpdatedAt`, and rebroadcasts the metadata.
+  Future<void> _toggleInviteJoin(Group group) async {
+    final controller = ref.read(nostrControllerProvider);
+    final next = !group.inviteEnabled;
+    widget.onClose();
+    await controller.setGroupInviteEnabled(group.id, next);
+  }
+
+  /// Owner: rotate the invite epoch so previously-shared links stop working
+  /// (groups.js `groupCtxResetInviteLink`). Confirms first, then rotates.
+  Future<void> _resetInviteLink(Group group) async {
+    final controller = ref.read(nostrControllerProvider);
+    final ok = await showAppConfirm(
+      context,
+      'Reset the invite link? Every link shared so far will stop working.',
+      title: 'Reset Invite Link',
+      okLabel: 'Reset',
+      danger: true,
+    );
+    if (!ok) return;
+    widget.onClose();
+    await controller.rotateGroupInviteEpoch(group.id);
+  }
+
   /// Add Members: pick recipients (nym / pubkey / npub) → `addGroupMembers`
   /// (groups.js `groupCtxAddMembers` → `openAddMembersModal`).
   Future<void> _addMembers(Group group) async {
@@ -521,38 +685,16 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     final isSelf = pubkey == self;
     final isOwner = group.createdBy == pubkey;
     final isMod = !isOwner && group.mods.contains(pubkey);
-    final status = user?.effectiveStatus() ?? UserStatus.offline;
 
+    // PWA `.group-ctx-member-avatar` is a bare 30×30 `<img>` — no status dot
+    // (the live member row is avatar + name + role badge only).
     return _MemberTile(
       colors: c,
-      avatar: SizedBox(
-        width: 32,
-        height: 32,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            NymAvatar(
-              seed: pubkey,
-              size: 32,
-              imageUrl: user?.profile?.picture,
-              label: base.isNotEmpty ? base[0] : null,
-            ),
-            if (status != UserStatus.hidden)
-              Positioned(
-                right: -1,
-                bottom: -1,
-                child: Container(
-                  width: 9,
-                  height: 9,
-                  decoration: BoxDecoration(
-                    color: statusColor(status),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: c.bgTertiary, width: 1.5),
-                  ),
-                ),
-              ),
-          ],
-        ),
+      avatar: NymAvatar(
+        seed: pubkey,
+        size: 30,
+        imageUrl: user?.profile?.picture,
+        label: base.isNotEmpty ? base[0] : null,
       ),
       base: base.isEmpty ? '(unknown)' : base,
       suffix: '#$suffix',
@@ -622,22 +764,6 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     }
   }
 
-  Widget _closeBtn(NymColors c) {
-    return InkWell(
-      onTap: widget.onClose,
-      borderRadius: const BorderRadius.all(Radius.circular(16)),
-      child: Container(
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.white.withValues(alpha: 0.05),
-          border: Border.all(color: c.glassBorder),
-        ),
-        child: Icon(Icons.close, size: 16, color: c.textDim),
-      ),
-    );
-  }
 }
 
 /// A `.context-menu-item` management row (icon + label + optional trailing).
@@ -663,7 +789,13 @@ class _ActionRowState extends State<_ActionRow> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final iconColor = widget.color == c.text ? c.textDim : widget.color;
+    final isNeutral = widget.color == c.text;
+    // Neutral rows shift label + icon to `--primary` on hover
+    // (`.context-menu-item:hover { color: var(--primary) }`); colored rows keep
+    // their resting tint.
+    final Color labelColor = isNeutral && _hover ? c.primary : widget.color;
+    final Color iconColor =
+        isNeutral ? (_hover ? c.primary : c.textDim) : widget.color;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -679,12 +811,13 @@ class _ActionRowState extends State<_ActionRow> {
           child: Row(
             children: [
               Icon(widget.icon, size: 16, color: iconColor),
-              const SizedBox(width: 10),
+              // `.nm-ico8` → margin-right:8px on the leading SVG.
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   widget.label,
                   style: TextStyle(
-                    color: widget.color,
+                    color: labelColor,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -698,8 +831,54 @@ class _ActionRowState extends State<_ActionRow> {
   }
 }
 
-/// A `.group-ctx-member` row: avatar (+status dot), base nym + dim suffix
-/// (+ "you"), and a role badge (Owner/Mod). Tapping opens the member's menu.
+/// `.context-menu-copy-pubkey` row reading "Copy Invite Link" (groups.js
+/// `grpCtxCopyInvite`): 3×8 padding, radius 6, hover white@0.08 bg + primary
+/// text; copy glyph + label. Copies the link + closes on tap.
+class _CopyInviteRow extends StatefulWidget {
+  const _CopyInviteRow({required this.onTap});
+  final Future<void> Function() onTap;
+
+  @override
+  State<_CopyInviteRow> createState() => _CopyInviteRowState();
+}
+
+class _CopyInviteRowState extends State<_CopyInviteRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final color = _hover ? c.primary : c.textDim;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => widget.onTap(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+            borderRadius: const BorderRadius.all(Radius.circular(6)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.copy, size: 12, color: color),
+              const SizedBox(width: 2),
+              Text('Copy Invite Link',
+                  style: TextStyle(color: color, fontSize: 11)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A `.group-ctx-member` row: avatar, base nym + suffix (+ "you"), and a role
+/// badge (Owner/Mod). Tapping opens the member's menu.
 class _MemberTile extends StatefulWidget {
   const _MemberTile({
     required this.colors,
@@ -736,7 +915,8 @@ class _MemberTileState extends State<_MemberTile> {
         onTap: widget.onTap,
         behavior: HitTestBehavior.opaque,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          // `.group-ctx-member`: padding 7px 16px, gap 10px.
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
           color: _hover ? Colors.white.withValues(alpha: 0.06) : null,
           child: Row(
             children: [
@@ -745,28 +925,29 @@ class _MemberTileState extends State<_MemberTile> {
               Expanded(
                 child: RichText(
                   overflow: TextOverflow.ellipsis,
+                  // `.group-ctx-member-name`: 14px, color `--text` (full green).
                   text: TextSpan(
-                    style: TextStyle(
-                        color: c.text,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500),
+                    style: TextStyle(color: c.text, fontSize: 14),
                     children: [
                       TextSpan(text: widget.base),
+                      // Generic `.nym-suffix`: `--text` @ opacity 0.7, 0.9em,
+                      // w100 (no dedicated group-member override).
                       TextSpan(
                         text: widget.suffix,
                         style: TextStyle(
-                          color: c.textDim.withValues(alpha: 0.7),
+                          color: c.text.withValues(alpha: 0.7),
+                          fontSize: 14 * 0.9,
                           fontWeight: FontWeight.w100,
                         ),
                       ),
-                      if (widget.isSelf)
+                      // `.group-ctx-you`: 6px left margin, 11px text-dim.
+                      if (widget.isSelf) ...[
+                        const WidgetSpan(child: SizedBox(width: 6)),
                         TextSpan(
-                          text: '  you',
-                          style: TextStyle(
-                              color: c.textDim,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w400),
+                          text: 'you',
+                          style: TextStyle(color: c.textDim, fontSize: 11),
                         ),
+                      ],
                     ],
                   ),
                 ),
@@ -783,7 +964,9 @@ class _MemberTileState extends State<_MemberTile> {
   }
 }
 
-/// `.group-ctx-role`: a small Owner/Mod chip (owner = primary, mod = secondary).
+/// `.group-ctx-role`: a small chip. Owner = lightning orange `#f7931a` text on
+/// `rgba(247,147,26,0.12)`; Mod = `--secondary` text on `rgba(255,255,255,0.08)`.
+/// 10px/w600 uppercase, 0.03em tracking, padding 2px 7px, radius 10, no border.
 class _RoleBadge extends StatelessWidget {
   const _RoleBadge({required this.label, required this.colors});
   final String label;
@@ -793,20 +976,23 @@ class _RoleBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = colors;
     final isOwner = label == 'Owner';
-    final accent = isOwner ? c.primary : c.secondary;
+    final Color fg = isOwner ? c.lightning : c.secondary;
+    final Color bg = isOwner
+        ? const Color(0x1FF7931A) // rgba(247,147,26,0.12)
+        : Colors.white.withValues(alpha: 0.08);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
-        color: accent.withValues(alpha: 0.16),
-        borderRadius: const BorderRadius.all(Radius.circular(6)),
-        border: Border.all(color: accent.withValues(alpha: 0.4)),
+        color: bg,
+        borderRadius: const BorderRadius.all(Radius.circular(10)),
       ),
       child: Text(
-        label,
+        label.toUpperCase(),
         style: TextStyle(
-          color: accent,
+          color: fg,
           fontSize: 10,
           fontWeight: FontWeight.w600,
+          letterSpacing: 0.3, // 0.03em ≈ 0.3px at 10px
         ),
       ),
     );

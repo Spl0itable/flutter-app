@@ -3,10 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
 import '../../services/storage/secure_store.dart';
 import '../../widgets/common/app_dialog.dart';
 import 'identity_vault.dart' show SecureStoreLike;
+import 'modal_chrome.dart';
 import 'vault_settings_modal.dart' show identityVaultProvider;
 
 /// Boot-time identity-vault unlock gate, mirroring `unlockVaultAtBoot` +
@@ -172,91 +172,99 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final isBio = _isBiometric;
+    // Boot unlock is a `.modal active nm-vault-overlay` over rgba(0,0,0,0.7)
+    // with a floating `.modal-content nm-vault-box` card (420 max, padding 32).
     return Scaffold(
-      backgroundColor: c.bg,
+      backgroundColor: const Color(0xB3000000),
       body: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Icon(Icons.lock_outline, size: 48, color: c.primary),
-                const SizedBox(height: 16),
-                Text(
-                  'Unlock your identity',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: c.text,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Your Nymchat identity key is encrypted on this device.'
-                  '${isBio ? ' Use your biometric to unlock.' : ''}',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: c.textDim, fontSize: 13),
-                ),
-                const SizedBox(height: 20),
-                if (!isBio)
-                  TextField(
-                    controller: _pw,
-                    autofocus: true,
-                    obscureText: true,
-                    enabled: !_busy,
-                    keyboardType: TextInputType.visiblePassword,
-                    onSubmitted: (_) => _unlock(),
-                    decoration: InputDecoration(
-                      hintText: 'Password or PIN',
-                      hintStyle: TextStyle(color: c.textDim),
-                      filled: true,
-                      fillColor: c.bgSecondary,
-                      border: OutlineInputBorder(
-                        borderRadius: NymRadius.rmd,
-                        borderSide: BorderSide(color: c.border),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Material(
+              color: Colors.transparent,
+              child: ModalChrome.box(
+                c,
+                child: Padding(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // `.modal-header` (no lock glyph in the PWA prompt).
+                      Container(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        margin: const EdgeInsets.only(bottom: 24),
+                        decoration: BoxDecoration(
+                          border: Border(
+                              bottom: BorderSide(color: c.glassBorder)),
+                        ),
+                        child: Text(
+                          'Unlock your identity'.toUpperCase(),
+                          style: TextStyle(
+                            color: c.primary,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 1.5,
+                          ),
+                        ),
                       ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: NymRadius.rmd,
-                        borderSide: BorderSide(color: c.border),
+                      // `.form-hint.nm-vault-text`: 13px, line-height 1.5, left.
+                      Text(
+                        'Your Nymchat identity key is encrypted on this device.'
+                        '${isBio ? ' Use your biometric to unlock.' : ''}',
+                        style: TextStyle(
+                            color: c.textDim, fontSize: 13, height: 1.5),
                       ),
-                    ),
-                    style: TextStyle(color: c.text),
+                      const SizedBox(height: 16),
+                      if (!isBio)
+                        TextField(
+                          controller: _pw,
+                          autofocus: true,
+                          obscureText: true,
+                          enabled: !_busy,
+                          keyboardType: TextInputType.visiblePassword,
+                          onSubmitted: (_) => _unlock(),
+                          decoration: ModalChrome.inputDecoration(
+                              c, 'Password or PIN'),
+                          style: TextStyle(color: c.textBright, fontSize: 15),
+                        ),
+                      if (_error != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          _error!,
+                          style: TextStyle(color: c.danger, fontSize: 13),
+                        ),
+                      ],
+                      const SizedBox(height: 24),
+                      // `.modal-actions`: center, gap 10. Wrap so the two pills
+                      // stack instead of overflowing on a narrow viewport.
+                      Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 10,
+                        runSpacing: 10,
+                        children: [
+                          ModalChrome.iconButton(c, 'Forget identity',
+                              _busy ? null : _forget),
+                          ModalChrome.sendButton(
+                            c,
+                            'Unlock',
+                            _busy ? null : _unlock,
+                            child: _busy
+                                ? SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2, color: c.primary),
+                                  )
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    _error!,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        color: Color(0xFFE5484D), fontSize: 13),
-                  ),
-                ],
-                const SizedBox(height: 20),
-                FilledButton(
-                  onPressed: _busy ? null : _unlock,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: c.primary,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: _busy
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text('Unlock'),
                 ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: _busy ? null : _forget,
-                  child: Text('Forget identity',
-                      style: TextStyle(color: c.textDim)),
-                ),
-              ],
+              ),
             ),
           ),
         ),

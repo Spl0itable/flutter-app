@@ -417,17 +417,26 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           if (activeStyle != null)
             _ActiveSummaryBlock(
               title: 'Active Message Style',
-              chips: [activeStyle.name],
+              // `Active Message Style` chip is name-only (shop.js:984).
+              chips: [_ActiveChip(name: activeStyle.name)],
             ),
           if (activeFlairs.isNotEmpty)
             _ActiveSummaryBlock(
               title: 'Active Nickname Flair',
-              chips: [for (final f in activeFlairs) f.name],
+              // `${f.name} ${f.icon}` — name then trailing icon (shop.js:993).
+              chips: [
+                for (final f in activeFlairs)
+                  _ActiveChip(name: f.name, icon: f.icon, iconLeading: false),
+              ],
             ),
           if (activeCosmetics.isNotEmpty)
             _ActiveSummaryBlock(
               title: 'Active Special Items',
-              chips: [for (final x in activeCosmetics) x.name],
+              // `${it.icon} ${it.name}` — leading icon then name (shop.js:1003).
+              chips: [
+                for (final x in activeCosmetics)
+                  _ActiveChip(name: x.name, icon: x.icon, iconLeading: true),
+              ],
             ),
           const SizedBox(height: 8),
           _categoryTitle(c, 'All Purchased Items'),
@@ -541,6 +550,9 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           'item and it lands directly in their inventory.',
       selfPubkey: identity?.pubkey,
       selfMessage: 'Use Buy to purchase an item for yourself.',
+      // Gift modal: "Continue" CTA + price row (shop.js:1620, 1630).
+      ctaLabel: 'Continue',
+      showPrice: true,
     );
     if (recipient == null || !mounted) return;
     await showDialog<bool>(
@@ -578,6 +590,9 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           'revoked from your inventory and assigned to theirs.',
       selfPubkey: identity.pubkey,
       selfMessage: 'You already own this item.',
+      // Transfer modal: "Confirm" CTA + no price (shop.js:1698-1702, 1711).
+      ctaLabel: 'Confirm',
+      showPrice: false,
     );
     if (recipient == null || !mounted) return;
     try {
@@ -607,6 +622,8 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     required String description,
     String? selfPubkey,
     required String selfMessage,
+    required String ctaLabel,
+    required bool showPrice,
   }) {
     return showDialog<String>(
       context: context,
@@ -617,6 +634,8 @@ class _ShopModalState extends ConsumerState<ShopModal> {
         description: description,
         selfPubkey: selfPubkey,
         selfMessage: selfMessage,
+        ctaLabel: ctaLabel,
+        showPrice: showPrice,
       ),
     );
   }
@@ -679,7 +698,22 @@ class _ShopItemCard extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: owned ? c.secondaryA(0.04) : Colors.white.withValues(alpha: 0.03),
+        // `.shop-item-legendary { background: linear-gradient(160deg,
+        // rgba(255,196,64,.06), rgba(255,120,200,.04)) }` — a faint gold→pink
+        // wash (styles-features.css:1306-1310). Non-legendary cards keep the
+        // flat owned/base fill.
+        color: legendary
+            ? null
+            : (owned
+                ? c.secondaryA(0.04)
+                : Colors.white.withValues(alpha: 0.03)),
+        gradient: legendary
+            ? const LinearGradient(
+                begin: Alignment(-0.342, -0.940), // CSS 160deg
+                end: Alignment(0.342, 0.940),
+                colors: [Color(0x0FFFC440), Color(0x0AFF78C8)],
+              )
+            : null,
         border: Border.all(
           color: legendary
               ? const Color(0x80FFC440)
@@ -694,10 +728,13 @@ class _ShopItemCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
+          // `.shop-item-icon` uses currentColor (= var(--text)) for legendary and
+          // non-legendary alike — there is no `.shop-item-legendary .shop-item-icon`
+          // override in the PWA (styles-features.css:161-165). Always tint c.text.
           ShopSvgIcon(
             svg: item.icon,
             size: 32,
-            color: legendary ? const Color(0xFFFFC440) : c.text,
+            color: c.text,
           ),
           const SizedBox(height: 8),
           Row(
@@ -762,22 +799,28 @@ class _ShopItemCard extends StatelessWidget {
                 ? ShopBundlePreview(item: item)
                 : (sampleEdition != null && item.type == 'nickname-flair'
                     ? _flairSamplePreview(c)
-                    : ShopItemPreview(item: item)),
+                    // The inventory supporter card shows a single supporter-badge
+                    // preview row (shop.js:1048), not the full special preview.
+                    : (inventory && item.type == 'supporter'
+                        ? const SupporterBadge()
+                        : ShopItemPreview(item: item))),
           ),
           const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
+              // `.shop-price-amount`: ⚡ {price} sats — lightning, 16px bold
+              // (styles-features.css:204-208).
               Row(
                 children: [
-                  const Icon(Icons.bolt, size: 13, color: Color(0xFFF7931A)),
+                  const Icon(Icons.bolt, size: 16, color: Color(0xFFF7931A)),
                   const SizedBox(width: 2),
                   Text(
-                    '${item.price}',
+                    '${item.price} sats',
                     style: const TextStyle(
                       color: Color(0xFFF7931A),
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
                     ),
                   ),
                 ],
@@ -806,19 +849,22 @@ class _ShopItemCard extends StatelessWidget {
         ],
       ),
     );
-    if (!legendary) return card;
-    // Legendary 45deg corner ribbon (F14). The ribbon is clipped to the card's
-    // rounded corner (PWA `.shop-item { overflow:hidden }`) while the card keeps
-    // its outer gold glow (which a whole-stack clip would crop).
+    if (!legendary && !owned) return card;
+    // Overlays: the legendary 45deg corner ribbon (F14, clipped to the card's
+    // rounded corner — PWA `.shop-item { overflow:hidden }` — while the card
+    // keeps its outer gold glow a whole-stack clip would crop), and/or the
+    // `✓ OWNED` corner pill on purchased cards (`.shop-item.purchased::after`).
     return Stack(
       children: [
         card,
-        Positioned.fill(
-          child: ClipRRect(
-            borderRadius: NymRadius.rmd,
-            child: const Stack(children: [ShopLegendaryRibbon()]),
+        if (legendary)
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: NymRadius.rmd,
+              child: const Stack(children: [ShopLegendaryRibbon()]),
+            ),
           ),
-        ),
+        if (owned) const Positioned(top: 8, left: 8, child: _OwnedBadge()),
       ],
     );
   }
@@ -838,7 +884,7 @@ class _ShopItemCard extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         if (_giftable) ...[
-          _PillButton(label: 'Gift', onTap: onGift),
+          _PillButton(label: 'GIFT', onTap: onGift),
           const SizedBox(width: 6),
         ],
         _BuyButton(onTap: onBuy),
@@ -862,6 +908,34 @@ class _ShopItemCard extends StatelessWidget {
   static String _formatDate(int msEpoch) {
     final d = DateTime.fromMillisecondsSinceEpoch(msEpoch);
     return '${d.month}/${d.day}/${d.year}';
+  }
+}
+
+/// The `✓ OWNED` corner pill on a purchased card (`.shop-item.purchased::after`,
+/// styles-features.css:147-159): secondary text, 10px 500, `secondary@.1` bg,
+/// `secondary@.25` border, radius 20, padding `3px 8px`.
+class _OwnedBadge extends StatelessWidget {
+  const _OwnedBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.10),
+        border: Border.all(color: c.secondaryA(0.25)),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        '✓ OWNED',
+        style: TextStyle(
+          color: c.secondary,
+          fontSize: 10,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
   }
 }
 
@@ -949,7 +1023,9 @@ class _ActiveItemsPreview extends ConsumerWidget {
           ),
         ),
         if (flairId != null)
-          FlairBadge(flairId: flairId, edition: edition, size: 16),
+          // `.flair-badge` = 20px (the PWA renders the preview nym's flair at the
+          // standard size, styles-features.css:316-320).
+          FlairBadge(flairId: flairId, edition: edition),
         if (supporter) const SupporterBadge(),
       ],
     );
@@ -1041,13 +1117,24 @@ class _SupporterContentLine extends StatelessWidget {
   }
 }
 
+/// One `.shop-active-item` chip: a name and (for flair / special items) the
+/// item's inline SVG icon, ordered to match the PWA (`iconLeading` = special
+/// items `${icon} ${name}`; trailing = flair `${name} ${icon}`).
+class _ActiveChip {
+  const _ActiveChip({required this.name, this.icon, this.iconLeading = true});
+
+  final String name;
+  final String? icon;
+  final bool iconLeading;
+}
+
 /// An active-items summary block (`.shop-active-items`): a secondary-tinted
 /// panel with a title + a row of pill chips (F9).
 class _ActiveSummaryBlock extends StatelessWidget {
   const _ActiveSummaryBlock({required this.title, required this.chips});
 
   final String title;
-  final List<String> chips;
+  final List<_ActiveChip> chips;
 
   @override
   Widget build(BuildContext context) {
@@ -1079,8 +1166,21 @@ class _ActiveSummaryBlock extends StatelessWidget {
                     border: Border.all(color: c.secondary),
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: Text(chip,
-                      style: TextStyle(color: c.text, fontSize: 12)),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (chip.icon != null && chip.iconLeading) ...[
+                        ShopSvgIcon(svg: chip.icon!, size: 14, color: c.text),
+                        const SizedBox(width: 5),
+                      ],
+                      Text(chip.name,
+                          style: TextStyle(color: c.text, fontSize: 12)),
+                      if (chip.icon != null && !chip.iconLeading) ...[
+                        const SizedBox(width: 5),
+                        ShopSvgIcon(svg: chip.icon!, size: 14, color: c.text),
+                      ],
+                    ],
+                  ),
                 ),
             ],
           ),
@@ -1099,6 +1199,8 @@ class _RecipientPubkeyDialog extends StatefulWidget {
     required this.description,
     required this.selfPubkey,
     required this.selfMessage,
+    required this.ctaLabel,
+    required this.showPrice,
   });
 
   final String title;
@@ -1106,6 +1208,14 @@ class _RecipientPubkeyDialog extends StatefulWidget {
   final String description;
   final String? selfPubkey;
   final String selfMessage;
+
+  /// CTA verb — "Continue" for the gift modal (shop.js:1630), "Confirm" for the
+  /// transfer modal (shop.js:1711).
+  final String ctaLabel;
+
+  /// The gift modal shows the price row (shop.js:1620); the transfer modal shows
+  /// only icon+name with no price (shop.js:1698-1702).
+  final bool showPrice;
 
   @override
   State<_RecipientPubkeyDialog> createState() => _RecipientPubkeyDialogState();
@@ -1177,13 +1287,14 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
                         ),
                       ),
                     ),
-                    Text(
-                      '${widget.item.price} sats',
-                      style: const TextStyle(
-                        color: Color(0xFFF7931A),
-                        fontWeight: FontWeight.w600,
+                    if (widget.showPrice)
+                      Text(
+                        '${widget.item.price} sats',
+                        style: const TextStyle(
+                          color: Color(0xFFF7931A),
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -1229,7 +1340,7 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
                             border: Border.all(color: c.secondaryA(0.4)),
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: Text('Continue',
+                          child: Text(widget.ctaLabel,
                               style: TextStyle(color: c.secondary)),
                         ),
                       ),
@@ -1280,7 +1391,7 @@ class _BuyButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
         ),
         child: const Text(
-          'Buy',
+          'BUY',
           style: TextStyle(
             color: Color(0xFFF7931A),
             fontWeight: FontWeight.w500,
@@ -1320,7 +1431,9 @@ class _ActivateButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          active ? 'Active' : 'Activate',
+          // PWA toggles the verb ACTIVATE/DEACTIVATE (shop.js:1032-1051), not an
+          // "Active" state chip.
+          active ? 'DEACTIVATE' : 'ACTIVATE',
           style: TextStyle(color: c.secondary, fontSize: 12),
         ),
       ),

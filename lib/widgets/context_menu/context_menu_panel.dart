@@ -197,8 +197,15 @@ class ContextMenuPanel extends ConsumerWidget {
                     ),
                   ),
                 ),
-              Padding(
+              // `.context-menu-actions`: 6px padding + a 1px white@0.06 top
+              // hairline separating the list from the header/bio.
+              Container(
                 padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  border: Border(
+                    top: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+                  ),
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -249,16 +256,19 @@ class ContextMenuPanel extends ConsumerWidget {
               panel,
               // Back chevron (top-left) → return to the originating group menu
               // (`.context-menu-back`, ui-context.js:369-373). Hidden otherwise.
+              // 28×28 at top/left 10, black 0.4 bg (hover 0.6), white chevron.
               if (backToGroupId != null)
                 Positioned(
-                  top: 14,
-                  left: 14,
-                  child: _backBtn(context, c, backToGroupId!),
+                  top: 10,
+                  left: 10,
+                  child: _BackButton(
+                    onTap: () => _onBack(context, backToGroupId!),
+                  ),
                 ),
               Positioned(
                 top: 14,
                 right: 14,
-                child: _closeBtn(c),
+                child: CtxCloseButton(onTap: onClose),
               ),
             ],
           ),
@@ -291,8 +301,11 @@ class ContextMenuPanel extends ConsumerWidget {
             : (target.targetIsMod ? 'Moderator' : null))
         : null;
 
-    // Avatar — real picture (proxied/cached) with identicon fallback; a 3px
-    // rgba(20,20,35,0.95) ring when it overlaps the banner.
+    // Avatar — real picture (proxied/cached) with identicon fallback. With a
+    // banner: a 3px rgba(20,20,35,0.95) ring, no glow (`.has-banner
+    // .avatar-context`). Without a banner: a 2px `--glass-border` ring + a cyan
+    // glow `0 0 15px rgba(0,255,255,0.15)` (`.avatar-context`,
+    // styles-features.css:2621-2628).
     final avatar = Container(
       decoration: hasBanner
           ? const BoxDecoration(
@@ -301,7 +314,16 @@ class ContextMenuPanel extends ConsumerWidget {
                 BorderSide(color: Color(0xF2141423), width: 3),
               ),
             )
-          : null,
+          : BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: c.glassBorder, width: 2),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x2600FFFF), // rgba(0,255,255,0.15)
+                  blurRadius: 15,
+                ),
+              ],
+            ),
       child: NymAvatar(seed: target.pubkey, size: 64, imageUrl: avatarUrl),
     );
 
@@ -325,15 +347,30 @@ class ContextMenuPanel extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
+              // base#suffix: base is secondary/13/w600; the `#suffix` is dimmed
+              // (`.context-menu-avatar-nym .nym-suffix`: 0.9em / w100 / opacity
+              // 0.7).
               Flexible(
-                child: Text(
-                  fullNym,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: c.secondary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                child: Text.rich(
+                  TextSpan(
+                    style: TextStyle(
+                      color: c.secondary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                    children: [
+                      TextSpan(text: target.nym),
+                      TextSpan(
+                        text: '#${getPubkeySuffix(target.pubkey)}',
+                        style: TextStyle(
+                          color: c.secondary.withValues(alpha: 0.7),
+                          fontSize: 13 * 0.9,
+                          fontWeight: FontWeight.w100,
+                        ),
+                      ),
+                    ],
                   ),
+                  textAlign: TextAlign.center,
                 ),
               ),
               CosmeticNymBadges(
@@ -341,13 +378,16 @@ class ContextMenuPanel extends ConsumerWidget {
                 flairSize: 15,
                 supporterHeight: 15,
               ),
+              // Verified ✓ badge — 20px (`.verified-badge`), left gap 4px (nm-ctx-1).
               if (isDeveloper || isBot) ...[
                 const SizedBox(width: 4),
-                const VerifiedBadge(size: 16),
+                const VerifiedBadge(size: 20),
               ],
+              // Friend badge — 12px @ opacity 0.7, left gap 3px (nm-ctx-2 +
+              // inline width/height=12 overriding the 20px standalone rule).
               if (showFriendBadge) ...[
-                const SizedBox(width: 2),
-                const FriendBadge(size: 16),
+                const SizedBox(width: 3),
+                const Opacity(opacity: 0.7, child: FriendBadge(size: 12)),
               ],
             ],
           ),
@@ -483,52 +523,19 @@ class ContextMenuPanel extends ConsumerWidget {
     }
   }
 
-  Widget _closeBtn(NymColors c) {
-    return InkWell(
-      onTap: onClose,
-      borderRadius: const BorderRadius.all(Radius.circular(16)),
-      child: Container(
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.white.withValues(alpha: 0.05),
-          border: Border.all(color: c.glassBorder),
-        ),
-        child: Icon(Icons.close, size: 16, color: c.textDim),
-      ),
-    );
-  }
-
   /// `.context-menu-back` chevron — pops this panel and re-opens the originating
   /// group context menu (PWA `ctxBackToGroup`: closeContextMenu →
   /// showGroupContextMenu(groupId)).
-  Widget _backBtn(BuildContext context, NymColors c, String groupId) {
-    return InkWell(
-      onTap: () {
-        // Capture the root navigator's (stable) context before popping — this
-        // panel's own context is defunct after onClose().
-        final rootContext =
-            Navigator.of(context, rootNavigator: true).context;
-        onClose();
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (rootContext.mounted) {
-            GroupContextMenuPanel.show(rootContext, groupId);
-          }
-        });
-      },
-      borderRadius: const BorderRadius.all(Radius.circular(16)),
-      child: Container(
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.white.withValues(alpha: 0.05),
-          border: Border.all(color: c.glassBorder),
-        ),
-        child: Icon(Icons.chevron_left, size: 20, color: c.textDim),
-      ),
-    );
+  void _onBack(BuildContext context, String groupId) {
+    // Capture the root navigator's (stable) context before popping — this
+    // panel's own context is defunct after onClose().
+    final rootContext = Navigator.of(context, rootNavigator: true).context;
+    onClose();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (rootContext.mounted) {
+        GroupContextMenuPanel.show(rootContext, groupId);
+      }
+    });
   }
 
   Color _colorFor(CtxAction a, NymColors c) {
@@ -924,10 +931,16 @@ class _ActionItemState extends State<_ActionItem> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final isNeutral = widget.color == c.text;
     // Neutral rows show a dimmed icon; colored rows (danger/lightning/warning)
     // tint the icon to match the label (mirrors the PWA's `currentColor` SVGs).
-    final iconColor =
-        widget.color == c.text ? c.textDim : widget.color;
+    // On hover, a neutral row's label + icon shift to `--primary`
+    // (`.context-menu-item:hover { color: var(--primary) }`); colored rows keep
+    // their resting tint.
+    final Color labelColor =
+        isNeutral && _hover ? c.primary : widget.color;
+    final Color iconColor =
+        isNeutral ? (_hover ? c.primary : c.textDim) : widget.color;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -943,12 +956,13 @@ class _ActionItemState extends State<_ActionItem> {
           child: Row(
             children: [
               Icon(widget.icon, size: 16, color: iconColor),
-              const SizedBox(width: 10),
+              // `.nm-ico8` → margin-right:8px on the leading SVG.
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   widget.label,
                   style: TextStyle(
-                    color: widget.color,
+                    color: labelColor,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -956,6 +970,92 @@ class _ActionItemState extends State<_ActionItem> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `.context-menu-close` ✕ button: 32×32 circle, white@0.05 bg + glassBorder
+/// at rest; on hover turns danger-red (bg `rgba(255,68,68,0.12)`, icon
+/// `--danger`, border `rgba(255,68,68,0.3)`) per styles-shell.css:674-678.
+/// Shared by the user + group context panels.
+class CtxCloseButton extends StatefulWidget {
+  const CtxCloseButton({super.key, required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<CtxCloseButton> createState() => _CtxCloseButtonState();
+}
+
+class _CtxCloseButtonState extends State<CtxCloseButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          width: 32,
+          height: 32,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _hover
+                ? const Color(0x1FFF4444) // rgba(255,68,68,0.12)
+                : Colors.white.withValues(alpha: 0.05),
+            border: Border.all(
+              color: _hover
+                  ? const Color(0x4DFF4444) // rgba(255,68,68,0.3)
+                  : c.glassBorder,
+            ),
+          ),
+          child: Icon(Icons.close, size: 16, color: _hover ? c.danger : c.textDim),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `.context-menu-back` chevron: 28×28 circle at top/left 10, black 0.4 bg
+/// (hover 0.6), border-none, white chevron (styles-features.css:5393-5411).
+class _BackButton extends StatefulWidget {
+  const _BackButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_BackButton> createState() => _BackButtonState();
+}
+
+class _BackButtonState extends State<_BackButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: Container(
+          width: 28,
+          height: 28,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _hover
+                ? const Color(0x99000000) // rgba(0,0,0,0.6)
+                : const Color(0x66000000), // rgba(0,0,0,0.4)
+          ),
+          child: const Icon(Icons.chevron_left, size: 18, color: Colors.white),
         ),
       ),
     );

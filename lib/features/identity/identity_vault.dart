@@ -132,7 +132,10 @@ class IdentityVault {
 
     await _kv.setString(
         StorageKeys.vaultSalt, base64.encode(salt));
-    await _kv.setString(StorageKeys.vaultMethod, isBio ? 'biometric' : method);
+    // The PWA stores `'password'` for both password AND PIN factors (a PIN is a
+    // digit-only password); only biometric is distinct (key-vault.js:180).
+    await _kv.setString(
+        StorageKeys.vaultMethod, isBio ? 'biometric' : 'password');
     await _kv.setString(
         StorageKeys.vaultCheck, await _encrypt(key, _checkPlaintext));
     await _kv.setBool(StorageKeys.vaultEnabled, true);

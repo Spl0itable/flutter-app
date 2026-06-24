@@ -77,9 +77,13 @@ class _PanicOverlayState extends State<PanicOverlay>
 
   Future<void> _runWipe() async {
     final startedAt = DateTime.now();
-    if (mounted) setState(() => _status = 'Encrypting local store…');
+    // Stage strings ported verbatim from panic.js (84/96/109/137).
+    if (mounted) {
+      setState(() => _status = 'Encrypting local store with a random key…');
+    }
     await widget.wipe.wipe();
     if (mounted) setState(() => _status = 'Shredding local databases…');
+    if (mounted) setState(() => _status = 'Purging caches…');
     if (mounted) setState(() => _status = 'Keys destroyed.');
     // Hold the animation a minimum so the effect reads as deliberate (PWA: 1.5s).
     final elapsed = DateTime.now().difference(startedAt).inMilliseconds;
@@ -112,53 +116,75 @@ class _PanicOverlayState extends State<PanicOverlay>
     return PopScope(
       canPop: false,
       child: Material(
+        // `.nm-panic-overlay` background: a radial-gradient primary glow
+        // (ellipse at 50% 35%, primary/0.08 → transparent at 60%) over `--bg`.
         color: c.bg,
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  'ENCRYPTING',
-                  style: TextStyle(
-                    color: c.primary,
-                    fontSize: 13,
-                    letterSpacing: 2,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                ClipRect(
-                  child: Text(
-                    _grid,
-                    textAlign: TextAlign.center,
-                    maxLines: _rows,
-                    softWrap: false,
-                    overflow: TextOverflow.clip,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: RadialGradient(
+              center: const Alignment(0, -0.3), // 50% 35%
+              radius: 0.9,
+              colors: [c.primary.withValues(alpha: 0.08), Colors.transparent],
+              stops: const [0, 0.6],
+            ),
+          ),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    'ENCRYPTING',
                     style: TextStyle(
+                      // `.nm-panic-title`: primary, opacity 0.9, mono, no weight.
+                      color: c.primary.withValues(alpha: 0.9),
                       fontFamily: 'monospace',
-                      fontSize: 14,
-                      height: 1.35,
-                      color: c.primary.withValues(alpha: 0.55),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  height: 16,
-                  child: Text(
-                    _status,
-                    style: TextStyle(
-                      color: c.textBright,
                       fontSize: 13,
-                      letterSpacing: 0.5,
+                      letterSpacing: 2,
                     ),
                   ),
-                ),
-                const SizedBox(height: 14),
-                _ProgressBar(controller: _barController, color: c.primary),
-              ],
+                  const SizedBox(height: 14),
+                  ClipRect(
+                    child: Text(
+                      _grid,
+                      textAlign: TextAlign.center,
+                      maxLines: _rows,
+                      softWrap: false,
+                      overflow: TextOverflow.clip,
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 14,
+                        height: 1.35,
+                        color: c.primary.withValues(alpha: 0.55),
+                        // `filter: drop-shadow(0 0 6px primary/0.4)` on the glyphs.
+                        shadows: [
+                          Shadow(
+                            color: c.primary.withValues(alpha: 0.4),
+                            blurRadius: 6,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    height: 16,
+                    child: Text(
+                      _status,
+                      style: TextStyle(
+                        // `.nm-panic-status`: text-bright, opacity 0.95.
+                        color: c.textBright.withValues(alpha: 0.95),
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  _ProgressBar(controller: _barController, color: c.primary),
+                ],
+              ),
             ),
           ),
         ),

@@ -7,8 +7,13 @@ import '../../core/theme/nym_metrics.dart';
 /// `.settings-section` styling (docs/specs/02 §5.10, §5.6). All controls take
 /// their colors from `context.nym`.
 
-/// A collapsible `.settings-section`: header (12px uppercase, letter-spacing,
-/// 14px/32px padding) with a chevron that rotates -90° when collapsed.
+/// A collapsible `.settings-section`. The header bar is full-bleed: a
+/// `rgba(255,255,255,.04)` tinted bar, primary 12px/700 uppercase label with
+/// letter-spacing 1.2, a primary chevron that rotates -90° when collapsed, and a
+/// bottom glass-border divider. The section spans the full modal-body width (the
+/// PWA's `.settings-section{margin:0 -32px}` cancels the modal padding); [bleed]
+/// is the horizontal inset (32) applied to the header/body content so it lines up
+/// with the rest of the modal.
 class SettingsSection extends StatelessWidget {
   const SettingsSection({
     super.key,
@@ -16,18 +21,20 @@ class SettingsSection extends StatelessWidget {
     required this.open,
     required this.onToggle,
     required this.children,
+    this.bleed = 32,
   });
 
   final String title;
   final bool open;
   final VoidCallback onToggle;
   final List<Widget> children;
+  final double bleed;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
+    return DecoratedBox(
+      // `.settings-section { border-bottom: 1px glass-border }`.
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
@@ -36,21 +43,21 @@ class SettingsSection extends StatelessWidget {
         children: [
           InkWell(
             onTap: onToggle,
-            child: Padding(
-              // `.settings-section-header` padding 14px 0 (32px is the modal's
-              // own horizontal padding in the PWA; here the modal body supplies
-              // its own inset so we use 0 horizontally).
-              padding: const EdgeInsets.symmetric(vertical: 14),
+            child: Container(
+              // `.settings-section-header { background: rgba(255,255,255,.04);
+              //   padding: 14px 32px }`.
+              color: const Color(0x0AFFFFFF),
+              padding: EdgeInsets.symmetric(vertical: 14, horizontal: bleed),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(
                       title.toUpperCase(),
                       style: TextStyle(
-                        color: c.text,
+                        color: c.primary,
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
-                        letterSpacing: 1.0,
+                        letterSpacing: 1.2,
                       ),
                     ),
                   ),
@@ -62,7 +69,7 @@ class SettingsSection extends StatelessWidget {
                     child: Icon(
                       Icons.keyboard_arrow_down,
                       size: 18,
-                      color: c.textDim,
+                      color: c.primary,
                     ),
                   ),
                 ],
@@ -71,7 +78,8 @@ class SettingsSection extends StatelessWidget {
           ),
           if (open)
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
+              // `.settings-section-body { padding: 18px 32px 4px }`.
+              padding: EdgeInsets.fromLTRB(bleed, 18, bleed, 4),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: children,
@@ -149,26 +157,47 @@ class FormGroup extends StatelessWidget {
   }
 }
 
-/// A `.form-select`: a styled dropdown over [items] (value, label).
+/// A `.form-select`: a styled dropdown over [items] (value, label). When
+/// [disabled] is true the control is locked (the PWA's `select.disabled`): dimmed
+/// and non-interactive, with an optional [tooltip] (the PWA's `title=`).
 class FormSelect<T> extends StatelessWidget {
   const FormSelect({
     super.key,
     required this.value,
     required this.items,
     required this.onChanged,
+    this.disabled = false,
+    this.tooltip,
   });
 
   final T value;
   final List<({T value, String label})> items;
   final ValueChanged<T> onChanged;
+  final bool disabled;
+  final String? tooltip;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final field = Opacity(
+      // Disabled native selects render at reduced opacity.
+      opacity: disabled ? 0.5 : 1.0,
+      child: _field(c),
+    );
+    if (disabled && tooltip != null) {
+      return Tooltip(message: tooltip!, child: field);
+    }
+    return field;
+  }
+
+  Widget _field(NymColors c) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
+      // `.form-select { background: rgba(255,255,255,.05); padding: 11px 14px }`.
+      padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
-        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.4),
+        color: c.isLight
+            ? c.bg
+            : Colors.white.withValues(alpha: 0.05),
         borderRadius: NymRadius.rsm,
         border: Border.all(color: c.glassBorder),
       ),
@@ -179,9 +208,10 @@ class FormSelect<T> extends StatelessWidget {
           isDense: true,
           dropdownColor: c.bgTertiary,
           iconEnabledColor: c.textDim,
-          style: TextStyle(color: c.text, fontSize: 13),
+          // `.form-select { color: var(--text-bright); font-size: 15px }`.
+          style: TextStyle(color: c.text, fontSize: 15),
           borderRadius: NymRadius.rsm,
-          padding: const EdgeInsets.symmetric(vertical: 12),
+          padding: const EdgeInsets.symmetric(vertical: 11),
           items: [
             for (final it in items)
               DropdownMenuItem<T>(
@@ -189,9 +219,20 @@ class FormSelect<T> extends StatelessWidget {
                 child: Text(it.label, overflow: TextOverflow.ellipsis),
               ),
           ],
-          onChanged: (v) {
-            if (v != null) onChanged(v);
-          },
+          // `disabled` → null handler (Material renders it greyed + inert).
+          onChanged: disabled
+              ? null
+              : (v) {
+                  if (v != null) onChanged(v);
+                },
+          disabledHint: () {
+            for (final it in items) {
+              if (it.value == value) {
+                return Text(it.label, overflow: TextOverflow.ellipsis);
+              }
+            }
+            return null;
+          }(),
         ),
       ),
     );
@@ -285,21 +326,28 @@ class SegmentGroup<T> extends StatelessWidget {
                 child: AnimatedContainer(
                   duration: NymMotion.transition,
                   curve: NymMotion.curve,
-                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  // `.color-mode-btn { padding: 8px 4px; border: 1px solid
+                  //   transparent }`; `.active { border-color: primary@.2 }`.
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
                   decoration: BoxDecoration(
                     color: s.value == value
                         ? c.primaryA(0.15)
                         : Colors.transparent,
                     borderRadius: NymRadius.rxs,
+                    border: Border.all(
+                      color: s.value == value
+                          ? c.primaryA(0.2)
+                          : Colors.transparent,
+                    ),
                   ),
                   child: Text(
                     s.label,
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: s.value == value ? c.primary : c.textDim,
-                      fontSize: 13,
+                      fontSize: 12,
                       fontWeight:
-                          s.value == value ? FontWeight.w600 : FontWeight.w400,
+                          s.value == value ? FontWeight.w600 : FontWeight.w500,
                     ),
                   ),
                 ),

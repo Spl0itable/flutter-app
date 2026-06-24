@@ -1,9 +1,19 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/constants/event_kinds.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/channels/channel_manager.dart';
-import '../features/emoji/custom_emoji.dart' show emojiPrefsProvider;
+import '../features/emoji/custom_emoji.dart'
+    show
+        CustomEmojiPack,
+        CustomEmojiState,
+        emojiPrefsProvider,
+        kCustomEmojiMapKey,
+        kCustomEmojiPacksKey,
+        loadCustomEmojiState;
 import '../features/emoji/emoji_data.dart';
 import '../features/groups/group_logic.dart';
 import '../features/pms/pm_logic.dart';
@@ -733,6 +743,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     state = AppState.live(pubkey, nym);
+  }
+
+  /// Resets the store to its pre-login state on sign-out (app.js `signOut` →
+  /// reload). Clears every session-scoped dedup/private map (so a new identity
+  /// can't inherit the old one's seen ids / closed PMs / reactor state) and
+  /// returns the visible store to the seed. Mirrors [goLive] but without a live
+  /// identity; the boot gate then shows the setup modal.
+  void reset() {
+    _seenIds.clear();
+    _seenNymMessageIds.clear();
+    _closedPMs.clear();
+    _closedPMTimes.clear();
+    _leftGroups.clear();
+    _reactors.clear();
+    _reactionLastAction.clear();
+    _processedPollVoteIds.clear();
+    _pendingPollVotes.clear();
+    state = AppState.seed();
   }
 
   void setIdentity(String pubkey, String nym) {
@@ -1715,10 +1743,76 @@ class AppStateNotifier extends StateNotifier<AppState> {
       senderVerified: true,
     );
     list.add(m);
+    m.optimistic = true;
     if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
     // New list identity so listeners rebuild.
     state = state.copyWith();
     return m;
+  }
+
+  /// Reconciles an optimistic channel echo with its real signed event, mirroring
+  /// the PWA's `_replaceOptimisticMessage` (messages.js:148). Finds the locally
+  /// echoed message by its temp id [optimisticId], rewrites its id (and
+  /// created_at / ms) to the signed event's values IN PLACE, clears the
+  /// `optimistic` flag, and — crucially — registers [realId] in [_seenIds] so the
+  /// relay echo that arrives later (carrying the same real id) is deduped instead
+  /// of appended as a duplicate. Re-sorts the list when the timestamp shifted
+  /// (PoW mining can move created_at). No-op if the optimistic message is gone
+  /// (e.g. the user already switched/cleared the view).
+  ///
+  /// Channel messages have no shared `nymMessageId`, so without this the
+  /// `_optim_*` echo and the relay-echoed real-id event would both render — the
+  /// double-send the user reported. PM/group sends already dedupe via
+  /// [_seenNymMessageIds]; this is the channel analogue.
+  void replaceOptimistic(
+    String optimisticId,
+    String realId, {
+    int? realCreatedAt,
+    int? realMs,
+  }) {
+    if (realId.isEmpty) return;
+    // Register the real id first so even a relay echo that races ahead of this
+    // call (already appended) can't slip a second copy through afterwards.
+    final alreadySeen = !_seenIds.add(realId);
+    for (final list in state.messages.values) {
+      final idx = list.indexWhere((m) => m.id == optimisticId);
+      if (idx < 0) continue;
+      final m = list[idx];
+      // If a relay echo with the real id already landed (rare race), drop the
+      // optimistic placeholder rather than keep a duplicate.
+      if (alreadySeen && list.any((x) => x.id == realId && !identical(x, m))) {
+        list.removeAt(idx);
+        state = state.copyWith();
+        return;
+      }
+      final oldCreated = m.createdAt;
+      m.id = realId;
+      if (realCreatedAt != null && realCreatedAt > 0) {
+        m.createdAt = realCreatedAt;
+        m.timestamp = realCreatedAt * 1000;
+      }
+      if (realMs != null && realMs > 0) m.ms = realMs;
+      m.optimistic = false;
+      if (oldCreated != m.createdAt) list.sort(compareMessages);
+      state = state.copyWith();
+      return;
+    }
+    // Optimistic message no longer present; the real id is registered so the
+    // relay echo still won't double up.
+    state = state.copyWith();
+  }
+
+  /// Marks an optimistic channel echo as failed (PWA `_markOptimisticFailed`,
+  /// messages.js:208): the publish threw, so the placeholder stays but flips to
+  /// the failed delivery state. No-op if the message is gone.
+  void markOptimisticFailed(String optimisticId) {
+    for (final list in state.messages.values) {
+      final idx = list.indexWhere((m) => m.id == optimisticId);
+      if (idx < 0) continue;
+      list[idx].deliveryStatus = DeliveryStatus.failed;
+      state = state.copyWith();
+      return;
+    }
   }
 
   /// Injects a centered system/action pill into a conversation's message flow,
@@ -1863,10 +1957,17 @@ final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
   final s = ref.watch(appStateProvider);
   final sortByProximity = ref.watch(
       settingsProvider.select((settings) => settings.sortByProximity));
+  // `hideNonPinned` (settings.js `hideNonPinnedChannels`): when on, the sidebar
+  // shows only pinned channels (the default channel always stays visible).
+  final hideNonPinned =
+      ref.watch(settingsProvider.select((settings) => settings.hideNonPinned));
   final location = ref.watch(userLocationProvider);
   final visible = s.channels
       .where((c) => !s.hiddenChannels.contains(c.key))
       .where((c) => !s.blockedChannels.contains(c.key))
+      .where((c) => !(hideNonPinned &&
+          c.key != kDefaultChannel &&
+          !s.pinnedChannels.contains(c.key)))
       .toList();
   return ChannelManager.sortChannels(
     visible,
@@ -1954,6 +2055,8 @@ class NotificationEntry {
     required this.body,
     required this.ts,
     this.route,
+    this.eventId,
+    this.senderPubkey,
     this.viewed = false,
   });
 
@@ -1968,6 +2071,14 @@ class NotificationEntry {
   /// An opaque route/target the UI can use to navigate on tap (e.g. a PM pubkey,
   /// a channel key, or a group id). Null when not actionable.
   final String? route;
+
+  /// The source event id (channel event id / PM nymMessageId / reaction id),
+  /// used to dedup live + replayed copies (notifications.js `eventId`).
+  final String? eventId;
+
+  /// The sender's pubkey (notifications.js `senderPubkey`), used in the
+  /// no-eventId dedup fallback.
+  final String? senderPubkey;
   bool viewed;
 }
 
@@ -1997,20 +2108,45 @@ class NotificationHistoryNotifier
   /// Records a notification, trimming entries older than 24h and capping the
   /// list. Increments the unread count. Mirrors `showNotification`'s history
   /// push + `_updateNotificationBadge` (`notifications.js:5-114`).
+  ///
+  /// Deduped like the PWA (notifications.js:27-36): a matching [eventId], or the
+  /// same title+body+sender within 60s, is dropped — so a live notification and
+  /// its archive/replay copy don't both land.
   void record({
     required String type,
     required String title,
     required String body,
     String? route,
     int? ts,
+    String? eventId,
+    String? senderPubkey,
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final stamp = ts ?? now;
+
+    // Dedup against existing history (live + replay can both fire).
+    final isDupe = state.entries.any((e) {
+      if (eventId != null &&
+          eventId.isNotEmpty &&
+          e.eventId != null &&
+          e.eventId == eventId) {
+        return true;
+      }
+      return e.title == title &&
+          e.body == body &&
+          (e.senderPubkey ?? '') == (senderPubkey ?? '') &&
+          (e.ts - stamp).abs() < 60000;
+    });
+    if (isDupe) return;
+
     final entry = NotificationEntry(
       type: type,
       title: title,
       body: body,
-      ts: ts ?? now,
+      ts: stamp,
       route: route,
+      eventId: eventId,
+      senderPubkey: senderPubkey,
     );
     final kept = [
       entry,
@@ -2039,4 +2175,237 @@ class NotificationHistoryNotifier
 final notificationHistoryProvider = StateNotifierProvider<
     NotificationHistoryNotifier, NotificationHistoryState>(
   (ref) => NotificationHistoryNotifier(),
+);
+
+// =============================================================================
+// Live custom emoji (NIP-30). The PWA discovers custom emoji from three sources
+// (emoji.js): kind-30030 emoji packs, the user's kind-10030 emoji-pack list, and
+// loose `['emoji', shortcode, url]` tags on any incoming event. This notifier is
+// the live, mutable store the [NostrController] feeds as those events arrive; it
+// hydrates from + persists to the same `nym_custom_emojis` / `nym_custom_emoji_packs`
+// SharedPreferences keys the PWA uses, so the cache survives reloads.
+//
+// The picker reads [customEmojiStateProvider] (a default-empty `Provider`). This
+// notifier exposes the SAME [CustomEmojiState] shape via [liveCustomEmojiProvider]
+// so the emoji UI can read live updates (CROSS-FILE: the picker/composer should
+// watch this provider, or override `customEmojiStateProvider` from it, to surface
+// relay-sourced packs/codes — they currently load only the static cache).
+// =============================================================================
+
+final RegExp _kEmojiShortcodeRx = RegExp(r'^[a-zA-Z0-9_]+$');
+final RegExp _kEmojiUrlRx = RegExp(r'^https?://', caseSensitive: false);
+
+class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
+  LiveCustomEmojiNotifier(this._ref) : super(CustomEmojiState.empty) {
+    _hydrate();
+  }
+
+  final Ref _ref;
+  SharedPreferences? _prefs;
+
+  /// Loose shortcode → url (mirrors `customEmojis`). Mutable working copy; the
+  /// published [state] is rebuilt from this + [_packsByKey] on each change.
+  final Map<String, String> _codeToUrl = {};
+
+  /// Pack key (`pubkey:identifier`) → pack (mirrors `customEmojiPacks`).
+  final Map<String, CustomEmojiPack> _packsByKey = {};
+
+  /// `30030:<pubkey>:<identifier>` refs the user subscribes to (kind-10030
+  /// `userEmojiPackRefs`). Newest list wins (guarded by [_userListTs]).
+  final Set<String> _userPackRefs = {};
+  int _userListTs = 0;
+
+  /// Hydrates from the persisted PWA cache so previously-seen emoji render
+  /// immediately on launch (emoji.js `_loadCustomEmojiCache`).
+  Future<void> _hydrate() async {
+    try {
+      final prefs = await _ref.read(emojiPrefsProvider.future);
+      _prefs = prefs;
+      final cached = loadCustomEmojiState(prefs);
+      _codeToUrl.addAll(cached.codeToUrl);
+      for (final p in cached.packs) {
+        _packsByKey[p.key] = p;
+      }
+      if (mounted && (_codeToUrl.isNotEmpty || _packsByKey.isNotEmpty)) {
+        _publish();
+      }
+    } catch (_) {
+      // Cache is best-effort; an unavailable store just yields live-only emoji.
+    }
+  }
+
+  /// Registers a loose custom emoji (emoji.js `registerCustomEmoji`): valid
+  /// shortcode + http(s) url, never shadowing a built-in unicode shortcode.
+  /// Returns true if it was newly added or changed.
+  bool registerEmoji(String? shortcode, String? url) {
+    if (shortcode == null || url == null) return false;
+    if (!_kEmojiShortcodeRx.hasMatch(shortcode) || !_kEmojiUrlRx.hasMatch(url)) {
+      return false;
+    }
+    if (kEmojiShortcodeMap.containsKey(shortcode.toLowerCase())) return false;
+    if (_codeToUrl[shortcode] == url) return false;
+    _codeToUrl[shortcode] = url;
+    // Cap the loose map like the PWA (`_saveCustomEmojiMap` keeps the last 5000).
+    if (_codeToUrl.length > 5000) {
+      final keys = _codeToUrl.keys.toList();
+      for (final k in keys.sublist(0, _codeToUrl.length - 5000)) {
+        _codeToUrl.remove(k);
+      }
+    }
+    _publish();
+    _persist();
+    return true;
+  }
+
+  /// Ingests `['emoji', shortcode, url]` tags from any inbound event
+  /// (emoji.js `ingestEmojiTags`).
+  void ingestEmojiTags(List<List<String>> tags) {
+    var changed = false;
+    for (final t in tags) {
+      if (t.length >= 3 && t[0] == 'emoji') {
+        if (registerEmojiQuiet(t[1], t[2])) changed = true;
+      }
+    }
+    if (changed) {
+      _publish();
+      _persist();
+    }
+  }
+
+  /// Like [registerEmoji] but defers the publish/persist (used by batch ingest).
+  bool registerEmojiQuiet(String? shortcode, String? url) {
+    if (shortcode == null || url == null) return false;
+    if (!_kEmojiShortcodeRx.hasMatch(shortcode) || !_kEmojiUrlRx.hasMatch(url)) {
+      return false;
+    }
+    if (kEmojiShortcodeMap.containsKey(shortcode.toLowerCase())) return false;
+    if (_codeToUrl[shortcode] == url) return false;
+    _codeToUrl[shortcode] = url;
+    return true;
+  }
+
+  /// Stores a kind-30030 emoji pack (emoji.js `_storeEmojiPack` /
+  /// `handleEmojiPackEvent`): newest `created_at` wins per `pubkey:identifier`
+  /// key, each pack emoji is registered into the loose map. Persists.
+  void storePack(CustomEmojiPack pack) {
+    if (pack.pubkey.isEmpty || pack.emojis.isEmpty) return;
+    final existing = _packsByKey[pack.key];
+    if (existing != null && existing.createdAt >= pack.createdAt) return;
+    _packsByKey[pack.key] = pack;
+    for (final e in pack.emojis) {
+      registerEmojiQuiet(e.shortcode, e.url);
+    }
+    _publish();
+    _persist();
+  }
+
+  /// Records the user's kind-10030 emoji-pack subscription list (emoji.js
+  /// `handleUserEmojiListEvent`): newest event wins; any inline `emoji` tags are
+  /// also registered. [refs] are the `30030:<pubkey>:<identifier>` `a`-tag values.
+  void setUserPackRefs(List<String> refs, int createdAt,
+      {List<List<String>> inlineEmojiTags = const []}) {
+    if (createdAt < _userListTs) return;
+    _userListTs = createdAt;
+    _userPackRefs
+      ..clear()
+      ..addAll(refs);
+    var changed = false;
+    for (final t in inlineEmojiTags) {
+      if (t.length >= 3 && t[0] == 'emoji') {
+        if (registerEmojiQuiet(t[1], t[2])) changed = true;
+      }
+    }
+    if (changed) {
+      _publish();
+      _persist();
+    }
+  }
+
+  /// Whether [pack] is one the user subscribed to via their kind-10030 list.
+  bool isPackSubscribed(CustomEmojiPack pack) =>
+      _userPackRefs.contains('30030:${pack.pubkey}:${pack.identifier}');
+
+  /// NIP-30 `['emoji', shortcode, url]` tags for every known custom shortcode
+  /// used in [content] (emoji.js `customEmojiTagsForContent`). Lets an outgoing
+  /// message declare its custom emoji so other clients render them. Empty when no
+  /// known shortcodes appear.
+  List<List<String>> emojiTagsForContent(String content) {
+    if (content.isEmpty || _codeToUrl.isEmpty) return const [];
+    final out = <List<String>>[];
+    final added = <String>{};
+    for (final m in RegExp(r':([a-zA-Z0-9_]+):').allMatches(content)) {
+      final code = m.group(1)!;
+      if (added.contains(code)) continue;
+      final url = _codeToUrl[code];
+      if (url != null) {
+        added.add(code);
+        out.add(['emoji', code, url]);
+      }
+    }
+    return out;
+  }
+
+  /// Clears all live + persisted custom emoji (sign-out).
+  void clearAll() {
+    _codeToUrl.clear();
+    _packsByKey.clear();
+    _userPackRefs.clear();
+    _userListTs = 0;
+    if (mounted) state = CustomEmojiState.empty;
+    final prefs = _prefs;
+    if (prefs != null) {
+      prefs.remove(kCustomEmojiMapKey);
+      prefs.remove(kCustomEmojiPacksKey);
+    }
+  }
+
+  /// Rebuilds the published immutable snapshot (newest packs first).
+  void _publish() {
+    if (!mounted) return;
+    final packs = _packsByKey.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    state = CustomEmojiState(
+      codeToUrl: Map.unmodifiable(_codeToUrl),
+      packs: List.unmodifiable(packs),
+    );
+  }
+
+  /// Persists both caches in the PWA's localStorage shape (`_saveCustomEmojiMap`
+  /// + `_saveCustomEmojiCache`): the loose map as `[[shortcode,url],…]` (≤5000)
+  /// and packs as objects sorted newest-first (≤200). Best-effort.
+  void _persist() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    try {
+      final mapEntries = _codeToUrl.entries
+          .map((e) => [e.key, e.value])
+          .toList();
+      prefs.setString(kCustomEmojiMapKey, jsonEncode(mapEntries));
+      final packs = _packsByKey.values.toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      final capped = packs.length > 200 ? packs.sublist(0, 200) : packs;
+      final packJson = capped
+          .map((p) => {
+                'pubkey': p.pubkey,
+                'identifier': p.identifier,
+                'title': p.title,
+                'created_at': p.createdAt,
+                'emojis': p.emojis
+                    .map((e) => {'shortcode': e.shortcode, 'url': e.url})
+                    .toList(),
+              })
+          .toList();
+      prefs.setString(kCustomEmojiPacksKey, jsonEncode(packJson));
+    } catch (_) {
+      // Quota or serialization failures are non-fatal; live state still works.
+    }
+  }
+}
+
+/// The live custom-emoji store, fed by the [NostrController]'s NIP-30
+/// subscription (kinds 10030 + 30030) and inbound `emoji` tags. Read the
+/// [CustomEmojiState] directly for the shortcode→url map + loaded packs.
+final liveCustomEmojiProvider =
+    StateNotifierProvider<LiveCustomEmojiNotifier, CustomEmojiState>(
+  (ref) => LiveCustomEmojiNotifier(ref),
 );

@@ -478,6 +478,16 @@ class RelayPoolProxy implements PoolTransport {
     return s.length;
   }
 
+  /// The deduped set of relay URLs reported connected across all shards (for the
+  /// Network Stats per-relay list). Same aggregation as [connectedCount].
+  Set<String> get connectedRelayUrls {
+    final s = <String>{};
+    for (final sock in _sockets) {
+      s.addAll(sock.connectedRelays);
+    }
+    return s;
+  }
+
   /// Number of shard sockets currently open (transport-level).
   int get openShardCount => _sockets.where((s) => s.isOpen).length;
 

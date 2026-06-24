@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
@@ -19,7 +21,6 @@ import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
-import '../../features/nymbot/bot_chat_screen.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
@@ -55,6 +56,12 @@ class _ComposerState extends ConsumerState<Composer> {
   // Lazily-loaded prefs + stores (only touched once a picker is opened).
   SharedPreferences? _prefs;
   List<String> _recents = const [];
+
+  // LIVE NIP-30 custom emoji (kind-30030 packs + kind-10030 list + inbound
+  // `emoji` tags). Synced from [liveCustomEmojiProvider] on every build so the
+  // emoji picker AND the `:` autocomplete surface user/relay packs — not just
+  // the static `loadCustomEmojiState` cache. (The live notifier itself hydrates
+  // from that cache, so this is a strict superset.)
   CustomEmojiState _customEmojis = CustomEmojiState.empty;
 
   // --- Quote-reply / edit preview chips (F1/F2) ----------------------------
@@ -74,6 +81,16 @@ class _ComposerState extends ConsumerState<Composer> {
   final _translateSearchController = TextEditingController();
   String _translateQuery = '';
   bool _translating = false;
+
+  /// Translate-dropdown favorites (`nym_translate_favorites`), pinned to the top
+  /// of the language list. Loaded once prefs resolve (translate.js:93-99).
+  List<String> _translateFavorites = const [];
+
+  /// The favorites-pinned language order, snapshotted when the dropdown opens.
+  /// The PWA only re-pins on the next open ("the list order updates the next
+  /// time the dropdown opens", translate.js:563-571) — toggling a star mid-open
+  /// flips its fill in place but does NOT reorder until reopen.
+  List<MapEntry<String, String>> _translateLangOrder = const [];
 
   /// Whether the draft is tall enough to float into the `.composer-popout` box
   /// (PWA expands when content exceeds ~1.5 lines, ui-context.js:1738).
@@ -207,14 +224,35 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// Resolve prefs once, then hydrate recents + the cached NIP-30 custom emoji.
+  /// Resolve prefs once, then hydrate recents + translate favorites. Custom
+  /// emoji come from the LIVE [liveCustomEmojiProvider] (synced in `build`).
   Future<SharedPreferences> _ensurePrefs() async {
     if (_prefs != null) return _prefs!;
     final prefs = await ref.read(emojiPrefsProvider.future);
     _prefs = prefs;
     _recents = EmojiRecentsStore(prefs).load();
-    _customEmojis = loadCustomEmojiState(prefs);
+    _translateFavorites = _loadTranslateFavorites(prefs);
     return prefs;
+  }
+
+  /// Read the persisted translate favorites (`nym_translate_favorites`).
+  static List<String> _loadTranslateFavorites(SharedPreferences prefs) {
+    final raw = prefs.getString(kTranslateFavoritesKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.whereType<String>().toList();
+    } catch (_) {}
+    return const [];
+  }
+
+  /// Toggle [code] in the favorites list and persist (translate.js:102-108):
+  /// append when absent, remove when present.
+  void _toggleTranslateFavorite(String code) {
+    final next = [..._translateFavorites];
+    if (!next.remove(code)) next.add(code);
+    setState(() => _translateFavorites = next);
+    _prefs?.setString(kTranslateFavoritesKey, jsonEncode(next));
   }
 
   /// Insert text at the current selection (mirrors PWA `insertEmoji`/`insertGif`
@@ -522,9 +560,22 @@ class _ComposerState extends ConsumerState<Composer> {
     // allows sending a bare quote: `if (!content && !this.pendingQuote) return`).
     if (typed.trim().isEmpty && _pendingQuote == null) return;
 
-    // Prepend the pending quote ONLY at send (messages.js:2354-2361): first
-    // quoted line as `> @author: line`, remaining lines each `> line`, then a
-    // blank line before the user's text.
+    final content = _composeOutgoing(typed);
+
+    // Routes through the NostrController: optimistic local echo + relay
+    // publish when an identity is live, falling back to local echo otherwise.
+    // `?`/@Nymbot interception and `/` commands are handled inside sendCurrent.
+    controller.sendCurrent(content);
+    _controller.clear();
+    _hideOverlay();
+    setState(() {});
+    _focus.requestFocus();
+  }
+
+  /// Prepends the pending quote to [typed] ONLY at send (messages.js:2354-2361):
+  /// first quoted line as `> @author: line`, remaining lines each `> line`, then
+  /// a blank line before the user's text. Clears the consumed quote chip.
+  String _composeOutgoing(String typed) {
     var content = typed;
     final quote = _pendingQuote;
     if (quote != null) {
@@ -536,16 +587,51 @@ class _ComposerState extends ConsumerState<Composer> {
       content = content.isNotEmpty ? '$quoteLine\n\n$content' : quoteLine;
       _pendingQuote = null;
     }
+    return content;
+  }
 
-    // Routes through the NostrController: optimistic local echo + relay
-    // publish when an identity is live, falling back to local echo otherwise.
-    // `?`/@Nymbot interception and `/` commands are handled inside sendCurrent.
-    controller.sendCurrent(content);
+  /// SEND long-press → pseudonymous "ANON" send (ui-context.js:1208-1225 →
+  /// messages.js `sendMessagePseudonymous`). Publishes the current draft signed
+  /// with a FRESH ephemeral keypair instead of the durable identity, so the
+  /// message is unlinkable to the user's nym. Only Nostr-login (durable)
+  /// identities can do this in the PWA (`if (this.nostrLoginMethod)`); ephemeral
+  /// geohash keys are already pseudonymous, so the affordance is gated off for
+  /// them (see [_anonEligible]). Quote/edit are handled exactly like a normal
+  /// send. Routed through the real controller method (CROSS_FILE_NEEDS: the
+  /// controller must expose `sendCurrentPseudonymous`).
+  void _sendAnon() {
+    final typed = _controller.text;
+    // Edit-in-progress isn't a pseudonymous flow in the PWA (the long-press still
+    // calls sendMessagePseudonymous which ignores edit state) — fall back to the
+    // normal send so an in-flight edit is never silently dropped.
+    if (_pendingEdit != null) {
+      _send();
+      return;
+    }
+    if (typed.trim().isEmpty && _pendingQuote == null) return;
+    final controller = ref.read(nostrControllerProvider);
+    final content = _composeOutgoing(typed);
+    // Real ephemeral-key publish lives in the controller (shared core). Dispatch
+    // dynamically so the build stays green until the typed method lands; if it's
+    // genuinely absent we surface the real "unavailable" state rather than
+    // silently publishing under the user's real key (a privacy regression).
+    try {
+      (controller as dynamic).sendCurrentPseudonymous(content);
+    } on NoSuchMethodError {
+      _onSystemMessage('Anonymous send is not available yet.');
+      return;
+    }
     _controller.clear();
     _hideOverlay();
     setState(() {});
     _focus.requestFocus();
   }
+
+  /// Whether the SEND long-press anon affordance applies: a durable Nostr-login
+  /// identity (`this.nostrLoginMethod`, ui-context.js:1215). Ephemeral geohash
+  /// keys are already anonymous so the PWA doesn't offer it for them.
+  bool get _anonEligible =>
+      ref.read(nostrControllerProvider).identity?.loginMethod != null;
 
   // --- Attachments: image upload (Blossom) + P2P file share -----------------
 
@@ -558,67 +644,98 @@ class _ComposerState extends ConsumerState<Composer> {
   /// `uploadImage` future isn't cancellable — F11).
   bool _uploadCancelled = false;
 
+  /// 1-based index + total of the current multi-file upload (users.js:1006-1008
+  /// labels "Uploading i of N…" when N>1). 0/0 = single-file (no "of N").
+  int _uploadIndex = 0;
+  int _uploadTotal = 0;
+
   void _cancelUpload() {
     setState(() {
       _uploadCancelled = true;
       _uploadProgress = null;
       _uploadMime = null;
+      _uploadIndex = 0;
+      _uploadTotal = 0;
     });
   }
 
-  /// Image/Video button (`selectImage` → fileInput, accepts image + video):
-  /// pick media, upload it to a Blossom server through the ApiClient, then
-  /// append the resulting URL to the input (the formatter renders it as media —
-  /// users.js:1022).
+  /// Image/Video button (`selectImage` → fileInput `multiple`, accepts image +
+  /// video): pick one OR MANY media, upload each to a Blossom server, then append
+  /// ALL resulting URLs (space-joined) to the input — the formatter renders them
+  /// as media (users.js:971-1028). For multi-select the progress label reads
+  /// "Uploading i of N…".
   Future<void> _pickAndUploadImage() async {
-    Uint8List bytes;
-    String contentType;
+    List<XFile> picked;
     try {
       final picker = ImagePicker();
-      // pickMedia accepts image OR video (PWA accept="image/*,video/…").
-      final picked = await picker.pickMedia();
-      if (picked == null) return;
-      bytes = await picked.readAsBytes();
-      contentType = picked.mimeType ?? _guessImageMime(picked.name);
+      // `pickMultipleMedia` returns image OR video files (PWA
+      // accept="image/*,video/…" `multiple`).
+      picked = await picker.pickMultipleMedia();
     } catch (_) {
       return; // picker unavailable (tests/desktop)
     }
+    if (picked.isEmpty) return;
     const maxUpload = 50 * 1024 * 1024; // 50 MB cap (users.js:977)
-    if (bytes.length > maxUpload) {
-      _onSystemMessage('Files must be under 50MB.');
-      return;
-    }
+
     if (!mounted) return;
     setState(() {
-      _uploadProgress = 0.1;
-      _uploadMime = contentType;
       _uploadCancelled = false;
+      _uploadTotal = picked.length;
     });
-    final url = await ref.read(nostrControllerProvider).uploadImage(
-          bytes,
-          contentType: contentType,
-          onProgress: (p) {
-            if (mounted && !_uploadCancelled) setState(() => _uploadProgress = p);
-          },
-        );
-    if (!mounted) return;
-    if (_uploadCancelled) {
-      // The user pressed ✕ while the upload was in flight — drop the result.
-      setState(() => _uploadCancelled = false);
-      return;
+
+    final controller = ref.read(nostrControllerProvider);
+    final urls = <String>[];
+    for (var i = 0; i < picked.length; i++) {
+      if (!mounted || _uploadCancelled) break;
+      final file = picked[i];
+      final Uint8List bytes;
+      try {
+        bytes = await file.readAsBytes();
+      } catch (_) {
+        continue;
+      }
+      if (bytes.length > maxUpload) {
+        _onSystemMessage('Files must be under 50MB.');
+        continue;
+      }
+      final contentType = file.mimeType ?? _guessImageMime(file.name);
+      if (!mounted) return;
+      setState(() {
+        _uploadProgress = 0.1;
+        _uploadMime = contentType;
+        _uploadIndex = i + 1;
+      });
+      final url = await controller.uploadImage(
+        bytes,
+        contentType: contentType,
+        onProgress: (p) {
+          if (mounted && !_uploadCancelled) setState(() => _uploadProgress = p);
+        },
+      );
+      if (!mounted) return;
+      if (_uploadCancelled) break;
+      if (url == null) {
+        _onSystemMessage('Failed to upload media.');
+        continue;
+      }
+      urls.add(url);
     }
+
+    if (!mounted) return;
+    final wasCancelled = _uploadCancelled;
     setState(() {
       _uploadProgress = null;
       _uploadMime = null;
+      _uploadCancelled = false;
+      _uploadIndex = 0;
+      _uploadTotal = 0;
     });
-    if (url == null) {
-      _onSystemMessage('Failed to upload media.');
-      return;
-    }
-    // Append the URL to the input (then a trailing space), like the PWA.
+    // Drop the results entirely if the user pressed ✕ mid-batch.
+    if (wasCancelled || urls.isEmpty) return;
+    // Append all URLs space-joined (then a trailing space), like the PWA.
     final existing = _controller.text;
     final needsSpace = existing.isNotEmpty && !existing.endsWith(' ');
-    _controller.text = '$existing${needsSpace ? ' ' : ''}$url ';
+    _controller.text = '$existing${needsSpace ? ' ' : ''}${urls.join(' ')} ';
     _controller.selection =
         TextSelection.collapsed(offset: _controller.text.length);
     setState(() {});
@@ -660,20 +777,21 @@ class _ComposerState extends ConsumerState<Composer> {
     return 'application/octet-stream';
   }
 
-  /// Bot-PM entry: binds the private Nymbot chat to the identity and opens
-  /// [BotChatScreen] (the paid 1:1 surface). Exposed as a composer affordance
-  /// since the PM-list entry is owned elsewhere.
-  void _openBotChat() {
-    ref.read(nostrControllerProvider).bindBotChat();
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const BotChatScreen()),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final hasText = _controller.text.trim().isNotEmpty;
+    // `#sendBtn` is gated on CONNECTION, not input content: the PWA flips
+    // `disabled=false` once an identity/relay connects (relays.js:1040/1169/1276)
+    // and never re-disables it for an empty field. The empty-input guard lives
+    // inside `_send`/`_sendAnon` only (matching `if (!content && !pendingQuote)`).
+    final sendEnabled = ref.watch(
+          appStateProvider.select((s) => s.connectedRelays > 0),
+        ) ||
+        ref.read(nostrControllerProvider).isLive;
+
+    // Keep the live NIP-30 custom-emoji snapshot in sync so the open emoji
+    // picker / `:` autocomplete refresh when packs arrive over relays.
+    _customEmojis = ref.watch(liveCustomEmojiProvider);
 
     // Apply mention/quote requests published by the context menu (one-shot).
     ref.listen(pendingComposerActionProvider, (_, action) {
@@ -689,7 +807,7 @@ class _ComposerState extends ConsumerState<Composer> {
     });
 
     final input = _inputWithChips(context);
-    final toolbar = _toolbar(context, hasText);
+    final toolbar = _toolbar(context, sendEnabled);
 
     return Container(
       decoration: BoxDecoration(
@@ -763,42 +881,79 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// `#uploadProgress` — a label + thin progress bar + cancel ✕ shown while a
-  /// Blossom upload is in flight (users.js:988). The label reflects the picked
-  /// media type ("Uploading video…" for `video/*`, else "…image…" — F6).
+  /// `.upload-progress` — a panel (bg glass-bg, glass border, top corners
+  /// radius-sm, 12px padding, 8px bottom gap) floating above the input with a
+  /// label + cancel ✕ + a thin gradient progress bar (users.js:988-1008).
+  /// Single: "Uploading image..." / "Uploading video..."; multi: "Uploading
+  /// i of N...". The bar fills primary→secondary.
   Widget _uploadBar(BuildContext context) {
     final c = context.nym;
     final isVideo = (_uploadMime ?? '').startsWith('video/');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+    final kind = isVideo ? 'video' : 'image';
+    final label = _uploadTotal > 1
+        ? 'Uploading $_uploadIndex of $_uploadTotal...'
+        : 'Uploading $kind...';
+    final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
+    return Container(
+      // `.upload-progress`: bg var(--glass-bg) (#14141e solid-ui), border 1px
+      // glass, radius-sm/radius-sm/0/0, padding 12, margin-bottom 8.
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: c.glassBg,
+        border: Border.all(color: c.glassBorder),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
             children: [
               Expanded(
-                child: Text(isVideo ? 'Uploading video…' : 'Uploading image…',
+                child: Text(label,
                     style: TextStyle(color: c.textDim, fontSize: 12)),
               ),
-              // `.upload-progress-close` (16×16 ✕), cancels the in-flight upload.
-              InkWell(
-                onTap: _cancelUpload,
-                borderRadius: NymRadius.rxs,
-                child: Padding(
-                  padding: const EdgeInsets.all(2),
-                  child: Icon(Icons.close, size: 16, color: c.textDim),
+              // `.upload-progress-close` (22×22 ✕, radius-sm), cancels the
+              // in-flight upload.
+              Material(
+                type: MaterialType.transparency,
+                borderRadius: NymRadius.rsm,
+                child: InkWell(
+                  onTap: _cancelUpload,
+                  borderRadius: NymRadius.rsm,
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: Icon(Icons.close, size: 14, color: c.textDim),
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
+          // `.progress-bar`: height 6, bg rgba(255,255,255,0.05), radius 10;
+          // `.progress-fill`: linear-gradient(90deg, primary, secondary).
           ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: LinearProgressIndicator(
-              value: _uploadProgress,
-              minHeight: 4,
-              backgroundColor: Colors.white.withValues(alpha: 0.06),
-              valueColor: AlwaysStoppedAnimation(c.primary),
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              height: 6,
+              color: Colors.white.withValues(alpha: 0.05),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: fraction,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      gradient: LinearGradient(
+                        colors: [c.primary, c.secondary],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -883,10 +1038,17 @@ class _ComposerState extends ConsumerState<Composer> {
   /// button + 230px language dropdown overlay the bottom-right (F7).
   Widget _textField(BuildContext context) {
     final c = context.nym;
+    final hasText = _controller.text.trim().isNotEmpty;
     // `.composer-popout .message-input`: elevated rounded box vs the flat field.
     final fill = _popout ? c.bgTertiary : Colors.white.withValues(alpha: 0.05);
+    // `.message-input` rounds ONLY the bottom corners when flat (chips/dropdowns
+    // sit `bottom:100%` flush above it — styles-chat.css:1666); the popout box
+    // uses full radius-md (styles-chat.css:1737).
+    final radius = _popout
+        ? NymRadius.rmd
+        : const BorderRadius.vertical(bottom: Radius.circular(NymRadius.md));
     final border = OutlineInputBorder(
-      borderRadius: NymRadius.rmd,
+      borderRadius: radius,
       borderSide: BorderSide(color: _popout ? c.primaryA(0.30) : c.glassBorder),
     );
     final field = TextField(
@@ -905,16 +1067,19 @@ class _ComposerState extends ConsumerState<Composer> {
         isDense: true,
         // PWA `data-placeholder` teaches the `/` and `?` affordances (F9).
         hintText: 'Message, / for commands, ? for Nymbot...',
-        hintStyle:
-            TextStyle(color: c.textDim, fontSize: widget.compact ? 16 : 15),
+        hintStyle: TextStyle(
+            // `div.message-input:empty::before` → rgba(255,255,255,0.4).
+            color: Colors.white.withValues(alpha: 0.4),
+            fontSize: widget.compact ? 16 : 15),
         filled: true,
         fillColor: fill,
-        // Pad the right so text never sits under the translate button.
-        contentPadding: const EdgeInsets.fromLTRB(16, 10, 40, 10),
+        // The translate button only exists when there's text (A9), so only then
+        // does the input reserve right padding for it (`paddingRight 38px`).
+        contentPadding: EdgeInsets.fromLTRB(16, 10, hasText ? 38 : 16, 10),
         border: border,
         enabledBorder: border,
         focusedBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rmd,
+          borderRadius: radius,
           borderSide: BorderSide(color: c.primaryA(0.30)),
         ),
       ),
@@ -923,12 +1088,15 @@ class _ComposerState extends ConsumerState<Composer> {
     final stack = Stack(
       children: [
         field,
-        // `.translate-input-btn`: 26×26, bottom-right, dim→primary on hover.
-        Positioned(
-          right: 8,
-          bottom: 8,
-          child: _translateButton(context),
-        ),
+        // `#translateInputBtn` starts `.nm-hidden` and `display:flex` ONLY when
+        // the field has text (translate.js:588-600). Render it solely then — no
+        // faded ghost when empty.
+        if (hasText)
+          Positioned(
+            right: 8,
+            bottom: 10,
+            child: _translateButton(context),
+          ),
       ],
     );
 
@@ -940,8 +1108,9 @@ class _ComposerState extends ConsumerState<Composer> {
       ),
       decoration: const BoxDecoration(
         borderRadius: NymRadius.rmd,
+        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
         boxShadow: [
-          BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: stack,
@@ -974,7 +1143,12 @@ class _ComposerState extends ConsumerState<Composer> {
     if (_controller.text.trim().isEmpty || _translating) return;
     _emojiPortal.hide();
     _gifPortal.hide();
-    setState(() => _translateQuery = '');
+    setState(() {
+      _translateQuery = '';
+      // Snapshot the favorites-pinned order at open (re-pins only on reopen).
+      _translateLangOrder =
+          sortedTranslateLanguagesWithFavorites(_translateFavorites);
+    });
     _translateSearchController.clear();
     _translatePortal.show();
   }
@@ -984,7 +1158,13 @@ class _ComposerState extends ConsumerState<Composer> {
   Widget _translateDropdown(BuildContext context) {
     final c = context.nym;
     final q = _translateQuery.trim().toLowerCase();
-    final langs = sortedTranslateLanguages()
+    // Star FILL reads the live favorites set; row ORDER uses the open-time
+    // snapshot so toggling a star doesn't reshuffle mid-open (PWA parity).
+    final favSet = _translateFavorites.toSet();
+    final order = _translateLangOrder.isEmpty
+        ? sortedTranslateLanguagesWithFavorites(_translateFavorites)
+        : _translateLangOrder;
+    final langs = order
         .where((e) => q.isEmpty || e.value.toLowerCase().contains(q))
         .toList();
     return Stack(
@@ -1012,6 +1192,7 @@ class _ComposerState extends ConsumerState<Composer> {
                   color: c.bgSecondary,
                   border: Border.all(color: c.glassBorder),
                   borderRadius: NymRadius.rmd,
+                  // `.translate-input-dropdown`: 0 8px 24px rgba(0,0,0,0.4).
                   boxShadow: const [
                     BoxShadow(
                         color: Color(0x66000000),
@@ -1023,9 +1204,14 @@ class _ComposerState extends ConsumerState<Composer> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // `.translate-dropdown-search`.
-                    Padding(
+                    // `.translate-dropdown-search`: 8px padding + a bottom
+                    // hairline divider under the search region.
+                    Container(
                       padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        border: Border(
+                            bottom: BorderSide(color: c.glassBorder)),
+                      ),
                       child: TextField(
                         controller: _translateSearchController,
                         autofocus: true,
@@ -1034,7 +1220,7 @@ class _ComposerState extends ConsumerState<Composer> {
                         cursorColor: c.primary,
                         decoration: InputDecoration(
                           isDense: true,
-                          hintText: 'Search language...',
+                          hintText: 'Search languages...',
                           hintStyle: TextStyle(color: c.textDim, fontSize: 13),
                           filled: true,
                           fillColor: Colors.white.withValues(alpha: 0.05),
@@ -1056,24 +1242,31 @@ class _ComposerState extends ConsumerState<Composer> {
                       ),
                     ),
                     Flexible(
-                      child: ListView.builder(
-                        shrinkWrap: true,
-                        padding: EdgeInsets.zero,
-                        itemCount: langs.length,
-                        itemBuilder: (_, i) {
-                          final e = langs[i];
-                          return InkWell(
-                            onTap: () => _translateDraft(e.key),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 8),
-                              child: Text(e.value,
-                                  style:
-                                      TextStyle(color: c.text, fontSize: 13)),
+                      // `.translate-dropdown-list`: padding 4px 0.
+                      child: langs.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Text('No languages found',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: c.textDim, fontSize: 13)),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 4),
+                              itemCount: langs.length,
+                              itemBuilder: (_, i) {
+                                final e = langs[i];
+                                return _TranslateLangRow(
+                                  name: e.value,
+                                  favorited: favSet.contains(e.key),
+                                  onTap: () => _translateDraft(e.key),
+                                  onToggleFavorite: () =>
+                                      _toggleTranslateFavorite(e.key),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
                     ),
                   ],
                 ),
@@ -1112,7 +1305,7 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// `.input-buttons`: image / file / emoji / GIF icon buttons + SEND.
-  Widget _toolbar(BuildContext context, bool hasText) {
+  Widget _toolbar(BuildContext context, bool sendEnabled) {
     final buttons = <Widget>[
       _IconBtn(
         icon: Icons.image_outlined,
@@ -1128,13 +1321,17 @@ class _ComposerState extends ConsumerState<Composer> {
       ),
       _emojiButton(context),
       _gifButton(context),
-      _IconBtn(
-        icon: Icons.smart_toy_outlined,
-        tooltip: 'Nymbot',
+      // The PWA's `.input-buttons` (index.html:758-790) has EXACTLY 5 children:
+      // Image, File, Emoji, GIF, SEND — there is NO Nymbot toolbar button (bot
+      // access is via `?`/@Nymbot in the input, routed inside `sendCurrent`).
+      _SendButton(
+        enabled: sendEnabled,
+        onTap: _send,
+        // Long-press → ANON pseudonymous send, only for durable Nostr-login
+        // identities (ephemeral geohash keys are already anonymous).
+        onAnon: _anonEligible ? _sendAnon : null,
         expand: widget.compact,
-        onTap: _openBotChat,
       ),
-      _SendButton(enabled: hasText, onTap: _send, expand: widget.compact),
     ];
 
     if (widget.compact) {
@@ -1167,17 +1364,14 @@ class _ComposerState extends ConsumerState<Composer> {
       link: _emojiAnchor,
       child: OverlayPortal(
         controller: _emojiPortal,
+        // The picker reads `liveCustomEmojiProvider` directly, so it surfaces
+        // relay-sourced packs live — no override needed.
         overlayChildBuilder: (context) => _popover(
           link: _emojiAnchor,
           onDismiss: _emojiPortal.hide,
-          child: ProviderScope(
-            overrides: [
-              customEmojiStateProvider.overrideWithValue(_customEmojis),
-            ],
-            child: EmojiPicker(
-              recents: _recents,
-              onSelect: _onEmojiSelected,
-            ),
+          child: EmojiPicker(
+            recents: _recents,
+            onSelect: _onEmojiSelected,
           ),
         ),
         child: _IconBtn(
@@ -1202,6 +1396,7 @@ class _ComposerState extends ConsumerState<Composer> {
           child: GifPicker(
             favoritesStore: FavoriteGifsStore(_prefs!),
             onSelect: _onGifSelected,
+            onClose: _gifPortal.hide,
           ),
         ),
         child: _IconBtn(
@@ -1306,14 +1501,25 @@ class _IconBtnState extends State<_IconBtn> {
 /// `.send-btn`: primary@10 bg, primary@30 border, radius sm, "SEND" 12px
 /// uppercase letter-spacing 1.5 weight 600. Disabled opacity 0.35. On hover
 /// the bg lifts to primary@18 with a primary@10 glow (F10).
+///
+/// When [onAnon] is non-null a 2s press-and-hold fires the pseudonymous "ANON"
+/// send (ui-context.js:1202-1264): a 700ms pre-glow (primary@0.2) telegraphs the
+/// press, then at 2s the label swaps to "ANON" with a primary@0.4 glow + haptic,
+/// [onAnon] runs, and after 1s it reverts to "SEND". The trailing click is
+/// suppressed so the hold doesn't also fire a normal send.
 class _SendButton extends StatefulWidget {
   const _SendButton({
     required this.enabled,
     required this.onTap,
+    this.onAnon,
     this.expand = false,
   });
   final bool enabled;
   final VoidCallback onTap;
+
+  /// Long-press (2s) pseudonymous send. Null = no anon affordance (the hold then
+  /// does nothing special; a tap still sends normally).
+  final VoidCallback? onAnon;
   final bool expand;
 
   @override
@@ -1323,10 +1529,79 @@ class _SendButton extends StatefulWidget {
 class _SendButtonState extends State<_SendButton> {
   bool _hover = false;
 
+  // Long-press state (ui-context.js sendLongPressTimer/Fired/SuppressClickUntil).
+  Timer? _holdTimer;
+  Timer? _preGlowTimer;
+  Timer? _revertTimer;
+  bool _anonFired = false;
+  bool _preGlow = false;
+  DateTime _suppressClickUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  @override
+  void dispose() {
+    _holdTimer?.cancel();
+    _preGlowTimer?.cancel();
+    _revertTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startHold() {
+    if (widget.onAnon == null || !widget.enabled) return;
+    if (_holdTimer != null) return;
+    _anonFired = false;
+    // 700ms pre-glow telegraph (primary@0.2).
+    _preGlowTimer = Timer(const Duration(milliseconds: 700), () {
+      if (_holdTimer != null && mounted) setState(() => _preGlow = true);
+    });
+    // 2s → fire ANON.
+    _holdTimer = Timer(const Duration(seconds: 2), () {
+      _holdTimer = null;
+      _preGlowTimer?.cancel();
+      if (!mounted) return;
+      _anonFired = true;
+      _suppressClickUntil =
+          DateTime.now().add(const Duration(milliseconds: 800));
+      HapticFeedback.mediumImpact();
+      setState(() => _preGlow = true);
+      widget.onAnon!.call();
+      // Revert label + glow after 1s.
+      _revertTimer = Timer(const Duration(seconds: 1), () {
+        if (!mounted) return;
+        setState(() {
+          _anonFired = false;
+          _preGlow = false;
+        });
+      });
+    });
+  }
+
+  void _cancelHold() {
+    _holdTimer?.cancel();
+    _holdTimer = null;
+    _preGlowTimer?.cancel();
+    if (!_anonFired && mounted && _preGlow) setState(() => _preGlow = false);
+  }
+
+  void _handleTap() {
+    // Suppress the click that follows a fired long-press (ui-context.js:1250).
+    if (_anonFired || DateTime.now().isBefore(_suppressClickUntil)) return;
+    if (widget.enabled) widget.onTap();
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final hovering = _hover && widget.enabled;
+    // Glow: 700ms pre-glow → primary@0.2; fired → primary@0.4; hover → @0.1.
+    final List<BoxShadow>? glow = _preGlow
+        ? [
+            BoxShadow(
+                color: c.primaryA(_anonFired ? 0.4 : 0.2),
+                blurRadius: _anonFired ? 15 : 10),
+          ]
+        : (hovering
+            ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
+            : null);
     return Opacity(
       opacity: widget.enabled ? 1 : 0.35,
       child: MouseRegion(
@@ -1335,39 +1610,37 @@ class _SendButtonState extends State<_SendButton> {
             : SystemMouseCursors.forbidden,
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
-        child: AnimatedContainer(
-          duration: NymMotion.transition,
-          curve: NymMotion.curve,
-          decoration: BoxDecoration(
-            color: c.primaryA(hovering ? 0.18 : 0.10),
-            borderRadius: NymRadius.rsm,
-            border: Border.all(color: c.primaryA(0.30)),
-            boxShadow: hovering
-                ? [
-                    BoxShadow(
-                        color: c.primaryA(0.10),
-                        blurRadius: 15,
-                        spreadRadius: 0),
-                  ]
-                : null,
-          ),
-          child: Material(
-            type: MaterialType.transparency,
-            borderRadius: NymRadius.rsm,
-            child: InkWell(
-              onTap: widget.enabled ? widget.onTap : null,
+        child: Listener(
+          onPointerDown: (_) => _startHold(),
+          onPointerUp: (_) => _cancelHold(),
+          onPointerCancel: (_) => _cancelHold(),
+          child: AnimatedContainer(
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            decoration: BoxDecoration(
+              color: c.primaryA(hovering ? 0.18 : 0.10),
               borderRadius: NymRadius.rsm,
-              child: Container(
-                height: 42,
-                padding: const EdgeInsets.symmetric(horizontal: 22),
-                alignment: Alignment.center,
-                child: Text(
-                  'SEND',
-                  style: TextStyle(
-                    color: c.primary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.5,
+              border: Border.all(color: c.primaryA(0.30)),
+              boxShadow: glow,
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              borderRadius: NymRadius.rsm,
+              child: InkWell(
+                onTap: widget.enabled ? _handleTap : null,
+                borderRadius: NymRadius.rsm,
+                child: Container(
+                  height: 42,
+                  padding: const EdgeInsets.symmetric(horizontal: 22),
+                  alignment: Alignment.center,
+                  child: Text(
+                    _anonFired ? 'ANON' : 'SEND',
+                    style: TextStyle(
+                      color: c.primary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ),
               ),
@@ -1405,8 +1678,9 @@ class _PreviewChip extends StatelessWidget {
         color: c.bgTertiary,
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
+        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
         boxShadow: const [
-          BoxShadow(color: Color(0x66000000), blurRadius: 24, offset: Offset(0, 8)),
+          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: Row(
@@ -1470,9 +1744,12 @@ class _QuotePreviewChip extends StatelessWidget {
                 if (suffix.isNotEmpty)
                   TextSpan(
                     text: suffix,
+                    // `.nym-suffix`: opacity 0.7, font-size 0.9em (≈10.8 of 12),
+                    // weight 100 (styles-chat.css:706-710).
                     style: TextStyle(
                       color: c.primary.withValues(alpha: 0.7),
                       fontWeight: FontWeight.w100,
+                      fontSize: 12 * 0.9,
                     ),
                   ),
               ],
@@ -1663,6 +1940,95 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
               ),
               child: glyph,
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One `.translate-dropdown-item` row: the language name + a trailing favorite
+/// star. The row hovers to `white@0.08` + `--text-bright`; the star is
+/// `--text-dim` (hover `white@0.1` + text-bright), and `#f5c518` when favorited
+/// (styles-chat.css:1850-1897).
+class _TranslateLangRow extends StatefulWidget {
+  const _TranslateLangRow({
+    required this.name,
+    required this.favorited,
+    required this.onTap,
+    required this.onToggleFavorite,
+  });
+
+  final String name;
+  final bool favorited;
+  final VoidCallback onTap;
+  final VoidCallback onToggleFavorite;
+
+  @override
+  State<_TranslateLangRow> createState() => _TranslateLangRowState();
+}
+
+class _TranslateLangRowState extends State<_TranslateLangRow> {
+  bool _hover = false;
+  bool _starHover = false;
+
+  static const Color _favColor = Color(0xFFF5C518);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          color: _hover ? Colors.white.withValues(alpha: 0.08) : null,
+          // `.translate-dropdown-item`: padding 7px 8px 7px 14px; gap 8.
+          padding: const EdgeInsets.fromLTRB(14, 7, 8, 7),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _hover ? c.textBright : c.text,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              // `.translate-dropdown-star`: 24×24, radius-sm.
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                onEnter: (_) => setState(() => _starHover = true),
+                onExit: (_) => setState(() => _starHover = false),
+                child: GestureDetector(
+                  onTap: widget.onToggleFavorite,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _starHover
+                          ? Colors.white.withValues(alpha: 0.1)
+                          : null,
+                      borderRadius: NymRadius.rsm,
+                    ),
+                    child: Icon(
+                      widget.favorited ? Icons.star : Icons.star_border,
+                      size: 14,
+                      color: widget.favorited
+                          ? _favColor
+                          : (_starHover ? c.textBright : c.textDim),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

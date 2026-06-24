@@ -13,6 +13,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/common/nym_avatar.dart';
 import 'dev_nsec_modal.dart';
+import 'modal_chrome.dart';
 import 'nym_identicon.dart';
 
 /// The profile / nickname editor (`#nickEditModal`, index.html:1149).
@@ -56,7 +57,6 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   String? _avatarPath;
   String? _bannerPath;
   bool _revealOpen = false;
-  bool _revealed = false; // gate passed (held)
   bool _nsecVisible = false;
   bool _pubkeyOpen = false; // full-hex pubkey slideout
   bool _saving = false;
@@ -109,53 +109,46 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
           constraints: const BoxConstraints(maxWidth: 500),
           child: Material(
             color: Colors.transparent,
-            child: Container(
-              decoration: BoxDecoration(
-                color: c.bgSecondary,
-                borderRadius: NymRadius.rxl,
-                border: Border.all(color: c.glassBorder),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.4),
-                    blurRadius: 40,
-                    offset: const Offset(0, 20),
-                  ),
-                ],
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(context).size.height * 0.9,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _modalHeader(c),
-                    Flexible(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _nicknameGroup(c),
-                            const SizedBox(height: 18),
-                            _avatarGroup(c),
-                            const SizedBox(height: 18),
-                            _bannerGroup(c),
-                            const SizedBox(height: 18),
-                            _bioGroup(c),
-                            const SizedBox(height: 18),
-                            _lightningGroup(c),
-                            const SizedBox(height: 18),
-                            _revealPrivkeyGroup(c),
-                          ],
-                        ),
-                      ),
+            child: Stack(
+              children: [
+                ModalChrome.box(
+                  c,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxHeight: MediaQuery.of(context).size.height * 0.9,
                     ),
-                    _actions(c),
-                  ],
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _modalHeader(c),
+                        Flexible(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.all(20),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _nicknameGroup(c),
+                                const SizedBox(height: 18),
+                                _avatarGroup(c),
+                                const SizedBox(height: 18),
+                                _bannerGroup(c),
+                                const SizedBox(height: 18),
+                                _bioGroup(c),
+                                const SizedBox(height: 18),
+                                _lightningGroup(c),
+                                const SizedBox(height: 18),
+                                _revealPrivkeyGroup(c),
+                              ],
+                            ),
+                          ),
+                        ),
+                        _actions(c),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+                ModalChrome.closeChip(c, () => Navigator.of(context).pop()),
+              ],
             ),
           ),
         ),
@@ -163,28 +156,20 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     );
   }
 
+  // `.modal-header`: 22px primary UPPERCASE ls1.5 w700 + bottom rule.
   Widget _modalHeader(NymColors c) => Container(
-        padding: const EdgeInsets.fromLTRB(24, 20, 16, 16),
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 14),
         decoration: BoxDecoration(
           border: Border(bottom: BorderSide(color: c.glassBorder)),
         ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                "Change Nym's Details",
-                style: TextStyle(
-                  color: c.text,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-            IconButton(
-              icon: Icon(Icons.close, color: c.textDim),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-          ],
+        child: Text(
+          "Change Nym's Details".toUpperCase(),
+          style: TextStyle(
+            color: c.primary,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.5,
+          ),
         ),
       );
 
@@ -541,13 +526,9 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                if (!_revealed)
-                  _HoldToReveal(
-                    color: c.danger,
-                    onRevealed: () => setState(() => _revealed = true),
-                  )
-                else
-                  _nsecRow(c),
+                // The PWA reveals the nsec on a plain click toggle — no hold
+                // gate (toggleRevealPrivkey, app.js:2959). Populate immediately.
+                _nsecRow(c),
               ],
             ),
           ),
@@ -622,34 +603,29 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       decoration: BoxDecoration(
         border: Border(top: BorderSide(color: c.glassBorder)),
       ),
+      // `.modal-actions`: center, gap 10 (Randomize / Cancel are `.icon-btn`,
+      // Change is `.send-btn`). No casino icon in the PWA.
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // `randomizeNick` (index.html:1249) — left-aligned third action.
-          OutlinedButton.icon(
-            onPressed: _saving ? null : _randomize,
-            icon: Icon(Icons.casino_outlined, size: 16, color: c.text),
-            label: Text('Randomize', style: TextStyle(color: c.text)),
-            style: OutlinedButton.styleFrom(
-              side: BorderSide(color: c.glassBorder),
-              shape: RoundedRectangleBorder(borderRadius: NymRadius.rxs),
-            ),
-          ),
-          const Spacer(),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('Cancel', style: TextStyle(color: c.textDim)),
-          ),
-          const SizedBox(width: 8),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: c.primary),
-            onPressed: _saving ? null : _save,
+          ModalChrome.iconButton(
+              c, 'Randomize', _saving ? null : _randomize),
+          const SizedBox(width: 10),
+          ModalChrome.iconButton(
+              c, 'Cancel', () => Navigator.of(context).pop()),
+          const SizedBox(width: 10),
+          ModalChrome.sendButton(
+            c,
+            'Change',
+            _saving ? null : _save,
             child: _saving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: c.primary),
                   )
-                : const Text('Change'),
+                : null,
           ),
         ],
       ),
@@ -731,12 +707,14 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       ok = await ref.read(nostrControllerProvider).saveProfile(
             name: includeName ? _nick.text.trim() : null,
             about: bio,
-            // Picked file (new) else the existing URL, so editing only the bio
-            // doesn't drop the avatar/banner from the republished kind-0.
-            // TODO(verify): a picked local path should upload to a host → URL
-            // (nostr.build / blossom). The engine treats empty as "no change".
-            picture: _avatarPath ?? _currentAvatarUrl,
-            banner: _bannerPath ?? _currentBannerUrl,
+            // Re-publish the EXISTING avatar/banner URLs so editing only the
+            // bio doesn't drop them from the replaced kind-0. A locally-picked
+            // file is NOT sent: a `file://` path is not a valid kind-0
+            // `picture`/`banner`, and the host-upload→URL step is cross-file
+            // (NostrController.uploadAvatar/uploadBanner — see CROSS_FILE_NEEDS).
+            // We render the local preview honestly but never publish it.
+            picture: _httpUrlOrCurrent(_avatarPath, _currentAvatarUrl),
+            banner: _httpUrlOrCurrent(_bannerPath, _currentBannerUrl),
             lud16: lightning,
           );
     } catch (_) {
@@ -749,6 +727,19 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       SnackBar(
           content: Text(ok ? 'Profile updated' : 'Could not save profile')),
     );
+  }
+
+  /// Returns [picked] only when it is already a hosted http(s) URL (it never is
+  /// for a gallery pick), else the [current] URL — so a `file://` path from the
+  /// picker is never published as a kind-0 image. Once a real host-upload step
+  /// lands ([CROSS_FILE_NEEDS]: NostrController.uploadAvatar/uploadBanner), the
+  /// uploaded URL flows through here.
+  String? _httpUrlOrCurrent(String? picked, String? current) {
+    if (picked != null &&
+        (picked.startsWith('http://') || picked.startsWith('https://'))) {
+      return picked;
+    }
+    return current;
   }
 
   /// Fills the nick field with a freshly generated random nym (Randomize,
@@ -765,73 +756,5 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     Clipboard.setData(ClipboardData(text: value));
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(confirm)));
-  }
-}
-
-/// A press-and-hold confirmation that reveals the private key after a 1.2s hold
-/// (mirrors the PWA's hold/confirm gate before showing the nsec).
-class _HoldToReveal extends StatefulWidget {
-  const _HoldToReveal({required this.color, required this.onRevealed});
-  final Color color;
-  final VoidCallback onRevealed;
-
-  @override
-  State<_HoldToReveal> createState() => _HoldToRevealState();
-}
-
-class _HoldToRevealState extends State<_HoldToReveal>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1200),
-    )..addStatusListener((s) {
-        if (s == AnimationStatus.completed) widget.onRevealed();
-      });
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => _ctrl.forward(),
-      onTapUp: (_) => _ctrl.reverse(),
-      onTapCancel: () => _ctrl.reverse(),
-      child: Container(
-        height: 40,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: widget.color.withValues(alpha: 0.12),
-          borderRadius: NymRadius.rxs,
-          border: Border.all(color: widget.color.withValues(alpha: 0.4)),
-        ),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            AnimatedBuilder(
-              animation: _ctrl,
-              builder: (context, _) => FractionallySizedBox(
-                widthFactor: _ctrl.value,
-                alignment: Alignment.centerLeft,
-                child: Container(color: widget.color.withValues(alpha: 0.18)),
-              ),
-            ),
-            Text(
-              'Hold to reveal private key',
-              style: TextStyle(color: widget.color, fontSize: 13),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

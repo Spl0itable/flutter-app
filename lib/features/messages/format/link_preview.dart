@@ -183,7 +183,9 @@ class _Card extends StatelessWidget {
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                  color: c.textBright,
+                                  // `.link-preview-title { color: var(--text) }`
+                                  // (styles-features.css:4397-4405).
+                                  color: c.text,
                                   fontSize: size * 0.9,
                                   fontWeight: FontWeight.w600,
                                   height: 1.3,
