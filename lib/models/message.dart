@@ -1,6 +1,31 @@
 /// Delivery state for a PM/group message.
 enum DeliveryStatus { sending, sent, delivered, read, failed }
 
+/// What kind of row a [Message] renders as.
+///
+/// * [normal] — an ordinary chat message (bubble / IRC row).
+/// * [system] — a centered muted `.system-message` pill injected into the
+///   conversation flow (command feedback, P2P/call status, flood notices).
+/// * [action] — the purple-italic `.action-message` variant of a system message.
+/// * [me] — a `/me …` emote rendered as an italic `* author action *` line.
+///
+/// Mirrors the PWA's `displaySystemMessage(content, type)` (`messages.js:1511`)
+/// and the `/me` branch (`messages.js:662`).
+enum MessageKind { normal, system, action, me }
+
+MessageKind messageKindFromString(String? s) {
+  switch (s) {
+    case 'system':
+      return MessageKind.system;
+    case 'action':
+      return MessageKind.action;
+    case 'me':
+      return MessageKind.me;
+    default:
+      return MessageKind.normal;
+  }
+}
+
 DeliveryStatus deliveryStatusFromString(String? s) {
   switch (s) {
     case 'sent':
@@ -51,7 +76,10 @@ class Message {
     this.optimistic = false,
     this.spamGated = false,
     this.blocked = false,
-  }) : timestamp = timestamp ?? createdAt * 1000;
+    this.kind = MessageKind.normal,
+    Map<String, String>? readers,
+  })  : timestamp = timestamp ?? createdAt * 1000,
+        readers = readers ?? <String, String>{};
 
   String id;
   String author;
@@ -112,6 +140,26 @@ class Message {
   /// Flagged from a blocked user.
   bool blocked;
 
+  /// What kind of row this renders as (normal / system / action / `/me`).
+  /// Defaults to [MessageKind.normal]; a system/action message is one injected
+  /// by [Message.system] (`displaySystemMessage`).
+  MessageKind kind;
+
+  /// Read-receipt readers for own channel/group messages: `pubkey → nym`. Drives
+  /// the stacked reader-avatar delivery indicator (`group-readers`/
+  /// `channel-readers`, `groups.js:2624`). Empty for everyone else.
+  final Map<String, String> readers;
+
+  /// True for the centered system/action pill rows (not an ordinary message).
+  bool get isSystemRow =>
+      kind == MessageKind.system || kind == MessageKind.action;
+
+  /// True when this is a `/me` emote (rendered as an italic action line). The
+  /// PWA keys this off the raw content prefix (`messages.js:662`), so we accept
+  /// either an explicit [MessageKind.me] or the `/me ` content prefix.
+  bool get isMeAction =>
+      kind == MessageKind.me || content.startsWith('/me ');
+
   DateTime get dateTime => DateTime.fromMillisecondsSinceEpoch(timestamp);
 
   Map<String, dynamic> toJson() => {
@@ -143,7 +191,29 @@ class Message {
         'fileOffer': fileOffer,
         'isBot': isBot,
         'thinking': thinking,
+        'kind': kind.name,
       };
+
+  /// Builds a centered system/action pill row for the conversation flow,
+  /// mirroring `displaySystemMessage(content, type)` (`messages.js:1511`). Pass
+  /// [action] for the purple-italic `.action-message` variant. The id is
+  /// synthetic (`sys-…`) and the row is flagged so the list renders the pill.
+  factory Message.system(
+    String content, {
+    bool action = false,
+    int? createdAtMs,
+  }) {
+    final ms = createdAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    return Message(
+      id: 'sys-${ms.toRadixString(36)}-${content.hashCode.toUnsigned(20)}',
+      author: '',
+      pubkey: '',
+      content: content,
+      createdAt: ms ~/ 1000,
+      timestamp: ms,
+      kind: action ? MessageKind.action : MessageKind.system,
+    );
+  }
 
   factory Message.fromJson(Map<String, dynamic> j) {
     return Message(
@@ -175,6 +245,7 @@ class Message {
       fileOffer: (j['fileOffer'] as Map?)?.cast<String, dynamic>(),
       isBot: j['isBot'] == true,
       thinking: j['thinking'] as String?,
+      kind: messageKindFromString(j['kind'] as String?),
     );
   }
 }

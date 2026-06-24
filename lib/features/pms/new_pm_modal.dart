@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../core/crypto/bech32_codec.dart';
 import '../../core/theme/nym_colors.dart';
@@ -8,6 +11,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/common/nym_avatar.dart';
 
 /// A picked recipient: pubkey (64-hex) + a display nym.
 class PmRecipient {
@@ -67,35 +71,95 @@ class NewPmModal extends ConsumerStatefulWidget {
 class _NewPmModalState extends ConsumerState<NewPmModal> {
   final _recipientController = TextEditingController();
   final _groupNameController = TextEditingController();
+  final _groupDescController = TextEditingController();
+  final _messageController = TextEditingController();
   final List<PmRecipient> _recipients = [];
 
+  /// Group-creation extras (revealed for ≥2 recipients, index.html:319-347).
+  String? _groupAvatarPath;
+  String? _groupBannerPath;
+  bool _allowInvites = true; // `newGroupAllowInvites` checked by default
+
   bool get _groupMode => _recipients.length >= 2;
+
+  @override
+  void initState() {
+    super.initState();
+    _recipientController.addListener(_onRecipientInput);
+  }
 
   @override
   void dispose() {
     _recipientController.dispose();
     _groupNameController.dispose();
+    _groupDescController.dispose();
+    _messageController.dispose();
     super.dispose();
+  }
+
+  void _onRecipientInput() => setState(() {}); // refresh suggestions live
+
+  /// Live recipient suggestions (`onNewPMRecipientInput` / `pmSuggestions`,
+  /// index.html:312): known users whose nym matches the current input, minus
+  /// self and already-picked recipients. Empty input → no suggestions.
+  List<User> get _suggestions {
+    final raw = _recipientController.text.trim().replaceFirst(RegExp(r'^@'), '');
+    if (raw.isEmpty) return const [];
+    final query = raw.toLowerCase();
+    final self = ref.read(appStateProvider).selfPubkey;
+    final picked = _recipients.map((r) => r.pubkey).toSet();
+    final out = <User>[];
+    for (final u in ref.read(usersProvider).values) {
+      if (u.pubkey == self || picked.contains(u.pubkey)) continue;
+      final nym = u.nym.toLowerCase();
+      if (nym.contains(query) ||
+          stripPubkeySuffix(u.nym).toLowerCase().contains(query)) {
+        out.add(u);
+      }
+      if (out.length >= 8) break;
+    }
+    return out;
+  }
+
+  void _addRecipient(String pubkey, String nym) {
+    if (pubkey == ref.read(appStateProvider).selfPubkey) return;
+    if (_recipients.any((r) => r.pubkey == pubkey)) {
+      _recipientController.clear();
+      return;
+    }
+    setState(() {
+      _recipients.add(PmRecipient(pubkey, nym));
+      _recipientController.clear();
+    });
   }
 
   void _addFromInput() {
     final users = ref.read(usersProvider);
     final pk = resolveRecipientPubkey(_recipientController.text, users);
     if (pk == null) return;
-    if (pk == ref.read(appStateProvider).selfPubkey) return;
-    if (_recipients.any((r) => r.pubkey == pk)) {
-      _recipientController.clear();
-      return;
-    }
     final nym = users[pk]?.nym ?? getNymFromPubkey('anon', pk);
-    setState(() {
-      _recipients.add(PmRecipient(pk, nym));
-      _recipientController.clear();
-    });
+    _addRecipient(pk, nym);
   }
 
   void _remove(String pubkey) {
     setState(() => _recipients.removeWhere((r) => r.pubkey == pubkey));
+  }
+
+  Future<void> _pickGroupImage(bool avatar) async {
+    try {
+      final picker = ImagePicker();
+      final file = await picker.pickImage(source: ImageSource.gallery);
+      if (file == null || !mounted) return;
+      setState(() {
+        if (avatar) {
+          _groupAvatarPath = file.path;
+        } else {
+          _groupBannerPath = file.path;
+        }
+      });
+    } catch (_) {
+      // Picker unavailable (tests / desktop) — ignore.
+    }
   }
 
   Future<void> _start() async {
@@ -108,10 +172,21 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
       final name = _groupNameController.text.trim().isNotEmpty
           ? _groupNameController.text.trim()
           : _recipients.map((r) => stripPubkeySuffix(r.nym)).take(3).join(', ');
+      // TODO(ui-parity): thread group avatar/banner/description/allowInvites
+      // through createGroup once Foundations extends its signature. The fields
+      // are collected here; see CROSS-FILE NEEDS. createGroup keeps its current
+      // 2-arg signature so this stays compiling.
       await controller.createGroup(
         name,
         _recipients.map((r) => r.pubkey).toList(),
       );
+    }
+    // Send the optional initial message into the just-opened conversation
+    // (`pmInitialMessage` → first DM/group send, index.html:348-351). After
+    // startPM/createGroup the active view IS the new conversation.
+    final initial = _messageController.text.trim();
+    if (initial.isNotEmpty) {
+      await controller.sendCurrent(initial);
     }
     if (mounted) Navigator.of(context).maybePop();
   }
@@ -199,6 +274,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                           ),
                         ),
                       ),
+                      _suggestionsList(c),
                       if (_groupMode) ...[
                         const SizedBox(height: 16),
                         _label(c, 'Group Name (optional)'),
@@ -206,13 +282,47 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                         TextField(
                           controller: _groupNameController,
                           maxLength: 40,
+                          onChanged: (_) => setState(() {}),
                           style: TextStyle(color: c.text, fontSize: 14),
                           decoration: _inputDecoration(
                             c,
                             'Enter a group name...',
                           ).copyWith(counterText: ''),
                         ),
+                        // `pmGroupNameCharCount 0/40` (index.html:317).
+                        _charCount(c, _groupNameController.text.length, 40),
+                        const SizedBox(height: 16),
+                        _groupMediaSection(c),
+                        const SizedBox(height: 16),
+                        _label(c, 'Description (optional)'),
+                        const SizedBox(height: 8),
+                        TextField(
+                          controller: _groupDescController,
+                          maxLength: 150,
+                          maxLines: 3,
+                          onChanged: (_) => setState(() {}),
+                          style: TextStyle(color: c.text, fontSize: 14),
+                          decoration: _inputDecoration(
+                            c,
+                            "What's this group about?",
+                          ).copyWith(counterText: ''),
+                        ),
+                        // `newGroupDescCharCount 0/150` (index.html:339).
+                        _charCount(c, _groupDescController.text.length, 150),
+                        const SizedBox(height: 12),
+                        _allowInvitesRow(c),
                       ],
+                      // `pmInitialMessage` — "Message (optional)" (index.html:348).
+                      const SizedBox(height: 16),
+                      _label(c, 'Message (optional)'),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: _messageController,
+                        maxLines: 3,
+                        style: TextStyle(color: c.text, fontSize: 14),
+                        decoration:
+                            _inputDecoration(c, 'Start the conversation...'),
+                      ),
                     ],
                   ),
                 ),
@@ -256,6 +366,165 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
           letterSpacing: 0.5,
         ),
       );
+
+  /// `.input-char-count` — warn at 80%, limit at 100% (updateFieldCharCount).
+  Widget _charCount(NymColors c, int len, int max) => Align(
+        alignment: Alignment.centerRight,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            '$len/$max',
+            style: TextStyle(
+              fontSize: 11,
+              color: len >= max
+                  ? c.danger
+                  : (len >= max * 0.8 ? c.warning : c.textDim),
+            ),
+          ),
+        ),
+      );
+
+  /// `.pm-suggestions` (index.html:312) — live matches from known users; tap to
+  /// add a recipient chip.
+  Widget _suggestionsList(NymColors c) {
+    final suggestions = _suggestions;
+    if (suggestions.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      constraints: const BoxConstraints(maxHeight: 200),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: NymRadius.rxs,
+        border: Border.all(color: c.glassBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ListView(
+        shrinkWrap: true,
+        padding: EdgeInsets.zero,
+        children: [
+          for (final u in suggestions)
+            InkWell(
+              onTap: () => _addRecipient(u.pubkey, u.nym),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: Row(
+                  children: [
+                    NymAvatar(
+                      seed: u.nym.isNotEmpty ? u.nym : u.pubkey,
+                      size: 24,
+                      imageUrl: u.profile?.picture,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        u.nym,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: c.text, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// `newGroupMediaGroup` (index.html:319-335) — group avatar + banner pickers.
+  Widget _groupMediaSection(NymColors c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _label(c, 'Group Avatar & Banner (optional)'),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            // Avatar tile.
+            GestureDetector(
+              onTap: () => _pickGroupImage(true),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  color: c.glassBg,
+                  child: _groupAvatarPath != null
+                      ? Image.file(File(_groupAvatarPath!), fit: BoxFit.cover)
+                      : Icon(Icons.group, color: c.textDim, size: 26),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            // Banner tile.
+            Expanded(
+              child: GestureDetector(
+                onTap: () => _pickGroupImage(false),
+                child: Container(
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: c.glassBg,
+                    borderRadius: NymRadius.rxs,
+                    border: Border.all(color: c.glassBorder),
+                    image: _groupBannerPath != null
+                        ? DecorationImage(
+                            image: FileImage(File(_groupBannerPath!)),
+                            fit: BoxFit.cover)
+                        : null,
+                  ),
+                  alignment: Alignment.center,
+                  child: _groupBannerPath == null
+                      ? Text('Add banner',
+                          style: TextStyle(color: c.textDim, fontSize: 12))
+                      : null,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// `newGroupAllowInvites` (index.html:341-347) — checked by default; off ⇒
+  /// only the owner can add members.
+  Widget _allowInvitesRow(NymColors c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: () => setState(() => _allowInvites = !_allowInvites),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 22,
+                height: 22,
+                child: Checkbox(
+                  value: _allowInvites,
+                  onChanged: (v) => setState(() => _allowInvites = v ?? true),
+                  activeColor: c.primary,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text('Allow members to add others',
+                  style: TextStyle(color: c.text, fontSize: 13)),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 30, top: 2),
+          child: Text(
+            'When off, only you (the group owner) can add new members.',
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
+        ),
+      ],
+    );
+  }
 
   InputDecoration _inputDecoration(NymColors c, String hint, {Widget? suffix}) {
     return InputDecoration(

@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
 
+import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/storage/secure_store.dart';
 import '../../state/settings_provider.dart';
+import '../../widgets/common/app_dialog.dart';
 import 'identity_vault.dart';
 
 /// Provides the [IdentityVault] wired to the app key/value + secure stores.
@@ -107,15 +109,6 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
           'Your identity key is encrypted at rest (${vault.method}).',
           style: TextStyle(color: c.textDim, fontSize: 13),
         ),
-        if (vault.method != 'biometric') ...[
-          const SizedBox(height: 14),
-          TextField(
-            controller: _pw,
-            obscureText: true,
-            style: TextStyle(color: c.text),
-            decoration: _decoration(c, 'Enter password/PIN to turn off'),
-          ),
-        ],
         if (_error != null) ...[
           const SizedBox(height: 8),
           Text(_error!, style: TextStyle(color: c.danger, fontSize: 12)),
@@ -299,6 +292,7 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
     setState(() => _error = null);
     String password;
     if (vault.method == 'biometric') {
+      // Passkey/biometric: fresh authenticator challenge (`_vaultReauth`).
       final ok = await _biometricAuth();
       if (!ok) {
         setState(() => _error = 'Biometric authentication failed.');
@@ -306,7 +300,25 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
       }
       password = await _deviceBiometricSecret();
     } else {
-      password = _pw.text;
+      // Password/PIN: a separate "Confirm it's you" prompt before turning off,
+      // matching the PWA's `_vaultReauth` (key-vault.js:479-498) instead of an
+      // inline field. Verify the factor, then disable only on success.
+      final entered = await showAppPrompt(
+        context,
+        'Enter your password or PIN to turn off identity encryption.',
+        title: "Confirm it's you",
+        okLabel: 'Confirm',
+        placeholder: 'Password or PIN',
+      );
+      if (entered == null) return; // cancelled
+      final ok = await vault.verifyPassword(entered);
+      if (!mounted) return;
+      if (!ok) {
+        setState(() =>
+            _error = 'Re-authentication failed. Encryption was not turned off.');
+        return;
+      }
+      password = entered;
     }
     setState(() => _busy = true);
     try {
@@ -352,4 +364,57 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
     }
     return s;
   }
+}
+
+/// Cross-device "Protect your identity here too?" nudge — the native port of
+/// `maybePromptEncryptAtRest` (key-vault.js:415-437). Call once AFTER settings
+/// sync completes. If the user enabled identity encryption on another device
+/// (`encryptAtRestPref`), this device isn't encrypted yet, a secret is
+/// persisted, and the prompt wasn't dismissed, it offers to set encryption up
+/// here. "Set up" opens [VaultSettingsModal]; both choices persist the
+/// dismissed flag so it shows at most once.
+///
+/// Returns true when the prompt was shown. Safe to call when conditions aren't
+/// met (returns false without UI). The trigger (calling this after sync) lives
+/// in the controller — see this slice's CROSS-FILE NEEDS.
+Future<bool> maybePromptEncryptAtRest(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final kv = ref.read(keyValueStoreProvider);
+  final vault = ref.read(identityVaultProvider);
+  if (vault.isEnabled) return false;
+  if (!kv.getBool(StorageKeys.encryptAtRestPref)) return false;
+  if (kv.getBool(StorageKeys.encryptAtRestPromptDismissed)) return false;
+
+  // Only nudge if there's actually a persisted identity secret to protect
+  // (`_hasPersistedSecret`). Mirrors the PWA's guard.
+  final secure = SecureStore();
+  var hasSecret = false;
+  for (final name in SecretKeys.all) {
+    if ((await secure.get(name))?.isNotEmpty ?? false) {
+      hasSecret = true;
+      break;
+    }
+  }
+  if (!hasSecret) return false;
+  if (!context.mounted) return false;
+
+  // Persist dismissed up-front (the PWA dismisses on either choice).
+  await kv.setBool(StorageKeys.encryptAtRestPromptDismissed, true);
+  if (!context.mounted) return true;
+
+  final setUp = await showAppConfirm(
+    context,
+    'You protect your identity key with encryption on another device. Set it '
+    "up on this device as well so your saved key can't be read without "
+    "unlocking. You'll choose a password, PIN, or passkey for this device.",
+    title: 'Protect your identity here too?',
+    okLabel: 'Set up',
+    cancelLabel: 'Not now',
+  );
+  if (setUp && context.mounted) {
+    await VaultSettingsModal.open(context);
+  }
+  return true;
 }

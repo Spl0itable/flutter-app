@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../services/api/api_client.dart';
 import '../../state/nostr_controller.dart';
 import 'shop_catalog.dart';
@@ -236,10 +237,24 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     );
   }
 
+  void _selectTab(ShopTab t) {
+    setState(() => _tab = t);
+    // Entering the limited tab kicks off the public supply fetch (F5).
+    if (t == ShopTab.limited) {
+      final ids = ShopCatalog.limited
+          .where((i) => i.maxSupply != null)
+          .map((i) => i.id)
+          .toList();
+      if (ids.isNotEmpty) {
+        ref.read(shopControllerProvider.notifier).fetchSupply(ids);
+      }
+    }
+  }
+
   Widget _tabButton(NymColors c, ShopTab t) {
     final active = _tab == t;
     return GestureDetector(
-      onTap: () => setState(() => _tab = t),
+      onTap: () => _selectTab(t),
       child: Container(
         margin: const EdgeInsets.only(right: 4),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
@@ -268,38 +283,186 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     );
   }
 
+  /// Fixed card width (mirrors the PWA `.shop-items` flex columns); cards size to
+  /// their content height so taller inventory/bundle cards don't overflow.
+  static const double _cardWidth = 214;
+
   Widget _body(NymColors c) {
     final state = ref.watch(shopControllerProvider);
+    if (_tab == ShopTab.inventory) {
+      return _inventoryBody(c, state);
+    }
+    if (_tab == ShopTab.limited) {
+      return _limitedBody(c, state);
+    }
     final items = _itemsForTab(_tab, state);
-    if (_tab == ShopTab.inventory && items.isEmpty) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: _cardWrap(c, state, items),
+    );
+  }
+
+  /// A wrapping row of item cards (PWA `.shop-items` flex-wrap).
+  Widget _cardWrap(NymColors c, ShopState state, List<ShopItem> items) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: [
+        for (final item in items)
+          SizedBox(width: _cardWidth, child: _card(c, state, item)),
+      ],
+    );
+  }
+
+  Widget _card(
+    NymColors c,
+    ShopState state,
+    ShopItem item, {
+    bool inventory = false,
+    ShopAvailability? availability,
+  }) {
+    return _ShopItemCard(
+      item: item,
+      owned: state.owns(item.id),
+      active: _isActive(item, state.active),
+      inventory: inventory,
+      ownedItem: inventory ? state.owned[item.id] : null,
+      availability: availability,
+      // Stamp a sample Genesis edition (#69) only on the unowned preview; the
+      // inventory shows the owner's real edition via ShopEditionNumber instead.
+      sampleEdition:
+          (!inventory && item.id == 'flair-genesis') ? 69 : null,
+      onBuy: () => _buy(item),
+      onActivate: () => _activate(item),
+      onGift: () => _gift(item),
+      onTransfer: () => _transfer(item),
+    );
+  }
+
+  /// The Limited & Bundles tab (F5/F6): limited drops with supply badges +
+  /// soldout/soon/ended gating, then bundles with content chips + savings. The
+  /// supply fetch is kicked off when the tab is selected (`_selectTab`).
+  Widget _limitedBody(NymColors c, ShopState state) {
+    final ctrl = ref.read(shopControllerProvider.notifier);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _categoryTitle(c, 'Limited Editions'),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final item in ShopCatalog.limited)
+                SizedBox(
+                  width: _cardWidth,
+                  child: _card(
+                    c,
+                    state,
+                    item,
+                    availability: ctrl.availability(item),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 24),
+          _categoryTitle(c, 'Bundles'),
+          const SizedBox(height: 12),
+          _cardWrap(c, state, ShopCatalog.bundles),
+        ],
+      ),
+    );
+  }
+
+  /// The My Items (inventory) tab (F9): a live self-message preview, the
+  /// active-items summary blocks, then every purchased item with its edition #,
+  /// acquired date, recovery code and Transfer action.
+  Widget _inventoryBody(NymColors c, ShopState state) {
+    final owned = state.owned.keys
+        .map(ShopCatalog.byId)
+        .whereType<ShopItem>()
+        .toList();
+    if (owned.isEmpty) {
       return Padding(
         padding: const EdgeInsets.all(40),
         child: Text(
-          'You don\'t own any items yet. Buy flair to see it here.',
+          'No items purchased yet',
           textAlign: TextAlign.center,
           style: TextStyle(color: c.textDim),
         ),
       );
     }
-    return GridView.builder(
+    final active = state.active;
+    final activeStyle = active.style != null
+        ? ShopCatalog.byId(active.style!)
+        : null;
+    final activeFlairs = active.flair
+        .map(ShopCatalog.byId)
+        .whereType<ShopItem>()
+        .toList();
+    final activeCosmetics = active.cosmetics
+        .map(ShopCatalog.byId)
+        .whereType<ShopItem>()
+        .toList();
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      shrinkWrap: true,
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 230,
-        mainAxisExtent: 220,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _categoryTitle(c, 'My Items'),
+          const SizedBox(height: 12),
+          _ActiveItemsPreview(active: active),
+          if (activeStyle != null)
+            _ActiveSummaryBlock(
+              title: 'Active Message Style',
+              chips: [activeStyle.name],
+            ),
+          if (activeFlairs.isNotEmpty)
+            _ActiveSummaryBlock(
+              title: 'Active Nickname Flair',
+              chips: [for (final f in activeFlairs) f.name],
+            ),
+          if (activeCosmetics.isNotEmpty)
+            _ActiveSummaryBlock(
+              title: 'Active Special Items',
+              chips: [for (final x in activeCosmetics) x.name],
+            ),
+          const SizedBox(height: 8),
+          _categoryTitle(c, 'All Purchased Items'),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final item in owned)
+                SizedBox(
+                  width: _cardWidth,
+                  child: _card(c, state, item, inventory: true),
+                ),
+            ],
+          ),
+        ],
       ),
-      itemCount: items.length,
-      itemBuilder: (context, i) => _ShopItemCard(
-        item: items[i],
-        owned: state.owns(items[i].id),
-        active: _isActive(items[i], state.active),
-        inventory: _tab == ShopTab.inventory,
-        onBuy: () => _buy(items[i]),
-        onActivate: () => _activate(items[i]),
-        onGift: () => _gift(items[i]),
-        onTransfer: () => _transfer(items[i]),
+    );
+  }
+
+  /// The `.shop-category-title`: primary, 18px 700, bottom hairline.
+  Widget _categoryTitle(NymColors c, String text) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: c.primary,
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -469,6 +632,9 @@ class _ShopItemCard extends StatelessWidget {
     required this.onActivate,
     required this.onGift,
     required this.onTransfer,
+    this.ownedItem,
+    this.availability,
+    this.sampleEdition,
   });
 
   final ShopItem item;
@@ -483,16 +649,35 @@ class _ShopItemCard extends StatelessWidget {
   final VoidCallback onGift;
   final VoidCallback onTransfer;
 
+  /// The owned record (inventory tab) — surfaces edition #, acquired date and
+  /// recovery code (F9).
+  final OwnedItem? ownedItem;
+
+  /// Limited-tab availability — supply badge + soldout/soon/ended gating (F5).
+  final ShopAvailability? availability;
+
+  /// Sample edition stamped on a flair preview (e.g. Genesis #69 in the
+  /// limited tab); only affects the preview, not real ownership.
+  final int? sampleEdition;
+
   /// Bundles can't be gifted/transferred in the PWA (no recovery code per
   /// component on the client); only single items expose gift/transfer.
   bool get _giftable => item.type != 'bundle';
+
+  bool get _isBundle => item.type == 'bundle';
+
+  /// True when a limited item is not currently buyable (soon/ended/soldout) —
+  /// the Buy button is replaced with the status label (F5).
+  bool get _blockedByAvailability =>
+      availability != null && !availability!.isAvailable;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final legendary = item.isLegendary;
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.all(16),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: owned ? c.secondaryA(0.04) : Colors.white.withValues(alpha: 0.03),
         border: Border.all(
@@ -507,6 +692,7 @@ class _ShopItemCard extends StatelessWidget {
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: [
           ShopSvgIcon(
             svg: item.icon,
@@ -514,16 +700,55 @@ class _ShopItemCard extends StatelessWidget {
             color: legendary ? const Color(0xFFFFC440) : c.text,
           ),
           const SizedBox(height: 8),
-          Text(
-            item.name,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: c.text,
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Flexible(
+                child: Text(
+                  item.name,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: c.text,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              // Inventory: gold edition number after the name (F9).
+              if (ownedItem?.edition != null) ...[
+                const SizedBox(width: 6),
+                ShopEditionNumber(
+                  edition: ownedItem!.edition!,
+                  editionMax: ownedItem!.editionMax,
+                ),
+              ],
+            ],
           ),
+          // Inventory description + acquired date (F9).
+          if (inventory) ...[
+            const SizedBox(height: 4),
+            Text(
+              item.description,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            ),
+            if (ownedItem != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Acquired: ${_formatDate(ownedItem!.timestamp)}',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.textDim, fontSize: 10),
+              ),
+            ],
+          ],
           const SizedBox(height: 8),
+          // Limited-tab supply badge (F5).
+          if (availability != null && availability!.label.isNotEmpty) ...[
+            Center(child: ShopSupplyBadge(availability: availability!)),
+            const SizedBox(height: 8),
+          ],
+          // Preview region: bundle chips (F6) or the standard item preview (F4).
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
             alignment: Alignment.center,
@@ -533,9 +758,13 @@ class _ShopItemCard extends StatelessWidget {
               border: Border.all(color: c.glassBorder),
               borderRadius: NymRadius.rsm,
             ),
-            child: ShopItemPreview(item: item),
+            child: _isBundle
+                ? ShopBundlePreview(item: item)
+                : (sampleEdition != null && item.type == 'nickname-flair'
+                    ? _flairSamplePreview(c)
+                    : ShopItemPreview(item: item)),
           ),
-          const Spacer(),
+          const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -553,31 +782,86 @@ class _ShopItemCard extends StatelessWidget {
                   ),
                 ],
               ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (owned)
-                    _ActivateButton(
-                        active: active, onTap: onActivate, item: item)
-                  else ...[
-                    if (_giftable) ...[
-                      _PillButton(label: 'Gift', onTap: onGift),
-                      const SizedBox(width: 6),
-                    ],
-                    _BuyButton(onTap: onBuy),
-                  ],
-                  // Owned items in the inventory tab can be transferred away.
-                  if (owned && inventory && _giftable) ...[
-                    const SizedBox(width: 6),
-                    _PillButton(label: 'Transfer', onTap: onTransfer),
-                  ],
-                ],
+              Flexible(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _actions(c),
+                ),
               ),
             ],
           ),
+          // Inventory: recovery code + transfer (F9).
+          if (inventory && owned) ...[
+            if (ownedItem?.code != null && ownedItem!.code!.isNotEmpty)
+              RecoveryCodeRow(code: ownedItem!.code!),
+            if (_giftable) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: _PillButton(
+                    label: 'TRANSFER TO PUBKEY', onTap: onTransfer),
+              ),
+            ],
+          ],
         ],
       ),
     );
+    if (!legendary) return card;
+    // Legendary 45deg corner ribbon (F14). The ribbon is clipped to the card's
+    // rounded corner (PWA `.shop-item { overflow:hidden }`) while the card keeps
+    // its outer gold glow (which a whole-stack clip would crop).
+    return Stack(
+      children: [
+        card,
+        Positioned.fill(
+          child: ClipRRect(
+            borderRadius: NymRadius.rmd,
+            child: const Stack(children: [ShopLegendaryRibbon()]),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _actions(NymColors c) {
+    if (owned) {
+      return _ActivateButton(active: active, onTap: onActivate, item: item);
+    }
+    if (_blockedByAvailability) {
+      // soon/ended/soldout → status label instead of Buy (F5).
+      return Text(
+        availability!.label,
+        style: TextStyle(color: c.textDim, fontSize: 12),
+      );
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_giftable) ...[
+          _PillButton(label: 'Gift', onTap: onGift),
+          const SizedBox(width: 6),
+        ],
+        _BuyButton(onTap: onBuy),
+      ],
+    );
+  }
+
+  /// The flair preview with a stamped sample edition (Genesis #69), used in the
+  /// limited tab (`_renderLimitedCard`).
+  Widget _flairSamplePreview(NymColors c) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text('Your_Nick', style: TextStyle(fontWeight: FontWeight.w600)),
+        FlairBadge(flairId: item.id, edition: sampleEdition),
+      ],
+    );
+  }
+
+  /// `M/D/YYYY` from a ms-epoch timestamp (matches the inventory acquired date).
+  static String _formatDate(int msEpoch) {
+    final d = DateTime.fromMillisecondsSinceEpoch(msEpoch);
+    return '${d.month}/${d.day}/${d.year}';
   }
 }
 
@@ -607,6 +891,200 @@ class _PillButton extends StatelessWidget {
             fontSize: 12,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The live "Preview" self-message at the top of the inventory tab
+/// (`_renderActiveItemsPreview`): your nym with the active style + flair +
+/// supporter + cosmetics, over "This is how your messages look." Built locally
+/// from [ShopCatalog] visuals + the shop's badge widgets.
+class _ActiveItemsPreview extends ConsumerWidget {
+  const _ActiveItemsPreview({required this.active});
+
+  final ActiveItems active;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final supporter = active.supporter;
+    final cosmetics =
+        active.cosmetics.where((x) => x != 'cosmetic-redacted').toList();
+    final redacted = active.cosmetics.contains('cosmetic-redacted');
+    final hasActive = active.style != null ||
+        supporter ||
+        cosmetics.isNotEmpty ||
+        active.flair.isNotEmpty;
+    if (!hasActive) return const SizedBox.shrink();
+
+    final id = ref.watch(nostrControllerProvider).identity;
+    final nym = id != null ? stripPubkeySuffix(id.nym) : 'You';
+    final suffix = id != null ? getPubkeySuffix(id.pubkey) : '';
+    final flairId = active.flair.isNotEmpty ? active.flair.last : null;
+    final isGenesis = flairId == 'flair-genesis';
+    final edition = flairId != null ? active.editions[flairId] : null;
+
+    // Author line: <nym#suffix> + flair + supporter badge. Genesis bolds the
+    // nym (suffix stays w400); redacted dims the author.
+    final authorColor = redacted ? c.textDim : c.secondary;
+    final author = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(
+                text: '<$nym',
+                style: TextStyle(
+                  color: authorColor,
+                  fontWeight: isGenesis ? FontWeight.w700 : FontWeight.w600,
+                ),
+              ),
+              TextSpan(
+                text: '#$suffix>',
+                style: TextStyle(color: authorColor, fontWeight: FontWeight.w400),
+              ),
+            ]),
+          ),
+        ),
+        if (flairId != null)
+          FlairBadge(flairId: flairId, edition: edition, size: 16),
+        if (supporter) const SupporterBadge(),
+      ],
+    );
+
+    // Content bubble: active style's text treatment + cosmetic aura.
+    Widget content;
+    if (redacted) {
+      content = const ShopCosmeticBubblePreview(
+        cosmeticId: 'cosmetic-redacted',
+      );
+    } else if (active.style != null &&
+        ShopCatalog.styleVisuals.containsKey(active.style)) {
+      content = ShopStyleBubblePreview(
+        styleId: active.style!,
+        text: 'This is how your messages look.',
+      );
+    } else if (supporter) {
+      content = const _SupporterContentLine();
+    } else {
+      content = Text(
+        'This is how your messages look.',
+        style: TextStyle(color: c.text, fontSize: 12),
+      );
+    }
+    // Wrap in the first active aura cosmetic's bubble decoration, if any.
+    if (cosmetics.isNotEmpty &&
+        ShopCatalog.cosmeticVisuals.containsKey(cosmetics.first)) {
+      final v = ShopCatalog.cosmeticVisuals[cosmetics.first]!;
+      content = Container(
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: v.borderLeft != null
+              ? Border(left: BorderSide(color: v.borderLeft!, width: 3))
+              : null,
+          boxShadow: v.boxShadows,
+        ),
+        child: content,
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.04),
+        border: Border.all(color: c.secondaryA(0.20)),
+        borderRadius: NymRadius.rsm,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Preview',
+              style: TextStyle(color: c.secondary, fontSize: 14)),
+          const SizedBox(height: 10),
+          author,
+          const SizedBox(height: 6),
+          Align(alignment: Alignment.centerLeft, child: content),
+        ],
+      ),
+    );
+  }
+}
+
+/// The supporter content line ("This is how your messages look." in gold).
+class _SupporterContentLine extends StatelessWidget {
+  const _SupporterContentLine();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0x14FFD700),
+        border:
+            const Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Text(
+        'This is how your messages look.',
+        style: TextStyle(
+          color: Color(0xFFFFD700),
+          fontSize: 12,
+          shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+        ),
+      ),
+    );
+  }
+}
+
+/// An active-items summary block (`.shop-active-items`): a secondary-tinted
+/// panel with a title + a row of pill chips (F9).
+class _ActiveSummaryBlock extends StatelessWidget {
+  const _ActiveSummaryBlock({required this.title, required this.chips});
+
+  final String title;
+  final List<String> chips;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.04),
+        border: Border.all(color: c.secondaryA(0.20)),
+        borderRadius: NymRadius.rsm,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyle(color: c.secondary, fontSize: 14)),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 5,
+            runSpacing: 5,
+            children: [
+              for (final chip in chips)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: c.secondaryA(0.10),
+                    border: Border.all(color: c.secondary),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(chip,
+                      style: TextStyle(color: c.text, fontSize: 12)),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -885,6 +1363,15 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   ShopInvoice? _invoice;
   Timer? _pollTimer;
 
+  // Purchase-success details revealed in the `paid` phase (F10).
+  bool _isGift = false;
+  String? _successCode;
+  int? _successEdition;
+  int? _successEditionMax;
+
+  /// Per-component recovery codes for a bundle purchase: (name, code).
+  List<({String name, String code})> _bundleCodes = const [];
+
   @override
   void initState() {
     super.initState();
@@ -956,12 +1443,20 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   Future<void> _claim(ShopInvoice inv, ShopIdentity identity) async {
     setState(() => _phase = _BuyPhase.claiming);
     try {
-      await _ctrl.claim(inv.invoiceId, identity: identity);
+      final data = await _ctrl.claim(inv.invoiceId, identity: identity);
       if (!mounted) return;
+      _captureSuccess(data);
+      // A limited purchase changes remaining supply; force a refresh next view.
+      if (widget.item.maxSupply != null) _ctrl.invalidateSupply();
       setState(() => _phase = _BuyPhase.paid);
-      Future<void>.delayed(const Duration(seconds: 2), () {
-        if (mounted) Navigator.of(context).pop(true);
-      });
+      // shop.js: don't auto-close while a recovery code is on screen — the user
+      // must tap Close to dismiss so they can save it. With no code (e.g. a
+      // gift), auto-close after 2s.
+      if (!_hasRecoveryReveal) {
+        Future<void>.delayed(const Duration(seconds: 2), () {
+          if (mounted) Navigator.of(context).pop(true);
+        });
+      }
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -970,6 +1465,40 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       });
     }
   }
+
+  /// Extracts the recovery code / edition / bundle codes from a `shop-claim`
+  /// response (shop.js `_renderShopSuccess`).
+  void _captureSuccess(Map<String, dynamic> data) {
+    _isGift = data['gift'] == true;
+    final edition = data['edition'];
+    if (edition is Map) {
+      _successEdition = (edition['n'] as num?)?.toInt();
+      _successEditionMax = (edition['max'] as num?)?.toInt();
+    }
+    final bundle = data['bundle'];
+    if (!_isGift && bundle is List) {
+      _bundleCodes = [
+        for (final b in bundle)
+          if (b is Map && b['code'] != null)
+            (
+              name: ShopCatalog.byId(b['itemId']?.toString() ?? '')?.name ??
+                  (b['itemId']?.toString() ?? ''),
+              code: b['code'].toString(),
+            ),
+      ];
+    }
+    // Single-item recovery code (not shown for gifts).
+    if (!_isGift && _bundleCodes.isEmpty) {
+      _successCode = data['code']?.toString();
+    }
+  }
+
+  /// True when the success view shows a recovery code (single or bundle) that
+  /// must be saved before dismissing.
+  bool get _hasRecoveryReveal =>
+      !_isGift &&
+      ((_successCode != null && _successCode!.isNotEmpty) ||
+          _bundleCodes.isNotEmpty);
 
   Future<void> _copy() async {
     final pr = _invoice?.pr;
@@ -988,13 +1517,30 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
     }
   }
 
-  /// Offline fallback for the unreachable-backend case: grant locally. Gifts
-  /// land in the recipient's inventory, so a gift purchase grants nothing here.
+  /// Offline fallback for the unreachable-backend case: grant locally, then show
+  /// the same success reveal (recovery code + edition) as the online path so the
+  /// user can still save their code. Gifts land in the recipient's inventory, so
+  /// a gift grants nothing here and just closes.
   Future<void> _manualConfirm() async {
-    if (widget.recipientPubkey == null) {
-      await _ctrl.claimAfterPayment(widget.item.id);
+    if (widget.recipientPubkey != null) {
+      _isGift = true;
+      if (mounted) Navigator.of(context).pop(true);
+      return;
     }
-    if (mounted) Navigator.of(context).pop(true);
+    await _ctrl.claimAfterPayment(widget.item.id);
+    if (widget.item.maxSupply != null) _ctrl.invalidateSupply();
+    // Surface the locally-granted code + edition from the persisted record.
+    final granted = ref.read(shopControllerProvider).owned[widget.item.id];
+    _successCode = granted?.code;
+    _successEdition = granted?.edition;
+    _successEditionMax = granted?.editionMax;
+    if (!mounted) return;
+    setState(() => _phase = _BuyPhase.paid);
+    if (!_hasRecoveryReveal) {
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (mounted) Navigator.of(context).pop(true);
+      });
+    }
   }
 
   @override
@@ -1009,25 +1555,30 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
             color: c.bgSecondary,
             borderRadius: NymRadius.rxl,
             clipBehavior: Clip.antiAlias,
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Purchasing ${widget.item.name}',
-                    style: TextStyle(
-                      color: c.text,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.85,
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Purchasing ${widget.item.name}',
+                      style: TextStyle(
+                        color: c.text,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text('${widget.item.price} sats',
-                      style: TextStyle(color: c.textDim, fontSize: 13)),
-                  const SizedBox(height: 16),
-                  ..._phaseBody(c),
-                ],
+                    const SizedBox(height: 4),
+                    Text('${widget.item.price} sats',
+                        style: TextStyle(color: c.textDim, fontSize: 13)),
+                    const SizedBox(height: 16),
+                    ..._phaseBody(c),
+                  ],
+                ),
               ),
             ),
           ),
@@ -1059,9 +1610,54 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       case _BuyPhase.paid:
         return [
           const SizedBox(height: 8),
-          const Text('⚡', style: TextStyle(fontSize: 40)),
+          const Text('✅', style: TextStyle(fontSize: 32)),
+          const SizedBox(height: 8),
+          Text(
+            _isGift ? 'Gift sent!' : 'Purchase successful!',
+            style: TextStyle(color: c.text, fontSize: 15),
+          ),
           const SizedBox(height: 4),
-          Text('Purchase complete!', style: TextStyle(color: c.primary)),
+          Text(widget.item.name,
+              style: TextStyle(color: c.textBright, fontSize: 16)),
+          // Edition number (F10): "Edition #n of max".
+          if (_successEdition != null) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Edition #$_successEdition of ${_successEditionMax ?? '?'}',
+              style: TextStyle(color: c.text, fontSize: 16),
+            ),
+          ],
+          // Recovery code reveal (F10): single or per-bundle-component.
+          if (_bundleCodes.isNotEmpty)
+            _recoveryWarningBlock(
+              c,
+              title: '⚠️ SAVE YOUR RECOVERY CODES',
+              children: [
+                for (final b in _bundleCodes)
+                  RecoveryCodeRow(code: b.code, label: b.name),
+              ],
+            )
+          else if (_successCode != null && _successCode!.isNotEmpty)
+            _recoveryWarningBlock(
+              c,
+              title: '⚠️ SAVE YOUR RECOVERY CODE',
+              children: [
+                Text(
+                  'Use this code to restore this item on another pubkey:',
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+                RecoveryCodeRow(code: _successCode!, label: ''),
+              ],
+            ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: c.primary),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Close'),
+            ),
+          ),
         ];
       case _BuyPhase.error:
         return [
@@ -1132,4 +1728,37 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
         onPressed: () => Navigator.of(context).pop(false),
         child: Text('Cancel', style: TextStyle(color: c.textDim)),
       );
+
+  /// The prominent "SAVE YOUR RECOVERY CODE(S)" panel (`.nm-shop-12/.nm-shop-13`,
+  /// `no-inline.css:119-122`): a warning-bordered tertiary box (F10).
+  Widget _recoveryWarningBlock(
+    NymColors c, {
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(top: 20),
+      padding: const EdgeInsets.all(15),
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: c.bgTertiary,
+        border: Border.all(color: c.warning),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              color: c.warning,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 10),
+          ...children,
+        ],
+      ),
+    );
+  }
 }

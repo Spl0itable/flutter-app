@@ -450,6 +450,17 @@ class NostrController {
           shopFlair: e.tagValue('shop-flair'),
           isSupporter: e.tagsNamed('shop-supporter')
               .any((t) => t.length > 1 && t[1] == '1'),
+          // Inlined special cosmetics + Genesis edition (one `shop-cosmetic` tag
+          // per active cosmetic; a `shop-edition` tag carries the Genesis number).
+          // The PWA's canonical source is the backend `shop-status` fetch
+          // (active.cosmetics/active.editions); these inlined tags let presence
+          // carry them without a round-trip. See CROSS-FILE NEED for the fetch.
+          shopCosmetics: e
+              .tagsNamed('shop-cosmetic')
+              .where((t) => t.length > 1 && t[1].isNotEmpty)
+              .map((t) => t[1])
+              .toList(),
+          shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
   }
 
@@ -2519,6 +2530,44 @@ class NostrController {
     await service.pool.publish(signed);
   }
 
+  /// Builds, signs and publishes a NIP-56 kind-1984 report event for [pubkey]
+  /// (optionally about a specific [messageId]), mirroring `submitReport`
+  /// (`ui-context.js:312-352`). [type] is the NIP-56 report-type string used as
+  /// the third element of the `p`/`e` tags (e.g. `nudity`, `spam`, `illegal`,
+  /// `profanity`, `impersonation`, `other`); [details] is the free-text content.
+  /// Surfaces a system message on success/failure (matching the PWA).
+  Future<bool> submitReport({
+    required String pubkey,
+    String? messageId,
+    required String type,
+    String? details,
+  }) async {
+    final service = _service;
+    final identity = _identity;
+    final sig = _signer;
+    if (service == null || identity == null || sig == null) return false;
+    try {
+      final tags = <List<String>>[
+        ['p', pubkey, type],
+        if (messageId != null && messageId.isNotEmpty) ['e', messageId, type],
+      ];
+      final unsigned = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        kind: 1984,
+        tags: tags,
+        content: details ?? '',
+      );
+      final signed = await sig.sign(unsigned);
+      await service.pool.publish(signed);
+      _emitSystemMessage('Report submitted successfully');
+      return true;
+    } catch (_) {
+      _emitSystemMessage('Failed to submit report');
+      return false;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Nymbot interception (`?`/@Nymbot) — commands.js `_handleBotCommand`
   // ---------------------------------------------------------------------------
@@ -2526,6 +2575,18 @@ class NostrController {
   /// The verified Nymbot pubkey (`verifiedBot.pubkey`, app.js:1096).
   static const String nymbotPubkey =
       'fb242a282d605f5f8141da8087a3ff0c16b255935306b324b578b43c6cf54bb2';
+
+  /// The verified Nymchat developer pubkey (`verifiedDeveloper.pubkey`,
+  /// app.js:1090-1094). Used for the "Nymchat Developer" verified badge.
+  static const String verifiedDeveloperPubkey =
+      'd49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df';
+
+  /// True when [pubkey] is the verified developer (`isVerifiedDeveloper`,
+  /// users.js:62). Shared API for the profile card / mention dropdown / composer.
+  bool isVerifiedDeveloper(String pubkey) => pubkey == verifiedDeveloperPubkey;
+
+  /// True when [pubkey] is the verified Nymbot (`isVerifiedBot`, users.js:71).
+  bool isVerifiedBot(String pubkey) => pubkey == nymbotPubkey;
 
   /// True when [text] in a CHANNEL view should be routed to Nymbot instead of
   /// published as a normal message: a `?` command or an `@Nymbot` mention

@@ -1,13 +1,18 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../core/crypto/bech32_codec.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../services/nostr/nym_generator.dart';
+import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/common/nym_avatar.dart';
+import 'dev_nsec_modal.dart';
 import 'nym_identicon.dart';
 
 /// The profile / nickname editor (`#nickEditModal`, index.html:1149).
@@ -36,11 +41,24 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   late final TextEditingController _bio;
   late final TextEditingController _lightning;
 
+  /// The original bio / lightning so `_save` writes only changed fields and
+  /// never blanks an existing value (`changeNick`, app.js:2662-2691).
+  String _originalBio = '';
+  String _originalLightning = '';
+  String _originalNick = '';
+
+  /// The current avatar / banner URLs (kind-0 is a full replacement, so these
+  /// must be re-published when the user only edits bio/lightning, or the
+  /// existing avatar/banner would be dropped).
+  String? _currentAvatarUrl;
+  String? _currentBannerUrl;
+
   String? _avatarPath;
   String? _bannerPath;
   bool _revealOpen = false;
   bool _revealed = false; // gate passed (held)
   bool _nsecVisible = false;
+  bool _pubkeyOpen = false; // full-hex pubkey slideout
   bool _saving = false;
 
   @override
@@ -50,11 +68,20 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     final nym = id?.nym ?? '';
     // The nym is `name#suffix`; the input edits only the name part.
     final hash = nym.indexOf('#');
-    _nick = TextEditingController(
-      text: hash >= 0 ? nym.substring(0, hash) : nym,
-    );
-    _bio = TextEditingController();
-    _lightning = TextEditingController();
+    _originalNick = hash >= 0 ? nym.substring(0, hash) : nym;
+    _nick = TextEditingController(text: _originalNick);
+
+    // Pre-fill bio + lightning from the current profile so opening the editor
+    // shows existing values and saving can't silently blank them (app.js:2595).
+    final profile = id != null
+        ? ref.read(appStateProvider).users[id.pubkey]?.profile
+        : null;
+    _originalBio = profile?.about ?? '';
+    _originalLightning = profile?.lightningAddress ?? '';
+    _currentAvatarUrl = profile?.picture;
+    _currentBannerUrl = profile?.banner;
+    _bio = TextEditingController(text: _originalBio);
+    _lightning = TextEditingController(text: _originalLightning);
   }
 
   @override
@@ -216,12 +243,25 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               ),
             ),
             const SizedBox(width: 8),
-            Text(
-              _suffix,
-              style: TextStyle(
-                color: c.textDim,
-                fontFamily: 'monospace',
-                fontSize: 13,
+            // `.nym-suffix-clickable` (index.html:1159) — tap to view the full
+            // hex pubkey.
+            Tooltip(
+              message: 'Click to view full pubkey',
+              child: InkWell(
+                onTap: () => setState(() => _pubkeyOpen = !_pubkeyOpen),
+                borderRadius: NymRadius.rxs,
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Text(
+                    _suffix,
+                    style: TextStyle(
+                      color: c.primary,
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
@@ -233,12 +273,64 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             style: TextStyle(color: c.textDim, fontSize: 11),
           ),
         ),
+        if (_pubkeyOpen) _pubkeySlideout(c),
         _hint(
           c,
           'Your ephemeral pseudonym nickname for this session. The # and four '
           'characters identify this Nym\'s pubkey.',
         ),
       ],
+    );
+  }
+
+  /// The full-hex pubkey panel (`#pubkeySlideout`, index.html:1159-1169): a
+  /// title, an explanatory paragraph, the full pubkey, and a Copy button.
+  Widget _pubkeySlideout(NymColors c) {
+    final pk = _pubkey;
+    return Container(
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: NymRadius.rsm,
+        border: Border.all(color: c.glassBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Full Hex Pubkey',
+              style: TextStyle(
+                  color: c.text, fontSize: 12, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(
+            'This is your public key — a unique identifier derived from your '
+            'keypair. Share it so others can find and verify this Nym. It is '
+            'safe to share (unlike your private key).',
+            style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: SelectableText(
+                  pk,
+                  style: TextStyle(
+                    color: c.text,
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _smallButton(
+                c,
+                'Copy',
+                () => _copyToClipboard(pk, 'Pubkey copied'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -256,7 +348,13 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 height: 64,
                 child: _avatarPath != null
                     ? Image.file(File(_avatarPath!), fit: BoxFit.cover)
-                    : NymIdenticon(seed: _pubkey, size: 64),
+                    : (_currentAvatarUrl != null && _currentAvatarUrl!.isNotEmpty
+                        ? NymAvatar(
+                            seed: _pubkey,
+                            size: 64,
+                            imageUrl: _currentAvatarUrl,
+                          )
+                        : NymIdenticon(seed: _pubkey, size: 64)),
               ),
             ),
             const SizedBox(width: 12),
@@ -292,22 +390,31 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _label(c, 'Banner'),
-        Container(
-          height: 80,
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.03),
-            borderRadius: NymRadius.rsm,
-            border: Border.all(color: c.glassBorder),
-            image: _bannerPath != null
-                ? DecorationImage(
-                    image: FileImage(File(_bannerPath!)), fit: BoxFit.cover)
+        Builder(builder: (_) {
+          final remoteBanner = _bannerPath == null
+              ? proxiedAvatarUrl(_currentBannerUrl)
+              : null;
+          return Container(
+            height: 80,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.03),
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: c.glassBorder),
+              image: _bannerPath != null
+                  ? DecorationImage(
+                      image: FileImage(File(_bannerPath!)), fit: BoxFit.cover)
+                  : (remoteBanner != null
+                      ? DecorationImage(
+                          image: NetworkImage(remoteBanner), fit: BoxFit.cover)
+                      : null),
+            ),
+            alignment: Alignment.center,
+            child: (_bannerPath == null && remoteBanner == null)
+                ? Text('No banner set', style: TextStyle(color: c.textDim))
                 : null,
-          ),
-          alignment: Alignment.center,
-          child: _bannerPath == null
-              ? Text('No banner set', style: TextStyle(color: c.textDim))
-              : null,
-        ),
+          );
+        }),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -496,6 +603,13 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                   size: 18, color: c.textDim),
               onPressed: () => setState(() => _nsecVisible = !_nsecVisible),
             ),
+            // `copyRevealedNsec` (index.html:1243) — one-tap copy of the nsec.
+            if (nsec.isNotEmpty)
+              IconButton(
+                tooltip: 'Copy',
+                icon: Icon(Icons.copy, size: 16, color: c.textDim),
+                onPressed: () => _copyToClipboard(nsec, 'Private key copied'),
+              ),
           ],
         ),
       ],
@@ -509,8 +623,18 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
         border: Border(top: BorderSide(color: c.glassBorder)),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
         children: [
+          // `randomizeNick` (index.html:1249) — left-aligned third action.
+          OutlinedButton.icon(
+            onPressed: _saving ? null : _randomize,
+            icon: Icon(Icons.casino_outlined, size: 16, color: c.text),
+            label: Text('Randomize', style: TextStyle(color: c.text)),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(color: c.glassBorder),
+              shape: RoundedRectangleBorder(borderRadius: NymRadius.rxs),
+            ),
+          ),
+          const Spacer(),
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
             child: Text('Cancel', style: TextStyle(color: c.textDim)),
@@ -574,19 +698,46 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   }
 
   Future<void> _save() async {
+    final newNick = _nick.text.trim();
+    final nickChanged = newNick.isNotEmpty && newNick != _originalNick;
+
+    // Reserved nicknames ("Luxas") require proving the developer nsec before
+    // the rename is allowed (changeNick → isReservedNick gate, app.js:2693).
+    if (nickChanged && isReservedNick(newNick)) {
+      final verified = await DevNsecModal.open(context);
+      if (!mounted) return;
+      if (verified == null) {
+        // Cancelled the reserved-nick check: persist bio/lightning edits but
+        // keep the current nick (app.js:2705-2709).
+        await _persist(includeName: false);
+        return;
+      }
+    }
+
+    await _persist(includeName: nickChanged);
+  }
+
+  /// Publishes the kind-0 profile. Because a kind-0 is a full replacement, ALL
+  /// fields are sent from the prefilled controllers / current URLs — an
+  /// untouched bio/lightning/avatar is re-published as-is (never blanked); a
+  /// cleared field is intentionally blanked. [includeName] gates the rename so
+  /// a non-change (or a cancelled reserved-nick check) leaves the nick alone.
+  Future<void> _persist({required bool includeName}) async {
     setState(() => _saving = true);
+    final bio = _bio.text.trim();
+    final lightning = _lightning.text.trim();
     bool ok = false;
     try {
       ok = await ref.read(nostrControllerProvider).saveProfile(
-            name: _nick.text.trim().isEmpty ? null : _nick.text.trim(),
-            about: _bio.text.trim(),
-            // TODO(verify): upload the picked image to a host → URL. For now
-            // pass the local path through; the engine treats empty as "no
-            // change". A real implementation uploads to nostr.build / blossom.
-            picture: _avatarPath,
-            banner: _bannerPath,
-            lud16:
-                _lightning.text.trim().isEmpty ? null : _lightning.text.trim(),
+            name: includeName ? _nick.text.trim() : null,
+            about: bio,
+            // Picked file (new) else the existing URL, so editing only the bio
+            // doesn't drop the avatar/banner from the republished kind-0.
+            // TODO(verify): a picked local path should upload to a host → URL
+            // (nostr.build / blossom). The engine treats empty as "no change".
+            picture: _avatarPath ?? _currentAvatarUrl,
+            banner: _bannerPath ?? _currentBannerUrl,
+            lud16: lightning,
           );
     } catch (_) {
       ok = false;
@@ -598,6 +749,22 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
       SnackBar(
           content: Text(ok ? 'Profile updated' : 'Could not save profile')),
     );
+  }
+
+  /// Fills the nick field with a freshly generated random nym (Randomize,
+  /// app.js:2721 `randomizeNick`).
+  void _randomize() {
+    final pk = _pubkey;
+    final generated = NymGenerator().generate(pk);
+    final hash = generated.indexOf('#');
+    final base = hash >= 0 ? generated.substring(0, hash) : generated;
+    setState(() => _nick.text = base);
+  }
+
+  void _copyToClipboard(String value, String confirm) {
+    Clipboard.setData(ClipboardData(text: value));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(confirm)));
   }
 }
 

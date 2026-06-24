@@ -201,6 +201,11 @@ class BotChatController extends StateNotifier<BotChatState> {
 
   void setBalance(BotBalance b) => state = state.copyWith(balance: b);
 
+  /// `?clear` — wipes the local chat history and starts fresh (PWA
+  /// `_clearBotPMHistory`, pms.js:1894). Does not touch credits or the pinned
+  /// model.
+  void clearHistory() => state = state.copyWith(messages: const []);
+
   // --- Network ---------------------------------------------------------------
 
   /// Sends a private chat message and appends the reply (with reasoning split

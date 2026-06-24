@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -98,10 +99,14 @@ class GeoMapStyle {
 /// color stops, sampled to an RGBA lookup keyed by accumulated alpha.
 class _HeatPalette {
   _HeatPalette._(this._argb);
-  final List<int> _argb; // length 256, premultiplied-free ARGB.
+  final List<int> _argb; // length 256, non-premultiplied ARGB.
 
   static _HeatPalette? _cached;
   static _HeatPalette get instance => _cached ??= _build();
+
+  /// The raw alpha-indexed ARGB table (0..255). Mirrors the PWA's 256px palette
+  /// canvas (`getHeatPalette`) read back via `getImageData`.
+  List<int> get argb => _argb;
 
   static _HeatPalette _build() {
     // Stops: (offset, r, g, b, a) matching the canvas linear gradient.
@@ -132,12 +137,150 @@ class _HeatPalette {
     }
     return _HeatPalette._(out);
   }
+}
 
-  /// Color for an accumulated intensity alpha [a] in 0..255.
-  Color colorFor(int a) {
-    final argb = _argb[a.clamp(0, 255)];
-    return Color(argb);
+/// Immutable inputs that fully determine a precomputed heatmap image. Used as a
+/// cache key so the explorer only rebuilds the `ui.Image` when something that
+/// affects it actually changed (view/size/channel activity), matching the PWA's
+/// debounced `drawHeatmap`.
+@immutable
+class HeatmapInput {
+  const HeatmapInput({
+    required this.view,
+    required this.size,
+    required this.points,
+  });
+
+  final GeoView view;
+  final Size size;
+
+  /// (lng, lat, messages) per plotted channel.
+  final List<({double lng, double lat, int messages})> points;
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    if (other is! HeatmapInput) return false;
+    if (view != other.view || size != other.size) return false;
+    if (points.length != other.points.length) return false;
+    for (var i = 0; i < points.length; i++) {
+      final a = points[i], b = other.points[i];
+      if (a.lng != b.lng || a.lat != b.lat || a.messages != b.messages) {
+        return false;
+      }
+    }
+    return true;
   }
+
+  @override
+  int get hashCode => Object.hash(
+        view,
+        size,
+        points.length,
+        // Fold a cheap activity signature so repaints track message changes.
+        points.fold<int>(0, (h, p) => h ^ p.messages.hashCode),
+      );
+}
+
+/// Precomputes the additive-accumulation heatmap as a half-resolution
+/// `ui.Image`, a faithful port of `drawHeatmap` (geohash-globe.js:736-797).
+///
+/// Pipeline (cannot run inside the synchronous `CustomPainter.paint`):
+///   1. draw each channel as a **grayscale** radial blob
+///      (`rgba(0,0,0,intensity)` → `rgba(0,0,0,0)`) additively (`BlendMode.plus`)
+///      into a `(w*0.5, h*0.5)` picture so overlapping alphas SUM;
+///   2. rasterize and read back the RGBA bytes;
+///   3. per pixel, look up the 256-entry heat palette by the accumulated alpha
+///      (`palette.argb[a]`) so dense overlaps climb blue→green→yellow→red;
+///   4. `decodeImageFromPixels` back into a `ui.Image` the painter blits to full
+///      size with `FilterQuality.low`.
+///
+/// Returns null when there are no channels (caller clears the image).
+Future<ui.Image?> buildHeatmapImage(HeatmapInput input) async {
+  final points = input.points;
+  if (points.isEmpty) return null;
+
+  const heatScale = 0.5; // HEAT_SCALE
+  final size = input.size;
+  final view = input.view;
+  final w2 = math.max(1, (size.width * heatScale).floor());
+  final h2 = math.max(1, (size.height * heatScale).floor());
+
+  // baseRadius = clamp(22,70, 24 + zoom*3.5); radius = baseRadius * HEAT_SCALE.
+  final baseRadius = (24 + view.zoom * 3.5).clamp(22.0, 70.0).toDouble();
+  final radius = baseRadius * heatScale;
+
+  var maxMsg = 1;
+  for (final p in points) {
+    if (p.messages > maxMsg) maxMsg = p.messages;
+  }
+  final denom = math.log(maxMsg + 1) == 0 ? 1.0 : math.log(maxMsg + 1);
+
+  // 1) Accumulate grayscale blobs additively into a half-res picture.
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(
+    recorder,
+    Rect.fromLTWH(0, 0, w2.toDouble(), h2.toDouble()),
+  );
+  for (final pt in points) {
+    final p = view.project(pt.lng, pt.lat, size);
+    final sx = p.dx * heatScale, sy = p.dy * heatScale;
+    if (sx < -radius ||
+        sx > w2 + radius ||
+        sy < -radius ||
+        sy > h2 + radius) {
+      continue;
+    }
+    final weight = math.log(pt.messages + 1) / denom;
+    final intensity = (0.18 + 0.82 * weight).clamp(0.0, 1.0);
+    final a = (intensity * 255).round();
+    final center = Offset(sx, sy);
+    // Grayscale (black) radial falloff: alpha at center, 0 at the edge. With
+    // BlendMode.plus the alpha channel sums across overlapping blobs.
+    final shader = ui.Gradient.radial(center, radius, [
+      Color.fromARGB(a, 0, 0, 0),
+      const Color.fromARGB(0, 0, 0, 0),
+    ]);
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..shader = shader
+        ..blendMode = BlendMode.plus,
+    );
+  }
+
+  final picture = recorder.endRecording();
+  final accum = await picture.toImage(w2, h2);
+  picture.dispose();
+  final bytes =
+      await accum.toByteData(format: ui.ImageByteFormat.rawRgba);
+  accum.dispose();
+  if (bytes == null) return null;
+
+  // 2/3) Remap each pixel's accumulated alpha through the heat palette.
+  final argb = _HeatPalette.instance.argb;
+  final data = bytes.buffer.asUint8List();
+  for (var i = 0; i < data.length; i += 4) {
+    final a = data[i + 3];
+    if (a == 0) continue;
+    final c = argb[a]; // non-premultiplied ARGB at this accumulated alpha.
+    data[i] = (c >> 16) & 0xFF; // R
+    data[i + 1] = (c >> 8) & 0xFF; // G
+    data[i + 2] = c & 0xFF; // B
+    data[i + 3] = (c >> 24) & 0xFF; // A (the palette's own alpha at index `a`)
+  }
+
+  // 4) Decode the remapped pixels back into an image.
+  final completer = Completer<ui.Image>();
+  ui.decodeImageFromPixels(
+    data,
+    w2,
+    h2,
+    ui.PixelFormat.rgba8888,
+    completer.complete,
+  );
+  return completer.future;
 }
 
 /// Paints the equirectangular world map exactly like geohash-globe.js `draw()`:
@@ -154,6 +297,7 @@ class GeoMapPainter extends CustomPainter {
     required this.grid,
     this.hoveredGeohash,
     this.userLocation,
+    this.heatmapImage,
     this.repaint,
   }) : super(repaint: repaint);
 
@@ -166,6 +310,10 @@ class GeoMapPainter extends CustomPainter {
   final bool grid;
   final String? hoveredGeohash;
   final ({double lat, double lng})? userLocation;
+
+  /// Precomputed half-res accumulation+palette heatmap (`buildHeatmapImage`).
+  /// Built off the paint pass by the explorer; blitted to full size here.
+  final ui.Image? heatmapImage;
   final Listenable? repaint;
 
   bool _inView(Offset p, double pad, Size size) =>
@@ -181,10 +329,20 @@ class GeoMapPainter extends CustomPainter {
 
     _drawGraticule(canvas, size);
     _drawWorld(canvas, size);
+    // TODO(ui-parity): the PWA draws an admin-1 (state/province) border layer
+    // (`drawAdmin1`, zoom>=2.5, gap report F2) and its labels (`drawAdmin1Labels`,
+    // zoom>=4, F3) here, between world and country labels. DEFERRED: the source
+    // dataset `ne_50m_admin_1_states_provinces_lakes.json` is NOT bundled
+    // (assets/data/ holds only countries-110m.json). Vendoring it + a
+    // `decodeAdmin1` (topojson.dart) is required before this can be drawn.
     _drawLabels(canvas, size);
     if (heatmap) {
       _drawHeatmap(canvas, size);
     } else {
+      // TODO(ui-parity): the PWA also draws progressive city dots + labels here
+      // (`drawCities`, zoom>=2.5, gap report F4). DEFERRED: the source dataset
+      // `ne_50m_populated_places_simple.json` is NOT bundled. Vendoring it + a
+      // `decodeCities` (topojson.dart) is required before this can be drawn.
       _drawChannels(canvas, size);
     }
     if (daynight) _drawDaynight(canvas, size);
@@ -295,39 +453,24 @@ class GeoMapPainter extends CustomPainter {
 
   void _drawHeatmap(Canvas canvas, Size size) {
     if (channels.isEmpty) return;
-    final palette = _HeatPalette.instance;
-    final baseRadius =
-        (24 + view.zoom * 3.5).clamp(22.0, 70.0).toDouble();
 
-    var maxMsg = 1;
-    for (final ch in channels) {
-      if (ch.messages > maxMsg) maxMsg = ch.messages;
-    }
-    final denom = math.log(maxMsg + 1) == 0 ? 1.0 : math.log(maxMsg + 1);
-
-    // Accumulate intensity per blob with additive (lighter) compositing, then
-    // map accumulated alpha through the heat palette via a layer + blend.
-    canvas.saveLayer(Offset.zero & size, Paint());
-    for (final ch in channels) {
-      final p = view.project(ch.lng, ch.lat, size);
-      if (!_inView(p, baseRadius, size)) continue;
-      final weight = math.log(ch.messages + 1) / denom;
-      final intensity = (0.18 + 0.82 * weight).clamp(0.0, 1.0);
-      final alpha = (intensity * 255).round();
-      // Radial falloff colored by the palette at this blob's peak intensity.
-      final shader = ui.Gradient.radial(p, baseRadius, [
-        palette.colorFor(alpha),
-        palette.colorFor(0).withValues(alpha: 0),
-      ]);
-      canvas.drawCircle(
-        p,
-        baseRadius,
-        Paint()
-          ..shader = shader
-          ..blendMode = BlendMode.plus,
+    // Blit the precomputed half-res accumulation+palette image to full size
+    // (PWA: `drawImage(heatCanvas, 0,0, cssWidth, cssHeight)` with
+    // imageSmoothingQuality='low'). If the image hasn't been built yet (the
+    // explorer recomputes it asynchronously on view/activity change) just skip
+    // this frame — the next rebuild paints it.
+    final img = heatmapImage;
+    if (img != null) {
+      final src = Rect.fromLTWH(
+          0, 0, img.width.toDouble(), img.height.toDouble());
+      final dst = Offset.zero & size;
+      canvas.drawImageRect(
+        img,
+        src,
+        dst,
+        Paint()..filterQuality = FilterQuality.low,
       );
     }
-    canvas.restore();
 
     if (hoveredGeohash != null) {
       for (final ch in channels) {
@@ -512,5 +655,6 @@ class GeoMapPainter extends CustomPainter {
       old.grid != grid ||
       old.hoveredGeohash != hoveredGeohash ||
       old.userLocation != userLocation ||
+      old.heatmapImage != heatmapImage ||
       old.style != style;
 }

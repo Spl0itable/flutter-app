@@ -44,6 +44,17 @@ List<GeoFeature> decodeWorldTopoJson(String jsonString) {
   return _decodeWorld(topo);
 }
 
+// TODO(ui-parity): the PWA additionally decodes two Natural-Earth datasets that
+// are NOT bundled here (assets/data/ holds only countries-110m.json):
+//   - `decodeAdmin1` (geo-decode.js:102) over
+//     `ne_50m_admin_1_states_provinces_lakes.json` -> state/province borders +
+//     labels (gap report F2/F3);
+//   - `decodeCities` (geo-decode.js:119) over
+//     `ne_50m_populated_places_simple.json` -> city dots + labels (F4).
+// DEFERRED: vendor those JSON assets into assets/data/ (mind the size; admin-1
+// is large) and add the decoders + lazy-load on zoom in geohash_explorer.dart
+// before the painter's deferred admin-1/cities layers can render.
+
 List<GeoFeature> _decodeWorld(Map<String, dynamic> topo) {
   // Quantization transform: x_real = x*scale + translate (delta-decoded arcs).
   final tx = (topo['transform'] as Map?) ?? const {};

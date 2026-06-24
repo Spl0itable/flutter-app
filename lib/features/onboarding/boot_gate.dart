@@ -106,6 +106,10 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
         const HomeShell(),
         if (_showTutorial)
           Positioned.fill(
+            // `sidebar:` is left null until HomeShell exposes a drawer driver
+            // (CROSS-FILE NEED, gap F2). Sidebar-anchored steps then degrade to
+            // centered cards on narrow layouts instead of pointing at a closed
+            // drawer; targets that ARE on screen still get the spotlight.
             child: TutorialOverlay(onDismiss: _dismissTutorial),
           ),
       ],
