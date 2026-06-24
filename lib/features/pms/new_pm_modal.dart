@@ -898,7 +898,10 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                           ),
                     image: hasBanner
                         ? DecorationImage(
-                            image: NetworkImage(_groupBannerUrl!),
+                            // Route the uploaded banner through the media proxy
+                            // (hides the user's IP from the image host, mirrors
+                            // the PWA's getProxiedMediaUrl).
+                            image: NetworkImage(proxiedAvatarUrl(_groupBannerUrl)!),
                             fit: BoxFit.cover,
                           )
                         : null,
@@ -936,7 +939,9 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                       border: Border.all(color: c.bg, width: 3),
                       image: hasAvatar
                           ? DecorationImage(
-                              image: NetworkImage(_groupAvatarUrl!),
+                              // Proxy the uploaded avatar (IP-hiding parity with
+                              // the PWA's getProxiedMediaUrl).
+                              image: NetworkImage(proxiedAvatarUrl(_groupAvatarUrl)!),
                               fit: BoxFit.cover,
                             )
                           : null,

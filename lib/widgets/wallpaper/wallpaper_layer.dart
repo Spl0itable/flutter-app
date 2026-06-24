@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../state/settings_provider.dart';
+import '../common/nym_avatar.dart' show proxiedAvatarUrl;
 
 /// The kind of fill a wallpaper pattern produces. Mirrors the CSS techniques in
 /// `styles-features.css`: `gradient` patterns paint stacked CSS gradients with
@@ -143,7 +144,9 @@ class WallpaperLayer extends ConsumerWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(
             image: DecorationImage(
-              image: NetworkImage(url),
+              // Route the custom wallpaper through the media proxy (hide IP /
+              // bypass hotlink-403), like every other remote image.
+              image: NetworkImage(proxiedAvatarUrl(url) ?? url),
               fit: BoxFit.cover,
               colorFilter: ColorFilter.mode(scrim, BlendMode.srcOver),
             ),

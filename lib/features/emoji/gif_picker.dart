@@ -21,6 +21,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/api/api_client.dart';
+import '../messages/format/message_content.dart' show proxiedMedia;
 
 /// Giphy API key — same key the PWA uses (`this.giphyApiKey`, app.js:679).
 /// Requests are routed through the backend `/api/proxy?action=giphy` worker
@@ -551,7 +552,9 @@ class _GifTileState extends State<_GifTile> {
                     Container(
                       color: Colors.white.withValues(alpha: 0.03),
                       child: CachedNetworkImage(
-                        imageUrl: widget.gif.url,
+                        // Route Giphy GIFs through the media proxy so the user's
+                        // IP is never exposed to the CDN (PWA getProxiedMediaUrl).
+                        imageUrl: proxiedMedia(widget.gif.url),
                         fit: BoxFit.cover,
                         placeholder: (_, __) => const SizedBox.shrink(),
                         errorWidget: (_, __, ___) =>

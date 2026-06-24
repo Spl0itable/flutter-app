@@ -19,6 +19,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../messages/format/message_content.dart' show proxiedMedia;
 import 'custom_emoji.dart';
 import 'emoji_data.dart';
 
@@ -389,7 +390,13 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
     return _EmojiCell(
       onTap: () => widget.onSelect(':$shortcode:'),
       child: CachedNetworkImage(
-        imageUrl: proxiedEmojiUrl(url, widget.proxyBase),
+        // Always route custom-emoji images through the media proxy so the
+        // user's IP is hidden from the host (PWA getProxiedEmojiUrl). When an
+        // explicit [proxyBase] is supplied (tests) honor it; otherwise fall
+        // back to the shared ApiClient proxy via [proxiedMedia].
+        imageUrl: (widget.proxyBase != null && widget.proxyBase!.isNotEmpty)
+            ? proxiedEmojiUrl(url, widget.proxyBase)
+            : proxiedMedia(url, emoji: true),
         width: 30,
         height: 30,
         fit: BoxFit.contain,
