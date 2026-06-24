@@ -11,6 +11,7 @@ import '../../features/settings/about_screen.dart';
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
+import '../../models/group.dart';
 import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -303,12 +304,14 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         );
 
       case ViewKind.group:
-        final g = app.groups.firstWhere(
-          (g) => g.id == view.id,
-          orElse: () => app.groups.isNotEmpty
-              ? app.groups.first
-              : throw StateError('no group'),
-        );
+        Group? g;
+        for (final cand in app.groups) {
+          if (cand.id == view.id) {
+            g = cand;
+            break;
+          }
+        }
+        if (g == null) return titleText;
         final customAvatar = g.avatar;
         final hasCustom = customAvatar != null && customAvatar.isNotEmpty;
         final others =
@@ -650,11 +653,10 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       case ViewKind.pm:
         return app.users[view.id]?.nym ?? 'PM';
       case ViewKind.group:
-        final g = app.groups.firstWhere(
-          (g) => g.id == view.id,
-          orElse: () => app.groups.first,
-        );
-        return g.name;
+        for (final g in app.groups) {
+          if (g.id == view.id) return g.name;
+        }
+        return 'Group';
     }
   }
 

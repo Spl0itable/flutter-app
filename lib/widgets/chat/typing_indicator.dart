@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../common/nym_avatar.dart';
 
 /// The `.typing-indicator` row pinned at the bottom of the active conversation
@@ -72,7 +73,11 @@ class _TypingIndicatorRowState extends ConsumerState<TypingIndicatorRow> {
       final visible = pubkeys.take(3).toList();
       final String text;
       if (pubkeys.length == 1) {
-        text = '${nymOf(pubkeys[0])} is typing';
+        // A bot "is thinking" rather than "is typing" (PWA `_renderTypingInto`
+        // `isVerifiedBot` → verb 'thinking').
+        final isBot =
+            ref.read(nostrControllerProvider).isVerifiedBot(pubkeys[0]);
+        text = '${nymOf(pubkeys[0])} is ${isBot ? 'thinking' : 'typing'}';
       } else if (pubkeys.length == 2) {
         text = '${nymOf(pubkeys[0])} and ${nymOf(pubkeys[1])} are typing';
       } else {
