@@ -935,6 +935,14 @@ class CallService {
     if (ac == null || !ac.members.contains(sender)) return;
     final peer = ac.peers[sender];
     if (peer == null) return;
+    // A duplicate / late answer on an already-stable connection would throw
+    // InvalidStateError from setRemoteDescription and abort the candidate flush,
+    // wedging ICE at CONNECTING→FAILED. Ignore it, exactly like calls.js:584
+    // (`if (entry.pc.signalingState === 'stable') return;`).
+    if (peer.pc.signalingState ==
+        RTCSignalingState.RTCSignalingStateStable) {
+      return;
+    }
     try {
       final sdp = data['sdp'] as Map;
       await peer.pc.setRemoteDescription(
@@ -1054,6 +1062,10 @@ class CallService {
           ));
     };
     pc.onTrack = (event) {
+      // A track event can arrive after the call ended (peer renderer disposed)
+      // or after this peer was removed — touching a disposed renderer keeps the
+      // EglRenderer alive churning "Frames received: 0". Drop stale events.
+      if (_active != ac || ac.peers[peerPubkey] != peer) return;
       if (event.streams.isNotEmpty) {
         peer.stream = event.streams.first;
         peer.renderer.srcObject = peer.stream;
@@ -1061,6 +1073,7 @@ class CallService {
       _publish();
     };
     pc.onConnectionState = (s) {
+      if (_active != ac || ac.peers[peerPubkey] != peer) return;
       if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         peer.connected = true;
         _onPeerConnected();
