@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
@@ -269,6 +270,29 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       case ViewKind.pm:
         final user = app.users[view.id];
         final status = user?.effectiveStatus() ?? UserStatus.offline;
+        // `.pm-header-row`: `.pm-name-text` (base nym) + a dimmed `.nym-suffix`
+        // (`#abcd`, 0.9em / w100 / opacity 0.7), mirroring the PWA header markup.
+        final base = stripPubkeySuffix(title);
+        final suffix = getPubkeySuffix(view.id);
+        final nameRich = Text.rich(
+          TextSpan(
+            style: titleStyle,
+            children: [
+              TextSpan(text: base),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: '#$suffix',
+                  style: titleStyle.copyWith(
+                    color: c.primary.withValues(alpha: 0.7),
+                    fontSize: titleSize * 0.9,
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+            ],
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        );
         // `.pm-header-avatar`: 26px round, margin-right 10, with a 7px status dot
         // (bottom-right -2) ringed by the bg. Hidden status drops the dot.
         return Row(
@@ -299,7 +323,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
               ],
             ),
             const SizedBox(width: 10),
-            Flexible(child: titleText),
+            Flexible(child: nameRich),
           ],
         );
 
