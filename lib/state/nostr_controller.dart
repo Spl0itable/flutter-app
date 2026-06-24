@@ -499,6 +499,18 @@ class NostrController {
       if (event.tags.isNotEmpty) {
         _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
       }
+      // Register an inbound P2P file offer with the service so the rendered
+      // file-offer card's download button can request it (nostr-core.js:434 —
+      // `parseFileOfferTag` populates `p2pFileOffers`, the store `requestP2PFile`
+      // reads). The mapper sets the message's isFileOffer/fileOffer (so the card
+      // renders); this side makes the card actionable. Skip our own echo — the
+      // offer is registered at share time by `shareP2PFile`.
+      if (event.pubkey != (_identity?.pubkey ?? '')) {
+        final offer = parseFileOfferTag(event.tags, event.pubkey);
+        if (offer != null) {
+          _ref.read(p2pServiceProvider).registerOffer(offer);
+        }
+      }
       _maybeNotifyChannel(event);
       // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
       // a profile fetch for every message author it lacks a profile for —
@@ -1233,6 +1245,12 @@ class NostrController {
     final identity = _identity;
     if (service == null || identity == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Mirror calls.js `_sendCallSignal` (line 146): the rumor content is
+    // `{ ...payload, nym }` — the sender's display name is injected into EVERY
+    // signal so the recipient's incoming-call UI can label the caller even
+    // before a kind-0 profile arrives. Without it an invite shows a truncated
+    // pubkey instead of the nym.
+    final content = <String, dynamic>{...payload, 'nym': identity.nym};
     final rumor = UnsignedEvent(
       pubkey: identity.pubkey,
       createdAt: nowSec,
@@ -1240,7 +1258,7 @@ class NostrController {
       tags: [
         ['p', to],
       ],
-      content: jsonEncode(payload),
+      content: jsonEncode(content),
     );
     return service.publishGiftWrappedRumor(rumor: rumor, recipients: [to]);
   }
@@ -3805,8 +3823,12 @@ class NostrController {
     final content =
         'Sharing file through Nymchat: ${offer.name} (${formatFileSize(offer.size)})';
 
-    // Local echo as a file-offer message (displayMessage isFileOffer path).
-    final echo = _ref.read(appStateProvider.notifier).sendLocal(content);
+    // Local echo as a file-offer message (displayMessage isFileOffer path,
+    // p2p.js:158-173: own send sets isFileOffer:true + fileOffer so the sender
+    // sees the same card peers do).
+    final echo = _ref
+        .read(appStateProvider.notifier)
+        .sendLocal(content, fileOffer: offer.toJson());
 
     if (identity == null || service == null) return;
     if (view.kind != ViewKind.channel) {
