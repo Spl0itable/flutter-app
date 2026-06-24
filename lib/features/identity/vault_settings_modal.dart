@@ -170,6 +170,10 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
         ModalChrome.formLabel(c, 'Method'),
         const SizedBox(height: 8),
         DropdownButtonFormField<String>(
+          // `value` over `initialValue`: the latter doesn't exist on the
+          // build toolchain's Flutter; `value` works on both (deprecated-only
+          // on newer SDKs).
+          // ignore: deprecated_member_use
           value: _method,
           dropdownColor: c.bgTertiary,
           style: TextStyle(color: c.text, fontSize: 14),

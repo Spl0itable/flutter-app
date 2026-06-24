@@ -5,6 +5,7 @@ import '../../core/constants/relays.dart';
 import '../../models/nostr_event.dart';
 import 'relay_connection.dart';
 import 'relay_message.dart';
+import 'relay_stats.dart';
 
 /// Tracks seen event ids so duplicate events arriving from multiple relays are
 /// only surfaced once. Pure and testable (no sockets).
@@ -85,6 +86,11 @@ abstract interface class PoolTransport {
 
   /// Relays currently reported as connected.
   int get connectedCount;
+
+  /// Live relay-traffic counters (bytes in/out, events, throughput history,
+  /// per-relay events + latency) for the Network Stats modal. Aggregated across
+  /// every relay/shard socket. Mirrors the PWA's `nym.relayStats`.
+  RelayStats get stats;
 
   /// Close every socket and subscription.
   Future<void> disconnectAll();
@@ -233,6 +239,15 @@ class RelayPool implements PoolTransport {
   /// subId -> active subscription.
   final Map<String, Subscription> _subscriptions = {};
 
+  /// Pool-level throughput history (last 60 per-second event counts). The
+  /// per-socket counters live on each [RelayConnection]; this aggregate list is
+  /// owned here and fed by [_sampler] (mirrors `startRelayStatsSampling`).
+  final List<int> _throughputHistory = [];
+
+  /// 1-second sampler: pushes the last second's aggregate event count onto
+  /// [_throughputHistory] (cap 60) and resets each socket's per-second counter.
+  Timer? _sampler;
+
   bool get _isWritable => true; // all relays are writable
   bool _isReadable(String url) => !_writeOnly.contains(url);
 
@@ -246,6 +261,56 @@ class RelayPool implements PoolTransport {
   /// Per-relay connected status snapshot.
   Map<String, bool> get connectionStatus =>
       {for (final e in _connections.entries) e.key: e.value.isConnected};
+
+  /// Aggregate live traffic counters across every relay socket (a fresh
+  /// snapshot each read). Sums each [RelayConnection]'s bytes/events and merges
+  /// its per-relay event + latency maps, then attaches the pool-owned
+  /// throughput history. Mirrors the PWA's single `nym.relayStats`.
+  @override
+  RelayStats get stats {
+    final agg = RelayStats(
+      throughputHistory: List<int>.from(_throughputHistory),
+    );
+    for (final conn in _connections.values) {
+      final s = conn.stats;
+      agg.bytesReceived += s.bytesReceived;
+      agg.bytesSent += s.bytesSent;
+      agg.totalEvents += s.totalEvents;
+      agg.eventsThisSecond += s.eventsThisSecond;
+      s.eventsPerRelay.forEach((url, n) {
+        agg.eventsPerRelay[url] = (agg.eventsPerRelay[url] ?? 0) + n;
+      });
+      // Last-measured REQ→EOSE latency per relay; one socket per url here, so
+      // assignment is a straight copy.
+      s.latencyPerRelay.forEach((url, ms) {
+        agg.latencyPerRelay[url] = ms;
+      });
+    }
+    return agg;
+  }
+
+  /// Start the 1-second throughput sampler (idempotent). Sums the per-socket
+  /// `eventsThisSecond`, pushes it onto [_throughputHistory] (cap 60), then
+  /// resets each socket's counter. Mirrors `startRelayStatsSampling`.
+  void _startSampler() {
+    if (_sampler != null) return;
+    _sampler = Timer.periodic(const Duration(seconds: 1), (_) {
+      var events = 0;
+      for (final conn in _connections.values) {
+        events += conn.stats.eventsThisSecond;
+        conn.stats.eventsThisSecond = 0;
+      }
+      _throughputHistory.add(events);
+      while (_throughputHistory.length > RelayStats.throughputCap) {
+        _throughputHistory.removeAt(0);
+      }
+    });
+  }
+
+  void _stopSampler() {
+    _sampler?.cancel();
+    _sampler = null;
+  }
 
   void _addRelayInternal(String url) {
     if (_connections.containsKey(url)) return;
@@ -279,6 +344,7 @@ class RelayPool implements PoolTransport {
   /// Connect every relay in the pool.
   @override
   void connectAll() {
+    _startSampler();
     for (final conn in _connections.values) {
       conn.connect();
     }
@@ -287,6 +353,7 @@ class RelayPool implements PoolTransport {
   /// Close every relay socket and all subscriptions.
   @override
   Future<void> disconnectAll() async {
+    _stopSampler();
     final subs = _subscriptions.values.toList();
     for (final s in subs) {
       await s.close();

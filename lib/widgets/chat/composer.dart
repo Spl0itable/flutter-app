@@ -108,13 +108,17 @@ class _ComposerState extends ConsumerState<Composer> {
   TriggerMatch _trigger = const TriggerMatch.none();
   AutocompleteView? _acView;
   List<PaletteRow> _paletteRows = const [];
+  // The public `?` Nymbot command palette rows (showBotCommandPalette). Same
+  // `#commandPalette` surface as `/`, populated from the real bot catalogue.
+  List<BotPaletteCommand> _botRows = const [];
   int _selectedIndex = 0;
 
   bool get _paletteActive => _trigger.kind == TriggerKind.command;
+  bool get _botPaletteActive => _trigger.kind == TriggerKind.botCommand;
   bool get _acActive => _acView != null && !_acView!.isEmpty;
   bool get _overlayActive => _paletteActive
       ? _paletteRows.isNotEmpty
-      : _acActive;
+      : (_botPaletteActive ? _botRows.isNotEmpty : _acActive);
 
   @override
   void dispose() {
@@ -329,12 +333,20 @@ class _ComposerState extends ConsumerState<Composer> {
 
     if (trigger.kind == TriggerKind.command) {
       _paletteRows = buildPaletteRows(trigger.query);
+      _botRows = const [];
+      _acView = null;
+    } else if (trigger.kind == TriggerKind.botCommand) {
+      // Public `?` Nymbot palette, filtered by `cmd.startsWith(input)`.
+      _botRows = buildBotPaletteRows(trigger.query);
+      _paletteRows = const [];
       _acView = null;
     } else if (trigger.kind != TriggerKind.none) {
       _paletteRows = const [];
+      _botRows = const [];
       _acView = _buildAutocompleteView(trigger);
     } else {
       _paletteRows = const [];
+      _botRows = const [];
       _acView = null;
     }
 
@@ -415,6 +427,7 @@ class _ComposerState extends ConsumerState<Composer> {
     _trigger = const TriggerMatch.none();
     _acView = null;
     _paletteRows = const [];
+    _botRows = const [];
     if (_acPortal.isShowing) _acPortal.hide();
     setState(() {});
   }
@@ -450,14 +463,36 @@ class _ComposerState extends ConsumerState<Composer> {
     _focus.requestFocus();
   }
 
-  int get _navItemCount =>
-      _paletteActive ? paletteCommands(_paletteRows).length : (_acView?.itemCount ?? 0);
+  void _completeBotCommand(BotPaletteCommand cmd) {
+    // selectCommand inserts `"?<name> "` (cmd.command already carries the `?`)
+    // then hides the palette (commands.js:494). For the public set there are no
+    // subcommands, so the trailing space closes the token and the palette stays
+    // hidden until the user types a fresh `?`.
+    _controller.value = TextEditingValue(
+      text: '${cmd.command} ',
+      selection: TextSelection.collapsed(offset: cmd.command.length + 1),
+    );
+    _hideOverlay();
+    _focus.requestFocus();
+  }
+
+  int get _navItemCount {
+    if (_paletteActive) return paletteCommands(_paletteRows).length;
+    if (_botPaletteActive) return _botRows.length;
+    return _acView?.itemCount ?? 0;
+  }
 
   void _confirmSelection() {
     if (_paletteActive) {
       final cmds = paletteCommands(_paletteRows);
       if (_selectedIndex >= 0 && _selectedIndex < cmds.length) {
         _completeCommand(cmds[_selectedIndex]);
+      }
+      return;
+    }
+    if (_botPaletteActive) {
+      if (_selectedIndex >= 0 && _selectedIndex < _botRows.length) {
+        _completeBotCommand(_botRows[_selectedIndex]);
       }
       return;
     }
@@ -986,6 +1021,12 @@ class _ComposerState extends ConsumerState<Composer> {
             rows: _paletteRows,
             selectedIndex: _selectedIndex,
             onSelect: _completeCommand,
+          )
+        : _botPaletteActive
+        ? BotCommandPalette(
+            rows: _botRows,
+            selectedIndex: _selectedIndex,
+            onSelect: _completeBotCommand,
           )
         : AutocompleteDropdown(
             view: _acView!,

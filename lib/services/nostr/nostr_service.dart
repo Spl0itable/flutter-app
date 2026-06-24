@@ -535,8 +535,12 @@ class NostrService {
     required String nym,
     String? geohash,
     List<List<String>> emojiTags = const [],
+    EventSigner? signerOverride,
   }) async {
-    final sig = signer;
+    // [signerOverride] is the pseudonymous-send path: a fresh per-message
+    // ephemeral key (publishMessagePseudonymous) so the message is unlinkable to
+    // the durable identity. Default = the logged-in signer.
+    final sig = signerOverride ?? signer;
     if (sig == null) return null;
 
     final isGeo = geohash != null && geohash.isNotEmpty;
@@ -555,7 +559,7 @@ class NostrService {
 
     final signed = await sig.sign(
       UnsignedEvent(
-        pubkey: identity.pubkey,
+        pubkey: sig.pubkey,
         createdAt: nowSec,
         kind: kind,
         tags: tags,

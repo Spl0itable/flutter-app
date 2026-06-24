@@ -201,12 +201,15 @@ class _NotificationRow extends ConsumerWidget {
   }
 
   /// The footer context label (`.notification-item-context`) from the entry
-  /// type (notifications.js:519-533). The PWA keys off `channelInfo.type` with
-  /// `in #<geohash>` / `in <groupName>` for channel + group sources; the store
-  /// entry does not yet carry the geohash / group-name (see CROSS_FILE_NEEDS),
-  /// so those render the bare type until that lands. Call bodies already encode
-  /// "Missed video/audio call …", so a call needs no separate context label.
+  /// (notifications.js:519-533). The PWA keys off `channelInfo` with
+  /// `in #<geohash>` / `in <groupName>` for channel + group sources, so PREFER
+  /// the entry's carried [NotificationEntry.contextLabel] when present (the
+  /// controller passes `in #<geohash>` for a channel mention / `in <GroupName>`
+  /// for a group). Otherwise fall back to the type-derived label. Call bodies
+  /// already encode "Missed video/audio call …", so a missed call needs none.
   String? _contextLabel() {
+    final carried = entry.contextLabel;
+    if (carried != null && carried.isNotEmpty) return carried;
     switch (entry.type) {
       case 'call':
         return entry.body.startsWith('Missed') ? null : 'Call';
@@ -217,8 +220,7 @@ class _NotificationRow extends ConsumerWidget {
       case 'mention':
         return 'Mention';
       case 'group':
-        // Without the group name carried on the entry, the PWA's "in <name>"
-        // cannot be reproduced exactly; surface the source generically.
+        // Fallback when no group name was carried on the entry.
         return 'Group';
       default:
         return null;

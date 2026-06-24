@@ -1716,17 +1716,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Appends a locally-echoed self message to the current view (composer SEND).
   /// For PM/group sends, pass [nymMessageId] so inbound receipts can match it
   /// and advance the delivery ticks. Returns the appended [Message].
-  Message? sendLocal(String text, {String? nymMessageId}) {
+  Message? sendLocal(String text,
+      {String? nymMessageId, String? pubkeyOverride, String? authorOverride}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return null;
     final view = state.view;
     final list = state.messages.putIfAbsent(view.storageKey, () => <Message>[]);
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nowSec = nowMs ~/ 1000;
+    // [pubkeyOverride]/[authorOverride] are the pseudonymous-send path: the
+    // optimistic echo carries the per-message ephemeral pubkey + random anon
+    // nym instead of the durable identity (publishMessagePseudonymous).
     final m = Message(
       id: '_optim_${_nextLocalSeq().toRadixString(36)}',
-      pubkey: state.selfPubkey,
-      author: state.selfNym,
+      pubkey: pubkeyOverride ?? state.selfPubkey,
+      author: authorOverride ?? state.selfNym,
       content: trimmed,
       createdAt: nowSec,
       ms: nowMs,
@@ -2057,6 +2061,7 @@ class NotificationEntry {
     this.route,
     this.eventId,
     this.senderPubkey,
+    this.contextLabel,
     this.viewed = false,
   });
 
@@ -2079,6 +2084,12 @@ class NotificationEntry {
   /// The sender's pubkey (notifications.js `senderPubkey`), used in the
   /// no-eventId dedup fallback.
   final String? senderPubkey;
+
+  /// The PWA footer context label derived from `channelInfo` — `in #<geohash>`
+  /// for a channel/geohash source or `in <GroupName>` for a group (notifications
+  /// .js:519-533). Null for PM/mention sources, which the panel labels from the
+  /// type. Preferred by the panel over the type-derived label when present.
+  final String? contextLabel;
   bool viewed;
 }
 
@@ -2120,6 +2131,7 @@ class NotificationHistoryNotifier
     int? ts,
     String? eventId,
     String? senderPubkey,
+    String? contextLabel,
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
     final stamp = ts ?? now;
@@ -2147,6 +2159,7 @@ class NotificationHistoryNotifier
       route: route,
       eventId: eventId,
       senderPubkey: senderPubkey,
+      contextLabel: contextLabel,
     );
     final kept = [
       entry,

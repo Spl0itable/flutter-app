@@ -15,6 +15,7 @@ import 'package:nym_bar/services/nostr/nostr_service.dart';
 import 'package:nym_bar/services/relay/relay_message.dart';
 import 'package:nym_bar/services/relay/relay_pool.dart';
 import 'package:nym_bar/services/relay/relay_pool_proxy.dart';
+import 'package:nym_bar/services/relay/relay_stats.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 NostrEvent _ev({
@@ -611,6 +612,8 @@ class _NoopTransport implements PoolTransport {
   @override
   int get connectedCount => 0;
   @override
+  RelayStats get stats => RelayStats();
+  @override
   Future<int> publish(NostrEvent event) async => 0;
   @override
   Future<int> publishDm(NostrEvent event) async => 0;
@@ -637,6 +640,8 @@ class _RecordingTransport implements PoolTransport {
   Future<void> disconnectAll() async {}
   @override
   int get connectedCount => 0;
+  @override
+  RelayStats get stats => RelayStats();
   @override
   Future<int> publish(NostrEvent event) async {
     plainCalls.add(event);

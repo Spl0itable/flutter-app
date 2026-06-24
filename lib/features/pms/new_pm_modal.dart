@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,7 +7,9 @@ import '../../core/crypto/bech32_codec.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../models/group.dart';
 import '../../models/user.dart';
+import '../../services/platform/deep_links.dart' show parseGroupInvite;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/common/nym_avatar.dart';
@@ -81,9 +81,24 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
   final List<PmRecipient> _recipients = [];
 
   /// Group-creation extras (revealed for ≥2 recipients, index.html:319-347).
-  String? _groupAvatarPath;
-  String? _groupBannerPath;
+  /// The PWA uploads the picked file at pick-time and keeps the HOSTED URL in
+  /// `_newGroupAvatar`/`_newGroupBanner` (pms.js `_pickNewGroupMedia`), passing
+  /// those URLs into `createGroup`. We mirror that: these hold hosted URLs (NOT
+  /// local file paths), so kind-0/group metadata never carries a `file://` path.
+  String? _groupAvatarUrl;
+  String? _groupBannerUrl;
   bool _allowInvites = true; // `newGroupAllowInvites` checked by default
+
+  /// `.new-group-progress` upload affordance state (index.html:329-334):
+  /// `_uploading` toggles the bar, `_uploadLabel` is the "Uploading group
+  /// avatar…"/"Uploading group banner…" line, `_uploadProgress` drives the
+  /// `.progress-fill` width (15%→55%→100%, users.js `_uploadFileWithProgress`).
+  bool _uploading = false;
+  String _uploadLabel = 'Uploading…';
+  double _uploadProgress = 0;
+  /// Last upload error surfaced under the media section (PWA `displaySystemMessage`
+  /// "Failed to upload image: …"); cleared on the next pick.
+  String? _uploadError;
 
   bool get _groupMode => _recipients.length >= 2;
 
@@ -169,21 +184,94 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
     setState(() => _recipients.removeLast());
   }
 
+  /// Per-surface upload caps, mirroring the PWA nick-edit avatar/banner guards
+  /// (`handleNickEditAvatarSelect` rejects >5MB, `handleNickEditBannerSelect`
+  /// >10MB). Avatar 5MB, banner 10MB.
+  static const int _avatarMaxBytes = 5 * 1024 * 1024;
+  static const int _bannerMaxBytes = 10 * 1024 * 1024;
+
+  /// Best-effort MIME from the picked file's extension (BUD-02 `Content-Type`),
+  /// mirroring `_contentTypeFor` in group_context_menu_panel.dart.
+  static String _contentTypeFor(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return 'image/jpeg';
+  }
+
+  /// Pick a group avatar/banner, then UPLOAD it (Blossom) before publishing —
+  /// `createGroup` must receive a hosted URL, never a `file://` path. Mirrors the
+  /// PWA `_pickNewGroupMedia` → `_uploadFileWithProgress` → store URL flow, with
+  /// the `.new-group-progress` affordance shown during the upload and an error
+  /// surfaced (no bad image stored) on failure. Caps: avatar 5MB / banner 10MB.
   Future<void> _pickGroupImage(bool avatar) async {
+    final Uint8List bytes;
+    final String contentType;
     try {
       final picker = ImagePicker();
       final file = await picker.pickImage(source: ImageSource.gallery);
       if (file == null || !mounted) return;
-      setState(() {
-        if (avatar) {
-          _groupAvatarPath = file.path;
-        } else {
-          _groupBannerPath = file.path;
-        }
-      });
+      bytes = await file.readAsBytes();
+      contentType = _contentTypeFor(file.path);
     } catch (_) {
-      // Picker unavailable (tests / desktop) — ignore.
+      // Picker unavailable (tests / desktop) — nothing to do.
+      return;
     }
+
+    // Enforce the per-surface size cap before uploading (PWA rejects oversize
+    // files with a system message and aborts the upload).
+    final cap = avatar ? _avatarMaxBytes : _bannerMaxBytes;
+    if (bytes.length > cap) {
+      final capMb = avatar ? 5 : 10;
+      final actualMb = (bytes.length / (1024 * 1024)).toStringAsFixed(1);
+      setState(() => _uploadError =
+          '${avatar ? 'Avatar' : 'Banner'} must be under ${capMb}MB (this is ${actualMb}MB).');
+      return;
+    }
+
+    setState(() {
+      _uploadError = null;
+      _uploading = true;
+      _uploadProgress = 0.15; // PWA seeds the fill at 15%.
+      _uploadLabel =
+          avatar ? 'Uploading group avatar…' : 'Uploading group banner…';
+    });
+
+    String? url;
+    try {
+      url = await ref.read(nostrControllerProvider).uploadImage(
+            bytes,
+            contentType: contentType,
+            onProgress: (p) {
+              if (mounted) setState(() => _uploadProgress = p);
+            },
+          );
+    } catch (_) {
+      url = null;
+    }
+    if (!mounted) return;
+
+    if (url == null || url.isEmpty) {
+      // Surface an error and DON'T publish a bad image (PWA shows a system
+      // message "Failed to upload image: …" and keeps the prior media).
+      setState(() {
+        _uploading = false;
+        _uploadProgress = 0;
+        _uploadError = 'Failed to upload image. Try again.';
+      });
+      return;
+    }
+
+    setState(() {
+      _uploading = false;
+      _uploadProgress = 1;
+      if (avatar) {
+        _groupAvatarUrl = url;
+      } else {
+        _groupBannerUrl = url;
+      }
+    });
   }
 
   Future<void> _start() async {
@@ -199,15 +287,14 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
       final description = _groupDescController.text.trim();
       // Thread the group-creation extras the modal collected into createGroup
       // (groups.js `createGroup(name, members, { avatar, banner, description,
-      // allowMemberInvites })`). The avatar/banner here are the picked local
-      // file paths; an upload-to-URL step is a separate concern (the PWA uploads
-      // before passing a URL — see CROSS-FILE NEEDS), so we forward what's
-      // collected and let empty stay null.
+      // allowMemberInvites })`). avatar/banner are HOSTED URLs (uploaded at
+      // pick-time via `_pickGroupImage`), never local paths — matching the PWA,
+      // which passes `_newGroupAvatar`/`_newGroupBanner` (upload URLs).
       await controller.createGroup(
         name,
         _recipients.map((r) => r.pubkey).toList(),
-        avatar: _groupAvatarPath,
-        banner: _groupBannerPath,
+        avatar: _groupAvatarUrl,
+        banner: _groupBannerUrl,
         description: description.isNotEmpty ? description : null,
         allowMemberInvites: _allowInvites,
       );
@@ -556,12 +643,100 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
     );
   }
 
+  /// The trimmed recipient input with a leading `@` stripped (the PWA parses the
+  /// raw value for invites but lower-cases for the pubkey/nym checks).
+  String get _rawInput => _recipientController.text.trim().replaceFirst(RegExp(r'^@'), '');
+
+  /// A group-invite token if the current input is a `#gjoin=…` link/token,
+  /// decoded via the EXISTING `parseGroupInvite` (deep_links.dart). The PWA's
+  /// `onNewPMRecipientInput` tries `parseGroupInviteInput(value.trim())` first
+  /// (case-sensitive — the base64url token must never be lower-cased).
+  GroupInviteToken? get _inviteToken {
+    if (_rawInput.isEmpty) return null;
+    return parseGroupInvite(_recipientController.text.trim());
+  }
+
+  /// If the input is a bare 64-hex pubkey or an `npub1…`, the resolved pubkey
+  /// for the single direct-pubkey suggestion row — unless it's self or already
+  /// picked (the PWA hides the row in those cases). Returns null otherwise.
+  /// Mirrors `onNewPMRecipientInput`'s `/^[0-9a-f]{64}$/i` branch, extended to
+  /// `npub1…` per the brief (submit already resolves both via
+  /// `resolveRecipientPubkey`).
+  String? get _directPubkey {
+    final raw = _rawInput;
+    if (raw.isEmpty) return null;
+    final isHex = RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(raw);
+    final isNpub = RegExp(r'^npub1', caseSensitive: false).hasMatch(raw);
+    if (!isHex && !isNpub) return null;
+    final pk = resolveRecipientPubkey(raw, ref.read(usersProvider));
+    if (pk == null) return null;
+    if (pk == ref.read(appStateProvider).selfPubkey) return null;
+    if (_recipients.any((r) => r.pubkey == pk)) return null;
+    return pk;
+  }
+
   /// `.pm-suggestions` — bg-secondary box, radius 12, mt4, `0 6px 20px
-  /// rgba(0,0,0,0.4)` shadow, max-height 200. On empty input the list is the
-  /// "recently seen users" set under an uppercase header.
+  /// rgba(0,0,0,0.4)` shadow, max-height 200. Priority mirrors the PWA
+  /// `onNewPMRecipientInput`: a `#gjoin=…` invite → a single "Join group" row;
+  /// else a bare 64-hex/npub → a single direct-pubkey row; else the nym
+  /// substring list (the "recently seen users" set under a header on empty).
   Widget _suggestionsList(NymColors c) {
+    // 1) Group-invite link/token paste → a single "Join group" row.
+    final invite = _inviteToken;
+    if (invite != null) {
+      return _suggestionsBox(c, [_inviteSuggestionItem(c, invite)]);
+    }
+
+    // 2) Direct 64-hex / npub paste → a single direct-pubkey row.
+    final directPk = _directPubkey;
+    if (directPk != null) {
+      final user = ref.read(usersProvider)[directPk];
+      final nym = user?.nym ?? getNymFromPubkey('anon', directPk);
+      return _suggestionsBox(c, [
+        _suggestionItem(
+          c,
+          pubkey: directPk,
+          nym: nym,
+          imageUrl: user?.profile?.picture,
+        ),
+      ]);
+    }
+
+    // 3) Known-user substring list (recently-seen on empty input).
     final suggestions = _suggestions;
     if (suggestions.isEmpty) return const SizedBox.shrink();
+    return _suggestionsBox(c, [
+      // `.pm-suggestion-header` — only for the empty-query recently-seen
+      // list (11px UPPERCASE ls0.5 text-dim + bottom hairline).
+      if (_isRecentlySeen)
+        Container(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+            ),
+          ),
+          child: Text(
+            'RECENTLY SEEN USERS',
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: 11,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ),
+      for (final u in suggestions)
+        _suggestionItem(
+          c,
+          pubkey: u.pubkey,
+          nym: u.nym,
+          imageUrl: u.profile?.picture,
+        ),
+    ]);
+  }
+
+  /// The shared `.pm-suggestions` chrome wrapping a set of rows.
+  Widget _suggestionsBox(NymColors c, List<Widget> children) {
     return Container(
       margin: const EdgeInsets.only(top: 4),
       constraints: const BoxConstraints(maxHeight: 200),
@@ -581,47 +756,91 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
       child: ListView(
         shrinkWrap: true,
         padding: EdgeInsets.zero,
-        children: [
-          // `.pm-suggestion-header` — only for the empty-query recently-seen
-          // list (11px UPPERCASE ls0.5 text-dim + bottom hairline).
-          if (_isRecentlySeen)
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
-                ),
-              ),
-              child: Text(
-                'RECENTLY SEEN USERS',
-                style: TextStyle(
-                  color: c.textDim,
-                  fontSize: 11,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          for (final u in suggestions) _suggestionItem(c, u),
-        ],
+        children: children,
       ),
     );
   }
 
-  /// `.pm-suggestion-item` — avatar 26 + base nym (13px --text) + `#suffix`
-  /// (11px text-dim), padding 8/12, gap 6.
-  Widget _suggestionItem(NymColors c, User u) {
-    final base = stripPubkeySuffix(u.nym);
-    final suffix = getPubkeySuffix(u.pubkey);
+  /// `_buildGroupInviteSuggestionItem` (pms.js) — a `.pm-suggestion-item` with
+  /// the group glyph, the invite's (sanitized) name (or "Group"), and a
+  /// "Join group" suffix. On tap: close the modal, then join via the EXISTING
+  /// `joinGroupViaInvite(token)` (no fakes).
+  Widget _inviteSuggestionItem(NymColors c, GroupInviteToken token) {
+    final name = _sanitizeGroupName(token.name);
     return InkWell(
-      onTap: () => _addRecipient(u.pubkey, u.nym),
+      onTap: () {
+        Navigator.of(context).maybePop();
+        ref.read(nostrControllerProvider).joinGroupViaInvite(token);
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: [
+            // `.group-suggestion-ico` — 26px circle holding the people glyph
+            // (primary), standing in for the avatar slot.
+            Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: 0.05),
+                border: Border.all(color: c.glassBorder),
+              ),
+              child: Icon(Icons.groups_outlined, color: c.primary, size: 16),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                name.isEmpty ? 'Group' : name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: c.text, fontSize: 13),
+              ),
+            ),
+            const SizedBox(width: 4),
+            // `.pm-suggestion-suffix` — "Join group" (11px text-dim).
+            Text(
+              'Join group',
+              style: TextStyle(color: c.textDim, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// `sanitizeGroupName` (groups.js) — collapse control chars/whitespace, trim,
+  /// cap at 40. Matches the PWA's invite-name sanitiser.
+  static String _sanitizeGroupName(String name) {
+    final s = name
+        .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return s.length > 40 ? s.substring(0, 40) : s;
+  }
+
+  /// `.pm-suggestion-item` — avatar 26 + base nym (13px --text) + `#suffix`
+  /// (11px text-dim), padding 8/12, gap 6. Used for both the known-user list and
+  /// the single direct-pubkey row (`_buildPMSuggestionItem`).
+  Widget _suggestionItem(
+    NymColors c, {
+    required String pubkey,
+    required String nym,
+    String? imageUrl,
+  }) {
+    final base = stripPubkeySuffix(nym);
+    final suffix = getPubkeySuffix(pubkey);
+    return InkWell(
+      onTap: () => _addRecipient(pubkey, nym),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
           children: [
             NymAvatar(
-              seed: u.nym.isNotEmpty ? u.nym : u.pubkey,
+              seed: nym.isNotEmpty ? nym : pubkey,
               size: 26,
-              imageUrl: u.profile?.picture,
+              imageUrl: imageUrl,
             ),
             const SizedBox(width: 6),
             Flexible(
@@ -647,8 +866,8 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
   /// gradient banner with the 56px circular avatar overhanging its bottom-left
   /// (`left:12; bottom:-22`), so the section reserves a 30px bottom margin.
   Widget _groupMediaSection(NymColors c) {
-    final hasBanner = _groupBannerPath != null;
-    final hasAvatar = _groupAvatarPath != null;
+    final hasBanner = _groupBannerUrl != null;
+    final hasAvatar = _groupAvatarUrl != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -660,9 +879,10 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
             clipBehavior: Clip.none,
             children: [
               // `.new-group-banner` — 96px, radius 12, 135° primary→secondary
-              // gradient (hidden when an image is set), glass border.
+              // gradient (hidden when an image is set), glass border. Tap is
+              // ignored while an upload is in flight (the PWA disables re-pick).
               GestureDetector(
-                onTap: () => _pickGroupImage(false),
+                onTap: _uploading ? null : () => _pickGroupImage(false),
                 child: Container(
                   height: 96,
                   decoration: BoxDecoration(
@@ -678,7 +898,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                           ),
                     image: hasBanner
                         ? DecorationImage(
-                            image: FileImage(File(_groupBannerPath!)),
+                            image: NetworkImage(_groupBannerUrl!),
                             fit: BoxFit.cover,
                           )
                         : null,
@@ -706,7 +926,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                 left: 12,
                 bottom: -22,
                 child: GestureDetector(
-                  onTap: () => _pickGroupImage(true),
+                  onTap: _uploading ? null : () => _pickGroupImage(true),
                   child: Container(
                     width: 56,
                     height: 56,
@@ -716,7 +936,7 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                       border: Border.all(color: c.bg, width: 3),
                       image: hasAvatar
                           ? DecorationImage(
-                              image: FileImage(File(_groupAvatarPath!)),
+                              image: NetworkImage(_groupAvatarUrl!),
                               fit: BoxFit.cover,
                             )
                           : null,
@@ -731,7 +951,63 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
             ],
           ),
         ),
+        // `.new-group-progress` (index.html:329-334) — the upload affordance:
+        // a label + `.progress-bar`/`.progress-fill`, shown only during upload
+        // (`position:static; margin:6px 0 0`).
+        if (_uploading) _uploadProgressBar(c),
+        // Upload failure line (PWA `displaySystemMessage` "Failed to upload
+        // image: …"). Cleared on the next pick.
+        if (_uploadError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              _uploadError!,
+              style: TextStyle(color: c.danger, fontSize: 11),
+            ),
+          ),
       ],
+    );
+  }
+
+  /// `.new-group-progress` / `.upload-progress` body: an "Uploading …" label
+  /// over the `.progress-bar` (height 6, bg white/0.05, radius 10) with the
+  /// `.progress-fill` (90° primary→secondary gradient, radius 10) at the live
+  /// progress width.
+  Widget _uploadProgressBar(NymColors c) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6), // `.new-group-progress` margin
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            _uploadLabel,
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: Container(
+              height: 6,
+              color: Colors.white.withValues(alpha: 0.05),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: _uploadProgress.clamp(0.0, 1.0),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius:
+                          const BorderRadius.all(Radius.circular(10)),
+                      gradient: LinearGradient(
+                        colors: [c.primary, c.secondary],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

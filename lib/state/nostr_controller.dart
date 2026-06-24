@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/crypto/keys.dart' as keys;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
@@ -29,6 +31,7 @@ import '../services/api/storage_sync.dart';
 import '../services/relay/relay_message.dart';
 import '../services/relay/relay_pool.dart';
 import '../services/relay/relay_pool_proxy.dart';
+import '../services/relay/relay_stats.dart';
 import '../models/channel.dart';
 import '../models/group.dart';
 import '../models/message.dart';
@@ -116,6 +119,11 @@ class NostrController {
     }
     return const {};
   }
+
+  /// Live relay throughput / byte / latency stats for the Network Stats modal
+  /// (`relay_stats_modal.dart`), aggregated across the pool (PWA
+  /// `nym.relayStats`). Null before boot → the modal renders the empty state.
+  RelayStats? get relayStats => _service?.pool.stats;
 
   // --- Slash commands -------------------------------------------------------
 
@@ -579,6 +587,10 @@ class NostrController {
       friendsOnly: _notifyFriendsOnly,
     );
     if (!notify) return;
+    // PWA footer context label for a channel source is `in #<geohash>`
+    // (notifications.js, derived from `channelInfo`). `channelKeyOf` already
+    // returns the `#`-prefixed key (geohash `g` tag / named `d` tag), so reuse
+    // it directly; null for an unkeyed event leaves the label off.
     _dispatchNotification(
       title: _nymDisplayFor(e.pubkey),
       body: e.content,
@@ -591,6 +603,7 @@ class NostrController {
       route: e.pubkey,
       eventId: e.id,
       tsMs: e.createdAt * 1000,
+      contextLabel: key != null ? 'in $key' : null,
     );
   }
 
@@ -632,6 +645,9 @@ class NostrController {
       route: isGroup ? (m.groupId ?? '') : m.pubkey,
       eventId: m.nymMessageId ?? m.id,
       tsMs: m.timestamp,
+      // Group footer label `in <GroupName>` (PWA `channelInfo`); PMs leave it
+      // null so the panel labels them 'PM' from the type.
+      contextLabel: isGroup ? 'in ${_groupNameFor(m.groupId)}' : null,
     );
   }
 
@@ -659,6 +675,7 @@ class NostrController {
     String? route,
     String? eventId,
     int? tsMs,
+    String? contextLabel,
   }) {
     unawaited(_ref.read(notificationsServiceProvider).notify(
           title: title,
@@ -683,6 +700,7 @@ class NostrController {
             ts: tsMs,
             eventId: eventId,
             senderPubkey: senderPubkey,
+            contextLabel: contextLabel,
           );
     } catch (_) {
       // History store may be unavailable in teardown; alerting still happened.
@@ -1011,6 +1029,8 @@ class NostrController {
           tsMs: (rumor['created_at'] as num?)?.toInt() != null
               ? (rumor['created_at'] as num).toInt() * 1000
               : null,
+          // Group source → footer label `in <GroupName>` (PWA `channelInfo`).
+          contextLabel: 'in ${name.isNotEmpty ? name : 'a group'}',
         );
       }
       return;
@@ -1172,6 +1192,109 @@ class NostrController {
     }
 
     await _sendMessageContent(trimmed);
+  }
+
+  // Anon-nym word lists for pseudonymous sends (nostr-core.js:2511-2525).
+  static const List<String> _anonAdjectives = [
+    'quantum', 'neon', 'cyber', 'shadow', 'plasma', //
+    'echo', 'nexus', 'void', 'flux', 'ghost',
+    'phantom', 'stealth', 'cryptic', 'dark', 'neural',
+    'binary', 'matrix', 'digital', 'virtual', 'zero',
+    'null', 'nym', 'masked', 'hidden', 'cipher',
+    'enigma', 'spectral', 'rogue', 'omega', 'alpha',
+  ];
+  static const List<String> _anonNouns = [
+    'ghost', 'nomad', 'drift', 'pulse', 'wave', //
+    'spark', 'node', 'byte', 'mesh', 'link',
+    'runner', 'hacker', 'coder', 'agent', 'proxy',
+    'daemon', 'virus', 'worm', 'bot', 'droid',
+    'reaper', 'shadow', 'wraith', 'specter', 'shade',
+  ];
+  final Random _anonRng = Random();
+
+  /// Pseudonymous channel send (composer ANON 2s-hold → "ANON";
+  /// `sendMessagePseudonymous` → `publishMessagePseudonymous`,
+  /// nostr-core.js:2493). Publishes [text] to the active CHANNEL signed with a
+  /// FRESH per-message ephemeral keypair under a random anon nym, so it is
+  /// unlinkable to the durable identity. Mirrors [sendCurrent]'s `/`-command and
+  /// `?`/@Nymbot interception; PM/group views fall through to the normal
+  /// logged-in-key send (the PWA always uses the real key for PMs/groups).
+  Future<void> sendCurrentPseudonymous(String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    if (isCommandLine(trimmed)) {
+      _dispatcher.handle(trimmed);
+      return;
+    }
+    if (shouldRouteToBot(trimmed)) {
+      await routeToBot(trimmed);
+      return;
+    }
+    final view = _ref.read(appStateProvider).view;
+    if (view.kind != ViewKind.channel) {
+      await _sendMessageContent(trimmed);
+      return;
+    }
+    await _sendChannelPseudonymous(trimmed);
+  }
+
+  /// Publishes one pseudonymous channel message: a fresh ephemeral keypair +
+  /// random anon nym, an optimistic echo under that anon identity, and the
+  /// in-place optimistic→real id reconciliation [_sendMessageContent] uses.
+  /// Deliberately does NOT `recordOwnActivity` — presence is broadcast under the
+  /// durable key, and emitting it would link the anon message to the user.
+  Future<void> _sendChannelPseudonymous(String content) async {
+    final appState = _ref.read(appStateProvider.notifier);
+    final state = _ref.read(appStateProvider);
+    final service = _service;
+    final view = state.view;
+    _markDirty(view.storageKey);
+
+    final ephemeralSigner = LocalSigner(keys.generatePrivateKey());
+    final anonNym = _generateAnonNym();
+
+    final echo = appState.sendLocal(
+      content,
+      pubkeyOverride: ephemeralSigner.pubkey,
+      authorOverride: anonNym,
+    );
+    if (service == null) return;
+    final isGeo = state.channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    try {
+      final signed = await service.publishChannelMessage(
+        channelKey: view.id,
+        content: content,
+        nym: anonNym,
+        geohash: isGeo ? view.id : null,
+        emojiTags: _ref
+            .read(liveCustomEmojiProvider.notifier)
+            .emojiTagsForContent(content),
+        signerOverride: ephemeralSigner,
+      );
+      if (signed != null && echo != null) {
+        appState.replaceOptimistic(
+          echo.id,
+          signed.id,
+          realCreatedAt: signed.createdAt,
+          realMs: int.tryParse(signed.tagValue('ms') ?? ''),
+        );
+      }
+    } catch (_) {
+      if (echo != null) appState.markOptimisticFailed(echo.id);
+    }
+  }
+
+  /// A random anon nym for a pseudonymous message (nostr-core.js:2506-2529):
+  /// `nym<1000-9999>` for the 'simple' nick style, else `<adjective>_<noun>`.
+  String _generateAnonNym() {
+    final style = _ref.read(settingsProvider).nickStyle;
+    if (style == 'simple') {
+      return 'nym${1000 + _anonRng.nextInt(9000)}';
+    }
+    final adj = _anonAdjectives[_anonRng.nextInt(_anonAdjectives.length)];
+    final noun = _anonNouns[_anonRng.nextInt(_anonNouns.length)];
+    return '${adj}_$noun';
   }
 
   /// Publishes [content] to the active conversation surface

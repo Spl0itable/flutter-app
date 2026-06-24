@@ -12,6 +12,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../../widgets/common/app_dialog.dart';
 import 'dev_nsec_modal.dart';
 import 'modal_chrome.dart';
 import 'nostr_login_modal.dart';
@@ -46,8 +47,9 @@ const String _kAsciiLogo = r'''
 /// success [onComplete] fires so the [BootGate] proceeds to the shell.
 ///
 /// Avatar/banner are file pickers (`setupAvatarPreview` / `setupBannerPreview`,
-/// index.html:1285-1323): a preview, "Choose photo"/"Remove" buttons, and the
-/// picked local path is threaded through `saveProfile`'s upload→URL path.
+/// index.html:1285-1323): a preview, "Choose photo"/"Remove" buttons. The picked
+/// file is uploaded (Blossom) at pick-time and the returned HOSTED URL is what
+/// `saveProfile` publishes into the kind-0 — a `file://` path is never sent.
 class SetupModal extends ConsumerStatefulWidget {
   const SetupModal({super.key, required this.onComplete});
 
@@ -61,9 +63,42 @@ class SetupModal extends ConsumerStatefulWidget {
 class _SetupModalState extends ConsumerState<SetupModal> {
   final _nymCtl = TextEditingController();
   final _bioCtl = TextEditingController();
+
+  /// Local preview paths for the on-screen thumbnails only — the published
+  /// value is always the HOSTED URL below (set after a pick-time upload).
   String? _avatarPath;
   String? _bannerPath;
+
+  /// The hosted (Blossom) URLs returned by `uploadImage` after a pick. These —
+  /// not the local `file://` paths — are what `saveProfile` publishes into the
+  /// kind-0 `picture`/`banner`.
+  String? _avatarUrl;
+  String? _bannerUrl;
+
+  /// `.upload-progress` affordance state (mirrors new_pm_modal): `_uploading`
+  /// toggles the bar, `_uploadLabel` is the "Uploading avatar…"/"Uploading
+  /// banner…" line, `_uploadProgress` drives the fill (users.js
+  /// `_uploadFileWithProgress`).
+  bool _uploading = false;
+  String _uploadLabel = 'Uploading…';
+  double _uploadProgress = 0;
+
   bool _busy = false;
+
+  /// Per-surface upload caps, mirroring the PWA avatar/banner guards. Avatar
+  /// 5MB, banner 10MB.
+  static const int _avatarMaxBytes = 5 * 1024 * 1024;
+  static const int _bannerMaxBytes = 10 * 1024 * 1024;
+
+  /// Best-effort MIME from the picked file's extension (BUD-02 `Content-Type`),
+  /// mirroring `_contentTypeFor` in new_pm_modal.dart.
+  static String _contentTypeFor(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    return 'image/jpeg';
+  }
 
   @override
   void dispose() {
@@ -72,20 +107,86 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     super.dispose();
   }
 
+  /// Pick an avatar/banner, then UPLOAD it (Blossom) so `saveProfile` publishes
+  /// a hosted URL, never a `file://` path. Mirrors the PWA setup avatar/banner
+  /// select → `uploadImage` flow: enforce the cap (avatar 5MB / banner 10MB),
+  /// show the progress affordance, store the returned URL. On failure the old
+  /// image is kept (nothing stored) and the PWA failure alert is shown.
   Future<void> _pickImage(bool avatar) async {
+    if (_uploading) return; // one upload at a time
+    final Uint8List bytes;
+    final String contentType;
+    final String path;
     try {
       final picker = ImagePicker();
       final file = await picker.pickImage(source: ImageSource.gallery);
       if (file == null || !mounted) return;
-      setState(() {
-        if (avatar) {
-          _avatarPath = file.path;
-        } else {
-          _bannerPath = file.path;
-        }
-      });
+      bytes = await file.readAsBytes();
+      contentType = _contentTypeFor(file.path);
+      path = file.path;
     } catch (_) {
       // Picker unavailable (e.g. tests / desktop) — silently ignore.
+      return;
+    }
+    if (!mounted) return; // readAsBytes awaited above
+
+    // Enforce the per-surface size cap before uploading.
+    final cap = avatar ? _avatarMaxBytes : _bannerMaxBytes;
+    if (bytes.length > cap) {
+      final capMb = avatar ? 5 : 10;
+      final actualMb = (bytes.length / (1024 * 1024)).toStringAsFixed(1);
+      await showAppAlert(
+        context,
+        '${avatar ? 'Avatar' : 'Banner'} must be under ${capMb}MB '
+        '(this image is ${actualMb}MB).',
+      );
+      return;
+    }
+
+    setState(() {
+      _uploading = true;
+      _uploadProgress = 0.15; // PWA seeds the fill at 15%.
+      _uploadLabel = avatar ? 'Uploading avatar…' : 'Uploading banner…';
+    });
+
+    String? url;
+    try {
+      url = await ref.read(nostrControllerProvider).uploadImage(
+            bytes,
+            contentType: contentType,
+            onProgress: (p) {
+              if (mounted) setState(() => _uploadProgress = p);
+            },
+          );
+    } catch (_) {
+      url = null;
+    }
+    if (!mounted) return;
+
+    if (url == null || url.isEmpty) {
+      // Keep the old image — never store a broken/local value (PWA shows
+      // "Upload failed — try again").
+      setState(() {
+        _uploading = false;
+        _uploadProgress = 0;
+      });
+      await showAppAlert(context, 'Upload failed — try again.');
+      return;
+    }
+
+    setState(() {
+      _uploading = false;
+      _uploadProgress = 1;
+      if (avatar) {
+        _avatarUrl = url;
+        _avatarPath = path; // local preview thumbnail
+      } else {
+        _bannerUrl = url;
+        _bannerPath = path;
+      }
+    });
+    if (avatar && mounted) {
+      await showAppAlert(context, 'Avatar updated successfully');
     }
   }
 
@@ -113,17 +214,18 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       await kv.setString(StorageKeys.customNick, nym);
     }
     final bio = _bioCtl.text.trim();
-    final avatar = _avatarPath;
-    final banner = _bannerPath;
+    // Persist/publish the HOSTED URLs (uploaded at pick-time), never the local
+    // `file://` paths — a `file://` is not a valid kind-0 `picture`/`banner`.
+    final avatar = _avatarUrl;
+    final banner = _bannerUrl;
     if (bio.isNotEmpty) await kv.setString(StorageKeys.bio, bio);
     if (avatar != null) await kv.setString(StorageKeys.avatarUrl, avatar);
     if (banner != null) await kv.setString(StorageKeys.bannerUrl, banner);
 
     // The ephemeral keypair was already booted in main(); publish the chosen
     // profile so the nym + avatar/banner/bio land on relays (saveToNostrProfile).
-    // TODO(verify): the PWA uploads the picked file to a host and persists the
-    // returned URL; here we pass the local path through saveProfile's
-    // upload→URL path (same as nick_edit_modal).
+    // avatar/banner are the hosted URLs returned by `uploadImage`; if no image
+    // was picked they're null, so nothing new is published for them.
     await controller.saveProfile(
       name: nym.isEmpty ? null : nym,
       about: bio.isEmpty ? null : bio,
@@ -424,15 +526,27 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         ),
         const SizedBox(width: 12),
         Expanded(
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _smallButton(c, 'Choose photo', () => _pickImage(true)),
-              if (_avatarPath != null) ...[
-                const SizedBox(width: 8),
-                _smallButton(c, 'Remove',
-                    () => setState(() => _avatarPath = null),
-                    danger: true),
-              ],
+              Row(
+                children: [
+                  _smallButton(c, 'Choose photo', () => _pickImage(true)),
+                  if (_avatarPath != null) ...[
+                    const SizedBox(width: 8),
+                    _smallButton(
+                        c,
+                        'Remove',
+                        () => setState(() {
+                              _avatarPath = null;
+                              _avatarUrl = null;
+                            }),
+                        danger: true),
+                  ],
+                ],
+              ),
+              if (_uploading && _uploadLabel == 'Uploading avatar…')
+                _uploadProgressBar(c),
             ],
           ),
         ),
@@ -469,12 +583,56 @@ class _SetupModalState extends ConsumerState<SetupModal> {
             if (_bannerPath != null) ...[
               const SizedBox(width: 8),
               _smallButton(
-                  c, 'Remove', () => setState(() => _bannerPath = null),
+                  c,
+                  'Remove',
+                  () => setState(() {
+                        _bannerPath = null;
+                        _bannerUrl = null;
+                      }),
                   danger: true),
             ],
           ],
         ),
+        if (_uploading && _uploadLabel == 'Uploading banner…')
+          _uploadProgressBar(c),
       ],
+    );
+  }
+
+  /// `.upload-progress` body: an "Uploading …" label over the `.progress-bar`
+  /// (height 6, bg white/0.05, radius 10) with the `.progress-fill` (90°
+  /// primary→secondary gradient) at the live progress width (mirrors
+  /// new_pm_modal's `_uploadProgressBar`).
+  Widget _uploadProgressBar(NymColors c) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(_uploadLabel, style: TextStyle(color: c.textDim, fontSize: 12)),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: Container(
+              height: 6,
+              color: Colors.white.withValues(alpha: 0.05),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: _uploadProgress.clamp(0.0, 1.0),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: const BorderRadius.all(Radius.circular(10)),
+                      gradient:
+                          LinearGradient(colors: [c.primary, c.secondary]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

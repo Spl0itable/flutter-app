@@ -1535,6 +1535,10 @@ class _TabsSheetState extends State<_TabsSheet> {
                     buildDefaultDragHandles: false,
                     padding: const EdgeInsets.all(8),
                     itemCount: _local.length,
+                    // `onReorder` over `onReorderItem`: the latter doesn't exist
+                    // on the build toolchain's Flutter; this works on both
+                    // (deprecated-only on newer SDKs).
+                    // ignore: deprecated_member_use
                     onReorder: (oldIndex, newIndex) {
                       if (newIndex > oldIndex) newIndex -= 1;
                       setState(() {

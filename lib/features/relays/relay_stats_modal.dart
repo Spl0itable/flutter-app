@@ -11,14 +11,20 @@
 //       .relay-stats-section "Data transferred" → per-relay list
 //       .relay-stats-low-data → Low-Data-Mode panel + nym-switch toggle
 //
-// Live data the app exposes today: the connected-relay COUNT
-// (`appState.connectedRelays`, fed by `NostrService.onConnectionChanged`) and
-// the per-relay connection status / relay list (via the optional
-// `relayConnectionStatus` getter on the controller, see CROSS_FILE_NEEDS). Every
-// counter the app does NOT yet track (latency, events, bytes in/out, throughput
-// history) renders the PWA's real placeholder (`--` / `0` / `0 B` / empty graph)
-// — NEVER a fabricated number. The Low-Data-Mode toggle is wired live to
+// Live data: the connected-relay COUNT (`appState.connectedRelays`, fed by
+// `NostrService.onConnectionChanged`), the per-relay connection status
+// (`NostrController.relayConnectionStatus`), and the real relay-traffic
+// counters (`NostrController.relayStats` → `RelayStats`: avg latency, total
+// events, bytes in/out, the throughput-history graph, and per-relay
+// events/latency rows). A 1s `Timer.periodic` re-reads a `RelayStats.snapshot`
+// each tick so every metric refreshes live (mirrors the PWA `_rsRenderInterval`
+// 1s poll). When `relayStats` is null (pre-boot) OR a specific metric is absent,
+// the PWA's real placeholder renders (`--` / `0` / `0 B` / flat graph) — NEVER a
+// fabricated number. The Low-Data-Mode toggle is wired live to
 // `settingsProvider.setLowDataMode` (mirrors `toggleLowDataModeFromStats`).
+
+import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,11 +32,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants/relays.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../services/relay/relay_stats.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 
-class RelayStatsModal extends ConsumerWidget {
+class RelayStatsModal extends ConsumerStatefulWidget {
   const RelayStatsModal({super.key});
 
   /// Opens the Network Stats modal as a centered dialog (the PWA renders it as a
@@ -45,7 +52,30 @@ class RelayStatsModal extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<RelayStatsModal> createState() => _RelayStatsModalState();
+}
+
+class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
+  // Mirrors the PWA `_rsRenderInterval` 1s poll (app.js:7339): re-read the live
+  // counters every second so the cards/graph/rows refresh while the modal is up.
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
     // Real connected-relay count (NostrService.onConnectionChanged → appState).
     final connected =
@@ -53,9 +83,14 @@ class RelayStatsModal extends ConsumerWidget {
     final lowData =
         ref.watch(settingsProvider.select((s) => s.lowDataMode));
 
-    // Per-relay status, if the controller exposes it (CROSS_FILE_NEEDS). Until
-    // the getter lands this is null → the relay list shows the real empty state.
-    final relayStatus = _readRelayStatus(ref);
+    // Live relay traffic counters — typed getter on the controller, null before
+    // boot. Read a stable snapshot so a per-second source mutation can't tear a
+    // frame mid-render (mirrors the PWA reading `nym.relayStats` each tick).
+    final stats = ref.read(nostrControllerProvider).relayStats?.snapshot();
+
+    // Per-relay connection status (url → connected), typed getter; empty before
+    // boot → the relay list shows the real "No relays connected" empty state.
+    final relayStatus = ref.read(nostrControllerProvider).relayConnectionStatus;
 
     return Center(
       child: Material(
@@ -116,11 +151,16 @@ class RelayStatsModal extends ConsumerWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            _Cards(connected: connected),
+                            _Cards(connected: connected, stats: stats),
                             const SizedBox(height: 14),
-                            const _ThroughputSection(),
+                            _ThroughputSection(
+                              history: stats?.throughputHistory ?? const [],
+                            ),
                             const SizedBox(height: 14),
-                            _RelayListSection(relayStatus: relayStatus),
+                            _RelayListSection(
+                              relayStatus: relayStatus,
+                              stats: stats,
+                            ),
                             const SizedBox(height: 14),
                             _LowDataPanel(
                               enabled: lowData,
@@ -149,28 +189,6 @@ class RelayStatsModal extends ConsumerWidget {
       ),
     );
   }
-
-  /// Reads the optional `relayConnectionStatus` getter off the controller
-  /// (CROSS_FILE_NEEDS) without a compile-time dependency. Returns null when the
-  /// getter is absent so the list falls back to its real empty state — never a
-  /// fabricated relay row.
-  Map<String, bool>? _readRelayStatus(WidgetRef ref) {
-    try {
-      final controller = ref.read(nostrControllerProvider);
-      final dynamic dyn = controller;
-      final result = dyn.relayConnectionStatus;
-      if (result is Map) {
-        return {
-          for (final e in result.entries)
-            if (e.key is String && e.value is bool)
-              e.key as String: e.value as bool,
-        };
-      }
-    } catch (_) {
-      // Getter not present yet — render the empty state.
-    }
-    return null;
-  }
 }
 
 // =============================================================================
@@ -178,14 +196,29 @@ class RelayStatsModal extends ConsumerWidget {
 // =============================================================================
 
 class _Cards extends StatelessWidget {
-  const _Cards({required this.connected});
+  const _Cards({required this.connected, required this.stats});
   final int connected;
+
+  /// Live relay counters, or null before boot. When null every untracked metric
+  /// renders the PWA's literal placeholder (NEVER a fabricated value): latency
+  /// `--`, events `0`, data in/out `0 B`.
+  final RelayStats? stats;
 
   @override
   Widget build(BuildContext context) {
-    // 5-up grid (.relay-stats-cards: grid 5, gap 6). Untracked metrics render
-    // the PWA's literal placeholder (NEVER a fabricated value): latency `--`,
-    // events `0`, data in/out `0 B`.
+    // Real values when [stats] is available; PWA placeholders otherwise.
+    // Avg Latency: `avgLat !== null ? avgLat + 'ms' : '--'` (app.js:7391).
+    final latency = stats?.averageLatencyMs != null
+        ? '${stats!.averageLatencyMs}ms'
+        : '--';
+    // Events: k-abbreviated total (app.js:7392).
+    final events =
+        stats != null ? _abbreviateCount(stats!.totalEvents) : '0';
+    // Data In / Out: formatBytes (app.js:7393-7394).
+    final dataIn = stats != null ? formatBytes(stats!.bytesReceived) : '0 B';
+    final dataOut = stats != null ? formatBytes(stats!.bytesSent) : '0 B';
+
+    // 5-up grid (.relay-stats-cards: grid 5, gap 6).
     return LayoutBuilder(builder: (context, cons) {
       const gap = 6.0;
       final cardW = (cons.maxWidth - gap * 4) / 5;
@@ -194,14 +227,29 @@ class _Cards extends StatelessWidget {
         runSpacing: gap,
         children: [
           _StatCard(width: cardW, value: '$connected', label: 'Connected'),
-          _StatCard(width: cardW, value: '--', label: 'Avg Latency'),
-          _StatCard(width: cardW, value: '0', label: 'Events'),
-          _StatCard(width: cardW, value: '0 B', label: 'Data In'),
-          _StatCard(width: cardW, value: '0 B', label: 'Data Out'),
+          _StatCard(width: cardW, value: latency, label: 'Avg Latency'),
+          _StatCard(width: cardW, value: events, label: 'Events'),
+          _StatCard(width: cardW, value: dataIn, label: 'Data In'),
+          _StatCard(width: cardW, value: dataOut, label: 'Data Out'),
         ],
       );
     });
   }
+}
+
+/// k-abbreviated event count, mirroring the PWA Events card
+/// (`s.totalEvents > 9999 ? (s.totalEvents / 1000).toFixed(1) + 'k' :
+/// s.totalEvents`, app.js:7392): only past 9999 does it switch to `X.Xk`.
+String _abbreviateCount(int n) =>
+    n > 9999 ? '${(n / 1000).toStringAsFixed(1)}k' : '$n';
+
+/// Human-readable byte size, a 1:1 port of the PWA `formatBytes` (app.js:7347):
+/// `< 1024` → `N B`; `< 1MiB` → `X.X KB`; `< 1GiB` → `X.X MB`; else `X.XX GB`.
+String formatBytes(int b) {
+  if (b < 1024) return '$b B';
+  if (b < 1048576) return '${(b / 1024).toStringAsFixed(1)} KB';
+  if (b < 1073741824) return '${(b / 1048576).toStringAsFixed(1)} MB';
+  return '${(b / 1073741824).toStringAsFixed(2)} GB';
 }
 
 class _StatCard extends StatelessWidget {
@@ -290,7 +338,11 @@ class _SectionTitle extends StatelessWidget {
 // =============================================================================
 
 class _ThroughputSection extends StatelessWidget {
-  const _ThroughputSection();
+  const _ThroughputSection({required this.history});
+
+  /// Last ≤60 per-second event counts (oldest→newest). Empty before any sample
+  /// → the flat-baseline placeholder.
+  final List<int> history;
 
   @override
   Widget build(BuildContext context) {
@@ -311,12 +363,11 @@ class _ThroughputSection extends StatelessWidget {
           child: SizedBox(
             height: 100,
             width: double.infinity,
-            // The app does not yet sample throughput history (no per-second
-            // event counter in the relay layer — see CROSS_FILE_NEEDS). Render
-            // the real empty graph: a flat baseline at y=0 with the `0/s` / `0`
-            // scale labels the PWA draws when history is empty (max=1, data=[0]).
+            // Real polyline once samples exist; the empty list renders the flat
+            // baseline + `0/s`/`0` labels the PWA draws for `data=[0]`, max=1.
             child: CustomPaint(
               painter: _ThroughputPainter(
+                history: history,
                 line: c.primary,
                 label: c.textDim,
               ),
@@ -328,15 +379,19 @@ class _ThroughputSection extends StatelessWidget {
   }
 }
 
-/// Draws the empty throughput graph: a baseline line at the bottom (data=[0],
-/// max=1) plus `0/s` (top-right) and `0` (bottom-right) scale labels — exactly
-/// what `drawThroughputGraph([])` renders before any sample exists.
+/// Port of the PWA `drawThroughputGraph` (app.js:7424): plots the last ≤60
+/// per-second event counts as a fill + 1.5px polyline (newest at the right),
+/// scaled to `max(1, …history)`, with `<max>/s` (top-right) and `0`
+/// (bottom-right) mono-9px labels. An empty list collapses to `data=[0]`,
+/// max=1 → the flat baseline the PWA draws before any sample exists.
 class _ThroughputPainter extends CustomPainter {
   _ThroughputPainter({
+    required this.history,
     required this.line,
     required this.label,
   });
 
+  final List<int> history;
   final Color line;
   final Color label;
 
@@ -344,14 +399,48 @@ class _ThroughputPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
-    // data=[0], maxVal=1 → y = h - 2 for every point (flat baseline near floor).
-    final y = h - 2;
+
+    // data = history.length > 0 ? history : [0] (app.js:7442).
+    final data = history.isNotEmpty ? history : const [0];
+    final maxVal = math.max(1, data.reduce(math.max));
+    const points = 60;
+    final stepX = w / (points - 1);
+    // Right-align: the freshest sample sits at index `points - 1` (app.js:7456).
+    final startIdx = math.max(0, points - data.length);
+
+    double xAt(int i) => (startIdx + i) * stepX;
+    double yAt(int i) => h - (data[i] / maxVal) * (h - 4) - 2;
+
+    // Fill gradient under the line (primary 0.25 → 0.02 top→bottom).
+    final fillPath = Path()..moveTo(xAt(0), h);
+    for (var i = 0; i < data.length; i++) {
+      fillPath.lineTo(xAt(i), yAt(i));
+    }
+    fillPath.lineTo(xAt(data.length - 1), h);
+    fillPath.close();
+    final fillPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          line.withValues(alpha: 0.25),
+          line.withValues(alpha: 0.02),
+        ],
+      ).createShader(Rect.fromLTWH(0, 0, w, h));
+    canvas.drawPath(fillPath, fillPaint);
+
+    // Polyline (primary stroke 1.5, round join).
+    final linePath = Path()..moveTo(xAt(0), yAt(0));
+    for (var i = 1; i < data.length; i++) {
+      linePath.lineTo(xAt(i), yAt(i));
+    }
     final strokePaint = Paint()
       ..color = line
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5
       ..strokeJoin = StrokeJoin.round;
-    canvas.drawLine(Offset(0, y), Offset(w, y), strokePaint);
+    canvas.drawPath(linePath, strokePaint);
 
     // Scale labels (mono 9px, right-aligned), matching the canvas text.
     void drawLabel(String text, double anchorRight, double baselineY) {
@@ -369,13 +458,23 @@ class _ThroughputPainter extends CustomPainter {
       tp.paint(canvas, Offset(anchorRight - tp.width, baselineY));
     }
 
-    drawLabel('0/s', w - 2, 2);
+    drawLabel('$maxVal/s', w - 2, 2);
     drawLabel('0', w - 2, h - 12);
   }
 
   @override
   bool shouldRepaint(covariant _ThroughputPainter old) =>
-      old.line != line || old.label != label;
+      old.line != line ||
+      old.label != label ||
+      !_sameHistory(old.history, history);
+
+  static bool _sameHistory(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 }
 
 // =============================================================================
@@ -383,29 +482,37 @@ class _ThroughputPainter extends CustomPainter {
 // =============================================================================
 
 class _RelayListSection extends StatelessWidget {
-  const _RelayListSection({required this.relayStatus});
+  const _RelayListSection({required this.relayStatus, required this.stats});
 
-  /// Per-relay url → open, when the controller exposes it; null otherwise.
-  final Map<String, bool>? relayStatus;
+  /// Per-relay url → open (empty before boot → real empty state).
+  final Map<String, bool> relayStatus;
+
+  /// Live counters for the per-relay events/latency columns; null before boot.
+  final RelayStats? stats;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
 
-    // Build the relay rows from REAL per-relay status when available; otherwise
-    // the list shows the PWA's real empty state ("No relays connected").
+    // Build the relay rows from REAL per-relay status; the empty status map
+    // leaves the list showing the PWA's real empty state ("No relays
+    // connected"). Each row carries its real `eventsPerRelay`/`latencyPerRelay`
+    // value (absent → 0 events / `--` latency — never a fabricated number).
     final entries = <_RelayRowData>[];
-    if (relayStatus != null) {
-      for (final e in relayStatus!.entries) {
-        if (RelayConfig.writeOnlyRelays.contains(e.key)) continue;
-        entries.add(_RelayRowData(url: e.key, open: e.value));
-      }
-      // PWA sort: connected first, then by events (events all 0 here → stable).
-      entries.sort((a, b) {
-        if (a.open != b.open) return a.open ? -1 : 1;
-        return 0;
-      });
+    for (final e in relayStatus.entries) {
+      if (RelayConfig.writeOnlyRelays.contains(e.key)) continue;
+      entries.add(_RelayRowData(
+        url: e.key,
+        open: e.value,
+        events: stats?.eventsPerRelay[e.key] ?? 0,
+        latency: stats?.latencyPerRelay[e.key],
+      ));
     }
+    // PWA sort: connected first, then by events DESC (app.js:7592-7595).
+    entries.sort((a, b) {
+      if (a.open != b.open) return a.open ? -1 : 1;
+      return b.events - a.events;
+    });
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -444,9 +551,20 @@ class _RelayListSection extends StatelessWidget {
 }
 
 class _RelayRowData {
-  const _RelayRowData({required this.url, required this.open});
+  const _RelayRowData({
+    required this.url,
+    required this.open,
+    required this.events,
+    required this.latency,
+  });
   final String url;
   final bool open;
+
+  /// Unique inbound events from this relay (`eventsPerRelay[url] ?? 0`).
+  final int events;
+
+  /// Last measured latency in ms, or null → render `--` (`latencyPerRelay[url]`).
+  final int? latency;
 }
 
 class _RelayRow extends StatelessWidget {
@@ -501,12 +619,12 @@ class _RelayRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          // .relay-stats-latency: mono 11, textDim, right-aligned, `--` (no
-          // per-relay latency tracked yet — see CROSS_FILE_NEEDS).
+          // .relay-stats-latency: mono 11, textDim, right-aligned. Real
+          // `<ms>ms`, or `--` when no latency has been measured (app.js:7660).
           SizedBox(
             width: 45,
             child: Text(
-              '--',
+              data.latency != null ? '${data.latency}ms' : '--',
               textAlign: TextAlign.right,
               style: TextStyle(
                 fontFamily: 'monospace',
@@ -516,12 +634,12 @@ class _RelayRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          // .relay-stats-events: mono 11, textBright, right-aligned, `0 evt`
-          // (no per-relay event counter tracked yet — see CROSS_FILE_NEEDS).
+          // .relay-stats-events: mono 11, textBright, right-aligned. Real
+          // `<n> evt` per-relay event count (app.js:7652).
           SizedBox(
             width: 50,
             child: Text(
-              '0 evt',
+              '${data.events} evt',
               textAlign: TextAlign.right,
               style: TextStyle(
                 fontFamily: 'monospace',
