@@ -102,6 +102,7 @@ flutter:
     - assets/images/
     - assets/text/
     - assets/data/
+    - assets/fonts/
 
   # Bundled fonts so text, emoji, and symbol glyphs all render correctly on ANY
   # device — including de-Googled / minimal Android builds whose system font set
@@ -124,10 +125,10 @@ flutter:
           weight: 500
         - asset: assets/fonts/Roboto-Bold.ttf
           weight: 700
-    - family: Noto Color Emoji
+    - family: "Noto Color Emoji"
       fonts:
         - asset: assets/fonts/NotoColorEmoji.ttf
-    - family: Noto Sans Symbols
+    - family: "Noto Sans Symbols"
       fonts:
         - asset: assets/fonts/NotoSansSymbols-Regular.ttf
 
