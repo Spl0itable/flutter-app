@@ -11,6 +11,7 @@ import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
 import '../core/utils/nym_utils.dart';
+import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
 import '../features/commands/command_handler.dart';
 import '../features/commands/command_registry.dart';
@@ -2703,6 +2704,9 @@ class NostrController {
     if (added) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Blocked ${_nymDisplayFor(pubkey)}');
+      // Blocking mid-call ends a 1:1 call / drops the peer from a group call and
+      // hides their chat (calls.js `_onUserBlockedForCall`).
+      _ref.read(callServiceProvider).onUserBlocked(pubkey);
     }
     return added;
   }

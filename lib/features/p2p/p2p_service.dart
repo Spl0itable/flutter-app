@@ -496,6 +496,19 @@ class P2PService extends ChangeNotifier {
     }
     chunks.add(bin);
     transfer.bytesReceived += bin.length;
+    // Live progress: %/speed status line (p2p.js:540-543 `handleFileChunk` →
+    // `updateTransferProgress`, p2p.js:606-621). pct is clamped to 100 and the
+    // throughput is bytesReceived over elapsed seconds since the transfer
+    // started, humanized with the shared `formatFileSize`.
+    if (transfer.offer.size > 0) {
+      final pct =
+          ((transfer.bytesReceived / transfer.offer.size) * 100).clamp(0, 100);
+      final elapsed =
+          (DateTime.now().millisecondsSinceEpoch - transfer.startTime) / 1000;
+      final speed = elapsed > 0 ? transfer.bytesReceived / elapsed : 0;
+      transfer.message =
+          '${pct.toStringAsFixed(1)}% • ${formatFileSize(speed.round())}/s';
+    }
     notifyListeners();
   }
 
