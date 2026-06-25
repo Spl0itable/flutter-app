@@ -1794,6 +1794,11 @@ class NostrController {
             realMs: int.tryParse(signed.tagValue('ms') ?? ''),
           );
         }
+        // Hardcore keypair mode: rotate to a brand-new keypair + nym after every
+        // sent channel message (messages.js:2392-2404). Runs AFTER the publish
+        // above so the message that just went out used the OLD identity; the
+        // next send uses the fresh one. No-op unless ephemeral + 'hardcore'.
+        await _rotateHardcoreIdentityIfNeeded();
       } catch (_) {
         // Publish failed: flip the placeholder to failed (`_markOptimisticFailed`).
         if (echo != null) appState.markOptimisticFailed(echo.id);
@@ -1846,6 +1851,65 @@ class NostrController {
         settings: _msgSettings,
       );
     }
+  }
+
+  /// Hardcore keypair mode: replace the live ephemeral identity with a brand-new
+  /// keypair + random nym after a sent message (messages.js:2392-2404 — the
+  /// `connectionMode === 'ephemeral' && nym_keypair_mode === 'hardcore'` branch
+  /// that runs `generateKeypair()` + `generateRandomNym()` + `updateSidebarAvatar()`).
+  ///
+  /// No-op unless we are EPHEMERAL (`loginMethod == null`, the PWA's
+  /// `connectionMode === 'ephemeral'`) AND the keypair mode is `'hardcore'`, so a
+  /// durable nsec/extension/NIP-46 account is never rotated out from under the
+  /// user.
+  ///
+  /// Rotation swaps the signing key IN PLACE on the live [NostrService]
+  /// ([NostrService.rotateIdentity]) — the relay connections + subscriptions
+  /// persist, matching the PWA's `generateKeypair` (which only swaps the key,
+  /// never reconnecting or re-subscribing). It then refreshes `selfPubkey`/
+  /// `selfNym` in [AppState] (the sidebar header avatar seed + nym react — the
+  /// native `updateSidebarAvatar`) and re-asserts presence under the new
+  /// identity via [recordOwnActivity].
+  Future<void> _rotateHardcoreIdentityIfNeeded() async {
+    final current = _identity;
+    final oldService = _service;
+    // Ephemeral only (no durable login) + the 'hardcore' keypair mode.
+    if (current == null ||
+        oldService == null ||
+        current.loginMethod != null) {
+      return;
+    }
+    if (_ref.read(settingsProvider.notifier).keypairMode != 'hardcore') return;
+
+    final kv = _ref.read(keyValueStoreProvider);
+    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    final rotated = await identityService.rotateEphemeral(current);
+    // rotateEphemeral returns the same instance for a durable login; the guard
+    // above already excludes that, but stay safe against a no-op rotation.
+    if (identical(rotated, current) || rotated.pubkey == current.pubkey) return;
+
+    final signer =
+        rotated.privkey != null ? LocalSigner(rotated.privkey!) : null;
+
+    // Swap the key IN PLACE on the live service — keep the relay connections +
+    // subscriptions (the PWA's `generateKeypair` only swaps privkey/pubkey; it
+    // does NOT reconnect or re-subscribe, so the `#p:[self]` gift-wrap filter
+    // stays on the prior pubkey). A full service rebuild would reconnect every
+    // relay on every sent message, which hardcore mode can't afford. The same
+    // [NostrService]/[GroupManager] instances are retained — only the signing
+    // identity changes for the NEXT publish.
+    oldService.rotateIdentity(rotated, signer);
+    _identity = rotated;
+    _signer = signer;
+
+    // Refresh the sidebar (header avatar seed + nym) without wiping the
+    // conversation — the native `updateSidebarAvatar`. (NOT goLive, which would
+    // reset the live store.)
+    _ref.read(appStateProvider.notifier).setIdentity(rotated.pubkey, rotated.nym);
+
+    // Re-assert presence under the new identity, like the boot path does for a
+    // freshly-booted identity (nostr-core.js presence-on-connect).
+    recordOwnActivity();
   }
 
   // --- Command effects (engine half of the cmd* handlers) -------------------

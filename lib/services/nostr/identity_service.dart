@@ -127,6 +127,43 @@ class IdentityService {
     return Identity(pubkey: pubkey, privkey: sk, nym: nym);
   }
 
+  /// Rotates the in-memory ephemeral identity: a brand-new keypair + a fresh
+  /// RANDOM nym, returned as a new ephemeral [Identity] (loginMethod=null).
+  ///
+  /// This is the "hardcore" keypair mode (messages.js:2392-2404): after every
+  /// sent message the PWA calls `generateKeypair()` then
+  /// `this.nym = this.generateRandomNym()`, so the durable ephemeral identity is
+  /// replaced wholesale and the nym is always freshly random (never the saved
+  /// nick). Only valid for an ephemeral [current] identity — a durable login
+  /// (nsec/extension/NIP-46, i.e. `loginMethod != null`) is returned unchanged,
+  /// so a key rotation can never clobber a real account.
+  ///
+  /// The new key is persisted exactly like [bootEphemeral] does (the
+  /// `nym_session_nsec` secret), so a same-session reconnect restores the
+  /// just-rotated identity rather than an older one — kept consistent with the
+  /// `randomKeypairPerSession` flag (hardcore sets it, so we skip persistence to
+  /// match `bootEphemeral`'s "fresh each session" behaviour).
+  Future<Identity> rotateEphemeral(Identity current) async {
+    if (current.loginMethod != null) return current;
+
+    final randomPerSession =
+        _kv.getBool(StorageKeys.randomKeypairPerSession, defaultValue: false);
+    final nickStyle = _kv.getString(StorageKeys.nickStyle) ?? 'fancy';
+
+    // Fresh keypair + always-fresh random nym (PWA `generateRandomNym`).
+    final sk = generatePrivateKey();
+    final pubkey = getPublicKeyHex(sk);
+    final nym = _nymGen.generate(pubkey, style: nickStyle);
+
+    if (!randomPerSession) {
+      // Persist for a same-session reconnect (mirrors [bootEphemeral]).
+      await _secure.set(SecretKeys.sessionNsec, bech32.encodeNsecBytes(sk));
+      await _kv.setString(StorageKeys.autoEphemeralNick, nym);
+    }
+
+    return Identity(pubkey: pubkey, privkey: sk, nym: nym);
+  }
+
   /// Sets a new display nym (persisted for the ephemeral session).
   Future<void> setNym(Identity identity, String nym) async {
     identity.nym = nym;
