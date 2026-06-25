@@ -2049,6 +2049,131 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state = state.copyWith();
   }
 
+  /// Seeds the sidebar + activity/unread maps from a D1 channel-activity probe
+  /// (the controller's `_discoverChannelActivity`, ported from channels.js
+  /// `_populateSidebarFromD1Activity` + `_mergeD1Last` + `_seedUnreadFromD1Activity`,
+  /// channels.js:215-284). Applied for BOTH the geohash discovery
+  /// (`channel-active`) and the named discovery (`channel-active-named`) — the
+  /// caller passes [geohash]=true for the former so a discovered key registers as
+  /// a geohash channel.
+  ///
+  /// [activity] maps a channel/geohash key (bare, no `#`) → 24 hourly message
+  /// buckets (index 0 = current hour); [last] maps the same key → last-activity
+  /// unix-SECONDS. Effects, all idempotent:
+  ///   1. **Discovery → sidebar**: a key with recent activity that the user hasn't
+  ///      blocked/hidden and isn't already listed is added via [addChannel] (cap
+  ///      [_kDiscoverSidebarLimit], most-recent first — `SIDEBAR_DISCOVER_LIMIT`).
+  ///   2. **Last-activity**: `channelLastActivity[#key]` is raised to the D1
+  ///      last-seen (ms) so the channel sorts by real recency (PWA keeps the max).
+  ///   3. **Unread floor**: for an already-listed (joined) channel that ISN'T the
+  ///      active view, the summed buckets seed `unreadCounts[#key]` as a FLOOR
+  ///      (only ever raised — D1 is the archive of record, channels.js:268-269).
+  ///
+  /// Mirrors the PWA's discovery vs. known split loosely: the discovery response
+  /// drives sidebar+last; the unread floor is conservative here because the native
+  /// store has no per-channel `channelLastRead` to bound the bucket span, so it
+  /// only RAISES a badge and never seeds the active/opened view.
+  void applyChannelActivity(
+    Map<String, List<int>> activity,
+    Map<String, int> last, {
+    bool geohash = false,
+  }) {
+    if (activity.isEmpty && last.isEmpty) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    var changed = false;
+
+    // 2) Last-activity: raise channelLastActivity[#key] to the newest D1 ts.
+    last.forEach((rawKey, tsSec) {
+      final key = rawKey.toLowerCase();
+      if (key.isEmpty || tsSec <= 0) return;
+      if (state.blockedChannels.contains(key)) return;
+      final storageKey = '#$key';
+      final tsMs = tsSec * 1000;
+      if (tsMs > (state.channelLastActivity[storageKey] ?? 0)) {
+        state.channelLastActivity[storageKey] = tsMs;
+        changed = true;
+      }
+    });
+
+    // 1) Discovery → sidebar. Rank candidates (not yet listed) by last-activity
+    //    (falling back to the newest non-empty bucket's hour) and add the top N.
+    final candidates = <({String key, int ts})>[];
+    activity.forEach((rawKey, buckets) {
+      final key = rawKey.toLowerCase();
+      if (key.isEmpty || key == kDefaultChannel) return;
+      if (state.blockedChannels.contains(key) ||
+          state.hiddenChannels.contains(key)) {
+        return;
+      }
+      // A bare word/geohash only (the PWA's `/^[\p{L}\p{N}]+$/u` guard).
+      if (!_isSimpleChannelName(key)) return;
+      if (state.channels.any((c) => c.key == key)) return; // already listed
+      final tsMs = state.channelLastActivity['#$key'] ??
+          _approxLastFromBuckets(buckets, nowMs);
+      if (tsMs <= 0) return; // no recent activity → don't surface
+      candidates.add((key: key, ts: tsMs));
+    });
+    if (candidates.isNotEmpty) {
+      candidates.sort((a, b) => b.ts.compareTo(a.ts));
+      for (final c in candidates.take(_kDiscoverSidebarLimit)) {
+        // Geohash discovery registers the key as a geohash channel so the globe
+        // + proximity sort treat it correctly; named discovery as a plain name.
+        addChannel(c.key, geohash: geohash ? c.key : '');
+        if ((state.channelLastActivity['#${c.key}'] ?? 0) < c.ts) {
+          state.channelLastActivity['#${c.key}'] = c.ts;
+        }
+        changed = true;
+      }
+    }
+
+    // 3) Unread floor for already-listed, non-active channels.
+    activity.forEach((rawKey, buckets) {
+      final key = rawKey.toLowerCase();
+      if (key.isEmpty) return;
+      final storageKey = '#$key';
+      // Never seed the open view (it's being read) or a blocked channel.
+      if (state.view.kind == ViewKind.channel &&
+          state.view.storageKey == storageKey) {
+        return;
+      }
+      if (state.blockedChannels.contains(key)) return;
+      if (!state.channels.any((c) => c.key == key)) return; // joined only
+      var count = 0;
+      for (final b in buckets) {
+        if (b > 0) count += b;
+      }
+      if (count <= 0) return;
+      // D1 is a FLOOR: only ever raise the badge, never lower it.
+      if (count > (state.unreadCounts[storageKey] ?? 0)) {
+        state.unreadCounts[storageKey] = count;
+        changed = true;
+      }
+    });
+
+    if (changed) state = state.copyWith();
+  }
+
+  /// Cap on how many never-opened channels a single D1 discovery pass surfaces
+  /// into the sidebar (`SIDEBAR_DISCOVER_LIMIT`, channels.js:219).
+  static const int _kDiscoverSidebarLimit = 30;
+
+  /// True when [name] is a single run of letters/digits — the PWA's
+  /// `/^[\p{L}\p{N}]+$/u` gate before adding a discovered channel to the sidebar
+  /// (channels.js:234), so a malformed/compound key can't create a junk row.
+  static bool _isSimpleChannelName(String name) =>
+      name.isNotEmpty && RegExp(r'^[\p{L}\p{N}]+$', unicode: true).hasMatch(name);
+
+  /// Approximates a channel's last-activity ms from its hourly buckets when the
+  /// `last` map omitted it: the first non-zero bucket (index = hours ago) →
+  /// `(now - h*3600s)` (PWA `_d1ChannelLastActivityMs`, channels.js:204-207).
+  /// Returns 0 when every bucket is empty.
+  static int _approxLastFromBuckets(List<int> buckets, int nowMs) {
+    for (var h = 0; h < buckets.length; h++) {
+      if (buckets[h] > 0) return nowMs - h * 3600 * 1000;
+    }
+    return 0;
+  }
+
   /// Appends a locally-echoed self message to the current view (composer SEND).
   /// For PM/group sends, pass [nymMessageId] so inbound receipts can match it
   /// and advance the delivery ticks. Returns the appended [Message].
