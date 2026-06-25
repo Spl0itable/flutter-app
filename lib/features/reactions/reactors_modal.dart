@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../messages/format/message_content.dart';
 
@@ -40,7 +42,7 @@ class ReactorEntry {
 /// Presented as an [OverlayEntry] by [showReactorsModal] so it can be anchored
 /// to the tapped badge and dismissed on outside-tap (matching the PWA's
 /// document-level close + scroll-dismiss behaviour).
-class ReactorsModal extends StatelessWidget {
+class ReactorsModal extends ConsumerWidget {
   const ReactorsModal({
     super.key,
     required this.emoji,
@@ -61,10 +63,16 @@ class ReactorsModal extends StatelessWidget {
   final String? title;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     final shown = reactors.take(maxRows).toList();
     final overflow = reactors.length - shown.length;
+    // Watch the unified user store so an avatar that lands AFTER this sheet opens
+    // — whether from the D1 `profile-get` that `ensureProfiles` kicked off, or a
+    // live relay kind-0 — fills the row in immediately. Both sources ingest into
+    // `usersProvider`, so this one watch covers either path; the entry's baked-in
+    // [ReactorEntry.imageUrl] is the fallback until then.
+    final users = ref.watch(usersProvider);
 
     return Material(
       type: MaterialType.transparency,
@@ -124,7 +132,9 @@ class ReactorsModal extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(vertical: 4),
                 shrinkWrap: true,
                 children: [
-                  for (final r in shown) _row(context, r),
+                  for (final r in shown)
+                    _row(context, r,
+                        users[r.pubkey]?.profile?.picture ?? r.imageUrl),
                   if (overflow > 0)
                     Padding(
                       padding:
@@ -147,7 +157,7 @@ class ReactorsModal extends StatelessWidget {
     );
   }
 
-  Widget _row(BuildContext context, ReactorEntry r) {
+  Widget _row(BuildContext context, ReactorEntry r, String? imageUrl) {
     final c = context.nym;
     return InkWell(
       onTap: onTapReactor == null ? null : () => onTapReactor!(r),
@@ -155,7 +165,7 @@ class ReactorsModal extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         child: Row(
           children: [
-            NymAvatar(seed: r.pubkey, size: 22, imageUrl: r.imageUrl),
+            NymAvatar(seed: r.pubkey, size: 22, imageUrl: imageUrl),
             const SizedBox(width: 8),
             Flexible(
               child: RichText(

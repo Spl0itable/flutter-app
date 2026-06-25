@@ -231,7 +231,7 @@ class NostrController {
       _groups = GroupManager(service);
       await service.start(NostrHandlers(
         onEvent: _onEvent,
-        onConnectionChanged: appState.setConnectedRelays,
+        onConnectionChanged: _onConnectionChanged,
         onGiftWrap: _onGiftWrap,
       ));
 
@@ -265,6 +265,15 @@ class NostrController {
       if (bootView.kind == ViewKind.channel) {
         unawaited(_backfillChannelArchive(bootView.id));
       }
+
+      // Discover recently-active GEOHASH + NAMED channels from the D1 archive and
+      // seed the sidebar / globe / unread floors — the PWA's
+      // `fetchGeohashActivityFromD1` + `fetchNamedChannelActivityFromD1`, fired on
+      // connect inside `backfillFromD1OnReconnect` (relays.js:2799-2805), NOT only
+      // on a view switch. Runs after `_initStorageSync` wires `_storageSync` (it
+      // no-ops otherwise). Throttled ~30s inside; also re-fired on reconnect (see
+      // [_onConnectionChanged]). Best-effort; never blocks boot.
+      unawaited(_discoverChannelActivity());
     } catch (e, st) {
       // Stay on seed/offline data if boot fails (e.g. no secure storage).
       debugPrint('NostrController.init failed: $e\n$st');
@@ -282,6 +291,102 @@ class NostrController {
     for (final g in kCommonGeohashes) {
       if (g == 'nymchat') continue;
       app.addChannel(g, geohash: g);
+    }
+  }
+
+  /// Relay connection-count sink. Forwards the live count to [AppState] (the old
+  /// direct `setConnectedRelays` binding) AND re-fires the D1 activity discovery
+  /// on a 0→connected edge, mirroring the PWA, which calls
+  /// `backfillFromD1OnReconnect` (→ `fetchGeohashActivityFromD1` +
+  /// `fetchNamedChannelActivityFromD1`) from the connect→subscribe chain
+  /// (relays.js:2761) and on every reconnect. The discovery is throttled ~30s
+  /// internally so a flapping connection can't hammer the worker.
+  void _onConnectionChanged(int count) {
+    final wasOffline = _ref.read(appStateProvider).connectedRelays == 0;
+    _ref.read(appStateProvider.notifier).setConnectedRelays(count);
+    if (count > 0 && wasOffline) {
+      // Reconnect edge → re-run the D1 activity discovery (PWA
+      // `backfillFromD1OnReconnect`, relays.js:2761) AND re-restore the open
+      // channel's archive. The latter is the retry that recovers a boot backfill
+      // which ran before the storage transport was reachable: `_backfillChannelArchive`
+      // forces past the freshness window, and re-ingest dedups by event id, so it
+      // is safe + idempotent.
+      unawaited(_discoverChannelActivity());
+      final view = _ref.read(appStateProvider).view;
+      if (view.kind == ViewKind.channel) {
+        unawaited(_backfillChannelArchive(view.id));
+      }
+    }
+  }
+
+  /// Last `_discoverChannelActivity` run (ms) — the ~30s throttle the PWA applies
+  /// to `fetchGeohashActivityFromD1` / `fetchNamedChannelActivityFromD1`
+  /// (`_geohashActivityFetchedAt` / `_namedActivityFetchedAt`, channels.js:131).
+  /// Reset to 0 on a transport failure so the next attempt retries immediately.
+  int _lastActivityDiscoveryAt = 0;
+
+  /// Discovers recently-active GEOHASH + NAMED channels from the D1 archive and
+  /// seeds the in-memory store (sidebar registry + last-activity sort + unread
+  /// floors), the native port of the PWA's `fetchGeohashActivityFromD1` +
+  /// `fetchNamedChannelActivityFromD1` (channels.js:128/289), which run on
+  /// connect (relays.js:2799-2805) so the channel list/globe surface real
+  /// recency before the user opens anything.
+  ///
+  /// Issues all three PUBLIC reads in parallel:
+  ///   * `channel-active`        — discover active GEOHASH channels,
+  ///   * `channel-active-named`  — discover active NAMED channels,
+  ///   * `channel-activity`      — activity buckets for the geohashes we already
+  ///     know (common + sidebar + channels with stored messages),
+  /// then folds each result into [AppStateNotifier.applyChannelActivity]. The
+  /// discovery results carry the globe/sidebar recency; the known-activity result
+  /// seeds unread floors for joined channels. Throttled ~30s, best-effort
+  /// (failures are swallowed; never blocks boot). Skipped in group/PM-only mode
+  /// (the sidebar channel list is hidden there, like [discoverChannels]).
+  Future<void> _discoverChannelActivity() async {
+    final sync = _storageSync;
+    if (sync == null) return;
+    if (_ref.read(settingsProvider).groupChatPMOnlyMode) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastActivityDiscoveryAt != 0 && now - _lastActivityDiscoveryAt < 30000) {
+      return;
+    }
+    _lastActivityDiscoveryAt = now;
+    try {
+      final app = _ref.read(appStateProvider.notifier);
+
+      // Known geohashes to probe (PWA gathers commonGeohashes + sidebar channels
+      // + channels with stored messages, channels.js:137-144). De-duped inside
+      // [StorageSync.channelActivity]; nymchat included (it's a valid geohash key
+      // in the PWA's `commonGeohashes`).
+      final known = <String>{...kCommonGeohashes};
+      for (final c in _ref.read(appStateProvider).channels) {
+        known.add(c.key);
+      }
+      for (final storageKey in _ref.read(appStateProvider).messages.keys) {
+        if (storageKey.startsWith('#')) known.add(storageKey.substring(1));
+      }
+
+      // All three reads in parallel (PWA `Promise.all`, each best-effort). The
+      // StorageSync methods already resolve failures to empty results.
+      final results = await Future.wait([
+        sync.channelActive(),
+        sync.channelActiveNamed(),
+        sync.channelActivity(known.toList()),
+      ]);
+      final geo = results[0];
+      final named = results[1];
+      final knownActivity = results[2];
+
+      // Discovered GEOHASH channels → sidebar (as geohash entries) + last-activity.
+      app.applyChannelActivity(geo.activity, geo.last, geohash: true);
+      // Discovered NAMED channels → sidebar (as named entries) + last-activity.
+      app.applyChannelActivity(named.activity, named.last);
+      // Known channels' activity → unread floors (+ last-activity top-up). These
+      // keys are already joined, so no new sidebar rows are created here.
+      app.applyChannelActivity(knownActivity.activity, knownActivity.last);
+    } catch (_) {
+      // Best-effort: allow the next trigger (reconnect / foreground) to retry.
+      _lastActivityDiscoveryAt = 0;
     }
   }
 
@@ -508,6 +613,11 @@ class NostrController {
     if (event.kind == EventKind.reaction) {
       final removed =
           event.tagsNamed('action').any((t) => t.length > 1 && t[1] == 'remove');
+      // Resolve the REACTOR's D1 profile so the reactors sheet (and any future
+      // surface) shows their custom avatar, not the identicon — the PWA resolves
+      // list/reaction author avatars too (`ensureListProfiles`, reactions.js:631).
+      // Guarded + debounced inside; a no-op once we know their picture.
+      if (!removed) _maybeBackfillProfiles(event.pubkey);
       if (!removed) {
         final target = event.tagValue('e');
         final author = event.tagValue('p');
@@ -975,6 +1085,13 @@ class NostrController {
               .toList(),
           shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
+
+    // Resolve this user's D1 profile so their custom avatar replaces the
+    // identicon even when they never send a message — the PWA resolves avatars
+    // for presence/list users too (`queueProfileFetch`/`ensureListProfiles`).
+    // No-op when presence already carried an `avatar-update` (picture set); the
+    // backfill guard keys on the picture, so it only fetches when one is missing.
+    _maybeBackfillProfiles(e.pubkey);
   }
 
   /// Per-pubkey newest presence timestamp (users.js `presenceTimestamps`) so a
@@ -1171,6 +1288,9 @@ class NostrController {
       awayMessage: status == 'away' ? away : null,
       lastSeenMs: DateTime.now().millisecondsSinceEpoch,
     );
+    // Resolve the friend's D1 profile so their custom avatar loads even without
+    // a message this session (guard no-ops once a picture is known).
+    _maybeBackfillProfiles(pubkey);
   }
 
   void _onRumorMessage(
@@ -1422,12 +1542,16 @@ class NostrController {
     if (messageId == null || bolt11 == null) return;
     final amount = ZapLogic.parseAmountFromBolt11(bolt11);
     if (amount == null) return;
+    final zapper = rumor['pubkey'] as String? ?? '';
     appState.recordMessageZap(
       messageId: messageId,
-      zapperPubkey: rumor['pubkey'] as String? ?? '',
+      zapperPubkey: zapper,
       amountSats: amount,
       dedupKey: ZapLogic.dedupKey(bolt11: bolt11, eventId: ''),
     );
+    // Resolve the zapper's avatar (the zappers sheet / badge), like the PWA
+    // resolves zap-list authors (`ensureListProfiles`, zaps.js:223).
+    if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
   }
 
   // ---------------------------------------------------------------------------
@@ -3736,6 +3860,17 @@ class NostrController {
   final Set<String> _profileBackfillQueued = <String>{};
   Timer? _profileBackfillTimer;
 
+  /// Resolves D1 profiles for a LIST of pubkeys (a reactors / zappers sheet, a
+  /// group-member or poll-voter list, a mention set) so each row shows its custom
+  /// avatar instead of the identicon — the PWA's `ensureListProfiles`. Each entry
+  /// goes through the same debounced, picture-guarded [_maybeBackfillProfiles], so
+  /// known avatars are skipped and the rest batch into one `profile-get`.
+  void ensureProfiles(Iterable<String> pubkeys) {
+    for (final pk in pubkeys) {
+      _maybeBackfillProfiles(pk);
+    }
+  }
+
   /// Enqueues [pubkey] for a debounced D1 profile fetch when we have no kind-0
   /// profile for it yet. Mirrors the PWA's `queueProfileFetch`
   /// (nostr-core.js:1767): a busy channel/PM/group stream only triggers ONE
@@ -3748,8 +3883,13 @@ class NostrController {
     if (_storageSync == null) return;
     final self = _service?.selfPubkey ?? _identity?.pubkey;
     if (pubkey == self) return;
-    // Already have a profile for this user → nothing to fetch.
-    if (_ref.read(appStateProvider).users[pubkey]?.profile != null) return;
+    // Already have this user's AVATAR → nothing to fetch. Keying on the picture
+    // (not profile-existence) mirrors the PWA, which guards on `userAvatars`
+    // (nostr-core.js:440/1771): a nym-only kind-0, or a presence that cleared the
+    // avatar, leaves a picture-less profile stub that must NOT permanently block
+    // the avatar backfill (the old `profile != null` guard did exactly that).
+    final pic = _ref.read(appStateProvider).users[pubkey]?.profile?.picture;
+    if (pic != null && pic.isNotEmpty) return;
     if (!_profileBackfillQueued.add(pubkey)) return;
     _profileBackfillQueue.add(pubkey);
     _profileBackfillTimer ??= Timer(
@@ -3784,11 +3924,16 @@ class NostrController {
     final name = channelKey.toLowerCase();
     if (!_channelBackfillInFlight.add(name)) return;
     try {
-      // Honor channelGet's 60s freshness window (channels.js `_channelD1FetchedAt`)
-      // so reopening the same channel in a tight loop doesn't refetch; the first
-      // open of the session still hydrates. The live subscription + any reconnect
-      // backfill top this up beyond the window.
-      final events = await sync.channelGet([name]);
+      // FORCE the fetch, bypassing channelGet's 60s freshness window — this is an
+      // explicit channel OPEN/boot, which the PWA always forces
+      // (`channelRestoreFromD1(geohash || channel, { force: true })` in
+      // `switchChannel`, channels.js:1264, and the boot landing-channel switch,
+      // relays.js:1066). Without `force` a prior probe (or a FAILED earlier
+      // attempt — `channelGet` marks `_channelFetchedAt` BEFORE the request and
+      // doesn't unmark on error) would suppress the boot/open restore for 60s,
+      // leaving #nymchat empty with no retry. `_channelBackfillInFlight` still
+      // de-dups concurrent calls for the same channel.
+      final events = await sync.channelGet([name], force: true);
       final appState = _ref.read(appStateProvider.notifier);
       for (final raw in events) {
         try {
