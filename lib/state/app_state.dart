@@ -1131,11 +1131,23 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final p = EventMapper.profile(e);
     if (p == null) return;
     final existing = state.users[e.pubkey];
+    var changed = false;
     if (existing != null) {
-      if (existing.profile == null || p.kind0Ts >= existing.profile!.kind0Ts) {
-        existing.profile = p;
-        if ((p.name ?? '').isNotEmpty) {
-          existing.nym = getNymFromPubkey(p.name!, e.pubkey);
+      final prev = existing.profile;
+      if (prev == null || p.kind0Ts >= prev.kind0Ts) {
+        // Skip a NO-OP refresh (same ts + same picture/name). A periodic D1
+        // re-fetch of an unchanged profile must not churn `state`: every
+        // copyWith rebuilds every user-watching widget (message rows, reaction
+        // badges, sidebar), which is what made the UI "constantly reload".
+        if (prev == null ||
+            prev.kind0Ts != p.kind0Ts ||
+            prev.picture != p.picture ||
+            prev.name != p.name) {
+          existing.profile = p;
+          if ((p.name ?? '').isNotEmpty) {
+            existing.nym = getNymFromPubkey(p.name!, e.pubkey);
+          }
+          changed = true;
         }
       }
     } else {
@@ -1144,8 +1156,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         nym: getNymFromPubkey(p.name ?? 'anon', e.pubkey),
         profile: p,
       );
+      changed = true;
     }
-    state = state.copyWith();
+    if (changed) state = state.copyWith();
   }
 
   void _ingestReaction(NostrEvent e) {

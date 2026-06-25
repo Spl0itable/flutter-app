@@ -395,9 +395,10 @@ class _RichInline extends StatelessWidget {
               width: side,
               height: side,
               fit: BoxFit.contain,
-              // Emoji bypass the sqflite disk cache (DB-lock storm) — see
-              // InlineNetworkImage.memoryOnly.
-              memoryOnly: true,
+              // Disk-cached (CachedNetworkImage): body emoji are sparse — only a
+              // few per visible message — so they don't storm the cache DB, and
+              // the disk cache lets them persist across restarts. (The high-volume
+              // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
               errorChild: Text(':$shortcode:', style: base),
             ),
           ),
@@ -992,7 +993,8 @@ class InlineEmojiText extends ConsumerWidget {
             width: side,
             height: side,
             fit: BoxFit.contain,
-            memoryOnly: true, // emoji: skip the sqflite disk cache (lock storm)
+            // Disk-cached (sparse: a reaction badge / a notification line shows
+            // one emoji). Only the picker grid uses memoryOnly.
             errorChild: Text(':${m.group(1)}:', style: style),
           ),
         ),

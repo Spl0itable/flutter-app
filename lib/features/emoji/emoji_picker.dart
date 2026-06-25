@@ -267,17 +267,17 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
                 _search(c),
                 const SizedBox(height: 8),
                 Expanded(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      // The PWA has NO "no results" node: an empty search just
-                      // toggles every section `.emoji-hidden` and the grid goes
-                      // blank silently (reactions.js:797-801). Render nothing.
-                      children: [
-                        for (final s in sections)
-                          _GridSection(columns: columns, section: s),
-                      ],
-                    ),
+                  child: CustomScrollView(
+                    // Lazy: each SliverGrid only mounts the cells in (and just
+                    // around) the viewport, so ONLY visible custom-emoji images
+                    // fetch + decode — the PWA's `loading="lazy"`. The old
+                    // SingleChildScrollView + shrinkWrap GridView mounted EVERY
+                    // cell across every pack at once, loading hundreds of images
+                    // simultaneously → out-of-memory crash on open.
+                    slivers: [
+                      for (final s in sections)
+                        ..._sectionSlivers(c, s, columns),
+                    ],
                   ),
                 ),
               ],
@@ -414,10 +414,59 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ),
     );
   }
+
+  /// The lazy slivers for one [section]: its title header + a virtualized
+  /// [SliverGrid]. The grid only mounts the cells in (and just around) the
+  /// viewport, so only VISIBLE custom-emoji images fetch + decode — keeping a
+  /// big pack from loading hundreds of images at once. `addAutomaticKeepAlives`
+  /// is off so scrolled-away cells (and their decoded images) are released.
+  List<Widget> _sectionSlivers(NymColors c, _Section section, int columns) {
+    return [
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 2, bottom: 6),
+          // `.emoji-default-cat-title` / `.emoji-pack-title`: flex space-between,
+          // the star button trailing.
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  section.title.toUpperCase(),
+                  overflow: TextOverflow.ellipsis,
+                  // `.emoji-picker-section-title`: 10px upper, ls1, dim.
+                  style: TextStyle(
+                      fontSize: 10, color: c.textDim, letterSpacing: 1),
+                ),
+              ),
+              if (section.onToggleFavorite != null)
+                _FavStar(
+                  active: section.isFavorite,
+                  onTap: section.onToggleFavorite!,
+                ),
+            ],
+          ),
+        ),
+      ),
+      SliverPadding(
+        padding: const EdgeInsets.only(bottom: 10),
+        sliver: SliverGrid(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            mainAxisSpacing: 2,
+            crossAxisSpacing: 2,
+          ),
+          delegate: SliverChildListDelegate(
+            section.cells,
+            addAutomaticKeepAlives: false,
+          ),
+        ),
+      ),
+    ];
+  }
 }
 
-/// A single emoji section (title + flat list of cells); laid out into a grid by
-/// [_GridSection] which knows the column count.
+/// A single emoji section (title + flat list of cells); laid out into a lazy
+/// grid by [_EmojiPickerState._sectionSlivers] which knows the column count.
 class _Section {
   const _Section({
     required this.title,
@@ -431,62 +480,6 @@ class _Section {
 
   /// When non-null, a favorite star is shown at the end of the title row.
   final VoidCallback? onToggleFavorite;
-}
-
-/// Renders one [_Section] as a titled responsive grid.
-class _GridSection extends StatelessWidget {
-  const _GridSection({required this.columns, required this.section});
-  final int columns;
-  final _Section section;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            // `.emoji-default-cat-title` / `.emoji-pack-title`: flex
-            // space-between, the star button trailing.
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    section.title.toUpperCase(),
-                    overflow: TextOverflow.ellipsis,
-                    // `.emoji-picker-section-title`: 10px upper, ls1, dim, no
-                    // explicit weight (→ 400).
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: c.textDim,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                ),
-                if (section.onToggleFavorite != null)
-                  _FavStar(
-                    active: section.isFavorite,
-                    onTap: section.onToggleFavorite!,
-                  ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 4),
-          GridView.count(
-            crossAxisCount: columns,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            mainAxisSpacing: 2,
-            crossAxisSpacing: 2,
-            children: section.cells,
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// `.emoji-category-fav-btn` / `.emoji-pack-fav-btn`: a 14px star, dim by

@@ -93,29 +93,39 @@ class InlineNetworkImage extends StatelessWidget {
   static final Map<String, Future<_Decoded?>> _cache = {};
 
   static Future<_Decoded?> _decode(String url) {
-    return _cache.putIfAbsent(url, () async {
-      Uint8List bytes;
+    // Return the SAME cached Future every call. The old code wrapped the cached
+    // future in a fresh `.then(...)` per call, so each rebuild handed the
+    // FutureBuilder a NEW Future → it reset to the placeholder and re-ran → a
+    // visible placeholder↔image flicker ("constantly reloading") whenever the
+    // surrounding widget rebuilt. A stable Future keeps the FutureBuilder settled.
+    final cached = _cache[url];
+    if (cached != null) return cached;
+    // Bound the cache at INSERT time (drop the oldest), not in a per-call `.then`.
+    if (_cache.length > 1024) _cache.remove(_cache.keys.first);
+    final fut = _fetchAndDecode(url);
+    _cache[url] = fut;
+    return fut;
+  }
+
+  static Future<_Decoded?> _fetchAndDecode(String url) async {
+    Uint8List bytes;
+    try {
+      final resp =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
+      if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) return null;
+      bytes = resp.bodyBytes;
+    } catch (_) {
+      return null;
+    }
+    if (_looksLikeSvg(bytes)) {
       try {
-        final resp =
-            await http.get(Uri.parse(url)).timeout(const Duration(seconds: 12));
-        if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) return null;
-        bytes = resp.bodyBytes;
+        final info = await vg.loadPicture(SvgBytesLoader(bytes), null);
+        return _Decoded.svg(info.picture, info.size);
       } catch (_) {
-        return null;
+        return null; // strict compiler rejected it — never paint it
       }
-      if (_looksLikeSvg(bytes)) {
-        try {
-          final info = await vg.loadPicture(SvgBytesLoader(bytes), null);
-          return _Decoded.svg(info.picture, info.size);
-        } catch (_) {
-          return null; // strict compiler rejected it — never paint it
-        }
-      }
-      return _Decoded.raster(bytes);
-    }).then((v) {
-      if (_cache.length > 1024) _cache.remove(_cache.keys.first);
-      return v;
-    });
+    }
+    return _Decoded.raster(bytes);
   }
 
   /// True when [bytes] begin with an SVG/XML document head (guards the parser
