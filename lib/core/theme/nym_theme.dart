@@ -158,24 +158,28 @@ NymColors resolveNymColors({
 /// The monospace stack the PWA uses (`--font-mono`).
 const String kMonoFont = 'monospace';
 
-/// The bundled color-emoji family (declared in `pubspec.yaml`). Applied as a
-/// `fontFamilyFallback` ONLY on the isolated emoji spans that render unicode
-/// emoji (message bodies' `EmojiNode`) — never on the global text theme. See
-/// [kEmojiFontFallback] for why it must stay off ordinary (Latin) text.
+/// The primary UI sans (`--font-sans`). BUNDLED as an asset (`pubspec.yaml`), so
+/// unlike the bare system name 'Roboto' it ALWAYS resolves — even on de-Googled
+/// images — which is what keeps line metrics correct. A null / unresolved primary
+/// lets Flutter promote the emoji fallback to primary, inflating every line and
+/// degrading Latin glyphs to boxes (the "all the text is fucked up" regression).
+const String kSansFont = 'Roboto';
+
+/// The bundled color-emoji family (`pubspec.yaml`): color glyphs for unicode
+/// emoji (😀 🔥 ❤ 🇺 …).
 const String kEmojiFont = 'Noto Color Emoji';
 
-/// The color-emoji fallback, attached ONLY to spans whose text is purely emoji
-/// codepoints. It must NEVER go on the global theme or any Latin-bearing style:
-/// when a style's primary `fontFamily` is null, Flutter promotes the FIRST
-/// `fontFamilyFallback` entry to the primary, so Noto Color Emoji (a CBDT bitmap
-/// font with huge metrics and no Latin glyphs) would (a) inflate every line's
-/// height — the "all the text is fucked up" regression — and (b) push Latin to a
-/// last-resort font, turning text into boxes / special characters on devices
-/// without a registered match. Left off ordinary text, the platform default
-/// renders Latin correctly and the system emoji font covers emoji; this constant
-/// is the explicit, opt-in coverage for the minority of devices whose system
-/// emoji font Flutter can't reach.
-const List<String> kEmojiFontFallback = [kEmojiFont];
+/// The bundled symbol family (`pubspec.yaml`): enclosed / circled letters and
+/// misc symbols the emoji font lacks (🅣 🅐 Ⓐ …, common in stylised nyms).
+const String kSymbolFont = 'Noto Sans Symbols';
+
+/// The glyph-coverage fallback chain appended after the real [kSansFont] primary
+/// (emoji first, then symbols). Because the primary is a bundled, always-resolved
+/// sans, the line strut comes from IT — not these fallbacks — so Latin metrics
+/// stay correct while emoji/symbol codepoints still resolve to colour/symbol
+/// glyphs. This mirrors the PWA's `--font-sans` chain (a real sans + the system
+/// emoji/symbol fonts), and is safe to apply globally + on the message renderer.
+const List<String> kEmojiFontFallback = [kEmojiFont, kSymbolFont];
 
 /// Builds Flutter [ThemeData] wrapping a [NymColors]. Most custom widgets read
 /// tokens via `context.nym`; this provides sensible Material defaults +
@@ -195,20 +199,26 @@ ThemeData buildNymThemeData(NymColors c) {
     error: c.danger,
   );
 
-  // The text theme is left as the framework default (no `fontFamily`, no
-  // `fontFamilyFallback`): Flutter then renders every label with the real
-  // platform sans (Roboto on Android) at correct metrics, exactly as the early
-  // builds did. Do NOT set a global font here — an explicit family that isn't
-  // registered on the device (e.g. 'Roboto' on a de-Googled image), or a global
-  // colour-emoji fallback, both demote Latin text to the emoji font and wreck
-  // its metrics/glyphs. Emoji coverage is applied surgically, per emoji span,
-  // via [kEmojiFontFallback].
+  // Every text style gets the bundled [kSansFont] primary + the emoji/symbol
+  // [kEmojiFontFallback]. The primary is a real, always-resolved sans, so the
+  // line strut is driven by Roboto (correct metrics) while emoji / enclosed
+  // letters / symbols in nyms, labels, and chrome still resolve to colour /
+  // symbol glyphs via the fallback — the PWA's `--font-sans` behaviour. This is
+  // a pure value assignment (no font is loaded here), so binding-less unit tests
+  // stay green.
+  final textTheme = base.textTheme
+      .apply(fontFamily: kSansFont, fontFamilyFallback: kEmojiFontFallback);
+  final primaryTextTheme = base.primaryTextTheme
+      .apply(fontFamily: kSansFont, fontFamilyFallback: kEmojiFontFallback);
+
   return base.copyWith(
     colorScheme: scheme,
     scaffoldBackgroundColor: c.bg,
     canvasColor: c.bg,
     dividerColor: c.glassBorder,
     splashFactory: InkRipple.splashFactory,
+    textTheme: textTheme,
+    primaryTextTheme: primaryTextTheme,
     textSelectionTheme: TextSelectionThemeData(
       cursorColor: c.primary,
       selectionColor: c.primary.withValues(alpha: 0.3),

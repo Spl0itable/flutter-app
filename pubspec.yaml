@@ -99,14 +99,33 @@ flutter:
     - assets/text/
     - assets/data/
 
-  # Bundled color-emoji font so unicode emoji render on devices whose system
-  # emoji font Flutter can't reach (e.g. de-Googled / minimal Android builds),
-  # instead of falling back to tofu (□). Referenced via `fontFamilyFallback`
-  # ('Noto Color Emoji') on the base text theme and the message renderer.
+  # Bundled fonts so text, emoji, and symbol glyphs all render correctly on ANY
+  # device — including de-Googled / minimal Android builds whose system font set
+  # Flutter can't reach. This mirrors the PWA's `--font-sans` chain (a real sans
+  # for Latin + system emoji/symbol fonts for the rest):
+  #   - Roboto      : the primary UI sans. Bundling it (vs. naming the unresolved
+  #                   system 'Roboto') guarantees correct line metrics — a null /
+  #                   unresolved primary lets Flutter promote the emoji fallback
+  #                   to primary, inflating every line and degrading Latin glyphs.
+  #   - Noto Color Emoji : color glyphs for unicode emoji (😀 🔥 ❤ 🇺 …).
+  #   - Noto Sans Symbols: enclosed / circled letters + misc symbols that the
+  #                   emoji font lacks (e.g. 🅣 🅐 Ⓐ, common in stylised nyms).
+  # Roboto is the `fontFamily`; the two Noto fonts are the `fontFamilyFallback`
+  # chain (emoji first, symbols second) on the base text theme + message renderer.
   fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
     - family: Noto Color Emoji
       fonts:
         - asset: assets/fonts/NotoColorEmoji.ttf
+    - family: Noto Sans Symbols
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols-Regular.ttf
 
 flutter_launcher_icons:
   android: true
