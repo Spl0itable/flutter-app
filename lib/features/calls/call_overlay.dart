@@ -22,6 +22,7 @@ import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/context_menu_actions.dart';
 import '../../widgets/context_menu/context_menu_panel.dart';
+import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
 import '../reactions/quick_react_popup.dart';
 import 'call_nym.dart';
@@ -284,7 +285,8 @@ class _Top extends ConsumerWidget {
       id = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.groups, size: 18, color: c.textBright),
+          // `.group-header-svg` (calls.js:740) — the three-figure group glyph.
+          NymSvgIcon(NymIcons.groupGlyph, size: 18, color: c.textBright),
           if (members.isNotEmpty) ...[
             const SizedBox(width: 6),
             for (final m in members)
@@ -790,8 +792,12 @@ class _ChatPanel extends ConsumerWidget {
                     style: TextStyle(
                         color: c.textBright, fontWeight: FontWeight.w600)),
                 const Spacer(),
+                // `.call-chat-close` is a literal "✕" char in the PWA — render as
+                // styled text, not an SVG glyph.
                 IconButton(
-                  icon: Icon(Icons.close, color: c.textDim, size: 20),
+                  icon: Text('✕',
+                      style: TextStyle(
+                          color: c.textDim, fontSize: 20, height: 1)),
                   onPressed: onClose,
                 ),
               ],
@@ -1252,7 +1258,9 @@ class _InputRowState extends ConsumerState<_InputRow> {
                   child: SizedBox(
                     width: 40,
                     height: 40,
-                    child: Icon(Icons.send, color: c.bg, size: 18),
+                    child: Center(
+                      child: NymSvgIcon(NymIcons.send, color: c.bg, size: 18),
+                    ),
                   ),
                 ),
               ),
@@ -1579,7 +1587,10 @@ class _SwitchCamButton extends StatelessWidget {
             child: SizedBox(
               width: 42,
               height: 42,
-              child: Icon(Icons.cameraswitch, color: c.textBright, size: 20),
+              child: Center(
+                child: NymSvgIcon(NymIcons.callSwitchCam,
+                    color: c.textBright, size: 20),
+              ),
             ),
           ),
         ),
@@ -1633,20 +1644,23 @@ class _Controls extends StatelessWidget {
         runSpacing: 10,
         children: [
           _CtrlBtn(
-            icon: call.muted ? Icons.mic_off : Icons.mic,
+            // PWA toggles `.active` (red) on the SAME mic glyph when muted.
+            svg: NymIcons.callMic,
             active: call.muted,
             tooltip: call.muted ? 'Unmute microphone' : 'Mute microphone',
             onTap: onMute,
           ),
           if (isVideo)
             _CtrlBtn(
-              icon: call.cameraOff ? Icons.videocam_off : Icons.videocam,
+              // PWA `#callVideoBtn` keeps the same video glyph and goes `.active`
+              // (red) when the camera is off.
+              svg: NymIcons.video,
               active: call.cameraOff,
               tooltip: call.cameraOff ? 'Turn on camera' : 'Turn off camera',
               onTap: onCamera,
             ),
           _CtrlBtn(
-            icon: Icons.screen_share,
+            svg: NymIcons.callScreenShare,
             active: call.sharing,
             // request-mode: primary outline when we can't share (calls.js).
             requestMode: !call.sharing && !call.canShareScreen,
@@ -1658,27 +1672,30 @@ class _Controls extends StatelessWidget {
           // Presenter button — mods only, badge = pending requests.
           if (call.isMod)
             _CtrlBtn(
-              icon: Icons.people_alt_outlined,
+              svg: NymIcons.callPresenter,
               active: presenterOpen,
               tooltip: 'Presenter controls',
               badge: call.presentRequests.length,
               onTap: onPresenter,
             ),
           _CtrlBtn(
-            icon: Icons.emoji_emotions_outlined,
+            svg: NymIcons.callReact,
             active: reactionsOpen,
             tooltip: 'React',
             onTap: onReact,
           ),
           _CtrlBtn(
-            icon: Icons.chat_bubble_outline,
+            svg: NymIcons.callChat,
             active: chatOpen,
             tooltip: 'Chat',
             badge: call.chatUnread,
             onTap: onChat,
           ),
           _CtrlBtn(
-            icon: Icons.call_end,
+            // `#callHangupBtn` — the feather phone ROTATED 135° (the hang-up
+            // glyph), danger bg, white icon.
+            svg: NymIcons.phone,
+            rotation: 0.375,
             tooltip: 'End call',
             background: c.danger,
             foreground: Colors.white,
@@ -1692,7 +1709,7 @@ class _Controls extends StatelessWidget {
 
 class _CtrlBtn extends StatelessWidget {
   const _CtrlBtn({
-    required this.icon,
+    required this.svg,
     required this.tooltip,
     required this.onTap,
     this.active = false,
@@ -1700,9 +1717,10 @@ class _CtrlBtn extends StatelessWidget {
     this.badge = 0,
     this.background,
     this.foreground,
+    this.rotation = 0,
   });
 
-  final IconData icon;
+  final String svg;
   final String tooltip;
   final VoidCallback onTap;
   final bool active;
@@ -1710,6 +1728,11 @@ class _CtrlBtn extends StatelessWidget {
   final int badge;
   final Color? background;
   final Color? foreground;
+
+  /// Glyph rotation in turns. The hangup button is the feather phone rotated
+  /// 135° (`.call-control-btn.hangup svg { transform: rotate(135deg) }`):
+  /// 135/360 = 0.375.
+  final double rotation;
 
   @override
   Widget build(BuildContext context) {
@@ -1734,7 +1757,14 @@ class _CtrlBtn extends StatelessWidget {
               child: SizedBox(
                 width: 54,
                 height: 54,
-                child: Icon(icon, color: iconColor, size: 22),
+                child: Center(
+                  child: rotation == 0
+                      ? NymSvgIcon(svg, color: iconColor, size: 22)
+                      : Transform.rotate(
+                          angle: rotation * 2 * math.pi,
+                          child: NymSvgIcon(svg, color: iconColor, size: 22),
+                        ),
+                ),
               ),
             ),
           ),

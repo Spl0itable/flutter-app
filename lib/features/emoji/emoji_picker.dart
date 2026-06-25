@@ -18,6 +18,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/nym_icons.dart';
 import '../messages/format/message_content.dart' show proxiedMedia;
 import '../messages/inline_network_image.dart';
 import 'custom_emoji.dart';
@@ -505,8 +506,10 @@ class _FavStar extends StatelessWidget {
         borderRadius: NymRadius.rxs,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          child: Icon(
-            active ? Icons.star : Icons.star_border,
+          // `.emoji-category-fav-btn` / `.emoji-pack-fav-btn` (emoji.js:449/511):
+          // the custom 5-point star — outline by default, filled gold `.active`.
+          child: NymSvgIcon(
+            active ? NymIcons.starFilled : NymIcons.starOutline,
             size: 14,
             color: active ? _activeColor : c.textDim,
           ),

@@ -5,18 +5,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../nym_icons.dart';
 
 /// One entry in a sidebar row's `.quick-context-menu` (sidebar-sections.js
 /// `_buildSidebarMenuItems`).
 class SidebarQuickMenuItem {
   const SidebarQuickMenuItem({
     required this.label,
-    required this.icon,
+    required this.svg,
     required this.onSelected,
     this.danger = false,
   });
   final String label;
-  final IconData icon;
+
+  /// The leading glyph as a [NymIcons] SVG string.
+  final String svg;
   final VoidCallback onSelected;
   final bool danger;
 }
@@ -212,7 +215,7 @@ class _QuickMenuRowState extends State<_QuickMenuRow> {
           ),
           child: Row(
             children: [
-              Icon(a.icon, size: 16, color: iconColor),
+              NymSvgIcon(a.svg, size: 16, color: iconColor),
               const SizedBox(width: 10),
               Text(
                 a.label,
@@ -244,13 +247,15 @@ Future<void> showPmContextMenu(
   final items = <SidebarQuickMenuItem>[
     SidebarQuickMenuItem(
       label: isBlocked ? 'Unblock user' : 'Block user',
-      icon: isBlocked ? Icons.check_circle_outline : Icons.block,
+      // PWA uses the same `blockSvg` for both block + unblock states.
+      svg: NymIcons.sidebarBlock,
       danger: !isBlocked,
       onSelected: () => controller.toggleBlockUser(pubkey),
     ),
     SidebarQuickMenuItem(
       label: 'Leave conversation',
-      icon: Icons.logout,
+      // PWA `leaveSvg` is the feather log-out (== NymIcons.logout).
+      svg: NymIcons.logout,
       danger: true,
       onSelected: () => ref.read(appStateProvider.notifier).closePM(pubkey),
     ),

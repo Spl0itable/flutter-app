@@ -30,6 +30,7 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 import 'channel_list_item.dart';
 import 'pm_context_menu.dart';
 import 'pm_list_item.dart';
@@ -318,7 +319,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             // `.discover-icon` (globe) → geohash explorer (gap F15).
             leadingIcon: _MiniIcon(
               key: TutorialTargets.keyFor(TutorialTarget.discoverIcon),
-              icon: Icons.public,
+              svg: NymIcons.globe,
               tooltip: 'Explore geohash channels',
               onTap: _openDiscover,
             ),
@@ -381,7 +382,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             onLongPressTitle: _toggleReorderMode,
             // `.new-pm-btn` (plus) → new PM / group (gap F15).
             leadingIcon: _MiniIcon(
-              icon: Icons.add,
+              svg: NymIcons.plus,
               tooltip: 'New message',
               onTap: () {
                 widget.onItemSelected?.call();
@@ -754,7 +755,8 @@ class _SidebarActions extends ConsumerWidget {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           _ActionButton(
-            icon: Icons.star_border,
+            // `.sidebar-actions` Flair → the feather star polygon (index.html:442).
+            svg: NymIcons.starFlair,
             label: 'Flair',
             onTap: () {
               onItemSelected?.call();
@@ -762,7 +764,7 @@ class _SidebarActions extends ConsumerWidget {
             },
           ),
           _ActionButton(
-            icon: Icons.settings_outlined,
+            svg: NymIcons.settings,
             label: 'Settings',
             onTap: () {
               onItemSelected?.call();
@@ -770,7 +772,7 @@ class _SidebarActions extends ConsumerWidget {
             },
           ),
           _ActionButton(
-            icon: Icons.info_outline,
+            svg: NymIcons.info,
             label: 'About',
             onTap: () {
               onItemSelected?.call();
@@ -778,7 +780,7 @@ class _SidebarActions extends ConsumerWidget {
             },
           ),
           _ActionButton(
-            icon: Icons.logout,
+            svg: NymIcons.logout,
             label: 'Logout',
             // `.icon-btn` Logout → `signOut()` (app.js `signOut`, 6740-6741):
             // close the drawer (inline-bindings `signOutAndCloseSidebar`), then
@@ -806,12 +808,12 @@ class _SidebarActions extends ConsumerWidget {
 
 class _ActionButton extends StatelessWidget {
   const _ActionButton({
-    required this.icon,
+    required this.svg,
     required this.label,
     required this.onTap,
   });
 
-  final IconData icon;
+  final String svg;
   final String label;
   final VoidCallback onTap;
 
@@ -827,7 +829,7 @@ class _ActionButton extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
           child: Column(
             children: [
-              Icon(icon, size: 16, color: c.text),
+              NymSvgIcon(svg, size: 16, color: c.text),
               const SizedBox(height: 3),
               Text(
                 label,
@@ -952,17 +954,16 @@ class _NavSection extends StatelessWidget {
                     const SizedBox(width: 4),
                   ],
                   _MiniIcon(
-                    icon: Icons.search,
+                    svg: NymIcons.search,
                     active: searching,
                     tooltip: 'Search',
                     onTap: onToggleSearch,
                   ),
                   const SizedBox(width: 4),
-                  // `.collapse-icon` chevron — rotates to ▾ open / ▸ collapsed.
+                  // `.collapse-icon` chevron — ▾ open (chevronDown) / ▸ collapsed
+                  // (the PWA rotates the same glyph -90° → chevronRight).
                   _MiniIcon(
-                    icon: open
-                        ? Icons.keyboard_arrow_down
-                        : Icons.keyboard_arrow_right,
+                    svg: open ? NymIcons.chevronDown : NymIcons.chevronRight,
                     tooltip: open ? 'Collapse section' : 'Expand section',
                     onTap: onToggleOpen,
                   ),
@@ -1013,10 +1014,10 @@ class _ReorderArrows extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _ReorderBtn(icon: Icons.keyboard_arrow_up, enabled: canUp, onTap: onUp),
+        _ReorderBtn(svg: NymIcons.reorderUp, enabled: canUp, onTap: onUp),
         const SizedBox(width: 3),
         _ReorderBtn(
-          icon: Icons.keyboard_arrow_down,
+          svg: NymIcons.reorderDown,
           enabled: canDown,
           onTap: onDown,
         ),
@@ -1027,11 +1028,11 @@ class _ReorderArrows extends StatelessWidget {
 
 class _ReorderBtn extends StatelessWidget {
   const _ReorderBtn({
-    required this.icon,
+    required this.svg,
     required this.enabled,
     required this.onTap,
   });
-  final IconData icon;
+  final String svg;
   final bool enabled;
   final VoidCallback onTap;
 
@@ -1053,7 +1054,7 @@ class _ReorderBtn extends StatelessWidget {
             color: c.hoverOverlay,
             borderRadius: NymRadius.rxs,
           ),
-          child: Icon(icon, size: 14, color: c.text),
+          child: NymSvgIcon(svg, size: 14, color: c.text),
         ),
       ),
     );
@@ -1063,12 +1064,12 @@ class _ReorderBtn extends StatelessWidget {
 class _MiniIcon extends StatelessWidget {
   const _MiniIcon({
     super.key,
-    required this.icon,
+    required this.svg,
     this.active = false,
     this.tooltip,
     required this.onTap,
   });
-  final IconData icon;
+  final String svg;
   final bool active;
   final String? tooltip;
   final VoidCallback onTap;
@@ -1083,8 +1084,8 @@ class _MiniIcon extends StatelessWidget {
         // `.search-icon/.discover-icon/.collapse-icon`: 20×20 hit (`padding:
         // 2px 5px`), 14 glyph.
         padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        child: Icon(
-          icon,
+        child: NymSvgIcon(
+          svg,
           size: 14,
           color: active ? c.primary : c.textDim,
         ),
@@ -1162,7 +1163,8 @@ class _GroupListItem extends ConsumerWidget {
     showSidebarQuickMenu(context, at, [
       SidebarQuickMenuItem(
         label: 'Leave conversation',
-        icon: Icons.logout,
+        // PWA `leaveSvg` is the feather log-out (== NymIcons.logout).
+        svg: NymIcons.logout,
         danger: true,
         onSelected: () => ref.read(nostrControllerProvider).leaveGroup(group.id),
       ),

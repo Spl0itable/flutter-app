@@ -17,6 +17,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 import 'context_menu_actions.dart';
 import 'context_menu_panel.dart';
 
@@ -419,7 +420,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // that dark disc shows through behind the glyph.
     return Container(
       alignment: Alignment.center,
-      child: Icon(Icons.groups, size: 34, color: c.primary),
+      child: NymSvgIcon(NymIcons.groupGlyph, size: 34, color: c.primary),
     );
   }
 
@@ -435,40 +436,42 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // Owner metadata controls (groups.js:3046-3083). Role-gated to the owner.
     if (iAmOwner) {
       rows.add(_ActionRow(
-        icon: Icons.edit_outlined,
+        svg: NymIcons.ctxEdit,
         label: 'Edit Group Name',
         color: c.text,
         onTap: () => _editName(group),
       ));
       rows.add(_ActionRow(
-        icon: Icons.notes,
+        svg: NymIcons.groupEditDescription,
         label: 'Edit Description',
         color: c.text,
         onTap: () => _editDescription(group),
       ));
       rows.add(_ActionRow(
-        icon: Icons.account_circle_outlined,
+        svg: NymIcons.groupChangeAvatar,
         label: 'Change Avatar',
         color: c.text,
         onTap: () => _changeImage(group, avatar: true),
       ));
       if ((group.avatar ?? '').isNotEmpty) {
+        // No distinct PWA glyph for "Remove Avatar" (the PWA only offers the
+        // change rows); reuse the avatar glyph so the row stays on-brand.
         rows.add(_ActionRow(
-          icon: Icons.hide_image_outlined,
+          svg: NymIcons.groupChangeAvatar,
           label: 'Remove Avatar',
           color: c.text,
           onTap: () => _removeImage(group, avatar: true),
         ));
       }
       rows.add(_ActionRow(
-        icon: Icons.image_outlined,
+        svg: NymIcons.groupChangeBanner,
         label: 'Change Banner',
         color: c.text,
         onTap: () => _changeImage(group, avatar: false),
       ));
       if ((group.banner ?? '').isNotEmpty) {
         rows.add(_ActionRow(
-          icon: Icons.hide_image_outlined,
+          svg: NymIcons.groupChangeBanner,
           label: 'Remove Banner',
           color: c.text,
           onTap: () => _removeImage(group, avatar: false),
@@ -479,7 +482,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // Transfer Ownership — enters member-pick mode (PWA `groupCtxTransferOwner`).
     if (iAmOwner && group.members.length > 1) {
       rows.add(_ActionRow(
-        icon: Icons.swap_horiz,
+        svg: NymIcons.ctxTransferOwner,
         label: 'Transfer Ownership',
         color: c.text,
         onTap: () => setState(() => _transferMode = true),
@@ -490,9 +493,9 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // groups.js `groupCtxToggleInviteJoin`).
     if (iAmOwner) {
       rows.add(_ActionRow(
-        icon: group.inviteEnabled
-            ? Icons.check_box_outlined
-            : Icons.check_box_outline_blank,
+        svg: group.inviteEnabled
+            ? NymIcons.checkboxChecked
+            : NymIcons.checkboxUnchecked,
         label: 'Allow joining via invite link',
         color: c.text,
         onTap: () => _toggleInviteJoin(group),
@@ -501,7 +504,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
       // (groups.js `groupCtxResetInviteLink`).
       if (group.inviteEnabled) {
         rows.add(_ActionRow(
-          icon: Icons.refresh,
+          svg: NymIcons.groupResetInvite,
           label: 'Reset Invite Link',
           color: c.text,
           onTap: () => _resetInviteLink(group),
@@ -513,9 +516,9 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // groups.js `groupCtxToggleInvites`).
     if (iAmOwner) {
       rows.add(_ActionRow(
-        icon: group.allowMemberInvites
-            ? Icons.check_box_outlined
-            : Icons.check_box_outline_blank,
+        svg: group.allowMemberInvites
+            ? NymIcons.checkboxChecked
+            : NymIcons.checkboxUnchecked,
         label: 'Allow members to add others',
         color: c.text,
         onTap: () => _toggleAllowInvites(group),
@@ -525,7 +528,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     // Add Members — owner, or a member when member-invites are allowed.
     if (canAdd) {
       rows.add(_ActionRow(
-        icon: Icons.person_add_alt_1_outlined,
+        svg: NymIcons.groupAddMembers,
         label: 'Add Members',
         color: c.text,
         onTap: () => _addMembers(group),
@@ -534,7 +537,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
 
     // Leave Group — available to every member (danger, confirmed).
     rows.add(_ActionRow(
-      icon: Icons.logout,
+      svg: NymIcons.groupLeave,
       label: 'Leave Group',
       color: c.danger,
       onTap: () => _leaveGroup(group),
@@ -784,12 +787,12 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
 /// A `.context-menu-item` management row (icon + label + optional trailing).
 class _ActionRow extends StatefulWidget {
   const _ActionRow({
-    required this.icon,
+    required this.svg,
     required this.label,
     required this.color,
     required this.onTap,
   });
-  final IconData icon;
+  final String svg;
   final String label;
   final Color color;
   final VoidCallback onTap;
@@ -827,7 +830,7 @@ class _ActionRowState extends State<_ActionRow> {
           ),
           child: Row(
             children: [
-              Icon(widget.icon, size: 16, color: iconColor),
+              NymSvgIcon(widget.svg, size: 16, color: iconColor),
               // `.nm-ico8` → margin-right:8px on the leading SVG.
               const SizedBox(width: 8),
               Expanded(
@@ -1228,7 +1231,9 @@ class _RecipientChip extends StatelessWidget {
           InkWell(
             onTap: onRemove,
             borderRadius: const BorderRadius.all(Radius.circular(10)),
-            child: Icon(Icons.close, size: 14, color: c.textDim),
+            // Member-pick chip remove — a literal "✕" char in the PWA.
+            child: Text('✕',
+                style: TextStyle(color: c.textDim, fontSize: 14, height: 1)),
           ),
         ],
       ),

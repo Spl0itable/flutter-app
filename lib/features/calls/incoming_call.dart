@@ -3,12 +3,15 @@
 // Accept / Reject, honoring the acceptCalls preference (the gate itself lives
 // in CallService._onInvite — by the time this renders, ringing was allowed).
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../state/app_state.dart';
 import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/nym_icons.dart';
 import 'call_nym.dart';
 import 'call_providers.dart';
 import 'call_signaling.dart';
@@ -111,7 +114,9 @@ class IncomingCallModal extends ConsumerWidget {
                   _RoundActionButton(
                     color: c.danger,
                     iconColor: Colors.white,
-                    icon: Icons.call_end,
+                    // `.incoming-call-btn.decline` — feather phone rotated 135°.
+                    svg: NymIcons.phone,
+                    rotation: 0.375,
                     tooltip: 'Decline',
                     onTap: service.reject,
                   ),
@@ -119,7 +124,8 @@ class IncomingCallModal extends ConsumerWidget {
                   _RoundActionButton(
                     color: c.primary,
                     iconColor: c.bg,
-                    icon: Icons.call,
+                    // `.incoming-call-btn.accept` — feather phone, primary bg.
+                    svg: NymIcons.phone,
                     tooltip: 'Accept',
                     onTap: () => service.answer(),
                   ),
@@ -196,20 +202,29 @@ class _PulsingAvatarState extends State<_PulsingAvatar>
 class _RoundActionButton extends StatelessWidget {
   const _RoundActionButton({
     required this.color,
-    required this.icon,
+    required this.svg,
     required this.tooltip,
     required this.onTap,
     this.iconColor = Colors.white,
+    this.rotation = 0,
   });
 
   final Color color;
   final Color iconColor;
-  final IconData icon;
+  final String svg;
   final String tooltip;
   final VoidCallback onTap;
 
+  /// Glyph rotation in turns (`.incoming-call-btn.decline svg` is rotated 135°
+  /// in the PWA: 135/360 = 0.375).
+  final double rotation;
+
   @override
   Widget build(BuildContext context) {
+    Widget glyph = NymSvgIcon(svg, color: iconColor, size: 26);
+    if (rotation != 0) {
+      glyph = Transform.rotate(angle: rotation * 2 * math.pi, child: glyph);
+    }
     return Tooltip(
       message: tooltip,
       child: Material(
@@ -221,7 +236,7 @@ class _RoundActionButton extends StatelessWidget {
           child: SizedBox(
             width: 58,
             height: 58,
-            child: Icon(icon, color: iconColor, size: 26),
+            child: Center(child: glyph),
           ),
         ),
       ),
