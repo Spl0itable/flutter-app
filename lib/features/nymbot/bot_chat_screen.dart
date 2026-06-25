@@ -5,7 +5,12 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
+import '../../widgets/chat/message_row.dart' show formatRelativeTime;
+import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/interaction_hooks.dart';
+import '../../widgets/context_menu/profile_badges.dart' show VerifiedBadge;
+import '../messages/format/message_content.dart';
 import 'bot_credits_modal.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
@@ -171,10 +176,18 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       controller: _scroll,
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
       itemCount: state.messages.length,
-      itemBuilder: (_, i) => _MessageBubble(
-        message: state.messages[i],
-        colors: c,
-      ),
+      itemBuilder: (_, i) {
+        // Same-author adjacency → group the bubble (suppress avatar/name,
+        // square the tail, tighten the gap), like the canonical message row.
+        final grouped = i > 0 &&
+            state.messages[i - 1].fromUser == state.messages[i].fromUser &&
+            !state.messages[i - 1].pending;
+        return _MessageBubble(
+          message: state.messages[i],
+          colors: c,
+          grouped: grouped,
+        );
+      },
     );
   }
 
@@ -698,59 +711,168 @@ class _TierSwitch extends StatelessWidget {
 // Message bubble + collapsed reasoning
 // =============================================================================
 
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.colors});
+/// A single Nymbot-chat row.
+///
+/// The PWA routes bot replies and the user's own messages through the SAME
+/// `displayMessage()` / `.message` pipeline as every other message (pms.js:1337,
+/// 1362), so they share the canonical bubble. This widget mirrors
+/// `message_row.dart`'s bubble exactly — fill (others = white@0.14, self =
+/// primary@0.25), 16px radius with a 4px tail, the 32px avatar + name header on
+/// bot rows, the in-bubble bottom-right relative timestamp, borderless bubbles,
+/// and the full [MessageContent] formatter — so the premium bot chat flows with
+/// the rest of the app instead of using a divergent bubble.
+class _MessageBubble extends ConsumerWidget {
+  const _MessageBubble({
+    required this.message,
+    required this.colors,
+    this.grouped = false,
+  });
 
   final BotChatMessage message;
   final NymColors colors;
 
+  /// True when the previous row shares this row's author — suppresses the
+  /// avatar/name header and squares the tail (canonical `widget.grouped`).
+  final bool grouped;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = colors;
     final fromUser = message.fromUser;
-    final bubbleColor = fromUser ? c.primary.withValues(alpha: 0.16) : c.bgSecondary;
+    final fontSize = ref.watch(settingsProvider).textSize.toDouble();
 
-    return Align(
-      alignment: fromUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.82,
+    // Canonical `.message-content` fill (message_row.dart:761-767): self =
+    // primary@0.25 (dark) / 0.20 (light); others (bot) = white@0.14 (dark) /
+    // black@0.10 (light). The error state takes the danger wash.
+    final bubbleColor = message.error
+        ? c.danger.withValues(alpha: 0.14)
+        : fromUser
+            ? c.primaryA(c.isLight ? 0.20 : 0.25)
+            : (c.isLight
+                ? const Color(0x1A000000) // black @ 0.10
+                : Colors.white.withValues(alpha: 0.14));
+
+    final bubble = ConstrainedBox(
+      // `.message-content { min-width:180px; max-width:85% }`.
+      constraints: BoxConstraints(
+        minWidth: 180,
+        maxWidth: MediaQuery.of(context).size.width * 0.85,
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: bubbleColor,
+          borderRadius: _bubbleRadius(fromUser),
+          // Canonical bubbles are borderless; only the error state keeps a ring.
+          border: message.error ? Border.all(color: c.danger) : null,
         ),
-        child: Column(
-          crossAxisAlignment:
-              fromUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            if (!fromUser && message.hasReasoning)
-              _ReasoningSection(reasoning: message.reasoning!, colors: c),
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: message.error
-                    ? c.danger.withValues(alpha: 0.14)
-                    : bubbleColor,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                    color: message.error ? c.danger : c.border),
-              ),
-              child: message.pending
-                  ? _TypingDots(color: c.textDim)
-                  : Text(
-                      message.text,
-                      style: TextStyle(
-                        color: message.error ? c.danger : c.text,
-                        fontSize: 14,
-                        height: 1.4,
-                      ),
+        child: message.pending
+            ? _TypingDots(color: c.textDim)
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Full canonical inline formatting (markdown / links / emoji /
+                  // mentions / fenced code) — not a raw Text — so bot replies
+                  // render identically to channel/PM messages.
+                  MessageContent(
+                    content: message.text,
+                    baseColor: message.error ? c.danger : c.text,
+                    fontSize: fontSize,
+                  ),
+                  // `.bubble-time-inner`: relative time pinned bottom-right,
+                  // 4px below the body, inside the bubble.
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      formatRelativeTime(message.timestamp),
+                      style:
+                          TextStyle(color: c.textDim, fontSize: 10, height: 1),
                     ),
-            ),
-            // NOTE: the PWA does NOT paint a per-reply model/task/cost footer.
-            // Cost is reported only conditionally via a separate system line
-            // (pms.js:2502-2515), so no inline footer is rendered here.
-          ],
-        ),
+                  ),
+                ],
+              ),
       ),
     );
+
+    // The user's own rows: right-aligned, no avatar/name (canonical `group-self`
+    // is row-reversed with no avatar).
+    if (fromUser) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(14, grouped ? 2 : 6, 14, 0),
+        child: Align(alignment: Alignment.centerRight, child: bubble),
+      );
+    }
+
+    // Bot rows: a 32px avatar gutter (6px from the edge) + a "Nymbot ✓" name
+    // line above the bubble (suppressed on grouped continuations).
+    final botPicture =
+        ref.watch(usersProvider)[NostrController.nymbotPubkey]?.profile?.picture;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(6, grouped ? 2 : 6, 14, 0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 32,
+            child: grouped
+                ? const SizedBox.shrink()
+                : NymAvatar(
+                    seed: NostrController.nymbotPubkey,
+                    size: 32,
+                    imageUrl: botPicture,
+                  ),
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!grouped)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 2, bottom: 3),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Nymbot',
+                          style: TextStyle(
+                              color: c.secondary,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(width: 4),
+                        const VerifiedBadge(size: 14),
+                      ],
+                    ),
+                  ),
+                // The collapsed reasoning sits just above the reply bubble
+                // (PWA `.bot-think` precedes the reply text).
+                if (message.hasReasoning)
+                  _ReasoningSection(reasoning: message.reasoning!, colors: c),
+                Align(alignment: Alignment.centerLeft, child: bubble),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 16px radius with a 4px tail (top-left for bot, top-right for self); a
+  /// grouped continuation is fully rounded. Mirrors `message_row._bubbleRadius`.
+  BorderRadius _bubbleRadius(bool self) {
+    const r = Radius.circular(16);
+    const tail = Radius.circular(4);
+    if (grouped) return const BorderRadius.all(r);
+    if (self) {
+      return const BorderRadius.only(
+          topLeft: r, topRight: tail, bottomLeft: r, bottomRight: r);
+    }
+    return const BorderRadius.only(
+        topLeft: tail, topRight: r, bottomLeft: r, bottomRight: r);
   }
 }
 
@@ -808,18 +930,18 @@ class _BotWelcomeBubble extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   CircleAvatar(
-                    radius: 11,
+                    radius: 16,
                     backgroundColor: c.purple.withValues(alpha: 0.2),
-                    child: const Text('🤖', style: TextStyle(fontSize: 11)),
+                    child: const Text('🤖', style: TextStyle(fontSize: 16)),
                   ),
                   const SizedBox(width: 6),
                   Text('Nymbot',
                       style: TextStyle(
                           color: c.secondary,
-                          fontSize: 13,
+                          fontSize: 11,
                           fontWeight: FontWeight.w600)),
                   const SizedBox(width: 4),
-                  _VerifiedBadge(colors: c),
+                  const VerifiedBadge(size: 14),
                 ],
               ),
             ),
@@ -827,9 +949,12 @@ class _BotWelcomeBubble extends StatelessWidget {
               padding:
                   const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
-                color: c.bgSecondary,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: c.border),
+                // Canonical bot-bubble fill (others = white@0.14 dark /
+                // black@0.10 light), borderless — matches the reply bubbles.
+                color: c.isLight
+                    ? const Color(0x1A000000)
+                    : Colors.white.withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(16),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -913,24 +1038,6 @@ class _BotWelcomeBubble extends StatelessWidget {
       spans.add(TextSpan(text: text.substring(last)));
     }
     return TextSpan(children: spans);
-  }
-}
-
-/// The Nymchat verified-bot ✓ badge (a small primary check chip).
-class _VerifiedBadge extends StatelessWidget {
-  const _VerifiedBadge({required this.colors});
-  final NymColors colors;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = colors;
-    return Container(
-      width: 14,
-      height: 14,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle),
-      child: Icon(Icons.check, size: 10, color: c.bg),
-    );
   }
 }
 
