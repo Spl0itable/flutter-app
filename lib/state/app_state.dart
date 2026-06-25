@@ -17,6 +17,7 @@ import '../features/emoji/custom_emoji.dart'
         loadCustomEmojiState;
 import '../features/emoji/emoji_data.dart';
 import '../features/groups/group_logic.dart';
+import '../features/messages/spam_filter.dart';
 import '../features/messages/trust_graph.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
@@ -68,6 +69,16 @@ const Set<String> kTrustRootPubkeys = {
 /// The trust graph still OBSERVES / PUBLISHES / INGESTS vouches live regardless;
 /// only the message-hiding is gated behind this flag (default off).
 bool nymVouchSpamGateEnabled = false;
+
+/// Live mirror of the heuristic CONTENT spam filter flags (PWA
+/// `spamFilterEnabled` / `spamFilterAggressive`, app.js:559-560 — both default
+/// **true**). Kept as module globals (like [nymVouchSpamGateEnabled]) so the
+/// pure [AppState.isMessageFiltered] / [AppState] paths can consult them without
+/// a Riverpod dependency. [NostrController.init] seeds them from the persisted
+/// settings at boot. Distinct from the web-of-trust spam GATE above: this is the
+/// `isSpamMessage` text heuristic ([SpamFilter]).
+bool appSpamFilterEnabled = true;
+bool appSpamFilterAggressive = true;
 
 /// Identifies what the chat pane is currently showing. Mirrors the PWA's
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
@@ -346,14 +357,24 @@ class AppState {
 
   /// True when [m] should be hidden from message lists: blocked author, a
   /// keyword match on its content / author (own messages are never filtered by
-  /// keyword — messages.js `if (!msg.isOwn && this.hasBlockedKeyword(...))`), or
-  /// spam-gated by the web-of-trust ([isSpamGated]). The PWA folds the
-  /// `_spamGated` flag into every visibility/unread filter (messages.js:2942,
-  /// persistence.js:443) so an un-vouched stranger's channel messages stay
-  /// hidden until trust is established.
+  /// keyword — messages.js `if (!msg.isOwn && this.hasBlockedKeyword(...))`), a
+  /// heuristic-spam hit on a NON-own message ([SpamFilter.isSpamMessage]), or
+  /// spam-gated by the web-of-trust ([isSpamGated]). The PWA hides a non-own
+  /// message when `this.blockedUsers.has(pubkey) || keywordHit || spamHit`
+  /// (messages.js:648) and folds the `_spamGated` flag into every
+  /// visibility/unread filter (messages.js:2942, persistence.js:443).
   bool isMessageFiltered(Message m) {
     if (blockedUsers.contains(m.pubkey)) return true;
     if (!m.isOwn && hasBlockedKeyword(m.content, m.author)) return true;
+    // Heuristic content spam — incoming-only (own-message spam is surfaced as a
+    // self-only system notice instead, see [sendLocal]). Mirrors the `spamHit`
+    // term of the PWA's non-own hide branch (messages.js:636,648).
+    if (!m.isOwn &&
+        SpamFilter.isSpamMessage(m.content,
+            enabled: appSpamFilterEnabled,
+            aggressive: appSpamFilterAggressive)) {
+      return true;
+    }
     // Web-of-trust spam gate — only applied when explicitly enabled (see
     // [nymVouchSpamGateEnabled]); held off until PoW-on-send + graph persistence
     // exist so it can't hide legitimate messages on a fresh session.
@@ -2248,10 +2269,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // [pubkeyOverride]/[authorOverride] are the pseudonymous-send path: the
     // optimistic echo carries the per-message ephemeral pubkey + random anon
     // nym instead of the durable identity (publishMessagePseudonymous).
+    final pubkey = pubkeyOverride ?? state.selfPubkey;
+    final author = authorOverride ?? state.selfNym;
+
     final m = Message(
       id: '_optim_${_nextLocalSeq().toRadixString(36)}',
-      pubkey: pubkeyOverride ?? state.selfPubkey,
-      author: authorOverride ?? state.selfNym,
+      pubkey: pubkey,
+      author: author,
       content: trimmed,
       createdAt: nowSec,
       ms: nowMs,
@@ -2274,6 +2298,25 @@ class AppStateNotifier extends StateNotifier<AppState> {
     list.add(m);
     m.optimistic = true;
     if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
+
+    // Own-message heuristic-spam notice (messages.js:643-647): the message is
+    // NOT hidden (it still renders below), but a self-only system line explains
+    // it was filtered for everyone else, with a "Report false positive" action.
+    if (fileOffer == null &&
+        SpamFilter.isSpamMessage(trimmed,
+            enabled: appSpamFilterEnabled,
+            aggressive: appSpamFilterAggressive)) {
+      addSystemMessageWithAction(
+        'Your message was flagged by the spam filter and not shown to anyone '
+        'but yourself.',
+        SystemAction(
+          kind: SystemActionKind.reportSpamFalsePositive,
+          label: 'Report false positive',
+          payload: trimmed,
+        ),
+      );
+    }
+
     // New list identity so listeners rebuild.
     state = state.copyWith();
     return m;
@@ -2358,6 +2401,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
       ..seq = _nextLocalSeq());
     state = state.copyWith();
   }
+
+  /// Like [addSystemMessage] but the injected pill carries an inline
+  /// [SystemAction] button (the spam false-positive "Report false positive"
+  /// affordance, messages.js:645). Routes to [storageKey] when given, else the
+  /// active view.
+  void addSystemMessageWithAction(String content, SystemAction action,
+      {String? storageKey}) {
+    if (content.isEmpty) return;
+    final key = storageKey ?? state.view.storageKey;
+    final list = state.messages.putIfAbsent(key, () => <Message>[]);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    list.add(Message.systemWithAction(content, action, createdAtMs: nowMs)
+      ..seq = _nextLocalSeq());
+    state = state.copyWith();
+  }
 }
 
 final appStateProvider =
@@ -2409,14 +2467,21 @@ final usersProvider = Provider<Map<String, User>>((ref) {
 });
 
 /// Ordered messages for the active view (oldest first). Messages from blocked
-/// users and keyword matches (content OR author nym) are dropped — mirrors the
-/// PWA's `.message.blocked` hiding (messages.js §11).
+/// users, keyword matches (content OR author nym), and heuristic spam are
+/// dropped — mirrors the PWA's `.message.blocked` hiding (messages.js §11) plus
+/// the `spamHit` term of the non-own hide branch (messages.js:648).
 final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
   final s = ref.watch(appStateProvider);
   final list = s.messages[s.view.storageKey] ?? const <Message>[];
-  final visible = (s.blockedUsers.isEmpty && s.blockedKeywords.isEmpty)
-      ? [...list]
-      : list.where((m) => !s.isMessageFiltered(m)).toList();
+  // Fast-path only when nothing can filter: no blocks AND the content spam
+  // filter is off. With the filter on (its default) every non-own message is
+  // tested, so the empty-block-sets shortcut must NOT skip it.
+  final canFilter = s.blockedUsers.isNotEmpty ||
+      s.blockedKeywords.isNotEmpty ||
+      appSpamFilterEnabled;
+  final visible = canFilter
+      ? list.where((m) => !s.isMessageFiltered(m)).toList()
+      : [...list];
   visible.sort(compareMessages);
   return visible;
 });

@@ -215,6 +215,14 @@ class NostrController {
       // Restore friends / blocked users / blocked keywords from KV.
       _hydrateSocialState(appState);
 
+      // Mirror the persisted heuristic-spam-filter flags (PWA `spamFilterEnabled`
+      // / `spamFilterAggressive`, default true) onto the AppState module globals
+      // the pure `isMessageFiltered` gate reads. No settings-modal UI changes
+      // them at runtime (the PWA has none), so seeding once at boot suffices.
+      final settings = _ref.read(settingsProvider.notifier);
+      appSpamFilterEnabled = settings.spamFilterEnabled;
+      appSpamFilterAggressive = settings.spamFilterAggressive;
+
       // Touch the live custom-emoji store so it hydrates the persisted NIP-30
       // cache (`nym_custom_emojis` / `nym_custom_emoji_packs`) at boot, mirroring
       // the PWA's `_loadCustomEmojiCache`; live 30030/10030 events then top it up.

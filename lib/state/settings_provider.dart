@@ -150,6 +150,27 @@ class SettingsController extends StateNotifier<Settings> {
   int get powDifficulty =>
       _kv.getInt(StorageKeys.powDifficulty, defaultValue: 0);
 
+  /// Heuristic content spam filter master switch (PWA `spamFilterEnabled`,
+  /// app.js:559 — default **true**). Device-local (the PWA never syncs it and
+  /// its settings modal has no toggle); persisted so a future UI can flip it.
+  /// The [NostrController] mirrors this onto the [AppState] module flag
+  /// [appSpamFilterEnabled] at boot so the pure [AppState.isMessageFiltered]
+  /// gate can read it without a provider dependency.
+  bool get spamFilterEnabled =>
+      _kv.getBool(StorageKeys.spamFilterEnabled, defaultValue: true);
+
+  set spamFilterEnabled(bool v) =>
+      _kv.setBool(StorageKeys.spamFilterEnabled, v);
+
+  /// Aggressive-heuristics sub-flag (PWA `spamFilterAggressive`, app.js:560 —
+  /// default **true**). When false, only the two known-spam literals trip the
+  /// filter; the gibberish/mixed-script/long-word scoring is skipped.
+  bool get spamFilterAggressive =>
+      _kv.getBool(StorageKeys.spamFilterAggressive, defaultValue: true);
+
+  set spamFilterAggressive(bool v) =>
+      _kv.setBool(StorageKeys.spamFilterAggressive, v);
+
   void setAcceptPMs(String v) {
     _kv.setString(StorageKeys.acceptPms, v);
     state = state.copyWith(acceptPMs: v);

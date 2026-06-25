@@ -41,6 +41,32 @@ DeliveryStatus deliveryStatusFromString(String? s) {
   }
 }
 
+/// An optional inline action button carried by a [MessageKind.system] row.
+///
+/// The PWA renders some system lines with an embedded `<button>` — e.g. the
+/// spam false-positive notice has `data-action="reportSpamFalsePositive"` with
+/// the flagged message stashed in a `data-spam-content` attribute
+/// (messages.js:645). Native rows can't embed HTML, so the button is modelled
+/// here: a [label] plus a [kind] discriminator and the [payload] the handler
+/// needs (the flagged content for [SystemActionKind.reportSpamFalsePositive]).
+enum SystemActionKind { reportSpamFalsePositive }
+
+class SystemAction {
+  const SystemAction({
+    required this.kind,
+    required this.label,
+    this.payload = '',
+  });
+
+  final SystemActionKind kind;
+
+  /// Button text (`Report false positive`).
+  final String label;
+
+  /// Action data — the flagged message body for the spam false-positive report.
+  final String payload;
+}
+
 /// Unified message model covering channel, PM and group messages, mirroring the
 /// IndexedDB-serialised record the PWA uses (docs/specs/01 §1.4, 03 §2.1/§3.4).
 class Message {
@@ -77,6 +103,7 @@ class Message {
     this.spamGated = false,
     this.blocked = false,
     this.kind = MessageKind.normal,
+    this.systemAction,
     Map<String, String>? readers,
   })  : timestamp = timestamp ?? createdAt * 1000,
         readers = readers ?? <String, String>{};
@@ -152,6 +179,11 @@ class Message {
   /// by [Message.system] (`displaySystemMessage`).
   MessageKind kind;
 
+  /// Optional inline action button for a [MessageKind.system] row (e.g. the
+  /// spam false-positive "Report false positive" affordance). Null for ordinary
+  /// system lines. Not serialised — these notices are session-local.
+  SystemAction? systemAction;
+
   /// Read-receipt readers for own channel/group messages: `pubkey → nym`. Drives
   /// the stacked reader-avatar delivery indicator (`group-readers`/
   /// `channel-readers`, `groups.js:2624`). Empty for everyone else.
@@ -219,6 +251,27 @@ class Message {
       createdAt: ms ~/ 1000,
       timestamp: ms,
       kind: action ? MessageKind.action : MessageKind.system,
+    );
+  }
+
+  /// A [MessageKind.system] pill that carries an inline action [SystemAction]
+  /// button (e.g. the spam false-positive notice with its "Report false
+  /// positive" affordance, messages.js:645).
+  factory Message.systemWithAction(
+    String content,
+    SystemAction action, {
+    int? createdAtMs,
+  }) {
+    final ms = createdAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    return Message(
+      id: 'sys-${ms.toRadixString(36)}-${content.hashCode.toUnsigned(20)}',
+      author: '',
+      pubkey: '',
+      content: content,
+      createdAt: ms ~/ 1000,
+      timestamp: ms,
+      kind: MessageKind.system,
+      systemAction: action,
     );
   }
 

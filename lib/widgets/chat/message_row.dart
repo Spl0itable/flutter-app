@@ -9,6 +9,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
 import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
+import '../../features/settings/about_screen.dart';
 import '../../features/p2p/p2p_models.dart';
 import '../../features/p2p/p2p_service.dart';
 import '../../features/shop/cosmetics.dart';
@@ -410,7 +411,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// A centered `.system-message` (or `.action-message`) pill injected into the
   /// conversation flow (`styles-chat.css:1334-1360`). Text-dim, rounded-20,
   /// `white@0.03` bg, glass border, `textSize-3`; the action variant is
-  /// purple-italic.
+  /// purple-italic. When the row carries a [Message.systemAction] (e.g. the spam
+  /// false-positive notice) an inline action button is rendered under the text.
   Widget _buildSystemMessage(BuildContext context) {
     final c = context.nym;
     final isAction = message.kind == MessageKind.action;
@@ -429,6 +431,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         height: 1.3,
       ),
     );
+    final action = message.systemAction;
+    // The pill body: just the text, or text + an inline action button (the
+    // `.spam-false-positive-btn` of messages.js:645).
+    final Widget pillChild = action == null
+        ? text
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              text,
+              const SizedBox(height: 8),
+              _SystemActionButton(
+                label: action.label,
+                onTap: () => _runSystemAction(context, action),
+              ),
+            ],
+          );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
@@ -441,10 +459,30 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   border: Border.all(color: c.glassBorder),
                   borderRadius: const BorderRadius.all(Radius.circular(20)),
                 ),
-                child: text,
+                child: pillChild,
               ),
       ),
     );
+  }
+
+  /// Dispatches a system-row [SystemAction]. For the spam false-positive notice
+  /// this opens the About contact form pre-filled with topic 'Spam false
+  /// positive' and the flagged message in a code block — a 1:1 port of
+  /// `reportSpamFalsePositive(content)` (app.js:4399-4404).
+  void _runSystemAction(BuildContext context, SystemAction action) {
+    switch (action.kind) {
+      case SystemActionKind.reportSpamFalsePositive:
+        final content = action.payload;
+        final body = content.isNotEmpty
+            ? 'The following message was incorrectly flagged by the spam '
+                'filter:\n\n```\n$content\n```'
+            : 'A message was incorrectly flagged by the spam filter.';
+        AboutScreen.open(
+          context,
+          initialTopic: 'Spam false positive',
+          initialMessage: body,
+        );
+    }
   }
 
   /// A `/me` emote rendered as a centered italic `* author#suffix action *` line
@@ -1607,6 +1645,53 @@ class _AddReactionButtonState extends State<_AddReactionButton> {
               NymIcons.addReaction,
               size: 16,
               color: c.text,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A small inline action button for a system-message pill (the PWA's
+/// `.spam-false-positive-btn`, messages.js:645): a primary-tinted rounded pill
+/// with a subtle press-state, sized for the muted system row.
+class _SystemActionButton extends StatefulWidget {
+  const _SystemActionButton({required this.label, required this.onTap});
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  State<_SystemActionButton> createState() => _SystemActionButtonState();
+}
+
+class _SystemActionButtonState extends State<_SystemActionButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.97 : 1.0,
+        duration: const Duration(milliseconds: 120),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: _pressed ? c.primaryA(0.16) : c.primaryA(0.10),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+            border: Border.all(color: c.primaryA(_pressed ? 0.5 : 0.3)),
+          ),
+          child: Text(
+            widget.label,
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
