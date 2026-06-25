@@ -1179,6 +1179,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final map =
         ref.read(appStateProvider.notifier).reactorsFor(message.id, r.emoji) ??
             const {};
+    // Resolve any reactor we lack an avatar for (e.g. reactions restored from
+    // cache, never seen live) — the PWA's `ensureListProfiles` on the reactor
+    // list. Debounced/guarded; faces fill in on the next open.
+    ref.read(nostrControllerProvider).ensureProfiles(map.keys);
     final reactors = <ReactorEntry>[
       for (final e in map.entries)
         ReactorEntry(

@@ -613,6 +613,11 @@ class NostrController {
     if (event.kind == EventKind.reaction) {
       final removed =
           event.tagsNamed('action').any((t) => t.length > 1 && t[1] == 'remove');
+      // Resolve the REACTOR's D1 profile so the reactors sheet (and any future
+      // surface) shows their custom avatar, not the identicon — the PWA resolves
+      // list/reaction author avatars too (`ensureListProfiles`, reactions.js:631).
+      // Guarded + debounced inside; a no-op once we know their picture.
+      if (!removed) _maybeBackfillProfiles(event.pubkey);
       if (!removed) {
         final target = event.tagValue('e');
         final author = event.tagValue('p');
@@ -1537,12 +1542,16 @@ class NostrController {
     if (messageId == null || bolt11 == null) return;
     final amount = ZapLogic.parseAmountFromBolt11(bolt11);
     if (amount == null) return;
+    final zapper = rumor['pubkey'] as String? ?? '';
     appState.recordMessageZap(
       messageId: messageId,
-      zapperPubkey: rumor['pubkey'] as String? ?? '',
+      zapperPubkey: zapper,
       amountSats: amount,
       dedupKey: ZapLogic.dedupKey(bolt11: bolt11, eventId: ''),
     );
+    // Resolve the zapper's avatar (the zappers sheet / badge), like the PWA
+    // resolves zap-list authors (`ensureListProfiles`, zaps.js:223).
+    if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
   }
 
   // ---------------------------------------------------------------------------
@@ -3850,6 +3859,17 @@ class NostrController {
   final List<String> _profileBackfillQueue = <String>[];
   final Set<String> _profileBackfillQueued = <String>{};
   Timer? _profileBackfillTimer;
+
+  /// Resolves D1 profiles for a LIST of pubkeys (a reactors / zappers sheet, a
+  /// group-member or poll-voter list, a mention set) so each row shows its custom
+  /// avatar instead of the identicon — the PWA's `ensureListProfiles`. Each entry
+  /// goes through the same debounced, picture-guarded [_maybeBackfillProfiles], so
+  /// known avatars are skipped and the rest batch into one `profile-get`.
+  void ensureProfiles(Iterable<String> pubkeys) {
+    for (final pk in pubkeys) {
+      _maybeBackfillProfiles(pk);
+    }
+  }
 
   /// Enqueues [pubkey] for a debounced D1 profile fetch when we have no kind-0
   /// profile for it yet. Mirrors the PWA's `queueProfileFetch`
