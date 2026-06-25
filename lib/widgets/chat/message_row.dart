@@ -538,11 +538,38 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final watermark = deco?.watermark ??
         auras.map((a) => a.watermark).firstWhere((w) => w != null, orElse: () => null);
 
-    final rowChildren = Wrap(
+    // The `.message` flex-wrap row: `.message-time` (FIRST), then
+    // `.message-author`, then `.message-content` — mirroring the PWA HTML order
+    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
+    // own lines (`.message-translation` width:100%, `.group-readers`/
+    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
+    // into the outer Column below so they span the whole message, right-aligned,
+    // rather than being clamped to the content's width.
+    final messageRow = Wrap(
       crossAxisAlignment: WrapCrossAlignment.start,
       spacing: 10,
       runSpacing: 4,
       children: [
+        // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
+        // the FIRST element, the left column, BEFORE the author. The clock
+        // reserves a 50px column so author/content left-edges line up.
+        if (settings.showTimestamps)
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 50),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  formatTime(message.dateTime, settings.timeFormat),
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+                // `.crypto-lock-irc`: the verification lock sits inside
+                // `.message-time` after the clock (PM/group only).
+                if (_cryptoState != null)
+                  CryptoVerifiedBadge(state: _cryptoState!),
+              ],
+            ),
+          ),
         ConstrainedBox(
           // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
           // the author flows inline and the line wraps. We keep a generous cap
@@ -574,25 +601,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             ),
           ),
         ),
-        if (settings.showTimestamps)
-          ConstrainedBox(
-            // `.message-time { min-width: 50px }` — the clock reserves a fixed
-            // column so content left-edges line up across rows.
-            constraints: const BoxConstraints(minWidth: 50),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  formatTime(message.dateTime, settings.timeFormat),
-                  style: TextStyle(color: c.textDim, fontSize: 12),
-                ),
-                // `.crypto-lock-irc`: the verification lock sits inside
-                // `.message-time` after the clock (PM/group only).
-                if (_cryptoState != null)
-                  CryptoVerifiedBadge(state: _cryptoState!),
-              ],
-            ),
-          ),
         ConstrainedBox(
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width - 220,
@@ -601,11 +609,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _bodyContent(context, c.text, fontSize, deco: deco),
-              if (_showTranslation)
-                MessageTranslation(
-                  content: message.content,
-                  targetLang: _translateLangOverride,
-                ),
               // `.edited-indicator-irc`: right-aligned 10px italic dim (edited).
               if (message.isEdited)
                 Align(
@@ -633,12 +636,34 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   padding: const EdgeInsets.only(top: 5),
                   child: _reactionsRow(context),
                 ),
-              if (_showReaderAvatars) _readerAvatars(context),
-              if (self && message.isPM && !message.isGroup)
-                _deliveryTicks(context),
             ],
           ),
         ),
+      ],
+    );
+
+    // The message body + the full-width siblings the PWA wraps below it. The
+    // `.message-translation` (`width:100%`) and `.group-readers`/
+    // `.channel-readers` (`flex-basis:100%; justify-content:flex-end`) each take
+    // a full-message-width line UNDER the content, right-aligned — not clamped
+    // to the content column.
+    final rowChildren = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        messageRow,
+        // `.message-translation`: full-width left-primary-bordered block BELOW
+        // the message content (a sibling after `.message-content`, width:100%).
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        // `.channel-readers`/`.group-readers`: a FULL-WIDTH, right-aligned row
+        // of 14px reader avatars BELOW the message.
+        if (_showReaderAvatars) _readerAvatars(context),
+        // PM delivery ticks (`.delivery-status`, right-aligned).
+        if (self && message.isPM && !message.isGroup) _deliveryTicks(context),
       ],
     );
 
@@ -657,6 +682,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           : rowChildren,
     );
     final content = Container(
+      // `.message` is a block-level flex row filling `.messages-container` (no
+      // shrink-wrap), so it spans the full list width. A full-width row is what
+      // lets `.message-translation` (`width:100%`) and the `.group-readers`
+      // (`flex-basis:100%`, right-aligned) line up across the whole message
+      // rather than clamping to the (possibly short) content.
+      width: double.infinity,
       decoration: BoxDecoration(
         color: bg,
         borderRadius: bg != null ? NymRadius.rsm : null,
@@ -707,7 +738,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final c = context.nym;
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
-    final align = self ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final deco = _styleDecoration(context);
 
     // In bubble mode the CSS applies the message style to `.message-content`
@@ -728,18 +758,20 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
+    // The bubble interior = the body, THEN the `.bubble-time-inner` (the
+    // timestamp sits at the BOTTOM-RIGHT, INSIDE the bubble background, below the
+    // content — followed by the crypto lock). The `.message-translation` is NOT
+    // here: the PWA inserts it as a sibling AFTER `.message-content`
+    // (`translate.js: contentEl.after(translationEl)`), so it renders as a
+    // full-width block BELOW the bubble — see [stack] below.
     final innerContent = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         _bodyContent(context, c.text, fontSize, deco: deco),
-        if (_showTranslation)
-          MessageTranslation(
-            content: message.content,
-            targetLang: _translateLangOverride,
-          ),
-        // `.bubble-time-inner { margin-top: 4px }` — the relative time sits 4px
-        // below the body, right-aligned (`margin-left: auto`).
+        // `.bubble-time-inner { display:block; width:fit-content; margin-left:
+        // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
+        // below the body, pinned to the bottom-right INSIDE the bubble.
         const SizedBox(height: 4),
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -751,7 +783,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 style: TextStyle(
                     color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
               ),
-            // `.bubble-time-inner`: RELATIVE time ("now"/"2m ago"), not clock.
+            // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
             Text(
               formatRelativeTime(message.dateTime),
               style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
@@ -798,31 +830,55 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ),
     );
 
+    // `.message-group-stack` (`flex:1 1 auto; min-width:0`, a flex column). It
+    // holds the name, the content bubble, then the full-width siblings the PWA
+    // wraps below `.message-content`: `.message-translation` (`width:100%`) and
+    // `.group-readers`/`.channel-readers` (`flex-basis:100%; justify-content:
+    // flex-end`). The column STRETCHES so those span its full width; the
+    // shrink-wrapped items (name / bubble / reactions) are re-aligned per side
+    // via [sideAlign] (start, or end for self).
+    final sideAlign = self ? Alignment.centerRight : Alignment.centerLeft;
     final stack = Column(
-      crossAxisAlignment: align,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
         if (widget.showName && !widget.grouped)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
-            child: GestureDetector(
-              onTap: () => _openContextMenu(context),
-              // Name above the bubble: nym `#suffix` + flair/verified/friend,
-              // no `<…>` brackets (bubble hides them).
-              child: _authorLine(
-                c,
-                self: self,
-                size: 11,
-                // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
-                flairSize: 20,
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
+              child: GestureDetector(
+                onTap: () => _openContextMenu(context),
+                // Name above the bubble: nym `#suffix` + flair/verified/friend,
+                // no `<…>` brackets (bubble hides them).
+                child: _authorLine(
+                  c,
+                  self: self,
+                  size: 11,
+                  // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                  flairSize: 20,
+                ),
               ),
             ),
           ),
-        bubble,
+        Align(alignment: sideAlign, child: bubble),
+        // `.message-translation`: a full-width left-primary-bordered block BELOW
+        // the bubble (a sibling after `.message-content`, NOT inside it).
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        // `.group-readers`/`.channel-readers`: a FULL-WIDTH, right-aligned row of
+        // 14px reader avatars below the message.
         if (_showReaderAvatars) _readerAvatars(context),
         if (reactions.isNotEmpty || _hasZaps)
-          Padding(
-            padding: const EdgeInsets.only(top: 5),
-            child: _reactionsRow(context),
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 5),
+              child: _reactionsRow(context),
+            ),
           ),
       ],
     );
