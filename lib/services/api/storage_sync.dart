@@ -266,7 +266,7 @@ class StorageSync {
         'category': category,
         'blob': blob,
         'contentHash': hash,
-        'auth': _auth('settings-set'),
+        'auth': await _auth('settings-set'),
       };
       await _api.storageAction(body);
       _lastSettingsHash[hashKey] = hash;
@@ -291,7 +291,7 @@ class StorageSync {
       data = await _api.storageAction({
         'action': 'settings-get',
         'pubkey': _pubkey,
-        'auth': _auth('settings-get'),
+        'auth': await _auth('settings-get'),
       });
     } catch (_) {
       return null;
@@ -367,7 +367,7 @@ class StorageSync {
       data = await _api.storageAction({
         'action': 'settings-get',
         'pubkey': _pubkey,
-        'auth': _auth('settings-get'),
+        'auth': await _auth('settings-get'),
       });
     } catch (_) {
       return const [];
@@ -514,7 +514,7 @@ class StorageSync {
         'action': 'profile-set',
         'pubkey': _pubkey,
         'event': signedEvent,
-        'auth': _auth('profile-set'),
+        'auth': await _auth('profile-set'),
       });
       final id = signedEvent['id'];
       if (id is String) markProfileCached(_pubkey);
@@ -554,7 +554,7 @@ class StorageSync {
         'action': 'pm-put',
         'pubkey': _pubkey,
         'events': batch.take(100).toList(),
-        'auth': _auth('pm-put'),
+        'auth': await _auth('pm-put'),
       });
       return batch.length;
     } catch (_) {
@@ -585,7 +585,7 @@ class StorageSync {
         'action': 'pm-deposit',
         'pubkey': _pubkey,
         'events': batch.take(100).toList(),
-        'auth': _auth('pm-deposit'),
+        'auth': await _auth('pm-deposit'),
       });
       return batch.length;
     } catch (_) {
@@ -617,7 +617,7 @@ class StorageSync {
         'since': since,
         if (before > 0) 'before': before,
         'limit': limit,
-        'auth': _auth('pm-get'),
+        'auth': await _auth('pm-get'),
       });
     } catch (_) {
       return const [];
@@ -956,22 +956,26 @@ class StorageSync {
   /// the ApiClient; the PWA signs the same event in `_signBotAuth`). Returns the
   /// signed event JSON for `body.auth`.
   ///
-  /// The signer abstracts local vs NIP-46 signing; [Nip98Auth.build] takes a
-  /// raw privkey, so for the durable-local path we sign through the signer
-  /// directly to stay uniform. We build the unsigned event here and sign it.
-  Map<String, dynamic>? _auth(String action) => _authBuilder?.call(action);
+  /// Signs a kind-27235 auth event for [action] via the injected builder. Async
+  /// because the builder signs through the active [EventSigner] — a NIP-46
+  /// remote signer round-trips the `sign_event` RPC. Returns null when there's
+  /// no builder or signing fails (auth then omitted; tolerated best-effort).
+  Future<Map<String, dynamic>?> _auth(String action) async =>
+      _authBuilder == null ? null : await _authBuilder!(action);
 
-  /// Auth-event builder injected by the controller (which holds the signer and
-  /// can sign sync or async). Returns the signed kind-27235 event JSON. When
-  /// null (e.g. pure tests of body shape via a pre-signed auth), callers pass
-  /// `auth` themselves. Set via [setAuthBuilder].
-  Map<String, dynamic>? Function(String action)? _authBuilder;
+  /// Auth-event builder injected by the controller (which holds the signer).
+  /// Returns the signed kind-27235 event JSON, or null. Async so it can sign via
+  /// a NIP-46 remote signer (the PWA's `_signBotAuth` → `signEvent` dispatch).
+  /// When null (e.g. pure tests of body shape via a pre-signed auth), callers
+  /// pass `auth` themselves. Set via [setAuthBuilder].
+  Future<Map<String, dynamic>?> Function(String action)? _authBuilder;
 
-  /// Registers the synchronous auth builder. The controller wires this to a
-  /// locally-signed kind-27235 event (the common nsec path). For NIP-46 the
-  /// builder may return null (auth then omitted; the worker rejects, which is
-  /// tolerated — durable NIP-46 settings/PM sync is best-effort).
-  void setAuthBuilder(Map<String, dynamic>? Function(String action) builder) {
+  /// Registers the async auth builder. The controller wires this to a signed
+  /// kind-27235 event via the active signer — local OR NIP-46 remote, so durable
+  /// remote-signer accounts now authenticate their settings/PM sync too.
+  void setAuthBuilder(
+    Future<Map<String, dynamic>?> Function(String action) builder,
+  ) {
     _authBuilder = builder;
   }
 

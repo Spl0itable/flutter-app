@@ -370,6 +370,10 @@ class NostrController {
     } catch (_) {}
     _api?.dispose();
     _api = null;
+    // Drop any cached signed kind-27235 auth so the next identity never reuses
+    // the previous one's auth event (the cache is keyed by pubkey, but clear it
+    // explicitly on identity teardown to be safe).
+    Nip98Auth.clearAuthCache();
 
     // 2) Drop in-memory identity + signer + group/service/storage-sync handles
     //    (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
@@ -3610,21 +3614,17 @@ class NostrController {
       pubkey: identity.pubkey,
       durableIdentity: durable,
     );
-    // Local-key auth builder: sign a kind-27235 event bound to the storage URL +
-    // action (Nip98Auth mirrors `_signBotAuth`). Only the local-key path can
-    // sign synchronously; a NIP-46 remote signer returns null (auth omitted →
-    // the worker rejects, tolerated as best-effort for remote-signer accounts).
-    final local = signer is LocalSigner ? signer : null;
-    sync.setAuthBuilder((action) {
-      final l = local;
-      if (l == null) return null;
-      return Nip98Auth.build(
-        action: action,
-        url: StorageSync.storageUrl(),
-        privkey: l.privkey,
-        pubkey: identity.pubkey,
-      );
-    });
+    // Auth builder: sign a kind-27235 event bound to the storage URL + action
+    // through the active signer (`Nip98Auth.buildSigned` mirrors the PWA's
+    // `_signBotAuth` → `signEvent` dispatch). This signs for BOTH a local key and
+    // a NIP-46 remote signer, so durable remote-signer accounts now authenticate
+    // their settings/PM sync too. Non-sensitive auth is cached 90s so a remote
+    // signer isn't round-tripped per request (the PWA's `_botAuthCache`).
+    sync.setAuthBuilder((action) => Nip98Auth.buildSigned(
+          action: action,
+          url: StorageSync.storageUrl(),
+          signer: signer,
+        ));
 
     // Activate the WS-first storage transport (the PWA's persistent `/api`
     // socket). Reads in [StorageSync] now try `wss://<host>/api` FIRST and fall
@@ -3635,19 +3635,15 @@ class NostrController {
     // The socket's one-time AUTH handshake signs a kind-27235 `api-ws` event
     // bound to `https://<host>/api/WS` — the PWA's `_signBotAuth('api-ws','WS')`
     // (endpoint 'WS' → `/api/WS`), distinct from the storage `/api/storage`
-    // `u`-tag. Only the local-key path can sign it; a NIP-46 remote signer
-    // returns null, so the socket simply opens UNAUTHENTICATED and carries only
-    // public reads (channel/profile/shop-status), exactly like a logged-out PWA.
-    api.setApiSocketAuthBuilder(() async {
-      final l = local;
-      if (l == null) return null;
-      return Nip98Auth.build(
-        action: 'api-ws',
-        url: _apiWsAuthUrl(),
-        privkey: l.privkey,
-        pubkey: identity.pubkey,
-      );
-    });
+    // `u`-tag. Signed through the same signer, so a NIP-46 remote signer also
+    // authenticates the socket (one remote sign at connect, cached). If signing
+    // fails (remote unreachable/declined), the socket opens UNAUTHENTICATED for
+    // public reads, exactly like a logged-out PWA.
+    api.setApiSocketAuthBuilder(() => Nip98Auth.buildSigned(
+          action: 'api-ws',
+          url: _apiWsAuthUrl(),
+          signer: signer,
+        ));
     api.activateApiSocket();
     _storageSync = sync;
 
