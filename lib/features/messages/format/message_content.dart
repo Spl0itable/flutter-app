@@ -16,11 +16,13 @@ import '../../../core/theme/nym_metrics.dart';
 import '../../../core/theme/nym_theme.dart'
     show kEmojiFontFallback, kSansFont, kMonoFont;
 import '../../../core/utils/nym_utils.dart';
+import '../../../models/message.dart';
 import '../../../services/api/api_client.dart';
 import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
+import '../../../widgets/chat/messages_list.dart' show messageListScrollerProvider;
 import '../../../widgets/common/app_dialog.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
@@ -60,6 +62,7 @@ class MessageContent extends ConsumerWidget {
   const MessageContent({
     super.key,
     required this.content,
+    this.hostMessageId,
     this.baseColor,
     this.fontSize,
     this.blurImages = false,
@@ -68,6 +71,12 @@ class MessageContent extends ConsumerWidget {
   });
 
   final String content;
+
+  /// The id of the message this content belongs to. Lets a tapped blockquote
+  /// EXCLUDE its own host message when searching for the quoted source (mirrors
+  /// the PWA `hostKey` guard in `_scrollToQuotedMessage`, messages.js:2690). Null
+  /// for surfaces without a backing message (e.g. the `/me` action preview).
+  final String? hostMessageId;
 
   /// Body text color (defaults to `context.nym.text`).
   final Color? baseColor;
@@ -279,8 +288,14 @@ class MessageContent extends ConsumerWidget {
         return _CodeBox(code: code, lang: lang, size: size);
       case QuoteBlock():
         // Top-level blockquote (PWA `:scope > blockquote`) — eligible for its
-        // own read-more truncation.
-        return _QuoteBox(block: block, color: color, size: size, topLevel: true);
+        // own read-more truncation, and tappable to jump to the quoted source.
+        return _QuoteBox(
+          block: block,
+          color: color,
+          size: size,
+          topLevel: true,
+          hostMessageId: hostMessageId,
+        );
       case MediaBlock(:final items):
         return _MediaGallery(items: items, blur: blurImages);
     }
@@ -855,13 +870,170 @@ int _inlineTextLength(InlineNode node) {
   }
 }
 
+// ===========================================================================
+// Jump-to-quoted-message resolution — the content-based search behind a tapped
+// blockquote, a 1:1 port of `_scrollToQuotedMessage`'s matcher
+// (messages.js:2676-2762). Given a [QuoteBlock] and the loaded view messages it
+// returns the best-matching SOURCE message (or null), so the caller can scroll
+// to + flash it. Public for the unit tests in `message_render_test.dart`.
+// ===========================================================================
+
+final RegExp _rxQuoteSuffix = RegExp(r'#([0-9a-f]{4})$', caseSensitive: false);
+final RegExp _rxWs = RegExp(r'\s+');
+
+/// The `textContent` of a quote's children (the PWA clones the blockquote and
+/// removes `.quote-author` before reading `textContent`), whitespace-collapsed.
+/// Custom-emoji / media contribute nothing, exactly like an `<img>` in
+/// `textContent`.
+String _quoteBodyText(QuoteBlock block) {
+  final buf = StringBuffer();
+  for (final child in block.children) {
+    _appendBlockText(buf, child);
+  }
+  return buf.toString().replaceAll(_rxWs, ' ').trim();
+}
+
+void _appendBlockText(StringBuffer buf, FormatBlock block) {
+  switch (block) {
+    case ParagraphBlock(:final inlines):
+    case HeadingBlock(:final inlines):
+      for (final node in inlines) {
+        _appendInlineText(buf, node);
+      }
+      buf.write(' ');
+    case CodeBlock(:final code):
+      buf
+        ..write(code)
+        ..write(' ');
+    case QuoteBlock():
+      // Nested quote: its author span + body are part of the outer textContent.
+      if (block.author != null) {
+        buf
+          ..write(block.author)
+          ..write(': ');
+      }
+      for (final child in block.children) {
+        _appendBlockText(buf, child);
+      }
+    case MediaBlock():
+      break; // <img>/<video> — no text content
+  }
+}
+
+void _appendInlineText(StringBuffer buf, InlineNode node) {
+  switch (node) {
+    case TextSpanNode(:final text):
+      buf.write(text);
+    case BoldNode(:final children):
+    case ItalicNode(:final children):
+    case StrikeNode(:final children):
+      for (final ch in children) {
+        _appendInlineText(buf, ch);
+      }
+    case InlineCodeNode(:final code):
+      buf.write(code);
+    case LinkNode(:final url):
+      buf.write(url);
+    case EmojiNode(:final unicode):
+      buf.write(unicode);
+    case MentionNode(:final base, :final suffix):
+      buf.write(base);
+      if (suffix != null) buf.write('#$suffix');
+    case ChannelRefNode(:final name):
+      buf.write('#$name');
+    case ChannelLinkChip(:final label):
+      buf.write(label);
+    case CustomEmojiNode():
+    case GroupInviteChip():
+      break; // rendered as image / chip — no text content
+    default:
+      break;
+  }
+}
+
+/// `stripQuoteLines` (messages.js:2711): the non-`>` lines of [raw], joined by a
+/// space and whitespace-collapsed — the "reply only" text the match scores
+/// against (so a reply whose body merely re-quotes doesn't shadow the original).
+String _stripQuoteLines(String raw) => raw
+    .split(RegExp(r'\r?\n'))
+    .where((l) => !l.startsWith('>'))
+    .join(' ')
+    .replaceAll(_rxWs, ' ')
+    .trim();
+
+/// `scoreHaystack` (messages.js:2695-2701): exact 1000 / contains 500 / long-
+/// prefix(80) 250 / else 0.
+int _scoreHaystack(String haystack, String needle) {
+  if (haystack.isEmpty) return 0;
+  if (haystack == needle) return 1000;
+  if (haystack.contains(needle)) return 500;
+  if (needle.length > 20 &&
+      haystack.contains(needle.substring(0, 80.clamp(0, needle.length)))) {
+    return 250;
+  }
+  return 0;
+}
+
+/// Finds the message a tapped quote points at, mirroring the DOM scan in
+/// `_scrollToQuotedMessage` (messages.js:2713-2728). Returns null when nothing
+/// scores above 0 (PWA: "Original message is not available").
+Message? resolveQuotedMessage(
+  QuoteBlock block,
+  List<Message> messages, {
+  String? hostMessageId,
+}) {
+  // Author: strip a leading '@'/trailing ':' (already done in QuoteBlock.author)
+  // then split a trailing `#xxxx` suffix from the base nym.
+  final authorText = (block.author ?? '').trim();
+  if (authorText.isEmpty && block.children.isEmpty) return null;
+  final sfx = _rxQuoteSuffix.firstMatch(authorText);
+  final quotedSuffix = sfx?.group(1)?.toLowerCase();
+  final quotedName = authorText.replaceAll(_rxQuoteSuffix, '').trim();
+
+  final quotedText = _quoteBodyText(block);
+  if (quotedText.isEmpty) return null;
+  final needle = quotedText.substring(0, quotedText.length.clamp(0, 200));
+
+  bool matchesAuthor(Message m) {
+    final suffix = m.pubkey.length >= 4
+        ? m.pubkey.substring(m.pubkey.length - 4).toLowerCase()
+        : m.pubkey.toLowerCase();
+    if (quotedSuffix != null && suffix != quotedSuffix) return false;
+    final trimmed = m.author.trim();
+    final baseAuthor = stripPubkeySuffix(trimmed);
+    if (quotedName.isNotEmpty &&
+        baseAuthor != quotedName &&
+        trimmed != quotedName) {
+      return false;
+    }
+    return true;
+  }
+
+  Message? best;
+  var bestScore = -1;
+  for (final m in messages) {
+    if (hostMessageId != null && m.id == hostMessageId) continue;
+    if (!matchesAuthor(m)) continue;
+    final raw = m.content.replaceAll(_rxWs, ' ').trim();
+    if (raw.isEmpty) continue;
+    final replyOnly = _stripQuoteLines(m.content);
+    final score = _scoreHaystack(replyOnly.isNotEmpty ? replyOnly : raw, needle);
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
 /// Left-bordered quote block, with an optional author header.
-class _QuoteBox extends StatelessWidget {
+class _QuoteBox extends ConsumerWidget {
   const _QuoteBox({
     required this.block,
     required this.color,
     required this.size,
     this.topLevel = false,
+    this.hostMessageId,
   });
   final QuoteBlock block;
   final Color color;
@@ -872,8 +1044,12 @@ class _QuoteBox extends StatelessWidget {
   /// `textContent` and is never independently truncated.
   final bool topLevel;
 
+  /// The id of the host message (the one containing this quote), forwarded so a
+  /// tap can exclude the host from the quoted-source search (PWA `hostKey`).
+  final String? hostMessageId;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     final inner = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -896,7 +1072,7 @@ class _QuoteBox extends StatelessWidget {
             : inner;
     // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
     // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
-    return Container(
+    final box = Container(
       padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
       decoration: BoxDecoration(
         color: c.secondaryA(0.1),
@@ -908,6 +1084,38 @@ class _QuoteBox extends StatelessWidget {
       ),
       child: clamped,
     );
+    // `.message-content > blockquote { cursor: pointer }` (styles-chat.css:1276):
+    // ONLY the top-level quote is tappable; tapping it jumps the list to the
+    // quoted source message and flashes it (PWA `_scrollToQuotedMessage`, bound
+    // to `.message-content > blockquote` in ui-context.js:873). Inner links /
+    // mentions / code carry their own recognizers and win the hit-test, so the
+    // translucent wrapper only fires on the quote's own (inert) surface — the
+    // same effect as the PWA's `closest('a, .nm-mention, code, …')` exclusion.
+    if (!topLevel) return box;
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _jumpToQuotedSource(ref),
+      child: box,
+    );
+  }
+
+  /// Resolves the quoted SOURCE message in the current view and scrolls+flashes
+  /// it, mirroring `_scrollToQuotedMessage` (messages.js:2676-2777): a
+  /// content-based search keyed on the quote's author (base nym + optional 4-hex
+  /// suffix) and its quoted text, excluding the host message. No-ops gracefully
+  /// when the source isn't in the loaded set (the PWA bails the same way).
+  void _jumpToQuotedSource(WidgetRef ref) {
+    final messages = ref.read(messagesForCurrentViewProvider);
+    final target = resolveQuotedMessage(
+      block,
+      messages,
+      hostMessageId: hostMessageId,
+    );
+    if (target == null) return; // not in the loaded set → bail (PWA parity)
+    final scroller = ref.read(messageListScrollerProvider);
+    if (scroller.scrollToMessage(target.id)) {
+      ref.read(flashedMessageProvider.notifier).flash(target.id);
+    }
   }
 
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
@@ -960,7 +1168,14 @@ class _QuoteBox extends StatelessWidget {
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size - 1);
       case QuoteBlock():
-        return _QuoteBox(block: child, color: dim, size: size);
+        // Nested quote: NOT independently tappable (only `> blockquote` is); a
+        // tap anywhere in the outer box already jumps using the outer quote.
+        return _QuoteBox(
+          block: child,
+          color: dim,
+          size: size,
+          hostMessageId: hostMessageId,
+        );
       case MediaBlock(:final items):
         return _MediaGallery(items: items);
     }

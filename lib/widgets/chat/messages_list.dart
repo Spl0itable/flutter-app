@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../features/polls/poll_card.dart';
@@ -14,19 +15,82 @@ import 'message_row.dart';
 import 'message_skeleton.dart';
 import 'typing_indicator.dart';
 
+/// Scroll-to-a-specific-message handle for the active [MessagesList], shared via
+/// [messageListScrollerProvider] so the blockquote tap (in `message_content.dart`)
+/// can jump the list to a quoted source message — the infrastructure behind the
+/// PWA's `_scrollToQuotedMessage` (`target.scrollIntoView({block:'center'})`,
+/// messages.js:2768-2774). The list reverses (newest at index 0), and items are
+/// built lazily, so a plain `ListView` can't land on an off-screen message — this
+/// wraps the package's [ItemScrollController] and a live message-id → render-index
+/// map the list republishes on every build.
+class MessageListScroller {
+  ItemScrollController? _controller;
+
+  /// message id → reversed render-unit index (the `ScrollablePositionedList`
+  /// index), rebuilt by [MessagesList] each build for the current view.
+  Map<String, int> _indexById = const {};
+
+  /// Called by [MessagesList] every build to (re)bind its controller + the
+  /// current id→index map.
+  void bind(ItemScrollController controller, Map<String, int> indexById) {
+    _controller = controller;
+    _indexById = indexById;
+  }
+
+  /// Whether [messageId] is in the currently-rendered set (so a jump can land).
+  bool canScrollTo(String messageId) =>
+      _indexById.containsKey(messageId) && (_controller?.isAttached ?? false);
+
+  /// Smooth-scrolls the list so [messageId] sits ~centered (PWA `block:'center'`).
+  /// No-ops when the message isn't in the loaded set or the list isn't attached
+  /// (the PWA likewise bails — "Original message is not available" — when the
+  /// target can't be found). Returns true when a scroll was issued.
+  bool scrollToMessage(String messageId) {
+    final index = _indexById[messageId];
+    final controller = _controller;
+    if (index == null || controller == null || !controller.isAttached) {
+      return false;
+    }
+    controller.scrollTo(
+      index: index,
+      // Leading-edge fraction of the viewport — ~0.4 lands the message a little
+      // above center, the closest analogue to `scrollIntoView({block:'center'})`.
+      alignment: 0.4,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+    return true;
+  }
+}
+
+/// The shared [MessageListScroller] for the mounted message list. A plain
+/// `Provider` (single instance for the app's lifetime); [MessagesList] binds its
+/// controller into it on build.
+final messageListScrollerProvider =
+    Provider<MessageListScroller>((ref) => MessageListScroller());
+
 /// The scrolling message list (`.messages-container`, column-reverse). Renders
 /// `messagesForCurrentViewProvider` newest-at-bottom via a reversed ListView,
 /// supporting both IRC and bubble layouts. Bubble mode groups consecutive
 /// same-author messages within 5 minutes (collapse name + tail). Inline poll
 /// cards (`pollsForCurrentViewProvider`) are interleaved by `createdAt`.
 /// (docs/specs/02 §6, docs/specs/03 §2.7)
-class MessagesList extends ConsumerWidget {
+class MessagesList extends ConsumerStatefulWidget {
   const MessagesList({super.key});
 
+  @override
+  ConsumerState<MessagesList> createState() => _MessagesListState();
+}
+
+class _MessagesListState extends ConsumerState<MessagesList> {
   static const int _groupWindowSec = 300; // 5 min
 
+  /// Drives [ScrollablePositionedList.scrollTo] for the jump-to-quoted-message
+  /// feature; bound into [messageListScrollerProvider] on every build.
+  final ItemScrollController _itemScrollController = ItemScrollController();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final c = context.nym;
     final settings = ref.watch(settingsProvider);
     final app = ref.watch(appStateProvider);
@@ -104,14 +168,34 @@ class MessagesList extends ConsumerWidget {
       }
     }
 
+    // Publish a message-id → reversed-render-index map so the blockquote tap can
+    // jump to a quoted source message (`ScrollablePositionedList.scrollTo`). The
+    // reversed list uses index 0 = newest at the bottom, so a unit at forward
+    // position `f` lives at reversed index `units.length - 1 - f`; every message
+    // inside a group maps to that same unit index.
+    final indexById = <String, int>{};
+    for (var f = 0; f < units.length; f++) {
+      final unit = units[f];
+      if (unit is _GroupUnit) {
+        final revIndex = units.length - 1 - f;
+        for (final entry in unit.entries) {
+          indexById[entry.message.id] = revIndex;
+        }
+      }
+    }
+    ref.read(messageListScrollerProvider).bind(_itemScrollController, indexById);
+
     // Reversed list: index 0 = newest at the bottom; the typing row is pinned
     // below the newest message, above the composer (`.typing-indicator`).
+    // ScrollablePositionedList (vs a plain ListView) is what lets the quote tap
+    // land on an OFF-SCREEN, lazily-built message via `scrollTo(index:…)`.
     return ColoredBox(
       color: containerColor,
       child: Column(
         children: [
           Expanded(
-            child: ListView.builder(
+            child: ScrollablePositionedList.builder(
+              itemScrollController: _itemScrollController,
               reverse: true,
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
               itemCount: units.length,

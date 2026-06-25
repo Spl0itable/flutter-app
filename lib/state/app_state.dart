@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -2375,6 +2376,47 @@ final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
       : list.where((m) => !s.isMessageFiltered(m)).toList();
   visible.sort(compareMessages);
   return visible;
+});
+
+/// Transient "scroll-flash" signal: the id of the message currently flashing its
+/// highlight halo, or null. Mirrors the PWA's `.message-scroll-flash` class that
+/// `_scrollToQuotedMessage` adds to a jumped-to message for ~1.6s
+/// (messages.js:2775-2776 `setTimeout(() => target.classList.remove(...), 1600)`).
+/// [MessageRow] watches this and pulses the matching message; calling
+/// `ref.read(flashedMessageProvider.notifier).flash(id)` (re)arms it.
+class FlashedMessageNotifier extends StateNotifier<String?> {
+  FlashedMessageNotifier() : super(null);
+
+  /// The PWA clears the class 1.6s after adding it.
+  static const Duration _flashDuration = Duration(milliseconds: 1600);
+
+  Timer? _timer;
+
+  /// Flashes [messageId], replacing any in-flight flash, and auto-clears after
+  /// [_flashDuration] (re-flashing the same id restarts the timer, matching the
+  /// PWA where a repeated jump re-adds the class).
+  void flash(String messageId) {
+    if (messageId.isEmpty) return;
+    _timer?.cancel();
+    // Force a state change even when re-flashing the same id (so the row
+    // re-triggers its pulse): clear, then set on the next microtask.
+    if (state == messageId) state = null;
+    state = messageId;
+    _timer = Timer(_flashDuration, () {
+      if (mounted) state = null;
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+}
+
+final flashedMessageProvider =
+    StateNotifierProvider<FlashedMessageNotifier, String?>((ref) {
+  return FlashedMessageNotifier();
 });
 
 /// Reactions for the active view's messages (message id → tallies).

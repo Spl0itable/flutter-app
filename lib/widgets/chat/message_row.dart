@@ -390,16 +390,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isSystemRow) return _buildSystemMessage(context);
     // `/me …` emote → italic "* author action *" line.
     if (message.isMeAction) return _buildActionMessage(context);
-    final row =
+    Widget row =
         settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
     // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
     // current conversation is dimmed (`messages.js:652-656`). Own messages are
     // never flooded.
     if (!message.isOwn &&
         ref.watch(floodTrackerProvider).isFlooding(message.pubkey)) {
-      return Opacity(opacity: 0.2, child: row);
+      row = Opacity(opacity: 0.2, child: row);
     }
-    return row;
+    // `.message-scroll-flash`: a tapped blockquote scrolls to its quoted source
+    // and flashes it (`_scrollToQuotedMessage`, messages.js:2775). Watch the
+    // transient flash signal and pulse this row's highlight halo when it targets
+    // us (the `::after` primary-tinted overlay, styles-chat.css:1285-1306).
+    final flashing = ref.watch(flashedMessageProvider) == message.id;
+    return _ScrollFlashOverlay(active: flashing, child: row);
   }
 
   /// A centered `.system-message` (or `.action-message`) pill injected into the
@@ -1653,6 +1658,91 @@ class _RedactedRevealState extends State<_RedactedReveal> {
         color: Colors.white.withValues(alpha: 0.15),
         borderRadius: NymRadius.rxs,
       ),
+    );
+  }
+}
+
+/// The `.message-scroll-flash` highlight pulse (`styles-chat.css:1285-1306`): a
+/// non-interactive primary-tinted overlay (`::after`, primary@0.18 fill + 1px
+/// primary@0.5 border, radius-sm) that fades in then out over the
+/// `messageScrollFlash` keyframes (0→1 at 8%, hold to 45%, →0 at 100%) across
+/// 1.8s. Wraps a message row and plays once each time [active] rises (the row's
+/// `flashedMessageProvider` match), mirroring the class the PWA adds to a
+/// jumped-to message after `_scrollToQuotedMessage`.
+class _ScrollFlashOverlay extends StatefulWidget {
+  const _ScrollFlashOverlay({required this.active, required this.child});
+  final bool active;
+  final Widget child;
+
+  @override
+  State<_ScrollFlashOverlay> createState() => _ScrollFlashOverlayState();
+}
+
+class _ScrollFlashOverlayState extends State<_ScrollFlashOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    // `animation: messageScrollFlash 1.8s ease-out forwards`.
+    duration: const Duration(milliseconds: 1800),
+    vsync: this,
+  );
+
+  // The `@keyframes messageScrollFlash` opacity curve: 0% → 0, 8% → 1, 45% → 1,
+  // 100% → 0 (ease-out). A TweenSequence reproduces the in/hold/out timeline.
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.0, end: 1.0)
+          .chain(CurveTween(curve: Curves.easeOut)),
+      weight: 8,
+    ),
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 37), // 8% → 45%
+    TweenSequenceItem(
+      tween: Tween(begin: 1.0, end: 0.0)
+          .chain(CurveTween(curve: Curves.easeOut)),
+      weight: 55, // 45% → 100%
+    ),
+  ]).animate(_controller);
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) _controller.forward(from: 0);
+  }
+
+  @override
+  void didUpdateWidget(_ScrollFlashOverlay old) {
+    super.didUpdateWidget(old);
+    // Re-trigger the pulse each time the flash newly targets this row.
+    if (widget.active && !old.active) _controller.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Stack(
+      children: [
+        widget.child,
+        // `position: absolute; inset: 0; pointer-events: none; z-index: 5`.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: FadeTransition(
+              opacity: _opacity,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: c.primaryA(0.18),
+                  border: Border.all(color: c.primaryA(0.5)),
+                  borderRadius: NymRadius.rsm,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
