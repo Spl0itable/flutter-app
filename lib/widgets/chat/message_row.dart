@@ -99,6 +99,7 @@ class MessageRow extends ConsumerStatefulWidget {
     this.grouped = false,
     this.showAvatar = true,
     this.showName = true,
+    this.inGroup = false,
     this.onReactionPicker,
   });
 
@@ -115,6 +116,14 @@ class MessageRow extends ConsumerStatefulWidget {
 
   /// Bubble layout: render the name above the bubble.
   final bool showName;
+
+  /// Bubble layout: this row is rendered INSIDE a [MessageGroup], which owns the
+  /// group's horizontal padding and the single sticky [_StickyGroupAvatar]. When
+  /// true, [_buildBubble] emits just the content stack (name / bubble /
+  /// translation / readers / reactions) plus the per-row vertical rhythm — no
+  /// avatar gutter, no self-contained row — so the group can lay the bubbles in
+  /// one column beside the gliding avatar (PWA `.message-group-stack`).
+  final bool inGroup;
 
   /// Opens the full emoji reaction picker for this message (host supplies it).
   /// When null the add-reaction / "more" affordances are no-ops.
@@ -202,11 +211,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// The author's active message-style decoration. The supporter badge also
   /// adds a gold "supporter-style" treatment to the message body
   /// (`.message.supporter-style`); an explicit style takes precedence.
-  MessageStyleDecoration? get _styleDecoration {
+  MessageStyleDecoration? _styleDecoration(BuildContext context) {
     final cos = _cosmetics;
-    final styled = messageStyleDecoration(cos.styleId);
+    final isLight = context.nym.isLight;
+    final styled = messageStyleDecoration(cos.styleId, isLight: isLight);
     if (styled != null) return styled;
-    if (cos.supporter) return supporterStyleDecoration;
+    if (cos.supporter) {
+      return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+    }
     return null;
   }
 
@@ -504,7 +516,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
 
-    final deco = _styleDecoration;
+    final deco = _styleDecoration(context);
 
     Color? bg;
     Color? barColor;
@@ -535,11 +547,38 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final watermark = deco?.watermark ??
         auras.map((a) => a.watermark).firstWhere((w) => w != null, orElse: () => null);
 
-    final rowChildren = Wrap(
+    // The `.message` flex-wrap row: `.message-time` (FIRST), then
+    // `.message-author`, then `.message-content` — mirroring the PWA HTML order
+    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
+    // own lines (`.message-translation` width:100%, `.group-readers`/
+    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
+    // into the outer Column below so they span the whole message, right-aligned,
+    // rather than being clamped to the content's width.
+    final messageRow = Wrap(
       crossAxisAlignment: WrapCrossAlignment.start,
       spacing: 10,
       runSpacing: 4,
       children: [
+        // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
+        // the FIRST element, the left column, BEFORE the author. The clock
+        // reserves a 50px column so author/content left-edges line up.
+        if (settings.showTimestamps)
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 50),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  formatTime(message.dateTime, settings.timeFormat),
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+                // `.crypto-lock-irc`: the verification lock sits inside
+                // `.message-time` after the clock (PM/group only).
+                if (_cryptoState != null)
+                  CryptoVerifiedBadge(state: _cryptoState!),
+              ],
+            ),
+          ),
         ConstrainedBox(
           // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
           // the author flows inline and the line wraps. We keep a generous cap
@@ -571,25 +610,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             ),
           ),
         ),
-        if (settings.showTimestamps)
-          ConstrainedBox(
-            // `.message-time { min-width: 50px }` — the clock reserves a fixed
-            // column so content left-edges line up across rows.
-            constraints: const BoxConstraints(minWidth: 50),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  formatTime(message.dateTime, settings.timeFormat),
-                  style: TextStyle(color: c.textDim, fontSize: 12),
-                ),
-                // `.crypto-lock-irc`: the verification lock sits inside
-                // `.message-time` after the clock (PM/group only).
-                if (_cryptoState != null)
-                  CryptoVerifiedBadge(state: _cryptoState!),
-              ],
-            ),
-          ),
         ConstrainedBox(
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width - 220,
@@ -598,11 +618,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _bodyContent(context, c.text, fontSize, deco: deco),
-              if (_showTranslation)
-                MessageTranslation(
-                  content: message.content,
-                  targetLang: _translateLangOverride,
-                ),
               // `.edited-indicator-irc`: right-aligned 10px italic dim (edited).
               if (message.isEdited)
                 Align(
@@ -630,12 +645,34 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   padding: const EdgeInsets.only(top: 5),
                   child: _reactionsRow(context),
                 ),
-              if (_showReaderAvatars) _readerAvatars(context),
-              if (self && message.isPM && !message.isGroup)
-                _deliveryTicks(context),
             ],
           ),
         ),
+      ],
+    );
+
+    // The message body + the full-width siblings the PWA wraps below it. The
+    // `.message-translation` (`width:100%`) and `.group-readers`/
+    // `.channel-readers` (`flex-basis:100%; justify-content:flex-end`) each take
+    // a full-message-width line UNDER the content, right-aligned — not clamped
+    // to the content column.
+    final rowChildren = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        messageRow,
+        // `.message-translation`: full-width left-primary-bordered block BELOW
+        // the message content (a sibling after `.message-content`, width:100%).
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        // `.channel-readers`/`.group-readers`: a FULL-WIDTH, right-aligned row
+        // of 14px reader avatars BELOW the message.
+        if (_showReaderAvatars) _readerAvatars(context),
+        // PM delivery ticks (`.delivery-status`, right-aligned).
+        if (self && message.isPM && !message.isGroup) _deliveryTicks(context),
       ],
     );
 
@@ -654,6 +691,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           : rowChildren,
     );
     final content = Container(
+      // `.message` is a block-level flex row filling `.messages-container` (no
+      // shrink-wrap), so it spans the full list width. A full-width row is what
+      // lets `.message-translation` (`width:100%`) and the `.group-readers`
+      // (`flex-basis:100%`, right-aligned) line up across the whole message
+      // rather than clamping to the (possibly short) content.
+      width: double.infinity,
       decoration: BoxDecoration(
         color: bg,
         borderRadius: bg != null ? NymRadius.rsm : null,
@@ -704,8 +747,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final c = context.nym;
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
-    final align = self ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-    final deco = _styleDecoration;
+    final deco = _styleDecoration(context);
 
     // In bubble mode the CSS applies the message style to `.message-content`
     // (the bubble): a translucent style background plus a soft glow halo.
@@ -725,18 +767,20 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
+    // The bubble interior = the body, THEN the `.bubble-time-inner` (the
+    // timestamp sits at the BOTTOM-RIGHT, INSIDE the bubble background, below the
+    // content — followed by the crypto lock). The `.message-translation` is NOT
+    // here: the PWA inserts it as a sibling AFTER `.message-content`
+    // (`translate.js: contentEl.after(translationEl)`), so it renders as a
+    // full-width block BELOW the bubble — see [stack] below.
     final innerContent = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         _bodyContent(context, c.text, fontSize, deco: deco),
-        if (_showTranslation)
-          MessageTranslation(
-            content: message.content,
-            targetLang: _translateLangOverride,
-          ),
-        // `.bubble-time-inner { margin-top: 4px }` — the relative time sits 4px
-        // below the body, right-aligned (`margin-left: auto`).
+        // `.bubble-time-inner { display:block; width:fit-content; margin-left:
+        // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
+        // below the body, pinned to the bottom-right INSIDE the bubble.
         const SizedBox(height: 4),
         Row(
           mainAxisSize: MainAxisSize.min,
@@ -748,7 +792,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 style: TextStyle(
                     color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
               ),
-            // `.bubble-time-inner`: RELATIVE time ("now"/"2m ago"), not clock.
+            // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
             Text(
               formatRelativeTime(message.dateTime),
               style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
@@ -795,36 +839,81 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ),
     );
 
+    // `.message-group-stack` (`flex:1 1 auto; min-width:0`, a flex column). It
+    // holds the name, the content bubble, then the full-width siblings the PWA
+    // wraps below `.message-content`: `.message-translation` (`width:100%`) and
+    // `.group-readers`/`.channel-readers` (`flex-basis:100%; justify-content:
+    // flex-end`). The column STRETCHES so those span its full width; the
+    // shrink-wrapped items (name / bubble / reactions) are re-aligned per side
+    // via [sideAlign] (start, or end for self).
+    final sideAlign = self ? Alignment.centerRight : Alignment.centerLeft;
     final stack = Column(
-      crossAxisAlignment: align,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
       children: [
         if (widget.showName && !widget.grouped)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
-            child: GestureDetector(
-              onTap: () => _openContextMenu(context),
-              // Name above the bubble: nym `#suffix` + flair/verified/friend,
-              // no `<…>` brackets (bubble hides them).
-              child: _authorLine(
-                c,
-                self: self,
-                size: 11,
-                // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
-                flairSize: 20,
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 2, left: 2, right: 2),
+              child: GestureDetector(
+                onTap: () => _openContextMenu(context),
+                // Name above the bubble: nym `#suffix` + flair/verified/friend,
+                // no `<…>` brackets (bubble hides them).
+                child: _authorLine(
+                  c,
+                  self: self,
+                  size: 11,
+                  // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                  flairSize: 20,
+                ),
               ),
             ),
           ),
-        bubble,
+        Align(alignment: sideAlign, child: bubble),
+        // `.message-translation`: a full-width left-primary-bordered block BELOW
+        // the bubble (a sibling after `.message-content`, NOT inside it).
+        if (_showTranslation)
+          MessageTranslation(
+            content: message.content,
+            targetLang: _translateLangOverride,
+          ),
+        // `.group-readers`/`.channel-readers`: a FULL-WIDTH, right-aligned row of
+        // 14px reader avatars below the message.
         if (_showReaderAvatars) _readerAvatars(context),
         if (reactions.isNotEmpty || _hasZaps)
-          Padding(
-            padding: const EdgeInsets.only(top: 5),
-            child: _reactionsRow(context),
+          Align(
+            alignment: sideAlign,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 5),
+              child: _reactionsRow(context),
+            ),
           ),
       ],
     );
 
-    // `.message-group`: align-end row with a 32px sticky avatar for others.
+    // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
+    // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
+    // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
+    // grouped after the lead `-8px`) for a ~2px in-group gap. Flutter list items
+    // can't carry negative inter-item margins, so the equivalent EFFECTIVE gaps
+    // are driven from the top edge only (bottom 0): a group lead opens 6px of
+    // air above it; a continuation member sits 2px below the previous bubble.
+    final vPad = EdgeInsets.only(top: widget.grouped ? 2 : 6);
+
+    // Rendered inside a [MessageGroup]: emit ONLY the content stack with its
+    // vertical rhythm. The group owns the `.message-group` horizontal padding
+    // and the single gliding [_StickyGroupAvatar], laying every bubble of the
+    // run in one `.message-group-stack` column beside it.
+    if (widget.inGroup) {
+      return Padding(padding: vPad, child: stack);
+    }
+
+    // Legacy standalone path (direct [MessageRow] use, not via [MessageGroup]):
+    // a self-contained `.message-group` row carrying its own 32px avatar.
+    // Horizontal inset mirrors `.message-group` padding: an others' group is
+    // `padding: 0 14px 0 6px` (the 32px avatar starts 6px from the edge), a
+    // self group is `padding: 0 14px` (`group-self`, row-reversed, no avatar).
     final row = Row(
       mainAxisAlignment:
           self ? MainAxisAlignment.end : MainAxisAlignment.start,
@@ -833,14 +922,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         if (!self) ...[
           SizedBox(
             width: 32,
-            // The PWA renders ONE 32px avatar per `.message-group`, pinned to the
-            // bottom of the group (`.message-group-avatar { align-self: flex-end;
-            // position: sticky; bottom: 8px }`). `showAvatar` is set on the LAST
-            // message of a group (others only); with the row bottom-aligned
-            // (`CrossAxisAlignment.end`) the avatar lands at the group's foot —
-            // the PWA's "avatar tracks the bottom of the stack" behaviour. Gating
-            // on `!grouped` too would hide it for every multi-message group, so
-            // gate purely on `showAvatar`.
             child: widget.showAvatar
                 ? GestureDetector(
                     onTap: () => _openContextMenu(context),
@@ -856,25 +937,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         Flexible(child: stack),
       ],
     );
-
-    // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
-    // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
-    // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
-    // grouped after the lead `-8px`) for a ~2px in-group gap. Flutter list items
-    // can't carry negative inter-item margins, so the equivalent EFFECTIVE gaps
-    // are driven from the top edge only (bottom 0): a group lead opens 6px of
-    // air above it; a continuation member sits 2px below the previous bubble.
-    //
-    // Horizontal inset mirrors `.message-group` padding: an others' group is
-    // `padding: 0 14px 0 6px` (the 32px avatar starts 6px from the edge), a
-    // self group is `padding: 0 14px` (`group-self`, row-reversed, no avatar).
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-        self ? 14 : 6,
-        widget.grouped ? 2 : 6,
-        14,
-        0,
-      ),
+      padding: EdgeInsets.fromLTRB(self ? 14 : 6, widget.grouped ? 2 : 6, 14, 0),
       child: row,
     );
   }
@@ -914,7 +978,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             : null;
 
     // Watermark from the active style or a frost/cosmic aura.
-    final watermark = _styleDecoration?.watermark ??
+    final watermark = _styleDecoration(context)?.watermark ??
         auras
             .map((a) => a.watermark)
             .firstWhere((w) => w != null, orElse: () => null);
@@ -1808,6 +1872,275 @@ class _StopBtn extends StatelessWidget {
         child: Text('Stop',
             style: TextStyle(color: c.danger, fontSize: 10)),
       ),
+    );
+  }
+}
+
+/// One message inside a [MessageGroup]: the message plus its already-resolved
+/// reactions and mention flag (computed once by [MessagesList] so the row needn't
+/// re-watch them).
+class MessageGroupEntry {
+  const MessageGroupEntry({
+    required this.message,
+    required this.reactions,
+    required this.mentioned,
+  });
+
+  final Message message;
+  final List<MessageReaction> reactions;
+  final bool mentioned;
+}
+
+/// A `.message-group`: a run of consecutive same-author bubble messages laid out
+/// in one `.message-group-stack` column beside a SINGLE avatar — the PWA's
+/// `.message-group-avatar` (32px, `align-self: flex-end`, `position: sticky;
+/// bottom: 8px`). Grouping consecutive messages into one widget is what lets that
+/// avatar span the whole run and GLIDE up the left edge as a tall group scrolls
+/// (each message is otherwise its own list item, so a per-row avatar can't move
+/// past its row). The glide itself lives in [_StickyGroupAvatar].
+///
+/// In IRC mode — and for standalone system / `/me` rows — a "group" is always a
+/// single entry and renders bare (no avatar gutter, no group chrome), so those
+/// paths are byte-for-byte what [MessageRow] produced before grouping existed.
+class MessageGroup extends ConsumerWidget {
+  const MessageGroup({
+    super.key,
+    required this.entries,
+    required this.settings,
+    this.onReactionPicker,
+  });
+
+  final List<MessageGroupEntry> entries;
+  final Settings settings;
+  final ValueChanged<Message>? onReactionPicker;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final useBubbles = settings.useBubbles;
+    final first = entries.first.message;
+    final self = first.isOwn;
+
+    // The `.message-group-stack` rows. `grouped`/`showName` track position in the
+    // run (only the lead carries a name); `inGroup` strips each row to its content
+    // stack so the group can host the one shared avatar.
+    List<Widget> buildRows() => [
+          for (var i = 0; i < entries.length; i++)
+            MessageRow(
+              key: ValueKey(entries[i].message.id),
+              message: entries[i].message,
+              settings: settings,
+              reactions: entries[i].reactions,
+              mentioned: entries[i].mentioned,
+              grouped: useBubbles && i > 0,
+              showName: !(useBubbles && i > 0),
+              showAvatar: false,
+              inGroup: useBubbles,
+              onReactionPicker: onReactionPicker,
+            ),
+        ];
+
+    // IRC layout, or a standalone system / `/me` row → no grouping chrome.
+    if (!useBubbles || first.isSystemRow || first.isMeAction) {
+      final rows = buildRows();
+      return rows.length == 1
+          ? rows.first
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch, children: rows);
+    }
+
+    // `width: double.infinity` forces the column to fill the group's width under
+    // the loose constraints a [Padding]/[Stack] hands it — without it a
+    // `CrossAxisAlignment.stretch` column shrink-wraps to its widest bubble,
+    // collapsing the full-width translation / read-receipt rows and breaking the
+    // self side's right-alignment (the old `Flexible`-in-`Row` gave it a tight
+    // width). The `.message-group-stack` is `flex: 1 1 auto`, i.e. full width.
+    final stack = SizedBox(
+      width: double.infinity,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: buildRows(),
+      ),
+    );
+
+    // Self group: `group-self` is `padding: 0 14px`, row-reversed, no avatar —
+    // each row already right-aligns its own content.
+    if (self) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: stack,
+      );
+    }
+
+    // Others group: `.message-group { padding: 0 14px 0 6px; gap: 6px }`. The
+    // 32px avatar lives in a Positioned overlay pinned to the left gutter; the
+    // stack is inset 38px (32 avatar + 6 gap) to sit where `.message-group-stack`
+    // does. The overlay (full group height) lets the avatar glide within the
+    // group's bounds without disturbing the bubble column's layout.
+    final last = entries.last.message;
+    final picture = ref.watch(
+        usersProvider.select((m) => m[first.pubkey]?.profile?.picture));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 0, 14, 0),
+      child: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 38),
+            child: stack,
+          ),
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 32,
+            child: _StickyGroupAvatar(
+              pubkey: first.pubkey,
+              imageUrl: picture,
+              onTap: () => _openAvatarMenu(context, ref, last),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Tapping the group avatar opens the context menu for the group's LAST message
+  /// (PWA `_createMessageGroupWrapper`: the avatar click resolves
+  /// `stack.lastElementChild` and calls `showContextMenu`).
+  void _openAvatarMenu(BuildContext context, WidgetRef ref, Message last) {
+    final app = ref.read(appStateProvider);
+    final target = ctxTargetForMessage(last, selfPubkey: app.selfPubkey);
+    ContextMenuPanel.show(
+      context,
+      target: target,
+      message: last,
+      onReact: () => onReactionPicker?.call(last),
+    );
+  }
+}
+
+/// The single per-group avatar reproducing the PWA's `.message-group-avatar`
+/// (`position: sticky; bottom: 8px; align-self: flex-end`). It fills the group's
+/// left gutter (a full-height, 32px-wide track) and positions a 32px avatar that:
+///   * rests at the group's foot (bottom of the stack) when the group sits above
+///     the viewport's bottom edge, and
+///   * GLIDES up to stay pinned 8px above the scroll viewport's bottom edge while
+///     a tall group spans that edge — clamped to the group's own bounds, exactly
+///     like CSS `position: sticky` constrained to its containing block. So a long
+///     monologue's avatar tracks the screen bottom as you scroll, then settles
+///     once the group's end scrolls into view.
+///
+/// The glide reads the previous frame's render geometry (the build runs before
+/// layout); mid-scroll that one-frame lag is imperceptible, and a post-frame
+/// recompute settles the initial (un-scrolled) position. Only this 32px box
+/// rebuilds per scroll tick — the [NymAvatar] is hoisted via the builder's
+/// `child` so it is built once.
+class _StickyGroupAvatar extends StatefulWidget {
+  const _StickyGroupAvatar({
+    required this.pubkey,
+    required this.imageUrl,
+    required this.onTap,
+  });
+
+  final String pubkey;
+  final String? imageUrl;
+  final VoidCallback onTap;
+
+  @override
+  State<_StickyGroupAvatar> createState() => _StickyGroupAvatarState();
+}
+
+class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
+  /// CSS `bottom: 8px` — the avatar floats 8px above the viewport's bottom edge.
+  static const double _stickyGap = 8;
+  static const double _avatar = 32;
+
+  /// Bumped on every scroll tick to recompute the glide offset (the value is
+  /// unused — it only drives the [ValueListenableBuilder] rebuild).
+  final ValueNotifier<int> _tick = ValueNotifier<int>(0);
+  ScrollPosition? _position;
+
+  @override
+  void initState() {
+    super.initState();
+    // Settle the initial (un-scrolled) position once the first layout exists.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tick.value++;
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final p = Scrollable.maybeOf(context)?.position;
+    if (!identical(p, _position)) {
+      _position?.removeListener(_onScroll);
+      _position = p;
+      _position?.addListener(_onScroll);
+    }
+  }
+
+  void _onScroll() {
+    if (mounted) _tick.value++;
+  }
+
+  @override
+  void dispose() {
+    _position?.removeListener(_onScroll);
+    _tick.dispose();
+    super.dispose();
+  }
+
+  /// The avatar's top within its [maxTop]-bounded track — `clamp(desired, 0,
+  /// maxTop)` is precisely CSS sticky bounded to the containing block, where
+  /// `desired` places the avatar 8px above the viewport bottom.
+  double _computeTop(double maxTop) {
+    final scrollable = Scrollable.maybeOf(context);
+    final track = context.findRenderObject();
+    if (scrollable != null && track is RenderBox && track.hasSize) {
+      final viewport = scrollable.context.findRenderObject();
+      if (viewport is RenderBox && viewport.hasSize) {
+        final trackTop =
+            track.localToGlobal(Offset.zero, ancestor: viewport).dy;
+        final desired =
+            viewport.size.height - _stickyGap - _avatar - trackTop;
+        return desired.clamp(0.0, maxTop);
+      }
+    }
+    return maxTop; // resting at the group's foot
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final avatar = GestureDetector(
+      onTap: widget.onTap,
+      child: NymAvatar(
+        seed: widget.pubkey,
+        size: _avatar,
+        imageUrl: widget.imageUrl,
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxTop =
+            (constraints.maxHeight - _avatar).clamp(0.0, double.infinity);
+        return ValueListenableBuilder<int>(
+          valueListenable: _tick,
+          builder: (context, _, child) => Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 0,
+                top: _computeTop(maxTop),
+                width: _avatar,
+                height: _avatar,
+                child: child!,
+              ),
+            ],
+          ),
+          child: avatar,
+        );
+      },
     );
   }
 }

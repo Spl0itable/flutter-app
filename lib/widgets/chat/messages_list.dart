@@ -66,37 +66,43 @@ class MessagesList extends ConsumerWidget {
       );
     }
 
-    // Precompute bubble grouping flags (in chronological order, messages only).
-    // System/action pill rows and `/me` action lines never group. Polls are not
-    // part of the message grouping (they render as their own group in the PWA).
-    final groupedWithPrev = List<bool>.filled(messages.length, false);
-    final hasNextSameGroup = List<bool>.filled(messages.length, false);
-    for (var i = 1; i < messages.length; i++) {
-      final prev = messages[i - 1];
-      final cur = messages[i];
-      final same = !prev.isSystemRow &&
-          !cur.isSystemRow &&
-          !prev.isMeAction &&
-          !cur.isMeAction &&
-          prev.pubkey == cur.pubkey &&
-          (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
-      groupedWithPrev[i] = same;
-      if (same) hasNextSameGroup[i - 1] = true;
-    }
-
     final mentionToken = '@${_baseNym(app.selfNym)}';
 
-    // Merge messages + polls into one chronological item list (oldest first).
-    // Each message carries its precomputed grouping flags; polls are standalone.
-    final items = <_ListItem>[
-      for (var i = 0; i < messages.length; i++)
-        _MessageItem(
-          message: messages[i],
-          grouped: settings.useBubbles && groupedWithPrev[i],
-          showAvatar: !hasNextSameGroup[i],
-        ),
-      for (final p in polls) _PollItem(p),
+    // Merge messages + polls into one chronological list (oldest first), each
+    // message carrying its resolved reactions + mention flag.
+    final merged = <_ListEntry>[
+      for (final m in messages)
+        _MsgEntry(MessageGroupEntry(
+          message: m,
+          reactions: reactions[m.id] ?? const [],
+          mentioned: !m.isOwn && m.content.contains(mentionToken),
+        )),
+      for (final p in polls) _PollEntry(p),
     ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
+    // Fold consecutive same-author bubble messages into render groups (the PWA's
+    // `.message-group`), so the group's single avatar can span and glide over the
+    // whole run. The fold runs over the MERGED order, so an interleaved poll — or
+    // a system / `/me` row — correctly breaks a same-author run (PWA
+    // `_rewrapBubbleGroups` resets the current group on any non-message or poll).
+    // Polls render standalone; in IRC mode `_groupsWith` is gated off so every
+    // message is its own (bare) group.
+    final units = <_RenderUnit>[];
+    for (final e in merged) {
+      if (e is _PollEntry) {
+        units.add(_PollUnit(e.poll));
+        continue;
+      }
+      final entry = (e as _MsgEntry).entry;
+      final last = units.isNotEmpty ? units.last : null;
+      if (settings.useBubbles &&
+          last is _GroupUnit &&
+          _groupsWith(last.entries.last.message, entry.message)) {
+        last.entries.add(entry);
+      } else {
+        units.add(_GroupUnit([entry]));
+      }
+    }
 
     // Reversed list: index 0 = newest at the bottom; the typing row is pinned
     // below the newest message, above the composer (`.typing-indicator`).
@@ -108,23 +114,15 @@ class MessagesList extends ConsumerWidget {
             child: ListView.builder(
               reverse: true,
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-              itemCount: items.length,
+              itemCount: units.length,
               itemBuilder: (context, revIndex) {
-                final item = items[items.length - 1 - revIndex];
-                if (item is _PollItem) {
-                  return PollCard(poll: item.poll, settings: settings);
+                final unit = units[units.length - 1 - revIndex];
+                if (unit is _PollUnit) {
+                  return PollCard(poll: unit.poll, settings: settings);
                 }
-                final mi = item as _MessageItem;
-                final m = mi.message;
-                final mentioned = !m.isOwn && m.content.contains(mentionToken);
-                return MessageRow(
-                  message: m,
+                return MessageGroup(
+                  entries: (unit as _GroupUnit).entries,
                   settings: settings,
-                  reactions: reactions[m.id] ?? const [],
-                  mentioned: mentioned,
-                  grouped: mi.grouped,
-                  showAvatar: mi.showAvatar,
-                  showName: !mi.grouped,
                   onReactionPicker: (msg) =>
                       showReactionPicker(context, ref, msg),
                 );
@@ -136,6 +134,17 @@ class MessagesList extends ConsumerWidget {
       ),
     );
   }
+
+  /// Whether [cur] bubble-groups onto [prev]: same author within the 5-minute
+  /// window, neither a system pill nor a `/me` action. (Polls are filtered out
+  /// before this is reached, so they never merge.)
+  bool _groupsWith(Message prev, Message cur) =>
+      !prev.isSystemRow &&
+      !cur.isSystemRow &&
+      !prev.isMeAction &&
+      !cur.isMeAction &&
+      prev.pubkey == cur.pubkey &&
+      (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
 
   String _baseNym(String nym) {
     final hash = nym.indexOf('#');
@@ -197,27 +206,36 @@ class _EmptyOrLoadingState extends State<_EmptyOrLoading> {
   }
 }
 
-/// A unified conversation item — either a message or an inline poll card.
-sealed class _ListItem {
+/// A merged conversation entry, used only to interleave messages + polls in
+/// chronological order before folding into render units.
+sealed class _ListEntry {
   int get createdAt;
 }
 
-class _MessageItem extends _ListItem {
-  _MessageItem({
-    required this.message,
-    required this.grouped,
-    required this.showAvatar,
-  });
-  final Message message;
-  final bool grouped;
-  final bool showAvatar;
+class _MsgEntry extends _ListEntry {
+  _MsgEntry(this.entry);
+  final MessageGroupEntry entry;
   @override
-  int get createdAt => message.createdAt;
+  int get createdAt => entry.message.createdAt;
 }
 
-class _PollItem extends _ListItem {
-  _PollItem(this.poll);
+class _PollEntry extends _ListEntry {
+  _PollEntry(this.poll);
   final Poll poll;
   @override
   int get createdAt => poll.createdAt;
+}
+
+/// A render unit in the reversed list: either a standalone poll card or a
+/// same-author [MessageGroup] (one or more messages sharing a sticky avatar).
+sealed class _RenderUnit {}
+
+class _PollUnit extends _RenderUnit {
+  _PollUnit(this.poll);
+  final Poll poll;
+}
+
+class _GroupUnit extends _RenderUnit {
+  _GroupUnit(this.entries);
+  final List<MessageGroupEntry> entries;
 }

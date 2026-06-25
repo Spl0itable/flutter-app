@@ -544,6 +544,12 @@ class _SidebarState extends ConsumerState<Sidebar> {
   /// scramble overlay.
   Widget _header(BuildContext context, String nym) {
     final c = context.nym;
+    // Live connected-relay count (PWA `poolConnectedRelays.length`, used by
+    // `updateConnectionStatus`). Read-only here — drives the status-indicator
+    // label + dot colour below the nym box.
+    final connectedRelays = ref.watch(
+      appStateProvider.select((s) => s.connectedRelays),
+    );
     // `.sidebar-header`: padding 20/16, bottom hairline. bg is black@0.15
     // (dark) and `body.light-mode .sidebar-header` → white@0.3
     // (styles-themes-responsive.css:1226) so it reads as a light wash, not a
@@ -619,33 +625,14 @@ class _SidebarState extends ConsumerState<Sidebar> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  // `.status-indicator` (inline-flex → centered by the header):
-                  // 11px textDim, gap 5, 8px dot. Tapping opens the Network Stats
-                  // modal (index.html:434 `data-action="openRelayStats"`).
-                  MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => RelayStatsModal.open(context),
-                      child: Row(
-                        key: TutorialTargets.keyFor(
-                            TutorialTarget.statusIndicator),
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const StatusDot(status: UserStatus.online, size: 8),
-                          const SizedBox(width: 5),
-                          Text(
-                            'connected',
-                            style: TextStyle(color: c.textDim, fontSize: 11),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 ],
               ),
             ),
+            // `.status-indicator` (index.html:434-437) is a SIBLING of
+            // `.nym-display` inside `.sidebar-header`, NOT nested in it. Its
+            // `margin-top:10px` is the gap below the nym box.
+            const SizedBox(height: 10),
+            _ConnectionStatusIndicator(connectedCount: connectedRelays),
           ],
         ),
       ),
@@ -728,6 +715,64 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
       onPointerUp: _up,
       onPointerCancel: _cancel,
       child: widget.child,
+    );
+  }
+}
+
+/// `.status-indicator` (index.html:434-437, styles-shell.css:105-119): the
+/// connection-status row that sits in `.sidebar-header` directly below
+/// `.nym-display` (a sibling of it, NOT nested inside). inline-flex, gap 5,
+/// 11px `--text-dim`, centred by the header's `text-align:center`; tapping
+/// opens the Network Stats modal (`data-action="openRelayStats"`).
+///
+/// `.status-dot` is a plain 8px circle whose colour `updateConnectionStatus`
+/// (relays.js:3886) sets inline from the live pool count:
+/// `--primary` Connected / `--warning` Connecting / `--danger` Disconnected.
+/// The label is `Connected (N relays)` when any relay is connected, else
+/// `Disconnected` (relays.js:3905-3936). [connectedCount] mirrors the PWA's
+/// `poolConnectedRelays.length`.
+class _ConnectionStatusIndicator extends StatelessWidget {
+  const _ConnectionStatusIndicator({required this.connectedCount});
+
+  final int connectedCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final connected = connectedCount > 0;
+    // PWA: `Connected (N relays)` (primary dot) else `Disconnected` (danger
+    // dot). The `Connecting...`/`--warning` state is a transient custom message
+    // the relay layer pushes; the count-driven branch only resolves to
+    // Connected/Disconnected, so we mirror that here.
+    final label =
+        connected ? 'Connected ($connectedCount relays)' : 'Disconnected';
+    final dotColor = connected ? c.primary : c.danger;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => RelayStatsModal.open(context),
+        child: Row(
+          key: TutorialTargets.keyFor(TutorialTarget.statusIndicator),
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // `.status-dot`: plain 8px circle, colour set per connection state.
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: dotColor,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(color: c.textDim, fontSize: 11),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

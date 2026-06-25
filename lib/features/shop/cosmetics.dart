@@ -345,20 +345,75 @@ class CosmeticAura {
 /// Maps a message-style id to its [MessageStyleDecoration], or null for an
 /// unknown id (or null). Pure. Sourced from the per-style `styleVisuals` table
 /// (`shop_catalog.dart`, ported from `css/styles-features.css`).
-MessageStyleDecoration? messageStyleDecoration(String? styleId) {
+///
+/// [isLight] selects the `body.light-mode .message.style-X .message-content`
+/// override: the bright dark-mode neons are unreadable on a light bubble, so the
+/// PWA swaps to a darker tone and drops the glow (`text-shadow: none`). Styles
+/// with no light override (eclipse/crt only restyle the background) keep their
+/// dark text/glow.
+MessageStyleDecoration? messageStyleDecoration(String? styleId,
+    {bool isLight = false}) {
   if (styleId == null || styleId.isEmpty) return null;
   final v = ShopCatalog.styleVisuals[styleId];
   if (v == null) return null;
+  final lightColor = isLight ? _styleLightColor[styleId] : null;
+  final hasLightText = lightColor != null;
   return MessageStyleDecoration(
-    textColor: v.color,
-    glow: v.glow,
-    gradient: v.gradient,
-    contentBackground: _styleContentBackground[styleId],
+    textColor: hasLightText ? lightColor : v.color,
+    // Light mode resets `text-shadow` to none — except glitch, whose light rule
+    // leaves its red/cyan chromatic split (supplied via [glyphShadows]) intact.
+    glow: hasLightText ? null : v.glow,
+    // Only aurora keeps a multi-stop gradient in light mode; every other gradient
+    // style falls back to a solid [_styleLightColor].
+    gradient: isLight ? _styleLightGradient[styleId] : v.gradient,
+    contentBackground:
+        (isLight ? _styleLightContentBackground[styleId] : null) ??
+            _styleContentBackground[styleId],
     monospace: v.monospace,
     glyphShadows: _styleGlyphShadows[styleId],
     watermark: styleWatermarks[styleId],
   );
 }
+
+/// Light-mode text colours (`body.light-mode .message.style-X .message-content`,
+/// styles-themes-responsive.css:810-1041). satoshi uses the colour of its inner
+/// text spans (`#c47a15`), not the dimmer `.message-content` colour.
+const Map<String, Color> _styleLightColor = {
+  'style-matrix': Color(0xFF006600),
+  'style-neon': Color(0xFF990099),
+  'style-ghost': Color(0x73000000), // rgba(0,0,0,0.45)
+  'style-fire': Color(0xFFCC4400),
+  'style-ice': Color(0xFF006688),
+  'style-rainbow': Color(0xFF8A3FD0),
+  'style-glitch': Color(0xFF006600),
+  'style-satoshi': Color(0xFFC47A15),
+  'style-ocean': Color(0xFF005F87),
+  'style-sakura': Color(0xFFC01F7A),
+  'style-galaxy': Color(0xFF6A2FB0),
+  'style-toxic': Color(0xFF3A7A00),
+  'style-blood': Color(0xFFB3000F),
+  'style-royal': Color(0xFF5A2FB0),
+  'style-circuit': Color(0xFF00897B),
+  'style-gold': Color(0xFF8A6D00),
+  'style-vapor': Color(0xFFA3157C),
+};
+
+/// Light-mode gradient overrides — aurora is the only style that stays a gradient
+/// in light mode (`linear-gradient(120deg,#007766,#334499,#880066,#007766)`).
+const Map<String, List<Color>> _styleLightGradient = {
+  'style-aurora': [
+    Color(0xFF007766),
+    Color(0xFF334499),
+    Color(0xFF880066),
+    Color(0xFF007766),
+  ],
+};
+
+/// Light-mode content-background overrides (satoshi tints lighter:
+/// `rgba(196,122,21,0.1)`).
+const Map<String, Color> _styleLightContentBackground = {
+  'style-satoshi': Color(0x1AC47A15),
+};
 
 /// Explicit glyph shadows for styles whose CSS `text-shadow` is not a single
 /// soft glow. Glitch (`.style-glitch`) is a red/-2px + cyan/+2px chromatic split
@@ -565,6 +620,17 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
   glow: Color(0x40FFD700), // rgba(255,215,0,.25)
   contentBackground: Color(0x14FFD700), // ~rgba(255,215,0,.08) bubble wash
   borderAccent: Color(0xFFFFD700),
+);
+
+/// Light-mode supporter style (`body.light-mode .message.supporter-style
+/// .message-content { color:#8a6d00; text-shadow:none }` + the lighter gold
+/// wash/border, styles-themes-responsive.css:1002,985). Darker gold text, no
+/// glow, so it stays legible on a light bubble.
+const MessageStyleDecoration supporterStyleDecorationLight =
+    MessageStyleDecoration(
+  textColor: Color(0xFF8A6D00),
+  contentBackground: Color(0x14B48C00), // rgba(180,140,0,~.08) wash
+  borderAccent: Color(0xFFB8960A),
 );
 
 // =============================================================================
