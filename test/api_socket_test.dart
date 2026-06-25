@@ -4,8 +4,46 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
+import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/api/api_client.dart';
+import 'package:nym_bar/services/nostr/event_signer.dart';
+import 'package:nym_bar/services/relay/relay_stats.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+/// A stand-in NIP-46 remote signer: `isRemote` is true and `sign` round-trips
+/// asynchronously (counting calls), so a test can prove `buildSigned` signs auth
+/// for remote-signer accounts and caches the result.
+class _FakeRemoteSigner implements EventSigner {
+  _FakeRemoteSigner(this.pubkey);
+
+  @override
+  final String pubkey;
+
+  int signCount = 0;
+
+  @override
+  bool get isRemote => true;
+
+  @override
+  Future<NostrEvent> sign(UnsignedEvent u) async {
+    signCount++;
+    final e = NostrEvent(
+      pubkey: pubkey,
+      createdAt: u.createdAt,
+      kind: u.kind,
+      tags: u.tags,
+      content: u.content,
+    );
+    e.id = e.computeId();
+    e.sig = 'f' * 128; // opaque remote signature
+    return e;
+  }
+
+  @override
+  Future<String> nip44Encrypt(String peer, String plaintext) async => plaintext;
+  @override
+  Future<String> nip44Decrypt(String peer, String ciphertext) async => ciphertext;
+}
 
 /// A fake `/api` WebSocket the test drives: queued auto-replies are injected in
 /// response to the frames the client sends, so we can exercise the multiplexed
@@ -258,6 +296,96 @@ void main() {
         'pubkeys': ['a' * 64],
       });
       expect(httpCalls, 1);
+    });
+
+    test('WS frames are tallied into the network stats per action', () async {
+      // Parity with the PWA's `_trackApiData`: every sent/received frame's JSON
+      // length is folded into the stats sink, attributed to its action (AUTH
+      // send + AUTH_OK recv → 'auth'; REQ send + RES recv → the action).
+      final sink = RelayStats();
+      ApiClient.apiStatsSink = sink;
+      addTearDown(() => ApiClient.apiStatsSink = null);
+      final client = MockClient((req) async => http.Response('', 200));
+      final api = ApiClient(client: client);
+      api.setApiSocketAuthBuilder(() async => {
+            'kind': 27235,
+            'id': 'auth-id',
+            'pubkey': 'a' * 64,
+            'sig': 's',
+            'created_at': 1,
+            'tags': const [],
+            'content': 'nymbot-pm-auth',
+          });
+      api.activateApiSocket(factory: (url) {
+        return _makeChannel((ch, frame) {
+          if (frame[0] == 'AUTH') {
+            ch.inject(['AUTH_OK']);
+          } else if (frame[0] == 'REQ') {
+            ch.inject(['RES', frame[1], 200, {'owned': {}, 'active': {}}]);
+          }
+        });
+      });
+
+      await api.storageAction({
+        'action': 'shop-get',
+        'pubkey': 'a' * 64,
+        'auth': {'kind': 27235},
+      });
+
+      // AUTH frame sent + AUTH_OK received → 'auth'.
+      final auth = sink.apiActionStats['auth'];
+      expect(auth, isNotNull);
+      expect(auth!.bytesSent, greaterThan(0), reason: 'AUTH frame sent');
+      expect(auth.bytesReceived, greaterThan(0), reason: 'AUTH_OK received');
+      // REQ sent + RES received → the action.
+      final action = sink.apiActionStats['shop-get'];
+      expect(action, isNotNull);
+      expect(action!.bytesSent, greaterThan(0), reason: 'REQ frame sent');
+      expect(action.bytesReceived, greaterThan(0), reason: 'RES received');
+      // Folded into the global byte totals too.
+      expect(sink.bytesSent, greaterThan(0));
+      expect(sink.bytesReceived, greaterThan(0));
+    });
+  });
+
+  group('Nip98Auth.buildSigned (remote-signer-capable auth)', () {
+    test('signs kind-27235 auth via a NIP-46 remote signer with action/url tags',
+        () async {
+      Nip98Auth.clearAuthCache();
+      addTearDown(Nip98Auth.clearAuthCache);
+      final signer = _FakeRemoteSigner('b' * 64);
+      final auth = await Nip98Auth.buildSigned(
+        action: 'settings-get',
+        url: 'https://h/api/storage',
+        signer: signer,
+      );
+      expect(auth, isNotNull);
+      expect(auth!['kind'], 27235);
+      expect(auth['pubkey'], 'b' * 64);
+      expect(auth['sig'], isNotNull);
+      final tags = (auth['tags'] as List).cast<dynamic>();
+      bool hasTag(String k, String v) =>
+          tags.any((t) => t is List && t.length >= 2 && t[0] == k && t[1] == v);
+      expect(hasTag('u', 'https://h/api/storage'), isTrue);
+      expect(hasTag('action', 'settings-get'), isTrue);
+      expect(signer.signCount, 1, reason: 'remote signer was invoked');
+    });
+
+    test('caches non-sensitive auth for 90s (no second remote round-trip)',
+        () async {
+      Nip98Auth.clearAuthCache();
+      addTearDown(Nip98Auth.clearAuthCache);
+      final signer = _FakeRemoteSigner('c' * 64);
+      final a1 = await Nip98Auth.buildSigned(
+          action: 'settings-get', url: 'https://h/api/storage', signer: signer);
+      final a2 = await Nip98Auth.buildSigned(
+          action: 'settings-get', url: 'https://h/api/storage', signer: signer);
+      expect(signer.signCount, 1, reason: 'second call served from cache');
+      expect(identical(a1, a2), isTrue);
+      // A different action is signed fresh (distinct cache key).
+      await Nip98Auth.buildSigned(
+          action: 'pm-get', url: 'https://h/api/storage', signer: signer);
+      expect(signer.signCount, 2);
     });
   });
 }

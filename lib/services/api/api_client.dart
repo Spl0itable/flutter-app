@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../models/nostr_event.dart';
+import '../nostr/event_signer.dart';
 import '../relay/relay_stats.dart';
 import 'api_config.dart';
 
@@ -152,6 +153,69 @@ class Nip98Auth {
     return signed.toJson();
   }
 
+  /// Signer-based async variant: builds the kind-27235 event and signs it via
+  /// the active [EventSigner], so a NIP-46 remote signer authenticates exactly
+  /// like a local key. Mirrors the PWA's `_signBotAuth`, which signs through the
+  /// generic `signEvent` dispatch (local OR remote) and caches non-[sensitive]
+  /// auth for 90s keyed by `pubkey|action|url` (`_botAuthCache`, pms.js:1659) so
+  /// a remote signer isn't round-tripped per request. Returns null when signing
+  /// fails (remote unreachable/declined) — the caller then proceeds best-effort
+  /// (unauthenticated), exactly as before for accounts that can't sign.
+  static Future<Map<String, dynamic>?> buildSigned({
+    required String action,
+    required String url,
+    required EventSigner signer,
+    bool sensitive = false,
+    int? createdAt,
+  }) async {
+    final pubkey = signer.pubkey;
+    final now = createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final cacheKey = '$pubkey|$action|$url';
+    if (!sensitive) {
+      final cached = _authCache[cacheKey];
+      // Match the PWA: validate the *signed* event's created_at (a remote signer
+      // may stamp its own clock) against a 90s window, well inside the worker's
+      // 120s tolerance.
+      if (cached != null &&
+          cached.pubkey == pubkey &&
+          (now - cached.createdAt) < 90) {
+        return cached.auth;
+      }
+    }
+    final tags = <List<String>>[
+      ['domain', 'nymbot-pm'],
+      ['method', 'POST'],
+      if (url.isNotEmpty) ['u', url],
+      if (action.isNotEmpty) ['action', action],
+    ];
+    final unsigned = UnsignedEvent(
+      pubkey: pubkey,
+      createdAt: now,
+      kind: 27235,
+      tags: tags,
+      content: content,
+    );
+    try {
+      final signed = await signer.sign(unsigned);
+      final auth = signed.toJson();
+      if (!sensitive) {
+        final ts = (auth['created_at'] as num?)?.toInt() ?? now;
+        _authCache[cacheKey] = _CachedAuth(pubkey, ts, auth);
+      }
+      return auth;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 90s non-sensitive auth cache (the PWA's `_botAuthCache`). Static so it is
+  /// shared across the storage + api-ws builders for one process identity.
+  static final Map<String, _CachedAuth> _authCache = {};
+
+  /// Drops all cached auth. Call on sign-out / identity switch so a new identity
+  /// never reuses the previous one's signed auth.
+  static void clearAuthCache() => _authCache.clear();
+
   /// Optional `['payload', sha256hex(canonicalBody)]` tag value. The nym backend
   /// canonicalizes by dropping the `auth` key and sorting the remaining keys,
   /// then `JSON.stringify`, sha256, lowercase hex (`canonicalAuthBody` +
@@ -166,6 +230,15 @@ class Nip98Auth {
     final text = jsonEncode(canonical);
     return sha256.convert(utf8.encode(text)).toString();
   }
+}
+
+/// A cached signed auth event with the timestamp its 90s validity is judged by
+/// (see [Nip98Auth.buildSigned]).
+class _CachedAuth {
+  _CachedAuth(this.pubkey, this.createdAt, this.auth);
+  final String pubkey;
+  final int createdAt;
+  final Map<String, dynamic> auth;
 }
 
 /// The parsed result of a single `/api` socket request: the HTTP-equivalent
@@ -209,6 +282,7 @@ class ApiSocket {
     Duration connectTimeout = const Duration(seconds: 12),
     Duration requestTimeout = const Duration(seconds: 45),
     Duration failureCooldown = const Duration(seconds: 5),
+    this.onTraffic,
   })  : _url = url,
         _factory = factory,
         _connectTimeout = connectTimeout,
@@ -220,6 +294,12 @@ class ApiSocket {
   final Duration _connectTimeout;
   final Duration _requestTimeout;
   final Duration _failureCooldown;
+
+  /// Per-frame byte tally (sent/received JSON frame length, attributed to the
+  /// request action), wired to the network-stats sink. Mirrors the PWA's
+  /// `_trackApiData` calls in `_ensureApiSocket`/`_apiSocketSend` (shop.js:60-70,
+  /// 147). Null in HTTP-only clients and the test default.
+  final void Function(String action, {int sent, int recv})? onTraffic;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
@@ -277,7 +357,8 @@ class ApiSocket {
       timer = Timer(_connectTimeout, () => fail(StateError('api socket timeout')));
 
       if (needAuth) {
-        _send(['AUTH', authEvent]);
+        final sent = _send(['AUTH', authEvent]);
+        onTraffic?.call('auth', sent: sent);
       } else {
         // No discrete open event in web_socket_channel; an unauthenticated
         // socket is usable as soon as we've attached the listener.
@@ -295,26 +376,41 @@ class ApiSocket {
     void Function(Object) fail,
     bool needAuth,
   ) {
+    // Frame byte count for the network stats (PWA: string `event.data.length`,
+    // else `byteLength`). Attributed to the action below, like `_trackApiData`.
+    final recvLen = raw is String ? raw.length : (raw is List ? raw.length : 0);
     dynamic msg;
     try {
       msg = jsonDecode(raw is String ? raw : utf8.decode(raw as List<int>));
     } catch (_) {
+      onTraffic?.call('other', recv: recvLen);
       return;
     }
-    if (msg is! List || msg.isEmpty) return;
+    if (msg is! List || msg.isEmpty) {
+      onTraffic?.call('other', recv: recvLen);
+      return;
+    }
     final t = msg[0];
     if (t == 'AUTH_OK') {
+      onTraffic?.call('auth', recv: recvLen);
       _authed = true;
       markReady();
       return;
     }
     if (t == 'AUTH_ERR') {
+      onTraffic?.call('auth', recv: recvLen);
       fail(StateError(msg.length > 1 ? '${msg[1]}' : 'Authentication failed'));
       return;
     }
-    if (msg.length < 2) return;
+    if (msg.length < 2) {
+      onTraffic?.call('other', recv: recvLen);
+      return;
+    }
     final id = msg[1];
     final p = _pending[id];
+    // Attribute received bytes to the request's action (else 'other') before any
+    // dispatch removes the pending entry — mirrors the PWA's recv tally.
+    onTraffic?.call(p?.action ?? 'other', recv: recvLen);
     if (p == null) return;
     if (t == 'RES') {
       _pending.remove(id);
@@ -347,7 +443,7 @@ class ApiSocket {
       return Future.error(StateError('api socket not ready'));
     }
     final id = _nextId++;
-    final p = _Pending(stream: stream);
+    final p = _Pending(stream: stream, action: action);
     _pending[id] = p;
     p.timer = Timer(_requestTimeout, () {
       if (_pending.remove(id) != null) {
@@ -355,7 +451,8 @@ class ApiSocket {
       }
     });
     try {
-      _send(['REQ', id, action, extra]);
+      final sent = _send(['REQ', id, action, extra]);
+      onTraffic?.call(action, sent: sent);
     } catch (e) {
       _pending.remove(id);
       p.completeError(e);
@@ -363,10 +460,15 @@ class ApiSocket {
     return p.future;
   }
 
-  void _send(List<dynamic> frame) {
+  /// Encodes [frame], sends it, and returns the JSON byte length sent (so the
+  /// caller can tally it via [onTraffic], matching the PWA's per-frame
+  /// `_trackApiData(action, frame.length, 0)`).
+  int _send(List<dynamic> frame) {
     final ch = _channel;
     if (ch == null) throw StateError('api socket not ready');
-    ch.sink.add(jsonEncode(frame));
+    final encoded = jsonEncode(frame);
+    ch.sink.add(encoded);
+    return encoded.length;
   }
 
   void _failAllPending(Object err) {
@@ -406,8 +508,12 @@ class ApiSocket {
 
 /// An in-flight `/api` socket request awaiting its `RES`/`END` frame.
 class _Pending {
-  _Pending({required this.stream});
+  _Pending({required this.stream, required this.action});
   final bool stream;
+
+  /// The request action, so a received RES/ITEM/END frame's bytes are tallied
+  /// under it (the PWA looks this up from `sock.pending`).
+  final String action;
   final List<dynamic> items = [];
   final Completer<ApiSocketResult> _completer = Completer<ApiSocketResult>();
   Timer? timer;
@@ -468,7 +574,11 @@ class ApiClient {
   void activateApiSocket({ApiSocketFactory? factory}) {
     _socketEnabled = true;
     if (factory != null && _socket == null && _injectedSocket == null) {
-      _socket = ApiSocket(url: _apiSocketUri(), factory: factory);
+      _socket = ApiSocket(
+        url: _apiSocketUri(),
+        factory: factory,
+        onTraffic: _trackApiData,
+      );
     }
   }
 
@@ -508,6 +618,7 @@ class ApiClient {
         ApiSocket(
           url: _apiSocketUri(),
           factory: _socketFactory ?? defaultApiSocketFactory,
+          onTraffic: _trackApiData,
         );
   }
 

@@ -37,7 +37,7 @@ StorageSync _syncWith(
     signer: _signer,
     pubkey: pubkey ?? _pub,
     durableIdentity: durable,
-  )..setAuthBuilder((action) => {
+  )..setAuthBuilder((action) async => {
         'kind': 27235,
         'pubkey': _pub,
         'id': 'auth-$action',
