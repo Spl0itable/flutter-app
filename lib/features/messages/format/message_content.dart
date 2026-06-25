@@ -169,8 +169,7 @@ class MessageContent extends ConsumerWidget {
         .where((line) => !line.startsWith('>'))
         .join('\n')
         .trim();
-    final threshold =
-        MediaQuery.of(context).size.width <= 768 ? 400 : 600;
+    final threshold = truncateThreshold(context);
     final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -279,7 +278,9 @@ class MessageContent extends ConsumerWidget {
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size);
       case QuoteBlock():
-        return _QuoteBox(block: block, color: color, size: size);
+        // Top-level blockquote (PWA `:scope > blockquote`) — eligible for its
+        // own read-more truncation.
+        return _QuoteBox(block: block, color: color, size: size, topLevel: true);
       case MediaBlock(:final items):
         return _MediaGallery(items: items, blur: blurImages);
     }
@@ -783,16 +784,116 @@ class _CodeBox extends StatelessWidget {
   }
 }
 
+/// The read-more char-count threshold (`truncateThreshold`, messages.js:1193-
+/// 1194): 400 on mobile (`innerWidth <= 768`), 600 on desktop. It only FLAGS a
+/// truncation candidate; the collapse itself is height-based (see [_Collapsible]).
+int truncateThreshold(BuildContext context) =>
+    MediaQuery.of(context).size.width <= 768 ? 400 : 600;
+
+/// The rendered text length of a [QuoteBlock], mirroring the PWA's
+/// `bq.textContent.length` (messages.js:1214) — the author header plus all child
+/// text, with custom-emoji images contributing nothing (they're `<img>`, no text)
+/// the same way `textContent` skips them. Used to flag a lone long blockquote as
+/// a read-more truncation candidate.
+int _quoteTextLength(QuoteBlock block) {
+  var n = block.author != null ? block.author!.length + 1 : 0; // header + ':'
+  for (final child in block.children) {
+    n += _blockTextLength(child);
+  }
+  return n;
+}
+
+int _blockTextLength(FormatBlock block) {
+  switch (block) {
+    case ParagraphBlock(:final inlines):
+    case HeadingBlock(:final inlines):
+      var n = 0;
+      for (final node in inlines) {
+        n += _inlineTextLength(node);
+      }
+      return n;
+    case CodeBlock(:final code):
+      return code.length;
+    case QuoteBlock():
+      return _quoteTextLength(block);
+    case MediaBlock():
+      return 0; // media renders as elements, no text content
+  }
+}
+
+int _inlineTextLength(InlineNode node) {
+  switch (node) {
+    case TextSpanNode(:final text):
+      return text.length;
+    case BoldNode(:final children):
+    case ItalicNode(:final children):
+    case StrikeNode(:final children):
+      var n = 0;
+      for (final ch in children) {
+        n += _inlineTextLength(ch);
+      }
+      return n;
+    case InlineCodeNode(:final code):
+      return code.length;
+    case LinkNode(:final url):
+      return url.length;
+    case EmojiNode(:final unicode):
+      return unicode.length;
+    case MentionNode(:final base, :final suffix):
+      return base.length + (suffix != null ? suffix.length + 1 : 0);
+    case ChannelRefNode(:final name):
+      return name.length + 1; // leading '#'
+    case ChannelLinkChip(:final label):
+      return label.length;
+    case CustomEmojiNode():
+    case GroupInviteChip():
+      return 0; // rendered as an image / chip, no text content
+    default:
+      // `_MediaInline` is flattened to blocks before render and never reaches
+      // here (it contributes no text content either way).
+      return 0;
+  }
+}
+
 /// Left-bordered quote block, with an optional author header.
 class _QuoteBox extends StatelessWidget {
-  const _QuoteBox({required this.block, required this.color, required this.size});
+  const _QuoteBox({
+    required this.block,
+    required this.color,
+    required this.size,
+    this.topLevel = false,
+  });
   final QuoteBlock block;
   final Color color;
   final double size;
 
+  /// True only for a direct child of `.message-content` (PWA `:scope >
+  /// blockquote`); a nested quote is measured as part of its parent's
+  /// `textContent` and is never independently truncated.
+  final bool topLevel;
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final inner = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (block.author != null) _quoteAuthor(c, block.author!),
+        for (final child in block.children) _quoteChild(context, c, child),
+      ],
+    );
+    // A lone long blockquote gets its OWN read-more truncation in the PWA
+    // (messages.js:1213-1224): each top-level `> blockquote` whose
+    // `textContent.length` exceeds the threshold is wrapped in a 300px
+    // `.truncated-inner` + "Read more" toggle — independent of the reply-body
+    // truncation in [MessageContent]. (The reply-body path measures only the
+    // non-`>` lines, so a message that is purely one long quote is never caught
+    // there; this is what clamps it.)
+    final clamped =
+        topLevel && _quoteTextLength(block) > truncateThreshold(context)
+            ? _Collapsible(child: inner)
+            : inner;
     // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
     // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
     return Container(
@@ -805,15 +906,7 @@ class _QuoteBox extends StatelessWidget {
           bottomRight: Radius.circular(8),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (block.author != null) _quoteAuthor(c, block.author!),
-          for (final child in block.children)
-            _quoteChild(context, c, child),
-        ],
-      ),
+      child: clamped,
     );
   }
 
