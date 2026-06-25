@@ -17,6 +17,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
 import '../identity/vault_settings_modal.dart';
 import 'settings_helpers.dart';
@@ -330,7 +331,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 shape: BoxShape.circle,
                 border: Border.all(color: c.glassBorder),
               ),
-              child: Icon(Icons.close, size: 18, color: c.textDim),
+              // `.modal-close` is a literal "✕" char in the PWA — styled text.
+              child: Text('✕',
+                  style: TextStyle(color: c.textDim, fontSize: 18, height: 1)),
             ),
           ),
         ],
@@ -1861,15 +1864,17 @@ class _WallpaperPicker extends StatelessWidget {
                       ),
                     ),
                     alignment: Alignment.center,
-                    child: Icon(
-                      o.id == 'none'
-                          ? Icons.close
-                          : o.id == 'custom'
-                              ? Icons.file_upload_outlined
-                              : Icons.texture,
-                      size: 18,
-                      color: c.textDim,
-                    ),
+                    // `.wallpaper-option` icons (index.html:1420-1471): "None"
+                    // is the two-line ✕ SVG, "Upload" is the feather upload
+                    // glyph. The pattern tiles render a CSS preview in the PWA
+                    // (no glyph) — stand in with a Material texture icon.
+                    child: o.id == 'none'
+                        ? NymSvgIcon(NymIcons.close,
+                            size: 18, color: c.textDim)
+                        : o.id == 'custom'
+                            ? NymSvgIcon(NymIcons.upload,
+                                size: 18, color: c.textDim)
+                            : Icon(Icons.texture, size: 18, color: c.textDim),
                   ),
                 ),
                 const SizedBox(height: 4),

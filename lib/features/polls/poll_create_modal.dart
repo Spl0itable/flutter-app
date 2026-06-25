@@ -226,7 +226,9 @@ class _PollCreateModalState extends ConsumerState<PollCreateModal> {
           color: Colors.white.withValues(alpha: 0.05),
           border: Border.all(color: c.glassBorder),
         ),
-        child: Icon(Icons.close, size: 16, color: c.textDim),
+        // `.modal-close` is a literal "✕" char in the PWA — styled text.
+        child: Text('✕',
+            style: TextStyle(color: c.textDim, fontSize: 16, height: 1)),
       ),
     );
   }
@@ -245,7 +247,9 @@ class _PollCreateModalState extends ConsumerState<PollCreateModal> {
           shape: BoxShape.circle,
           border: Border.all(color: c.glassBorder),
         ),
-        child: Icon(Icons.close, size: 14, color: c.textDim),
+        // Matches the PWA's "✕" dismissal convention (styled text, not an icon).
+        child: Text('✕',
+            style: TextStyle(color: c.textDim, fontSize: 14, height: 1)),
       ),
     );
   }

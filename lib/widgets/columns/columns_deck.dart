@@ -16,6 +16,7 @@ import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../chat/message_row.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 
 /// Fixed dimensions from `css/styles-columns.css`.
 class _CvDimens {
@@ -1058,9 +1059,9 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final children = <Widget>[];
 
     if (mobile) {
-      // `.cv-col-move` prev arrow.
+      // `.cv-col-move` prev arrow (columns.js:397 — feather chevron-left).
       children.add(_HeaderIconButton(
-        icon: Icons.chevron_left,
+        svg: NymIcons.chevronLeft,
         tooltip: 'Previous column',
         enabled: widget.index > 0,
         onTap: widget.onPrev,
@@ -1077,9 +1078,9 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
           ),
         ),
       ));
-      // `.cv-col-move` next arrow.
+      // `.cv-col-move` next arrow (columns.js:398 — feather chevron-right).
       children.add(_HeaderIconButton(
-        icon: Icons.chevron_right,
+        svg: NymIcons.chevronRight,
         tooltip: 'Next column',
         enabled: widget.index < widget.total - 1,
         onTap: widget.onNext,
@@ -1136,7 +1137,8 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   Widget _buildCloseButton(NymColors c) {
     return IconButton(
       tooltip: 'Remove column',
-      icon: Icon(Icons.close, size: 16, color: c.textDim),
+      // `.cv-col-close` (columns.js:399) — the two-line feather X SVG.
+      icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
       hoverColor: c.danger.withValues(alpha: 0.12),
       onPressed: widget.onClose,
       visualDensity: VisualDensity.compact,
@@ -1299,13 +1301,13 @@ class _HeaderDots extends StatelessWidget {
 /// when disabled. (Desktop move arrows don't exist — reorder is drag-only.)
 class _HeaderIconButton extends StatefulWidget {
   const _HeaderIconButton({
-    required this.icon,
+    required this.svg,
     required this.tooltip,
     required this.enabled,
     required this.onTap,
   });
 
-  final IconData icon;
+  final String svg;
   final String tooltip;
   final bool enabled;
   final VoidCallback? onTap;
@@ -1336,7 +1338,7 @@ class _HeaderIconButtonState extends State<_HeaderIconButton> {
           behavior: HitTestBehavior.opaque,
           child: Padding(
             padding: const EdgeInsets.all(2),
-            child: Icon(widget.icon, size: 16, color: color),
+            child: NymSvgIcon(widget.svg, size: 16, color: color),
           ),
         ),
       ),
@@ -1519,7 +1521,8 @@ class _TabsSheetState extends State<_TabsSheet> {
                       ),
                       IconButton(
                         tooltip: 'Close',
-                        icon: Icon(Icons.close, size: 18, color: c.textDim),
+                        // `.cv-tabs-close` (columns.js:851) — feather X SVG.
+                        icon: NymSvgIcon(NymIcons.close, size: 18, color: c.textDim),
                         onPressed: () => Navigator.of(context).pop(),
                         visualDensity: VisualDensity.compact,
                         padding: EdgeInsets.zero,
@@ -1661,10 +1664,11 @@ class _TabRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                // `.cv-tab-close` (text-dim → danger on hover).
+                // `.cv-tab-close` (columns.js:899; text-dim → danger on hover)
+                // — feather X SVG.
                 IconButton(
                   tooltip: 'Remove column',
-                  icon: Icon(Icons.close, size: 16, color: c.textDim),
+                  icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
                   hoverColor: c.danger.withValues(alpha: 0.12),
                   onPressed: onClose,
                   visualDensity: VisualDensity.compact,
@@ -1804,7 +1808,8 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
                 ),
               ],
             ),
-            child: Icon(Icons.keyboard_arrow_down, size: 20, color: c.primary),
+            // `.cv-add-column` strip scroll FAB (columns.js:418) — down chevron.
+            child: NymSvgIcon(NymIcons.chevronDown, size: 20, color: c.primary),
           ),
         ),
       ),

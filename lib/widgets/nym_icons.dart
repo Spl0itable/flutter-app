@@ -538,6 +538,65 @@ class NymIcons {
   static const String send =
       '<svg viewBox="0 0 24 24" fill="currentColor">'
       '<path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>';
+
+  // ===========================================================================
+  // Modal-internal glyphs (settings / identity / wallpaper). Append-only.
+  // ===========================================================================
+
+  /// `#revealPrivkeyArrow` collapsed state (index.html:1232; app.js:2959) — a
+  /// filled right-pointing triangle (the nick-edit "Reveal private key" toggle
+  /// when the slideout is hidden). The PWA swaps to [revealArrowDown] when open
+  /// (no CSS rotation — it rewrites the SVG markup).
+  static const String revealArrowRight =
+      '<svg viewBox="0 0 16 16" fill="currentColor">'
+      '<path d="M 6 3 L 11 8 L 6 13 Z"/></svg>';
+
+  /// `#revealPrivkeyArrow` open state (app.js:2959) — a filled down-pointing
+  /// triangle (the nick-edit reveal toggle when the slideout is shown).
+  static const String revealArrowDown =
+      '<svg viewBox="0 0 16 16" fill="currentColor">'
+      '<path d="M 3 6 L 8 11 L 13 6 Z"/></svg>';
+
+  /// `data-action="toggleNsecVisibility"` (index.html:1242) — an eye (show/hide
+  /// the revealed nsec). The PWA shows the SAME eye regardless of password/text
+  /// state (it never swaps to an eye-off glyph; `toggleNsecVisibility` only flips
+  /// the input `type`), so both visibility states reuse this one glyph.
+  static const String nsecEye =
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">'
+      '<path d="M 1 8 C 3 4 6 3 8 3 C 10 3 13 4 15 8 C 13 12 10 13 8 13 C 6 13 3 12 1 8 Z"/>'
+      '<circle cx="8" cy="8" r="2.5"/></svg>';
+
+  /// The nsec-warning triangle (index.html:1237) — a warning sign with an
+  /// exclamation, shown above the revealed private key.
+  static const String warningTriangle =
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">'
+      '<path d="M 8 1 L 15 14 L 1 14 Z" stroke-linejoin="round"/>'
+      '<path d="M 8 6 L 8 9.5" stroke-linecap="round" stroke-width="2"/>'
+      '<circle cx="8" cy="11.5" r="0.8" fill="currentColor" stroke="none"/></svg>';
+
+  /// `.wallpaper-custom` "Upload" tile (index.html:1464) — feather upload (an
+  /// up-arrow into a tray). The wallpaper "None" tile reuses the two-line
+  /// [close]; the pattern tiles render a CSS preview with no glyph.
+  static const String upload =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
+      '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+      '<polyline points="17 8 12 3 7 8"/>'
+      '<line x1="12" y1="3" x2="12" y2="15"/></svg>';
+
+  /// `.file-offer-icon` (messages.js:904) — the generic feather "file" glyph the
+  /// PWA shows for EVERY P2P file offer (the category only re-tints the stroke;
+  /// the shape never changes). Stroke 2, no download arrow (distinct from the
+  /// composer's `composerFile`).
+  static const String fileOffer =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">'
+      '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>'
+      '<polyline points="13 2 13 9 20 9"/></svg>';
+
+  /// `.add-reaction-btn` (reactions.js:570) — a filled smiley face with a "+"
+  /// (add a reaction). 20×20 `fill-rule:evenodd` path, tinted `--text`.
+  static const String addReaction =
+      '<svg viewBox="0 0 20 20" fill="currentColor">'
+      '<path fill-rule="evenodd" clip-rule="evenodd" d="M15.5 1a.75.75 0 0 1 .75.75v2h2a.75.75 0 0 1 0 1.5h-2v2a.75.75 0 0 1-1.5 0v-2h-2a.75.75 0 0 1 0-1.5h2v-2A.75.75 0 0 1 15.5 1m-13 10a6.5 6.5 0 0 1 7.166-6.466.75.75 0 0 0 .152-1.493 8 8 0 1 0 7.14 7.139.75.75 0 0 0-1.492.152A7 7 0 0 1 15.5 11a6.5 6.5 0 1 1-13 0m4.25-.5a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5m4.5 0a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5M9 15c1.277 0 2.553-.724 3.06-2.173.148-.426-.209-.827-.66-.827H6.6c-.452 0-.808.4-.66.827C6.448 14.276 7.724 15 9 15"/></svg>';
 }
 
 /// Renders one of the [NymIcons] SVG strings at [size], tinted to [color] with a

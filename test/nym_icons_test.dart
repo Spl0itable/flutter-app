@@ -83,6 +83,14 @@ void main() {
       ('callPresenter', NymIcons.callPresenter),
       ('callSwitchCam', NymIcons.callSwitchCam),
       ('send', NymIcons.send),
+      // Modal-internal glyphs (settings / identity / wallpaper).
+      ('revealArrowRight', NymIcons.revealArrowRight),
+      ('revealArrowDown', NymIcons.revealArrowDown),
+      ('nsecEye', NymIcons.nsecEye),
+      ('warningTriangle', NymIcons.warningTriangle),
+      ('upload', NymIcons.upload),
+      ('fileOffer', NymIcons.fileOffer),
+      ('addReaction', NymIcons.addReaction),
     ];
 
     for (final (name, svg) in icons) {
