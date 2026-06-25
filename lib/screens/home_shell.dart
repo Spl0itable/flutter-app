@@ -14,7 +14,6 @@ import '../state/nostr_controller.dart';
 import '../state/settings_provider.dart';
 import '../widgets/context_menu/interaction_hooks.dart';
 import '../widgets/chat/chat_pane.dart';
-import '../widgets/columns/columns_deck.dart';
 import '../widgets/sidebar/sidebar.dart';
 import '../widgets/wallpaper/wallpaper_layer.dart';
 
@@ -172,12 +171,15 @@ class HomeShellState extends ConsumerState<HomeShell>
     );
   }
 
-  /// The main content region: the single ChatPane, or the columns deck when
-  /// `chatViewMode == 'columns'`.
+  /// The main content region: always the ChatPane. In columns mode the deck
+  /// replaces the messages list INSIDE the pane (so the chat header + composer
+  /// stay mounted), matching the PWA, which hides only `#messagesScroller` and
+  /// shows `#columnsStrip` in its place (styles-columns.css:9-15) — never the
+  /// `.chat-header` or `.input-container`.
   Widget _content(BuildContext context, bool useColumns, {bool compact = false}) {
-    if (useColumns) return const ColumnsDeck();
     return ChatPane(
       compact: compact,
+      useColumns: useColumns,
       onOpenSidebar:
           compact ? () => setState(() => _drawerOpen = true) : null,
       onStartCall: _startCall,
