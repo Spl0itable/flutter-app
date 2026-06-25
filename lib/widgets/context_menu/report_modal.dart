@@ -7,9 +7,9 @@ import '../../core/theme/nym_metrics.dart';
 /// `submitReport`). Report a user/content: a type select + optional details +
 /// a "report specific message" checkbox.
 ///
-/// UI only — submitting builds the NIP-56 kind-1984 report the PWA does, but the
-/// signing/relay path is owned by another slice, so [onSubmit] is invoked with
-/// the form values and the actual publish is a labelled TODO for the caller.
+/// This widget owns the form; submitting invokes [onSubmit], which the
+/// context-menu panel wires to NostrController.submitReport — the real NIP-56
+/// kind-1984 publish (signed + sent to relays). Not a stub.
 class ReportModal extends StatefulWidget {
   const ReportModal({
     super.key,
@@ -258,10 +258,11 @@ class _ReportModalState extends State<ReportModal> {
   }
 
   void _submit() {
-    // TODO(verify): publish NIP-56 kind-1984 report. The PWA's submitReport
-    // signs `{kind:1984, tags:[['p',pubkey,type], ['e',messageId,type]?],
-    // content:details}` and sends it to relays; signing/relay is owned by
-    // another slice, so we surface the form values via onSubmit instead.
+    // Surfaces the form values to [onSubmit], which the context-menu panel
+    // wires to NostrController.submitReport — that signs and publishes the real
+    // NIP-56 kind-1984 report (`{kind:1984, tags:[['p',pubkey,type],
+    // ['e',messageId,type]?], content:details}`) to the relays. (Not a stub: the
+    // publish happens; this widget just owns the form, not the signing.)
     widget.onSubmit?.call(_type, _details.text, _reportMessage);
     Navigator.of(context).maybePop();
   }

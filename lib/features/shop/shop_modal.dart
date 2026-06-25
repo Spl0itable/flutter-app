@@ -769,22 +769,23 @@ class _ShopItemCard extends StatelessWidget {
               ],
             ],
           ),
-          // Inventory description + acquired date (F9).
-          if (inventory) ...[
-            const SizedBox(height: 4),
+          // Per-card description — the PWA renders `.shop-item-description` on
+          // EVERY card type (styles/flair/special/limited/bundle/inventory;
+          // shop.js:737,757,800,877,908,1022), not just the inventory tab.
+          const SizedBox(height: 4),
+          Text(
+            item.description,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
+          // Inventory: acquired date (F9).
+          if (inventory && ownedItem != null) ...[
+            const SizedBox(height: 6),
             Text(
-              item.description,
+              'Acquired: ${_formatDate(ownedItem!.timestamp)}',
               textAlign: TextAlign.center,
-              style: TextStyle(color: c.textDim, fontSize: 12),
+              style: TextStyle(color: c.textDim, fontSize: 10),
             ),
-            if (ownedItem != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Acquired: ${_formatDate(ownedItem!.timestamp)}',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: c.textDim, fontSize: 10),
-              ),
-            ],
           ],
           const SizedBox(height: 8),
           // Limited-tab supply badge (F5).

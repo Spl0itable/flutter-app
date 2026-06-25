@@ -111,9 +111,8 @@ final pendingComposerActionProvider =
 /// here and the nymbot slice watches [giftCreditsRequestProvider], opens its
 /// gift-credit modal with the recipient prefilled, then calls [consume].
 ///
-/// CROSS-FILE NEED: the nymbot slice must wire a listener on this provider to
-/// open its gift-credit modal (`bot_chat_screen.dart:193` TODO). Until then the
-/// request is posted but unobserved (no-op, matching the prior deferral).
+/// The nymbot slice observes this provider (home_shell.dart + bot_chat_screen)
+/// and opens BotCreditsModal with the recipient prefilled, then calls [consume].
 class GiftCreditsRequest {
   const GiftCreditsRequest({required this.pubkey, required this.nym});
 
