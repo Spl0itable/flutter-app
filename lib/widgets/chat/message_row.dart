@@ -99,6 +99,7 @@ class MessageRow extends ConsumerStatefulWidget {
     this.grouped = false,
     this.showAvatar = true,
     this.showName = true,
+    this.inGroup = false,
     this.onReactionPicker,
   });
 
@@ -115,6 +116,14 @@ class MessageRow extends ConsumerStatefulWidget {
 
   /// Bubble layout: render the name above the bubble.
   final bool showName;
+
+  /// Bubble layout: this row is rendered INSIDE a [MessageGroup], which owns the
+  /// group's horizontal padding and the single sticky [_StickyGroupAvatar]. When
+  /// true, [_buildBubble] emits just the content stack (name / bubble /
+  /// translation / readers / reactions) plus the per-row vertical rhythm — no
+  /// avatar gutter, no self-contained row — so the group can lay the bubbles in
+  /// one column beside the gliding avatar (PWA `.message-group-stack`).
+  final bool inGroup;
 
   /// Opens the full emoji reaction picker for this message (host supplies it).
   /// When null the add-reaction / "more" affordances are no-ops.
@@ -883,7 +892,28 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
-    // `.message-group`: align-end row with a 32px sticky avatar for others.
+    // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
+    // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
+    // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
+    // grouped after the lead `-8px`) for a ~2px in-group gap. Flutter list items
+    // can't carry negative inter-item margins, so the equivalent EFFECTIVE gaps
+    // are driven from the top edge only (bottom 0): a group lead opens 6px of
+    // air above it; a continuation member sits 2px below the previous bubble.
+    final vPad = EdgeInsets.only(top: widget.grouped ? 2 : 6);
+
+    // Rendered inside a [MessageGroup]: emit ONLY the content stack with its
+    // vertical rhythm. The group owns the `.message-group` horizontal padding
+    // and the single gliding [_StickyGroupAvatar], laying every bubble of the
+    // run in one `.message-group-stack` column beside it.
+    if (widget.inGroup) {
+      return Padding(padding: vPad, child: stack);
+    }
+
+    // Legacy standalone path (direct [MessageRow] use, not via [MessageGroup]):
+    // a self-contained `.message-group` row carrying its own 32px avatar.
+    // Horizontal inset mirrors `.message-group` padding: an others' group is
+    // `padding: 0 14px 0 6px` (the 32px avatar starts 6px from the edge), a
+    // self group is `padding: 0 14px` (`group-self`, row-reversed, no avatar).
     final row = Row(
       mainAxisAlignment:
           self ? MainAxisAlignment.end : MainAxisAlignment.start,
@@ -892,14 +922,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         if (!self) ...[
           SizedBox(
             width: 32,
-            // The PWA renders ONE 32px avatar per `.message-group`, pinned to the
-            // bottom of the group (`.message-group-avatar { align-self: flex-end;
-            // position: sticky; bottom: 8px }`). `showAvatar` is set on the LAST
-            // message of a group (others only); with the row bottom-aligned
-            // (`CrossAxisAlignment.end`) the avatar lands at the group's foot —
-            // the PWA's "avatar tracks the bottom of the stack" behaviour. Gating
-            // on `!grouped` too would hide it for every multi-message group, so
-            // gate purely on `showAvatar`.
             child: widget.showAvatar
                 ? GestureDetector(
                     onTap: () => _openContextMenu(context),
@@ -915,25 +937,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         Flexible(child: stack),
       ],
     );
-
-    // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
-    // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
-    // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
-    // grouped after the lead `-8px`) for a ~2px in-group gap. Flutter list items
-    // can't carry negative inter-item margins, so the equivalent EFFECTIVE gaps
-    // are driven from the top edge only (bottom 0): a group lead opens 6px of
-    // air above it; a continuation member sits 2px below the previous bubble.
-    //
-    // Horizontal inset mirrors `.message-group` padding: an others' group is
-    // `padding: 0 14px 0 6px` (the 32px avatar starts 6px from the edge), a
-    // self group is `padding: 0 14px` (`group-self`, row-reversed, no avatar).
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-        self ? 14 : 6,
-        widget.grouped ? 2 : 6,
-        14,
-        0,
-      ),
+      padding: EdgeInsets.fromLTRB(self ? 14 : 6, widget.grouped ? 2 : 6, 14, 0),
       child: row,
     );
   }
@@ -1867,6 +1872,275 @@ class _StopBtn extends StatelessWidget {
         child: Text('Stop',
             style: TextStyle(color: c.danger, fontSize: 10)),
       ),
+    );
+  }
+}
+
+/// One message inside a [MessageGroup]: the message plus its already-resolved
+/// reactions and mention flag (computed once by [MessagesList] so the row needn't
+/// re-watch them).
+class MessageGroupEntry {
+  const MessageGroupEntry({
+    required this.message,
+    required this.reactions,
+    required this.mentioned,
+  });
+
+  final Message message;
+  final List<MessageReaction> reactions;
+  final bool mentioned;
+}
+
+/// A `.message-group`: a run of consecutive same-author bubble messages laid out
+/// in one `.message-group-stack` column beside a SINGLE avatar — the PWA's
+/// `.message-group-avatar` (32px, `align-self: flex-end`, `position: sticky;
+/// bottom: 8px`). Grouping consecutive messages into one widget is what lets that
+/// avatar span the whole run and GLIDE up the left edge as a tall group scrolls
+/// (each message is otherwise its own list item, so a per-row avatar can't move
+/// past its row). The glide itself lives in [_StickyGroupAvatar].
+///
+/// In IRC mode — and for standalone system / `/me` rows — a "group" is always a
+/// single entry and renders bare (no avatar gutter, no group chrome), so those
+/// paths are byte-for-byte what [MessageRow] produced before grouping existed.
+class MessageGroup extends ConsumerWidget {
+  const MessageGroup({
+    super.key,
+    required this.entries,
+    required this.settings,
+    this.onReactionPicker,
+  });
+
+  final List<MessageGroupEntry> entries;
+  final Settings settings;
+  final ValueChanged<Message>? onReactionPicker;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final useBubbles = settings.useBubbles;
+    final first = entries.first.message;
+    final self = first.isOwn;
+
+    // The `.message-group-stack` rows. `grouped`/`showName` track position in the
+    // run (only the lead carries a name); `inGroup` strips each row to its content
+    // stack so the group can host the one shared avatar.
+    List<Widget> buildRows() => [
+          for (var i = 0; i < entries.length; i++)
+            MessageRow(
+              key: ValueKey(entries[i].message.id),
+              message: entries[i].message,
+              settings: settings,
+              reactions: entries[i].reactions,
+              mentioned: entries[i].mentioned,
+              grouped: useBubbles && i > 0,
+              showName: !(useBubbles && i > 0),
+              showAvatar: false,
+              inGroup: useBubbles,
+              onReactionPicker: onReactionPicker,
+            ),
+        ];
+
+    // IRC layout, or a standalone system / `/me` row → no grouping chrome.
+    if (!useBubbles || first.isSystemRow || first.isMeAction) {
+      final rows = buildRows();
+      return rows.length == 1
+          ? rows.first
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch, children: rows);
+    }
+
+    // `width: double.infinity` forces the column to fill the group's width under
+    // the loose constraints a [Padding]/[Stack] hands it — without it a
+    // `CrossAxisAlignment.stretch` column shrink-wraps to its widest bubble,
+    // collapsing the full-width translation / read-receipt rows and breaking the
+    // self side's right-alignment (the old `Flexible`-in-`Row` gave it a tight
+    // width). The `.message-group-stack` is `flex: 1 1 auto`, i.e. full width.
+    final stack = SizedBox(
+      width: double.infinity,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: buildRows(),
+      ),
+    );
+
+    // Self group: `group-self` is `padding: 0 14px`, row-reversed, no avatar —
+    // each row already right-aligns its own content.
+    if (self) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        child: stack,
+      );
+    }
+
+    // Others group: `.message-group { padding: 0 14px 0 6px; gap: 6px }`. The
+    // 32px avatar lives in a Positioned overlay pinned to the left gutter; the
+    // stack is inset 38px (32 avatar + 6 gap) to sit where `.message-group-stack`
+    // does. The overlay (full group height) lets the avatar glide within the
+    // group's bounds without disturbing the bubble column's layout.
+    final last = entries.last.message;
+    final picture = ref.watch(
+        usersProvider.select((m) => m[first.pubkey]?.profile?.picture));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 0, 14, 0),
+      child: Stack(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 38),
+            child: stack,
+          ),
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 32,
+            child: _StickyGroupAvatar(
+              pubkey: first.pubkey,
+              imageUrl: picture,
+              onTap: () => _openAvatarMenu(context, ref, last),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Tapping the group avatar opens the context menu for the group's LAST message
+  /// (PWA `_createMessageGroupWrapper`: the avatar click resolves
+  /// `stack.lastElementChild` and calls `showContextMenu`).
+  void _openAvatarMenu(BuildContext context, WidgetRef ref, Message last) {
+    final app = ref.read(appStateProvider);
+    final target = ctxTargetForMessage(last, selfPubkey: app.selfPubkey);
+    ContextMenuPanel.show(
+      context,
+      target: target,
+      message: last,
+      onReact: () => onReactionPicker?.call(last),
+    );
+  }
+}
+
+/// The single per-group avatar reproducing the PWA's `.message-group-avatar`
+/// (`position: sticky; bottom: 8px; align-self: flex-end`). It fills the group's
+/// left gutter (a full-height, 32px-wide track) and positions a 32px avatar that:
+///   * rests at the group's foot (bottom of the stack) when the group sits above
+///     the viewport's bottom edge, and
+///   * GLIDES up to stay pinned 8px above the scroll viewport's bottom edge while
+///     a tall group spans that edge — clamped to the group's own bounds, exactly
+///     like CSS `position: sticky` constrained to its containing block. So a long
+///     monologue's avatar tracks the screen bottom as you scroll, then settles
+///     once the group's end scrolls into view.
+///
+/// The glide reads the previous frame's render geometry (the build runs before
+/// layout); mid-scroll that one-frame lag is imperceptible, and a post-frame
+/// recompute settles the initial (un-scrolled) position. Only this 32px box
+/// rebuilds per scroll tick — the [NymAvatar] is hoisted via the builder's
+/// `child` so it is built once.
+class _StickyGroupAvatar extends StatefulWidget {
+  const _StickyGroupAvatar({
+    required this.pubkey,
+    required this.imageUrl,
+    required this.onTap,
+  });
+
+  final String pubkey;
+  final String? imageUrl;
+  final VoidCallback onTap;
+
+  @override
+  State<_StickyGroupAvatar> createState() => _StickyGroupAvatarState();
+}
+
+class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
+  /// CSS `bottom: 8px` — the avatar floats 8px above the viewport's bottom edge.
+  static const double _stickyGap = 8;
+  static const double _avatar = 32;
+
+  /// Bumped on every scroll tick to recompute the glide offset (the value is
+  /// unused — it only drives the [ValueListenableBuilder] rebuild).
+  final ValueNotifier<int> _tick = ValueNotifier<int>(0);
+  ScrollPosition? _position;
+
+  @override
+  void initState() {
+    super.initState();
+    // Settle the initial (un-scrolled) position once the first layout exists.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _tick.value++;
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final p = Scrollable.maybeOf(context)?.position;
+    if (!identical(p, _position)) {
+      _position?.removeListener(_onScroll);
+      _position = p;
+      _position?.addListener(_onScroll);
+    }
+  }
+
+  void _onScroll() {
+    if (mounted) _tick.value++;
+  }
+
+  @override
+  void dispose() {
+    _position?.removeListener(_onScroll);
+    _tick.dispose();
+    super.dispose();
+  }
+
+  /// The avatar's top within its [maxTop]-bounded track — `clamp(desired, 0,
+  /// maxTop)` is precisely CSS sticky bounded to the containing block, where
+  /// `desired` places the avatar 8px above the viewport bottom.
+  double _computeTop(double maxTop) {
+    final scrollable = Scrollable.maybeOf(context);
+    final track = context.findRenderObject();
+    if (scrollable != null && track is RenderBox && track.hasSize) {
+      final viewport = scrollable.context.findRenderObject();
+      if (viewport is RenderBox && viewport.hasSize) {
+        final trackTop =
+            track.localToGlobal(Offset.zero, ancestor: viewport).dy;
+        final desired =
+            viewport.size.height - _stickyGap - _avatar - trackTop;
+        return desired.clamp(0.0, maxTop);
+      }
+    }
+    return maxTop; // resting at the group's foot
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final avatar = GestureDetector(
+      onTap: widget.onTap,
+      child: NymAvatar(
+        seed: widget.pubkey,
+        size: _avatar,
+        imageUrl: widget.imageUrl,
+      ),
+    );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxTop =
+            (constraints.maxHeight - _avatar).clamp(0.0, double.infinity);
+        return ValueListenableBuilder<int>(
+          valueListenable: _tick,
+          builder: (context, _, child) => Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 0,
+                top: _computeTop(maxTop),
+                width: _avatar,
+                height: _avatar,
+                child: child!,
+              ),
+            ],
+          ),
+          child: avatar,
+        );
+      },
     );
   }
 }
