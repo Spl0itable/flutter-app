@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../widgets/common/nym_avatar.dart';
+import '../messages/format/message_content.dart';
 
 /// One reactor row in the reactor-list popup.
 class ReactorEntry {
@@ -102,8 +103,13 @@ class ReactorsModal extends StatelessWidget {
                     )
                   : Row(
                       children: [
-                        Text(emoji,
-                            style: const TextStyle(fontSize: 40, height: 1)),
+                        // A `:shortcode:` reaction renders as its custom-emoji
+                        // image at the 40px header size; unicode stays text.
+                        InlineEmojiText(
+                          text: emoji,
+                          style: const TextStyle(fontSize: 40, height: 1),
+                          emojiSize: 40,
+                        ),
                         const SizedBox(width: 6),
                         Text(
                           '${reactors.length}',

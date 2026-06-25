@@ -284,11 +284,10 @@ class _RichInline extends StatelessWidget {
       height: 1.4,
       shadows: shadows,
       fontFamily: monospace ? 'monospace' : null,
-      // Bundled color-emoji fallback so unicode emoji in message bodies render
-      // as color glyphs instead of tofu (□) on devices Flutter can't reach the
-      // system emoji font on. Set on the body base so every span (and the
-      // enlarged emoji-only path) inherits it. (BUG: emoji → boxes on Android.)
-      fontFamilyFallback: kEmojiFontFallback,
+      // NO emoji fallback on the body base: with a null primary family Flutter
+      // would promote Noto Color Emoji to the primary for EVERY run, inflating
+      // line metrics and breaking Latin glyphs. The colour-emoji fallback is
+      // attached per-[EmojiNode] span below, where the text is purely emoji.
     );
     return Text.rich(
       TextSpan(
@@ -354,10 +353,16 @@ class _RichInline extends StatelessWidget {
         );
       case EmojiNode(:final unicode):
         // `.emoji` has no font-size (inherits 1em); only `.emoji-only .emoji` is
-        // 2.5em (styles-chat.css:824-837).
+        // 2.5em (styles-chat.css:824-837). The colour-emoji fallback is attached
+        // HERE — the span text is purely emoji, so promoting Noto Color Emoji to
+        // its primary covers the glyph (system font otherwise) without touching
+        // any Latin run's metrics; only emoji-bearing lines grow, as they should.
         return TextSpan(
           text: unicode,
-          style: base.merge(TextStyle(fontSize: size * (emojiOnly ? 2.5 : 1.0))),
+          style: base.merge(TextStyle(
+            fontSize: size * (emojiOnly ? 2.5 : 1.0),
+            fontFamilyFallback: kEmojiFontFallback,
+          )),
         );
       case MentionNode():
         return WidgetSpan(
@@ -914,6 +919,93 @@ class _BlurRevealState extends State<_BlurReveal> {
         imageFilter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
         child: widget.child,
       ),
+    );
+  }
+}
+
+/// Renders a short string inline while resolving NIP-30 custom emoji: any
+/// `:shortcode:` known to [liveCustomEmojiProvider] (and bare http(s) custom-
+/// emoji URLs) becomes an inline image; everything else is plain styled text.
+///
+/// This is the lightweight counterpart to [MessageContent] for surfaces that
+/// show a reaction emoji or a short notification line — reaction badges, the
+/// reactors sheet, the notifications panel — where a full formatted block is too
+/// heavy and where, until now, `:shortcode:` reactions showed as literal text.
+///
+/// Text runs keep the caller's [style] verbatim (no colour-emoji fallback is
+/// forced onto them, which would wreck Latin metrics/glyphs the same way the old
+/// global theme fallback did); unicode emoji render via the platform font.
+class InlineEmojiText extends ConsumerWidget {
+  const InlineEmojiText({
+    super.key,
+    required this.text,
+    required this.style,
+    this.emojiSize,
+    this.maxLines,
+    this.overflow,
+    this.textAlign,
+  });
+
+  final String text;
+  final TextStyle style;
+
+  /// Side length for an inline custom-emoji image. Defaults to ~1.2× the font
+  /// size so the glyph sits a touch above the cap height like the PWA's emoji.
+  final double? emojiSize;
+
+  final int? maxLines;
+  final TextOverflow? overflow;
+  final TextAlign? textAlign;
+
+  /// `:shortcode:` token (NIP-30 codes are `[a-zA-Z0-9_]+`, emoji.js).
+  static final RegExp _rxToken = RegExp(r':([a-zA-Z0-9_]+):');
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final codeToUrl = ref.watch(liveCustomEmojiProvider).codeToUrl;
+
+    // Fast path: nothing to substitute → a single styled Text (keeps these
+    // surfaces find-by-text friendly and avoids a needless RichText).
+    if (codeToUrl.isEmpty || !_rxToken.hasMatch(text)) {
+      return Text(text,
+          style: style,
+          maxLines: maxLines,
+          overflow: overflow,
+          textAlign: textAlign);
+    }
+
+    final side = (emojiSize ?? (style.fontSize ?? 14)) * 1.2;
+    final spans = <InlineSpan>[];
+    var last = 0;
+    for (final m in _rxToken.allMatches(text)) {
+      final url = codeToUrl[m.group(1)];
+      if (url == null) continue; // unknown code → leave the literal `:code:`
+      if (m.start > last) {
+        spans.add(TextSpan(text: text.substring(last, m.start), style: style));
+      }
+      spans.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 1),
+          child: InlineNetworkImage(
+            url: proxiedMedia(url, emoji: true),
+            width: side,
+            height: side,
+            fit: BoxFit.contain,
+            errorChild: Text(':${m.group(1)}:', style: style),
+          ),
+        ),
+      ));
+      last = m.end;
+    }
+    if (last < text.length) {
+      spans.add(TextSpan(text: text.substring(last), style: style));
+    }
+    return Text.rich(
+      TextSpan(children: spans),
+      maxLines: maxLines,
+      overflow: overflow,
+      textAlign: textAlign,
     );
   }
 }
