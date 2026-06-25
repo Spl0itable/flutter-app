@@ -368,6 +368,9 @@ class AppState {
   /// heuristic-spam is deliberately NOT filtered here — the PWA still shows the
   /// sender their own flagged message (with a self-only notice, see [sendLocal]).
   bool isMessageFiltered(Message m) {
+    // Injected system/action pills (notices, command feedback) are never subject
+    // to content filtering — they carry no sender and must always show.
+    if (m.isSystemRow) return false;
     if (blockedUsers.contains(m.pubkey)) return true;
     // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
