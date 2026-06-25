@@ -102,6 +102,12 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
       case 'group':
         if (route.isNotEmpty) appState.switchView(ChatView.group(route));
         break;
+      case 'channel':
+      case 'geohash':
+        // A channel/geohash mention switches to that channel (the route is the
+        // bare channel name; switchChannel auto-detects geohash).
+        if (route.isNotEmpty) controller.switchChannel(route);
+        break;
       case 'call':
         // Call routes carry a group id (group call) or a pubkey (1:1 call).
         if (isPubkeyRoute) {

@@ -833,16 +833,22 @@ class NostrController {
     // (notifications.js, derived from `channelInfo`). `channelKeyOf` already
     // returns the `#`-prefixed key (geohash `g` tag / named `d` tag), so reuse
     // it directly; null for an unkeyed event leaves the label off.
+    // A channel @-mention routes to the CHANNEL (notifications.js type
+    // 'geohash' → `switchChannel(info.channel, info.geohash)`), NOT the sender's
+    // PM. The channel key from `channelKeyOf` is `#`-prefixed; switchChannel
+    // takes the bare name (it auto-detects geohash via isChannelGeohash). The
+    // sender pubkey is carried separately for the avatar + author; the panel
+    // labels it via the `in #<key>` contextLabel.
+    final channelRoute =
+        key != null ? (key.startsWith('#') ? key.substring(1) : key) : '';
     _dispatchNotification(
       title: _nymDisplayFor(e.pubkey),
       body: e.content,
       senderPubkey: e.pubkey,
       isFriend: appState.isFriend(e.pubkey),
       isMention: mention,
-      // A channel notification only fires on an @-mention; record it as such so
-      // the panel labels it "Mention" and routes to the sender's PM/profile.
-      historyType: 'mention',
-      route: e.pubkey,
+      historyType: channelRoute.isNotEmpty ? 'channel' : 'mention',
+      route: channelRoute.isNotEmpty ? channelRoute : e.pubkey,
       eventId: e.id,
       tsMs: e.createdAt * 1000,
       contextLabel: key != null ? 'in $key' : null,
