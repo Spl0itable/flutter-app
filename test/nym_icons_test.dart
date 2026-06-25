@@ -28,6 +28,11 @@ void main() {
       ('groupGlyph', NymIcons.groupGlyph),
       ('friendBadge', NymIcons.friendBadge),
       ('lock', NymIcons.lock),
+      ('close', NymIcons.close),
+      ('composerImage', NymIcons.composerImage),
+      ('composerFile', NymIcons.composerFile),
+      ('composerEmoji', NymIcons.composerEmoji),
+      ('translate', NymIcons.translate),
     ];
 
     for (final (name, svg) in icons) {

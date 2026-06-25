@@ -147,6 +147,45 @@ class NymIcons {
       '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>'
       '<path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
 
+  /// Generic close "✕" — two crossed lines (the PWA's `quote-preview-close` /
+  /// `upload-progress-close` SVG; stroke).
+  static const String close =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      'stroke-linecap="round" stroke-linejoin="round">'
+      '<line x1="18" y1="6" x2="6" y2="18"/>'
+      '<line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+  /// `.input-btn` "Upload Image/Video" (`selectImage`) — feather image (stroke).
+  static const String composerImage =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      'stroke-linecap="round" stroke-linejoin="round">'
+      '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>'
+      '<circle cx="8.5" cy="8.5" r="1.5"/>'
+      '<polyline points="21 15 16 10 5 21"/></svg>';
+
+  /// `.input-btn` "Share File (P2P)" (`selectP2PFile`) — feather file-out (stroke).
+  static const String composerFile =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      'stroke-linecap="round" stroke-linejoin="round">'
+      '<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>'
+      '<polyline points="13 2 13 9 20 9"/>'
+      '<line x1="12" y1="18" x2="12" y2="12"/>'
+      '<polyline points="9 15 12 12 15 15"/></svg>';
+
+  /// `.input-btn` "Emoji" (`toggleEmojiPicker`) — feather smile (stroke).
+  static const String composerEmoji =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      'stroke-linecap="round" stroke-linejoin="round">'
+      '<circle cx="12" cy="12" r="10"/>'
+      '<path d="M8 14s1.5 2 4 2 4-2 4-2"/>'
+      '<circle cx="9" cy="9" r="1"/>'
+      '<circle cx="15" cy="9" r="1"/></svg>';
+
+  /// `.translate-input-btn` (`translateInputBtn`) — the filled translate glyph.
+  static const String translate =
+      '<svg viewBox="0 0 24 24" fill="currentColor">'
+      '<path d="m12.87 15.07-2.54-2.51.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7 1.62-4.33L19.12 17h-3.24z"/></svg>';
+
   /// The native-only "Transfers" pill (no PWA header equivalent) — feather repeat
   /// (stroke), keeping the chrome consistent with the feather icon family.
   static const String transfers =

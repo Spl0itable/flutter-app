@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
 import '../../features/autocomplete/autocomplete_triggers.dart';
@@ -978,7 +979,9 @@ class _ComposerState extends ConsumerState<Composer> {
                   child: SizedBox(
                     width: 22,
                     height: 22,
-                    child: Icon(Icons.close, size: 14, color: c.textDim),
+                    child: Center(
+                      child: NymSvgIcon(NymIcons.close, size: 14, color: c.textDim),
+                    ),
                   ),
                 ),
               ),
@@ -1403,13 +1406,13 @@ class _ComposerState extends ConsumerState<Composer> {
   Widget _toolbar(BuildContext context, bool sendEnabled, bool phone) {
     final buttons = <Widget>[
       _IconBtn(
-        icon: Icons.image_outlined,
+        svg: NymIcons.composerImage,
         tooltip: 'Upload Image/Video',
         expand: widget.compact,
         onTap: _uploadProgress != null ? null : _pickAndUploadImage,
       ),
       _IconBtn(
-        icon: Icons.attach_file,
+        svg: NymIcons.composerFile,
         tooltip: 'Share File (P2P)',
         expand: widget.compact,
         onTap: _pickAndShareFile,
@@ -1474,7 +1477,7 @@ class _ComposerState extends ConsumerState<Composer> {
           ),
         ),
         child: _IconBtn(
-          icon: Icons.emoji_emotions_outlined,
+          svg: NymIcons.composerEmoji,
           tooltip: 'Emoji',
           expand: widget.compact,
           onTap: _toggleEmojiPicker,
@@ -1499,7 +1502,7 @@ class _ComposerState extends ConsumerState<Composer> {
           ),
         ),
         child: _IconBtn(
-          icon: Icons.gif_box_outlined,
+          label: 'GIF',
           tooltip: 'GIF',
           expand: widget.compact,
           onTap: _toggleGifPicker,
@@ -1564,12 +1567,19 @@ class _ComposerState extends ConsumerState<Composer> {
 /// `.icon-btn.input-btn`: height 42, 18×18 icon stroke text→primary, radius sm.
 class _IconBtn extends StatefulWidget {
   const _IconBtn({
-    required this.icon,
+    this.svg,
+    this.label,
     required this.tooltip,
     this.expand = false,
     this.onTap,
-  });
-  final IconData icon;
+  }) : assert(svg != null || label != null, 'provide an svg or a label');
+  /// The exact-PWA glyph markup (image/file/emoji), or null for a [label] button.
+  final String? svg;
+
+  /// A text glyph instead of an SVG — the PWA's GIF button is the literal "GIF"
+  /// text (`<text>GIF</text>`), which flutter_svg can't render, so it's drawn as
+  /// styled text here.
+  final String? label;
   final String tooltip;
   final bool expand;
   final VoidCallback? onTap;
@@ -1603,11 +1613,21 @@ class _IconBtnState extends State<_IconBtn> {
               constraints: const BoxConstraints(minWidth: 42),
               padding: const EdgeInsets.symmetric(horizontal: 12),
               alignment: Alignment.center,
-              child: Icon(
-                widget.icon,
-                size: 18,
-                color: _hover ? c.primary : c.text,
-              ),
+              child: widget.label != null
+                  ? Text(
+                      widget.label!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                        color: _hover ? c.primary : c.text,
+                      ),
+                    )
+                  : NymSvgIcon(
+                      widget.svg!,
+                      size: 18,
+                      color: _hover ? c.primary : c.text,
+                    ),
             ),
           ),
         ),
@@ -1973,8 +1993,8 @@ class _ChipCloseButtonState extends State<_ChipCloseButton> {
                   : null,
               borderRadius: NymRadius.rxs,
             ),
-            child: Icon(
-              Icons.close,
+            child: NymSvgIcon(
+              NymIcons.close,
               size: 16,
               color: _hover
                   ? (c.isLight ? c.text : Colors.white)
@@ -2043,7 +2063,7 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
   Widget build(BuildContext context) {
     final c = context.nym;
     final color = _hover && widget.enabled ? c.primary : c.textDim;
-    Widget glyph = Icon(Icons.translate, size: 16, color: color);
+    Widget glyph = NymSvgIcon(NymIcons.translate, size: 16, color: color);
     if (widget.translating) {
       // `.translating` pulse: opacity 0.4 ↔ 0.8.
       glyph = FadeTransition(
@@ -2153,8 +2173,10 @@ class _TranslateLangRowState extends State<_TranslateLangRow> {
                           : null,
                       borderRadius: NymRadius.rsm,
                     ),
-                    child: Icon(
-                      widget.favorited ? Icons.star : Icons.star_border,
+                    child: NymSvgIcon(
+                      widget.favorited
+                          ? NymIcons.starFilled
+                          : NymIcons.starOutline,
                       size: 14,
                       color: widget.favorited
                           ? _favColor
