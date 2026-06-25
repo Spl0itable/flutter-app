@@ -15,6 +15,7 @@ import '../../models/pm_conversation.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../chat/message_row.dart';
+import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
 
@@ -163,6 +164,11 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   final List<_ColumnDesc> _columns = [];
   bool _seeded = false;
 
+  /// Whether the shared header/composer has been pointed at the initially
+  /// focused column yet (`_cvEnable` focuses the first column on entry,
+  /// columns.js:77-78). One-shot so later rebuilds don't re-fire it.
+  bool _syncedInitialView = false;
+
   /// Mobile carousel page controller (`_cvScrollToIndex` on `innerWidth<=768`).
   final PageController _pageController = PageController();
 
@@ -252,7 +258,39 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     });
   }
 
-  void _removeColumn(_ColumnDesc desc) {
+  /// Storage flag for the "Don't ask again" remove-column confirm
+  /// (`nym_columns_skip_delete_confirm`, columns.js:236/247). Reached through the
+  /// KV store directly (like [_saveLayout]) since the constants file is owned by
+  /// another slice.
+  static const String _skipRemoveConfirmKey = 'nym_columns_skip_delete_confirm';
+
+  /// `cvRequestRemoveColumn` (columns.js:233-251): confirm removal with a
+  /// persistable "Don't ask again", unless the skip flag is already set. The
+  /// column close buttons + the tabs-sheet close both route through here.
+  Future<void> _removeColumn(_ColumnDesc desc) async {
+    final idx = _columns.indexOf(desc);
+    if (idx < 0) return;
+    final kv = ref.read(keyValueStoreProvider);
+    if (kv.getBool(_skipRemoveConfirmKey)) {
+      _doRemoveColumn(desc);
+      return;
+    }
+    final title = _columnTitle(context, desc);
+    final res = await showAppConfirmWithCheckbox(
+      context,
+      'Remove the "$title" column? You can add it back anytime.',
+      title: 'Remove column',
+      okLabel: 'Remove',
+      danger: true,
+      checkboxLabel: "Don't ask again",
+    );
+    if (!res.confirmed || !mounted) return;
+    if (res.checked) kv.setBool(_skipRemoveConfirmKey, true);
+    _doRemoveColumn(desc);
+  }
+
+  /// The actual removal (`cvRemoveColumn`, columns.js:253-268).
+  void _doRemoveColumn(_ColumnDesc desc) {
     final idx = _columns.indexOf(desc);
     if (idx < 0) return;
     setState(() {
@@ -264,6 +302,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     });
     _saveLayout();
     _syncPageController();
+    // Re-point the shared header/composer at the surviving focused column.
+    _syncFocusedView();
   }
 
   /// Reorder a column from [oldIndex] to [newIndex] (desktop drag / tabs-sheet
@@ -284,10 +324,41 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
 
   /// Desktop "click a column to focus it" (`columns.js:175-179` →
   /// `_cvOpenConversation`/`_cvFocusColumn`): clicking a non-focused column
-  /// marks it focused so its header shows the primary border + `--shadow-glow`.
+  /// marks it focused so its header shows the primary border + `--shadow-glow`,
+  /// and re-points the shared chat header + composer at it.
   void _focusColumn(int index) {
     if (index < 0 || index >= _columns.length) return;
     if (_focused != index) setState(() => _focused = index);
+    _syncFocusedView();
+  }
+
+  /// Maps a column descriptor to the shared [ChatView] it represents.
+  ChatView _viewForDesc(_ColumnDesc d) {
+    switch (d.kind) {
+      case _ColumnKind.channel:
+        return ChatView.channel(d.key);
+      case _ColumnKind.pm:
+        return ChatView.pm(d.pubkey);
+      case _ColumnKind.group:
+        return ChatView.group(d.groupId);
+    }
+  }
+
+  /// Point the shared chat header + composer at the focused column's
+  /// conversation, mirroring `_cvFocusColumn` (columns.js:550-559), which sets
+  /// `currentChannel`/`currentPM`/`currentGroup` so the single shared composer
+  /// (kept mounted in columns mode) targets the focused column. Deferred to
+  /// post-frame so it never mutates the provider during a build/seed pass.
+  void _syncFocusedView() {
+    if (_columns.isEmpty) return;
+    final idx = _focused.clamp(0, _columns.length - 1);
+    final view = _viewForDesc(_columns[idx]);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final notifier = ref.read(appStateProvider.notifier);
+      if (ref.read(appStateProvider).view == view) return;
+      notifier.switchView(view);
+    });
   }
 
   /// Step the visible column one slot left/right (`_cvStepFocused`, mobile
@@ -310,6 +381,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       );
     }
     if (_focused != idx) setState(() => _focused = idx);
+    _syncFocusedView();
   }
 
   /// Keep the PageView page valid after a removal/reorder changes the count.
@@ -337,18 +409,23 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     bool pmOnly,
   ) async {
     // `_cvAvailableConversations`: channels (unless PM-only) + PMs + groups not
-    // already open.
+    // already open. Each carries its title (the PWA's `label`) so the live
+    // search can filter by it (`_cvOpenAddColumn`, columns.js:750-753).
     final open = _columns.toSet();
     final available = <_ColumnDesc>[
       if (!pmOnly)
         for (final ch in channels) _ColumnDesc.channel(ch.channel, ch.geohash),
       for (final pm in pms) _ColumnDesc.pm(pm.pubkey, nym: pm.nym),
       for (final g in groups) _ColumnDesc.group(g.id),
-    ].where((d) => !open.contains(d)).toList();
+    ]
+        .where((d) => !open.contains(d))
+        .map((d) => (desc: d, label: _columnTitle(context, d)))
+        .toList();
 
     final picked = await showModalBottomSheet<_ColumnDesc>(
       context: context,
       backgroundColor: context.nym.bgSecondary,
+      isScrollControlled: true,
       builder: (ctx) {
         final c = ctx.nym;
         if (available.isEmpty) {
@@ -358,25 +435,91 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                 style: TextStyle(color: c.textDim, fontSize: 14)),
           );
         }
-        return ListView(
-          shrinkWrap: true,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('Add a column',
-                  style: TextStyle(
-                      color: c.textBright,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700)),
-            ),
-            for (final d in available)
-              ListTile(
-                leading: _columnIcon(ctx, d, size: 24),
-                title: Text(_columnTitle(ctx, d),
-                    style: TextStyle(color: c.text)),
-                onTap: () => Navigator.of(ctx).pop(d),
+        // `.cv-picker-search` live filter over the available conversations.
+        var term = '';
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            final f = term.trim().toLowerCase();
+            final shown = f.isEmpty
+                ? available
+                : available
+                    .where((r) => r.label.toLowerCase().contains(f))
+                    .toList();
+            return SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // `.cv-column-header` → `.cv-col-title`.
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Add a column',
+                          style: TextStyle(
+                              color: c.textBright,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                  // `.cv-picker-search` → `.cv-picker-input` (form-input).
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: TextField(
+                      autofocus: true,
+                      style: TextStyle(color: c.textBright, fontSize: 14),
+                      cursorColor: c.primary,
+                      onChanged: (v) => setSheetState(() => term = v),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'Search conversations…',
+                        hintStyle: TextStyle(color: c.textDim, fontSize: 14),
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        filled: true,
+                        fillColor: c.insetFill,
+                        border: OutlineInputBorder(
+                          borderRadius: NymRadius.rxs,
+                          borderSide: BorderSide(color: c.glassBorder),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: NymRadius.rxs,
+                          borderSide: BorderSide(color: c.glassBorder),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: NymRadius.rxs,
+                          borderSide: BorderSide(color: c.primaryA(0.30)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // `.cv-picker-list` (filtered rows) / `.cv-picker-empty`.
+                  Flexible(
+                    child: shown.isEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Text('No conversations',
+                                style:
+                                    TextStyle(color: c.textDim, fontSize: 14)),
+                          )
+                        : ListView(
+                            shrinkWrap: true,
+                            children: [
+                              for (final r in shown)
+                                ListTile(
+                                  leading: _columnIcon(ctx, r.desc, size: 24),
+                                  title: Text(r.label,
+                                      style: TextStyle(color: c.text)),
+                                  onTap: () =>
+                                      Navigator.of(ctx).pop(r.desc),
+                                ),
+                            ],
+                          ),
+                  ),
+                ],
               ),
-          ],
+            );
+          },
         );
       },
     );
@@ -519,6 +662,13 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       _focused = _columns.isEmpty ? 0 : _columns.length - 1;
     }
 
+    // On first mount, point the shared header/composer at the focused column
+    // (mirrors `_cvEnable` → `_cvFocusColumn(first.id)`, columns.js:77-78).
+    if (!_syncedInitialView && _columns.isNotEmpty) {
+      _syncedInitialView = true;
+      _syncFocusedView();
+    }
+
     return Container(
       key: const Key('columnsStrip'),
       color: Colors.transparent,
@@ -605,6 +755,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       onPageChanged: (i) {
         if (i < _columns.length && i != _focused) {
           setState(() => _focused = i);
+          // Re-point the shared header/composer at the now-visible column.
+          _syncFocusedView();
         }
       },
       itemBuilder: (context, i) {

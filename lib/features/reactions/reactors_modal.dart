@@ -15,6 +15,7 @@ class ReactorEntry {
     this.suffix = '',
     this.isYou = false,
     this.imageUrl,
+    this.subtitle,
   });
 
   /// Reactor pubkey (used for the avatar seed + opening their context menu).
@@ -32,6 +33,9 @@ class ReactorEntry {
   /// The reactor's profile picture (kind-0 `picture`); identicon fallback when
   /// null (Rule 4 — every NymAvatar receives an imageUrl).
   final String? imageUrl;
+
+  /// Optional secondary line under the nym (e.g. a poll voter's chosen option).
+  final String? subtitle;
 }
 
 /// The reactor-list popup (reactions.js `showReactorsModal`,
@@ -168,21 +172,34 @@ class ReactorsModal extends ConsumerWidget {
             NymAvatar(seed: r.pubkey, size: 22, imageUrl: imageUrl),
             const SizedBox(width: 8),
             Flexible(
-              child: RichText(
-                overflow: TextOverflow.ellipsis,
-                text: TextSpan(
-                  style: TextStyle(fontSize: 13, color: c.text),
-                  children: [
-                    TextSpan(text: r.nym),
-                    TextSpan(
-                      text: '#${r.suffix}',
-                      style: TextStyle(
-                        color: c.text.withValues(alpha: 0.5),
-                        fontSize: 13 * 0.9,
-                      ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RichText(
+                    overflow: TextOverflow.ellipsis,
+                    text: TextSpan(
+                      style: TextStyle(fontSize: 13, color: c.text),
+                      children: [
+                        TextSpan(text: r.nym),
+                        TextSpan(
+                          text: '#${r.suffix}',
+                          style: TextStyle(
+                            color: c.text.withValues(alpha: 0.5),
+                            fontSize: 13 * 0.9,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  ),
+                  // Secondary line — e.g. a poll voter's chosen option.
+                  if (r.subtitle != null && r.subtitle!.isNotEmpty)
+                    Text(
+                      r.subtitle!,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: c.textDim),
+                    ),
+                ],
               ),
             ),
             if (r.isYou) ...[

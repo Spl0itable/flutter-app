@@ -352,28 +352,34 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _categoryTitle(c, 'Limited Editions'),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              for (final item in ShopCatalog.limited)
-                SizedBox(
-                  width: _cardWidth,
-                  child: _card(
-                    c,
-                    state,
-                    item,
-                    availability: ctrl.availability(item),
+          // Each section title renders only when its list is non-empty
+          // (shop.js:920/927 — `if (limited.length)` / `if (bundles.length)`).
+          if (ShopCatalog.limited.isNotEmpty) ...[
+            _categoryTitle(c, 'Limited Editions'),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final item in ShopCatalog.limited)
+                  SizedBox(
+                    width: _cardWidth,
+                    child: _card(
+                      c,
+                      state,
+                      item,
+                      availability: ctrl.availability(item),
+                    ),
                   ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 24),
-          _categoryTitle(c, 'Bundles'),
-          const SizedBox(height: 12),
-          _cardWrap(c, state, ShopCatalog.bundles),
+              ],
+            ),
+            const SizedBox(height: 24),
+          ],
+          if (ShopCatalog.bundles.isNotEmpty) ...[
+            _categoryTitle(c, 'Bundles'),
+            const SizedBox(height: 12),
+            _cardWrap(c, state, ShopCatalog.bundles),
+          ],
         ],
       ),
     );
@@ -686,8 +692,9 @@ class _ShopItemCard extends StatelessWidget {
   /// limited tab); only affects the preview, not real ownership.
   final int? sampleEdition;
 
-  /// Bundles can't be gifted/transferred in the PWA (no recovery code per
-  /// component on the client); only single items expose gift/transfer.
+  /// Gates the inventory TRANSFER action: a bundle has no single recovery code
+  /// to transfer, so only single owned items expose Transfer. (GIFT on the shop
+  /// tabs is handled in [_actions], where bundles ARE giftable per the PWA.)
   bool get _giftable => item.type != 'bundle';
 
   bool get _isBundle => item.type == 'bundle';
@@ -769,22 +776,23 @@ class _ShopItemCard extends StatelessWidget {
               ],
             ],
           ),
-          // Inventory description + acquired date (F9).
-          if (inventory) ...[
-            const SizedBox(height: 4),
+          // Per-card description — the PWA renders `.shop-item-description` on
+          // EVERY card type (styles/flair/special/limited/bundle/inventory;
+          // shop.js:737,757,800,877,908,1022), not just the inventory tab.
+          const SizedBox(height: 4),
+          Text(
+            item.description,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
+          // Inventory: acquired date (F9).
+          if (inventory && ownedItem != null) ...[
+            const SizedBox(height: 6),
             Text(
-              item.description,
+              'Acquired: ${_formatDate(ownedItem!.timestamp)}',
               textAlign: TextAlign.center,
-              style: TextStyle(color: c.textDim, fontSize: 12),
+              style: TextStyle(color: c.textDim, fontSize: 10),
             ),
-            if (ownedItem != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                'Acquired: ${_formatDate(ownedItem!.timestamp)}',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: c.textDim, fontSize: 10),
-              ),
-            ],
           ],
           const SizedBox(height: 8),
           // Limited-tab supply badge (F5).
@@ -813,37 +821,46 @@ class _ShopItemCard extends StatelessWidget {
                         : ShopItemPreview(item: item))),
           ),
           const SizedBox(height: 10),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              // `.shop-price-amount`: ⚡ {price} sats — lightning, 16px bold
-              // (styles-features.css:204-208).
-              Row(
-                children: [
-                  // `.shop-price-amount` prefixes a literal "⚡" emoji in the PWA
-                  // (`<span class="shop-price-amount">⚡ ${price} sats</span>`).
-                  const Text('⚡',
-                      style: TextStyle(
-                          fontSize: 16, color: Color(0xFFF7931A))),
-                  const SizedBox(width: 2),
-                  Text(
-                    '${item.price} sats',
-                    style: const TextStyle(
-                      color: Color(0xFFF7931A),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
+          if (_blockedByAvailability)
+            // Limited soon/ended/soldout: the PWA replaces the whole footer with
+            // just the availability label — NO price row, no buttons
+            // (shop.js:870, the `else` footer branch).
+            Text(
+              availability!.label,
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            )
+          else
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // `.shop-price-amount`: ⚡ {price} sats — lightning, 16px bold
+                // (styles-features.css:204-208).
+                Row(
+                  children: [
+                    // `.shop-price-amount` prefixes a literal "⚡" emoji in the PWA
+                    // (`<span class="shop-price-amount">⚡ ${price} sats</span>`).
+                    const Text('⚡',
+                        style: TextStyle(
+                            fontSize: 16, color: Color(0xFFF7931A))),
+                    const SizedBox(width: 2),
+                    Text(
+                      '${item.price} sats',
+                      style: const TextStyle(
+                        color: Color(0xFFF7931A),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-              Flexible(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: _actions(c),
+                  ],
                 ),
-              ),
-            ],
-          ),
+                Flexible(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: _actions(c),
+                  ),
+                ),
+              ],
+            ),
           // Inventory: recovery code + transfer (F9).
           if (inventory && owned) ...[
             if (ownedItem?.code != null && ownedItem!.code!.isNotEmpty)
@@ -881,27 +898,37 @@ class _ShopItemCard extends StatelessWidget {
   }
 
   Widget _actions(NymColors c) {
-    if (owned) {
+    // Bundles are never individually owned/activatable — always BUY + GIFT
+    // (_renderBundleCard → _shopItemActionsHtml, shop.js:911).
+    if (_isBundle) {
+      return _buyGiftRow();
+    }
+    // Inventory tab is the only place ACTIVATE lives (shop.js renderInventory);
+    // on the shop tabs an owned item shows GIFT (regular) or nothing (limited),
+    // never ACTIVATE.
+    if (inventory) {
       return _ActivateButton(active: active, onTap: onActivate, item: item);
     }
-    if (_blockedByAvailability) {
-      // soon/ended/soldout → status label instead of Buy (F5).
-      return Text(
-        availability!.label,
-        style: TextStyle(color: c.textDim, fontSize: 12),
-      );
+    if (owned) {
+      // `_shopItemOwnedHtml(item, allowGift)`: regular owned → price + GIFT
+      // (allowGift true); limited owned → price only (allowGift false,
+      // shop.js:869).
+      return availability != null
+          ? const SizedBox.shrink()
+          : _PillButton(label: 'GIFT', onTap: onGift);
     }
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (_giftable) ...[
+    // Not owned: BUY + GIFT (`_shopItemActionsHtml` always shows both).
+    return _buyGiftRow();
+  }
+
+  Widget _buyGiftRow() => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
           _PillButton(label: 'GIFT', onTap: onGift),
           const SizedBox(width: 6),
+          _BuyButton(onTap: onBuy),
         ],
-        _BuyButton(onTap: onBuy),
-      ],
-    );
-  }
+      );
 
   /// The flair preview with a stamped sample edition (Genesis #69), used in the
   /// limited tab (`_renderLimitedCard`).

@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../services/platform/deep_links.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
@@ -378,14 +379,20 @@ class _SetupModalState extends ConsumerState<SetupModal> {
   }
 
   /// Mirrors updateSetupInviteBanner: shows an invite line when a pending
-  /// group-invite token is present (`nym_pending_group_invite`).
+  /// group-invite token is present (`nym_pending_group_invite`), decoding the
+  /// group name so the banner reads `You've been invited to join "<name>".`
+  /// (app.js:7161) — falling back to the generic copy when the token carries
+  /// no name.
   String? _inviteBannerText() {
     final kv = ref.read(keyValueStoreProvider);
     final token = kv.getString(StorageKeys.pendingGroupInvite);
     if (token == null || token.isEmpty) return null;
-    // TODO(verify): decode the group name from the token (parseGroupInviteInput).
-    // We surface the generic copy until the token decoder is ported here.
-    return 'You\'ve been invited to join a group. Pick a nym or log in '
+    final name = parseGroupInvite(token)?.name.trim() ?? '';
+    if (name.isEmpty) {
+      return 'You\'ve been invited to join a group. Pick a nym or log in '
+          'below to continue.';
+    }
+    return 'You\'ve been invited to join "$name". Pick a nym or log in '
         'below to continue.';
   }
 

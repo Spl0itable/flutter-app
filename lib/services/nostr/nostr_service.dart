@@ -309,13 +309,28 @@ class NostrService {
         apiClient: apiClient,
       );
 
-  final Identity identity;
+  /// The active identity. Mutable so hardcore keypair mode can swap the signing
+  /// key in place (see [rotateIdentity]) without tearing down the live relay
+  /// connections — every publish reads `identity.pubkey` at call time.
+  Identity identity;
 
   /// The active signer: a [LocalSigner] for nsec/ephemeral keys, a
   /// [Nip46SignerAdapter] for a remote signer, or null when signing is
   /// unavailable. Every publish / gift-wrap path routes through this so the
   /// NIP-46 remote path works end-to-end (mirrors the PWA's `signEvent`).
-  final EventSigner? signer;
+  /// Mutable for the same hardcore-rotation reason as [identity].
+  EventSigner? signer;
+
+  /// Surgically swap the signing identity in place — hardcore keypair mode
+  /// (messages.js:2392-2404 → `generateKeypair()`, which only swaps `privkey`/
+  /// `pubkey`; it does NOT reconnect relays or re-subscribe). The live [pool]
+  /// and its subscriptions persist (the `#p:[self]` gift-wrap filter stays on
+  /// the prior pubkey, exactly like the PWA), and the NEXT publish signs with
+  /// [newSigner] / advertises [newIdentity].
+  void rotateIdentity(Identity newIdentity, EventSigner? newSigner) {
+    identity = newIdentity;
+    signer = newSigner;
+  }
 
   /// The active transport. Swappable: starts as the proxy (default) and is
   /// replaced by a direct [RelayPool] if the proxy proves unreachable (and back
@@ -400,6 +415,20 @@ class NostrService {
         since: since,
         tags: {
           'k': ['${EventKind.geoChannel}', '${EventKind.namedChannel}'],
+        },
+      ),
+      // Public NIP-57 zap receipts addressed to us (kind 9735, `#p:[self]`): the
+      // recipient is always p-tagged, so this catches receipts for OUR authored
+      // channel/profile messages — both the LNURL provider's (verified) receipt
+      // and a peer's own-published kind-9735 (zaps.js `_publishOwnMessageZapEvent`).
+      // The PWA runs a broad `#p` zap-receipt REQ for this (zaps.js
+      // `listenForZapReceipt` / `_listenForBotCreditReceipt`). Routed through
+      // `_onEvent` → the public-zap-receipt path (`_onPublicZapReceipt`).
+      NostrFilter(
+        kinds: [EventKind.zapReceipt],
+        since: since,
+        tags: {
+          'p': [self],
         },
       ),
       // Gift wraps addressed to us (PMs, group messages, receipts, typing).
@@ -1080,6 +1109,66 @@ class NostrService {
     if (sig == null) return null;
     final signed = await sig.sign(rumor);
     await pool.publish(signed);
+    return signed;
+  }
+
+  /// Publishes OUR OWN signed kind-9735 zap-receipt for a CHANNEL message we
+  /// paid, so peers' (and the recipient's) live `#k`/`#p` subscriptions update
+  /// the zap badge in real time. Mirrors zaps.js `_publishOwnMessageZapEvent`
+  /// (line 1527): the LNURL provider's receipt carries no top-level `k` tag and
+  /// never matches those subs, so we mint a receipt that does. Tags:
+  /// `['e',messageId], ['p',recipientPubkey], ['k',originalKind],
+  /// ['bolt11',bolt11]` (+ `['g',geohash]` for a geohash channel, else
+  /// `['d',channel]` for a named channel), content `''`. For a geohash channel
+  /// it's additionally delivered to the closest geo relays (like
+  /// [publishChannelMessage]). Returns the signed event so the controller can
+  /// register its id (own-echo dedup) and route ingestion.
+  Future<NostrEvent?> publishMessageZapReceipt({
+    required String messageId,
+    required String recipientPubkey,
+    required String bolt11,
+    required String originalKind, // '20000' | '23333'
+    String? geohash,
+    String? channel,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    if (originalKind != '${EventKind.geoChannel}' &&
+        originalKind != '${EventKind.namedChannel}') {
+      return null;
+    }
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final isGeo = geohash != null && geohash.isNotEmpty;
+    final tags = <List<String>>[
+      ['e', messageId],
+      ['p', recipientPubkey],
+      ['k', originalKind],
+      ['bolt11', bolt11],
+      // Carry the channel id so the relay/D1 archive can key the receipt
+      // (zaps.js: geohash → ['g',gh]; else named → ['d',channel]).
+      if (isGeo)
+        ['g', geohash]
+      else if (originalKind == '${EventKind.namedChannel}' &&
+          channel != null &&
+          channel.isNotEmpty)
+        ['d', channel],
+    ];
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.zapReceipt,
+        tags: tags,
+        content: '',
+      ),
+    );
+    if (isGeo) {
+      final closest =
+          closestGeoRelays(geohash).map((r) => r.url).toList(growable: false);
+      await pool.publishGeo(signed, closest);
+    } else {
+      await pool.publish(signed);
+    }
     return signed;
   }
 

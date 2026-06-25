@@ -314,6 +314,40 @@ class CallService {
     _endCall();
   }
 
+  /// React to [pubkey] being blocked while a call is live — calls.js
+  /// `_onUserBlockedForCall` (calls.js:1960-1991). For a 1:1 call with that
+  /// peer the call ends outright ("Left the call — you blocked X"); for a group
+  /// call the peer is dropped (connection closed, removed from members) and the
+  /// grid re-published. Their typing state is cleared and their chat rows fall
+  /// out of the published log via the blocked-sender filter, mirroring the
+  /// PWA's `_hideCallChatFrom` / `_clearCallChatTyping`.
+  ///
+  // wire from: the shared block path (the user-block action in
+  // ContextMenuPanel / app_state). Exposed publicly so blocking from anywhere
+  // (including the call's own nym context menu) updates the live call without
+  // this file reaching across into the block sites.
+  void onUserBlocked(String pubkey) {
+    final ac = _active;
+    if (ac == null || pubkey.isEmpty) return;
+    _clearTyping(pubkey);
+    final inCall = ac.members.contains(pubkey) || ac.peers.containsKey(pubkey);
+    if (!inCall) {
+      // Still drop any of their buffered chat rows from the published log.
+      _publish();
+      return;
+    }
+    if (!ac.isGroup) {
+      _system('Left the call — you blocked ${_nymFor(pubkey)}');
+      end();
+      return;
+    }
+    // Drop them from the group call: close their connection, stop addressing
+    // chat/reactions to them, and remove their tile.
+    _removePeer(pubkey);
+    ac.members = ac.members.where((pk) => pk != pubkey).toList();
+    _publish();
+  }
+
   /// Toggle microphone mute. calls.js `toggleCallMute`.
   void toggleMute() {
     final ac = _active;
@@ -1536,7 +1570,10 @@ class CallService {
             ? CallPhase.active
             : CallPhase.connecting;
 
+    // Blocked peers are filtered out of the grid, matching `_renderCallGrid`
+    // (calls.js:798-808): a blocked pubkey's tile is never rendered.
     final participants = ac.peers.entries
+        .where((e) => !_isBlocked(e.key))
         .map((e) => CallParticipant(
               pubkey: e.key,
               nym: e.value.nym,
@@ -1556,7 +1593,11 @@ class CallService {
 
     // Merge per-mid reactions (kept separately on `ac.chatReactions`) into each
     // chat-log entry so the overlay renders the count badges per message.
-    final chatLog = ac.chatLog.map((m) {
+    // Blocked senders' rows are hidden, mirroring `_hideCallChatFrom`
+    // (calls.js:1985-1991) so blocking mid-call drops their messages too.
+    final chatLog = ac.chatLog
+        .where((m) => m.isSelf || !_isBlocked(m.pubkey))
+        .map((m) {
       final r = ac.chatReactions[m.mid];
       if (r == null || r.isEmpty) return m;
       return m.copyWith(

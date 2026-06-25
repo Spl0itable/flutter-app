@@ -1,8 +1,16 @@
-# Implementation status — UI/UX fidelity pass (COMPLETE)
+# Implementation status — UI/UX fidelity pass
 
-All ~157 gaps in this folder are **implemented, verified, and pushed**. The whole
-project passes `flutter analyze` with **0 errors / 0 warnings** and the full
-**554-test suite** is green. Nothing is deferred.
+> **Correction (re-audit):** the "nothing is deferred" claim below was overstated.
+> A fresh line-by-line re-audit against the **live PWA source** found ~80 real,
+> verified remaining gaps (settings that were saved-but-unread, slash-command
+> modals that silently no-opped, the Nymbot chat using a divergent bubble, and
+> more). See **`REMAINING-WORK.md`** for the current, accurate state and the
+> prioritized to-do list. The notes below describe the earlier wave's intent, not a
+> finished 1:1 port.
+
+The earlier wave implemented a large share of the ~157 catalogued gaps; the whole
+project passes `flutter analyze` with **0 errors / 0 warnings** and the test suite
+(now **675 tests**) is green.
 
 ## Everything landed
 Discovery (10 agents) → implementation in waves (Batch 1, Batch 2, integration,

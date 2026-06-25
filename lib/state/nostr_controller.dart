@@ -11,6 +11,7 @@ import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
 import '../core/utils/nym_utils.dart';
+import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
 import '../features/commands/command_handler.dart';
 import '../features/commands/command_registry.dart';
@@ -27,6 +28,7 @@ import '../features/p2p/p2p_models.dart';
 import '../features/p2p/p2p_service.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
+import '../features/zaps/lnurl.dart';
 import '../features/zaps/zap_logic.dart';
 import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
@@ -293,6 +295,15 @@ class NostrController {
       app.addChannel(g, geohash: g);
     }
   }
+
+  /// Public, throttled D1 activity refresh for the globe (GL3). The geohash
+  /// explorer calls this on open and on its 30s active-window tick so the
+  /// dots/heatmap reflect real D1 activity for channels we never loaded —
+  /// mirroring the PWA's `showGeohashExplorer` + the `ACTIVE_WINDOW_REFRESH_MS`
+  /// timer, both of which call `fetchGeohashActivityFromD1` (geohash-globe.js:210
+  /// / :1024). Delegates to [_discoverChannelActivity], which is already
+  /// ~30s-throttled and best-effort (so calling it on every tick is safe).
+  Future<void> refreshGeohashActivity() => _discoverChannelActivity();
 
   /// Relay connection-count sink. Forwards the live count to [AppState] (the old
   /// direct `setConnectedRelays` binding) AND re-fires the D1 activity discovery
@@ -601,6 +612,14 @@ class NostrController {
       _onChannelReadReceipt(event);
       return;
     }
+    // Public NIP-57 zap receipt (kind 9735) — a CHANNEL/profile zap on one of
+    // our authored messages (or a peer's own-published receipt). Routed here
+    // from the `#p:[self]` zap-receipt sub; gift-wrapped private zaps come via
+    // `_onPrivateZap` instead. Not an `ingestEvent` kind.
+    if (event.kind == EventKind.zapReceipt) {
+      _onPublicZapReceipt(event, appState);
+      return;
+    }
     // A live kind-0 from relays refreshes the D1 profile cache so we don't
     // re-issue a `profile-get` for a profile we just received (mirrors the PWA's
     // `profileFetchedAt` freshness gate).
@@ -832,16 +851,22 @@ class NostrController {
     // (notifications.js, derived from `channelInfo`). `channelKeyOf` already
     // returns the `#`-prefixed key (geohash `g` tag / named `d` tag), so reuse
     // it directly; null for an unkeyed event leaves the label off.
+    // A channel @-mention routes to the CHANNEL (notifications.js type
+    // 'geohash' → `switchChannel(info.channel, info.geohash)`), NOT the sender's
+    // PM. The channel key from `channelKeyOf` is `#`-prefixed; switchChannel
+    // takes the bare name (it auto-detects geohash via isChannelGeohash). The
+    // sender pubkey is carried separately for the avatar + author; the panel
+    // labels it via the `in #<key>` contextLabel.
+    final channelRoute =
+        key != null ? (key.startsWith('#') ? key.substring(1) : key) : '';
     _dispatchNotification(
       title: _nymDisplayFor(e.pubkey),
       body: e.content,
       senderPubkey: e.pubkey,
       isFriend: appState.isFriend(e.pubkey),
       isMention: mention,
-      // A channel notification only fires on an @-mention; record it as such so
-      // the panel labels it "Mention" and routes to the sender's PM/profile.
-      historyType: 'mention',
-      route: e.pubkey,
+      historyType: channelRoute.isNotEmpty ? 'channel' : 'mention',
+      route: channelRoute.isNotEmpty ? channelRoute : e.pubkey,
       eventId: e.id,
       tsMs: e.createdAt * 1000,
       contextLabel: key != null ? 'in $key' : null,
@@ -1543,15 +1568,117 @@ class NostrController {
     final amount = ZapLogic.parseAmountFromBolt11(bolt11);
     if (amount == null) return;
     final zapper = rumor['pubkey'] as String? ?? '';
+    // A gift-wrapped private zap is zapper-signed, so it is NOT cryptographically
+    // verified against the recipient's LNURL provider pubkey (zaps.js treats the
+    // gift-wrap announcement as unverified — the badge tooltip flags the sats).
+    // Deduped by bolt11 so our own self-record (verified) and this announcement
+    // of the SAME payment can't double-count: whichever lands first wins the
+    // count, and the verified self-record upgrades it out of `unverified`.
     appState.recordMessageZap(
       messageId: messageId,
       zapperPubkey: zapper,
       amountSats: amount,
       dedupKey: ZapLogic.dedupKey(bolt11: bolt11, eventId: ''),
+      verified: false,
     );
     // Resolve the zapper's avatar (the zappers sheet / badge), like the PWA
     // resolves zap-list authors (`ensureListProfiles`, zaps.js:223).
     if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+  }
+
+  /// Event ids of kind-9735 receipts WE published ourselves (channel announce,
+  /// [announceMessageZap]) so the `#p:[self]` zap-receipt sub echoing them back
+  /// is ignored — our own zap is already recorded at payment time (zaps.js
+  /// `_ownPublishedZapIds`, handleZapReceipt:1152). Capped to bound memory.
+  final Set<String> _ownPublishedZapIds = <String>{};
+
+  /// Routes an inbound PUBLIC kind-9735 zap receipt (channel/profile zap) for one
+  /// of our authored messages. Mirrors the channel/message arm of zaps.js
+  /// `handleZapReceipt` (lines 1147-1284): parse the `e`/`p`/`bolt11` tags,
+  /// resolve whether it's VERIFIED (the receipt's event pubkey equals the
+  /// recipient's LNURL provider pubkey), and accrue the sats to the message —
+  /// deduped by bolt11 so the LNURL provider's receipt, our own self-record, and
+  /// a peer's own-published echo of the SAME payment never multi-count.
+  ///
+  /// Profile zaps (no `['e', …]` tag) don't accrue to a message and are skipped
+  /// here (the PWA handles them via a separate notification path).
+  void _onPublicZapReceipt(NostrEvent event, AppStateNotifier appState) {
+    // Ignore the receipt we just published ourselves echoing back.
+    if (_ownPublishedZapIds.contains(event.id)) return;
+    if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
+
+    final info = ZapLogic.parseReceipt(event);
+    if (info == null) return; // no `e` tag / unparseable bolt11 → not a msg zap
+    final messageId = info.messageId;
+    final amount = info.amountSats;
+    final recipientPubkey = info.recipientPubkey;
+
+    // Resolve the recipient's LNURL provider pubkey, then decide verified:
+    // VERIFIED ⇔ the receipt author IS that provider (zaps.js:1259-1260).
+    _getZapProviderPubkey(recipientPubkey).then((providerPubkey) {
+      final verified = providerPubkey != null &&
+          event.pubkey.toLowerCase() == providerPubkey;
+      // Attribute the zap to the requester (description's kind-9734 author) when
+      // verified; otherwise to the receipt's own author (zaps.js zapper logic,
+      // simplified — we don't parse the description here, so fall back to the
+      // event author, which is correct for both the provider-verified and the
+      // peer-published-receipt cases).
+      final zapper = info.zapperPubkey;
+      if (_ref.read(appStateProvider).blockedUsers.contains(zapper)) return;
+      appState.recordMessageZap(
+        messageId: messageId,
+        zapperPubkey: zapper,
+        amountSats: amount,
+        dedupKey: info.dedupKey, // 'b:'+bolt11.toLowerCase()
+        verified: verified,
+      );
+      if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+    }).catchError((_) {});
+  }
+
+  /// Cache: recipient pubkey → resolved LNURL provider Nostr pubkey (lowercased)
+  /// or null. Mirrors zaps.js `_zapProviderPubkeys` (line 1464) — the NIP-57
+  /// receipt is "verified" only when its author equals this provider pubkey.
+  final Map<String, String?> _zapProviderPubkeys = {};
+  final Map<String, Future<String?>> _zapProviderLookups = {};
+
+  /// Resolves [recipientPubkey]'s LNURL provider Nostr pubkey (the `nostrPubkey`
+  /// in their `.well-known/lnurlp` metadata), cached + de-duplicated like the
+  /// PWA's `_getZapProviderPubkey` (zaps.js:1462). Returns null when the user has
+  /// no lightning address, the provider doesn't advertise a Nostr pubkey, or the
+  /// fetch fails. Used to mark public zap receipts verified/unverified.
+  Future<String?> _getZapProviderPubkey(String? recipientPubkey) async {
+    if (recipientPubkey == null || recipientPubkey.isEmpty) return null;
+    if (_zapProviderPubkeys.containsKey(recipientPubkey)) {
+      return _zapProviderPubkeys[recipientPubkey];
+    }
+    final inflight = _zapProviderLookups[recipientPubkey];
+    if (inflight != null) return inflight;
+    final lookup = () async {
+      try {
+        final lnAddress = _ref
+            .read(appStateProvider)
+            .users[recipientPubkey]
+            ?.profile
+            ?.lightningAddress;
+        if (lnAddress == null || lnAddress.isEmpty) return null;
+        final params = await Lnurl.fetchPayParams(lnAddress);
+        final pk = params.nostrPubkey;
+        if (params.allowsNostr &&
+            pk != null &&
+            RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(pk)) {
+          return pk.toLowerCase();
+        }
+        return null;
+      } catch (_) {
+        return null;
+      }
+    }();
+    _zapProviderLookups[recipientPubkey] = lookup;
+    final pk = await lookup;
+    _zapProviderLookups.remove(recipientPubkey);
+    _zapProviderPubkeys[recipientPubkey] = pk;
+    return pk;
   }
 
   // ---------------------------------------------------------------------------
@@ -1699,6 +1826,9 @@ class NostrController {
         emojiTags: _ref
             .read(liveCustomEmojiProvider.notifier)
             .emojiTagsForContent(content),
+        // Honor the user's Proof-of-Work Difficulty setting (settings.js
+        // `powDifficulty`); the service clamps it up to the Nymchat floor.
+        powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
         signerOverride: ephemeralSigner,
       );
       if (signed != null && echo != null) {
@@ -1759,6 +1889,9 @@ class NostrController {
           emojiTags: _ref
               .read(liveCustomEmojiProvider.notifier)
               .emojiTagsForContent(trimmed),
+          // Honor the user's Proof-of-Work Difficulty setting (clamped up to
+          // the Nymchat floor by the service).
+          powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
         );
         // Swap the temp id for the real signed-event id IN PLACE and register
         // it so the relay echo is deduped — never shown twice (the PWA's
@@ -1772,6 +1905,11 @@ class NostrController {
             realMs: int.tryParse(signed.tagValue('ms') ?? ''),
           );
         }
+        // Hardcore keypair mode: rotate to a brand-new keypair + nym after every
+        // sent channel message (messages.js:2392-2404). Runs AFTER the publish
+        // above so the message that just went out used the OLD identity; the
+        // next send uses the fresh one. No-op unless ephemeral + 'hardcore'.
+        await _rotateHardcoreIdentityIfNeeded();
       } catch (_) {
         // Publish failed: flip the placeholder to failed (`_markOptimisticFailed`).
         if (echo != null) appState.markOptimisticFailed(echo.id);
@@ -1824,6 +1962,65 @@ class NostrController {
         settings: _msgSettings,
       );
     }
+  }
+
+  /// Hardcore keypair mode: replace the live ephemeral identity with a brand-new
+  /// keypair + random nym after a sent message (messages.js:2392-2404 — the
+  /// `connectionMode === 'ephemeral' && nym_keypair_mode === 'hardcore'` branch
+  /// that runs `generateKeypair()` + `generateRandomNym()` + `updateSidebarAvatar()`).
+  ///
+  /// No-op unless we are EPHEMERAL (`loginMethod == null`, the PWA's
+  /// `connectionMode === 'ephemeral'`) AND the keypair mode is `'hardcore'`, so a
+  /// durable nsec/extension/NIP-46 account is never rotated out from under the
+  /// user.
+  ///
+  /// Rotation swaps the signing key IN PLACE on the live [NostrService]
+  /// ([NostrService.rotateIdentity]) — the relay connections + subscriptions
+  /// persist, matching the PWA's `generateKeypair` (which only swaps the key,
+  /// never reconnecting or re-subscribing). It then refreshes `selfPubkey`/
+  /// `selfNym` in [AppState] (the sidebar header avatar seed + nym react — the
+  /// native `updateSidebarAvatar`) and re-asserts presence under the new
+  /// identity via [recordOwnActivity].
+  Future<void> _rotateHardcoreIdentityIfNeeded() async {
+    final current = _identity;
+    final oldService = _service;
+    // Ephemeral only (no durable login) + the 'hardcore' keypair mode.
+    if (current == null ||
+        oldService == null ||
+        current.loginMethod != null) {
+      return;
+    }
+    if (_ref.read(settingsProvider.notifier).keypairMode != 'hardcore') return;
+
+    final kv = _ref.read(keyValueStoreProvider);
+    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    final rotated = await identityService.rotateEphemeral(current);
+    // rotateEphemeral returns the same instance for a durable login; the guard
+    // above already excludes that, but stay safe against a no-op rotation.
+    if (identical(rotated, current) || rotated.pubkey == current.pubkey) return;
+
+    final signer =
+        rotated.privkey != null ? LocalSigner(rotated.privkey!) : null;
+
+    // Swap the key IN PLACE on the live service — keep the relay connections +
+    // subscriptions (the PWA's `generateKeypair` only swaps privkey/pubkey; it
+    // does NOT reconnect or re-subscribe, so the `#p:[self]` gift-wrap filter
+    // stays on the prior pubkey). A full service rebuild would reconnect every
+    // relay on every sent message, which hardcore mode can't afford. The same
+    // [NostrService]/[GroupManager] instances are retained — only the signing
+    // identity changes for the NEXT publish.
+    oldService.rotateIdentity(rotated, signer);
+    _identity = rotated;
+    _signer = signer;
+
+    // Refresh the sidebar (header avatar seed + nym) without wiping the
+    // conversation — the native `updateSidebarAvatar`. (NOT goLive, which would
+    // reset the live store.)
+    _ref.read(appStateProvider.notifier).setIdentity(rotated.pubkey, rotated.nym);
+
+    // Re-assert presence under the new identity, like the boot path does for a
+    // freshly-booted identity (nostr-core.js presence-on-connect).
+    recordOwnActivity();
   }
 
   // --- Command effects (engine half of the cmd* handlers) -------------------
@@ -2271,6 +2468,18 @@ class NostrController {
     await cache.wipe();
   }
 
+  /// Wipes the on-device PM + group-chat cache (the shared `pms` table). Called
+  /// when the user disables "Cache PMs & Group Chats" — the PWA's `clearPMCache`
+  /// that the setting's hint promises ("Toggling off clears the existing cached
+  /// PM/group data"). Drops the dirty PM keys first so a pending flush can't
+  /// immediately re-persist what we just dropped.
+  Future<void> clearPmGroupCache() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return;
+    _dirtyPmKeys.clear();
+    await cache.clearPms();
+  }
+
   // --- moderation entry points (role-checked) -------------------------------
 
   Future<bool> kickFromGroup(String groupId, String targetPubkey,
@@ -2685,6 +2894,9 @@ class NostrController {
     if (added) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Blocked ${_nymDisplayFor(pubkey)}');
+      // Blocking mid-call ends a 1:1 call / drops the peer from a group call and
+      // hides their chat (calls.js `_onUserBlockedForCall`).
+      _ref.read(callServiceProvider).onUserBlocked(pubkey);
     }
     return added;
   }
@@ -3628,6 +3840,143 @@ class NostrController {
       comment: comment,
     );
     return service.publishZapRequest(rumor);
+  }
+
+  /// Announces a message zap we just paid so OTHER clients update the badge
+  /// (zaps.js `handleZapPaymentSuccess`:1099-1110 → `_publishOwnPrivateZapEvent`
+  /// / `_publishOwnMessageZapEvent`). Reads the CURRENT view and routes:
+  ///   * PM (1:1) → gift-wrap a kind-9735 rumor to `[self, peer]` (private; never
+  ///     leaks the zap to public relays),
+  ///   * group → gift-wrap a kind-9735 rumor to `group.members`,
+  ///   * channel → publish a real signed kind-9735 to relays (+ geo relays for a
+  ///     geohash channel).
+  ///
+  /// Called from `zap_modal._markPaid` right after the self-record. Deduped end
+  /// to end by bolt11: the self-record (verified), this announcement, and any
+  /// public-receipt echo share the `'b:'+bolt11.toLowerCase()` dedup key, so a
+  /// single payment is counted once. [bolt11] is the paid invoice's `pr`.
+  Future<void> announceMessageZap({
+    required String messageId,
+    required String recipientPubkey,
+    required String bolt11,
+    String? originalKind,
+  }) async {
+    if (messageId.isEmpty || recipientPubkey.isEmpty || bolt11.isEmpty) return;
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+    final view = _ref.read(appStateProvider).view;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    if (view.kind == ViewKind.group) {
+      // Group rumor tags (zaps.js:1578): g/e/k('14')/p/bolt11 → group.members.
+      final group = _ref.read(appStateProvider.notifier).groupById(view.id);
+      if (group == null) return;
+      final ek = _groups?.keysFor(group.id);
+      final rumor = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.zapReceipt,
+        tags: [
+          ['g', group.id],
+          ['e', messageId],
+          ['k', '${EventKind.dmRumor}'], // '14'
+          ['p', recipientPubkey],
+          ['bolt11', bolt11],
+        ],
+        content: '',
+      );
+      await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: group.members,
+        encryptTo: ek != null
+            ? (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey)
+            : null,
+      );
+      return;
+    }
+
+    if (view.kind == ViewKind.pm) {
+      // PM rumor tags (zaps.js:1587): e/p/k('1059')/bolt11 → [self, peer].
+      final peer = view.id;
+      final rumor = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.zapReceipt,
+        tags: [
+          ['e', messageId],
+          ['p', recipientPubkey],
+          ['k', '${EventKind.giftWrap}'], // '1059'
+          ['bolt11', bolt11],
+        ],
+        content: '',
+      );
+      await service.publishGiftWrappedRumor(
+        rumor: rumor,
+        recipients: [identity.pubkey, peer],
+      );
+      return;
+    }
+
+    // Channel: publish a real, signed kind-9735 to relays. Only geohash/named
+    // channel kinds are publishable (zaps.js `_publishOwnMessageZapEvent` bails
+    // on any other kind). Infer the kind from the view when not supplied.
+    final isGeo = _ref
+        .read(appStateProvider)
+        .channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    final kind = originalKind ??
+        (isGeo ? '${EventKind.geoChannel}' : '${EventKind.namedChannel}');
+    if (kind != '${EventKind.geoChannel}' &&
+        kind != '${EventKind.namedChannel}') {
+      return;
+    }
+    final signed = await service.publishMessageZapReceipt(
+      messageId: messageId,
+      recipientPubkey: recipientPubkey,
+      bolt11: bolt11,
+      originalKind: kind,
+      geohash: isGeo ? view.id : null,
+      channel: isGeo ? null : view.id,
+    );
+    if (signed != null) {
+      // Ignore the `#p:[self]` echo of our own published receipt (zaps.js
+      // `_ownPublishedZapIds`); the self-record already counted this payment.
+      _ownPublishedZapIds.add(signed.id);
+      if (_ownPublishedZapIds.length > 500) {
+        _ownPublishedZapIds.remove(_ownPublishedZapIds.first);
+      }
+    }
+  }
+
+  /// Resolves [pubkey]'s lightning address for a quick-zap (zaps.js
+  /// `fetchLightningAddressForUser`/`handleQuickZap`): returns the cached lud16/
+  /// lud06 if we already hold their kind-0, else fetches their profile (D1-first
+  /// via [resolveProfiles], falling back to a relay kind-0 sub) and awaits the
+  /// resolved address up to [timeout], returning null when none is found.
+  ///
+  /// This fixes the quick-zap button wrongly reporting "cannot receive zaps" for
+  /// an author whose kind-0 simply hasn't been ingested yet — the PWA always does
+  /// a fresh fetch first before deciding (`handleQuickZap`, zaps.js:1794).
+  Future<String?> resolveLightningAddressForZap(
+    String pubkey, {
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    String? cached() =>
+        _ref.read(appStateProvider).users[pubkey]?.profile?.lightningAddress;
+    final existing = cached();
+    if (existing != null && existing.isNotEmpty) return existing;
+
+    // Trigger a D1-first (then relay) kind-0 fetch — the same path message/
+    // presence backfill uses — and poll the store for the resolved address.
+    unawaited(resolveProfiles([pubkey]));
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      final addr = cached();
+      if (addr != null && addr.isNotEmpty) return addr;
+    }
+    return cached();
   }
 
   // ---------------------------------------------------------------------------

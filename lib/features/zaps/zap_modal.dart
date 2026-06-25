@@ -9,8 +9,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/api/api_client.dart';
+import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import 'lnurl.dart';
+import 'zap_logic.dart';
 
 /// `#zapModal` (`.zap-modal`, index.html lines 2021-2098; zaps.js
 /// `showZapModal` / `generateZapInvoice` / `displayZapInvoice`). Preset amounts
@@ -213,6 +215,33 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   void _markPaid(LnInvoice invoice) {
     if (!_settledInvoices.add(invoice.dedupKey)) return; // already counted
     HapticFeedback.lightImpact(); // PWA `window.nymHapticTap`
+    // Record our own zap on the target message's badge instantly (zaps.js
+    // `_recordOwnMessageZap`), deduped by the invoice's bolt11 so a later
+    // kind-9735 echo for the same payment can't double-count (same dedupKey
+    // scheme as the receipt path, _onPrivateZap).
+    final messageId = widget.messageId;
+    if (messageId != null && messageId.isNotEmpty) {
+      ref.read(appStateProvider.notifier).recordMessageZap(
+            messageId: messageId,
+            zapperPubkey: ref.read(appStateProvider).selfPubkey,
+            amountSats: invoice.amountSats,
+            dedupKey: ZapLogic.dedupKey(bolt11: invoice.pr, eventId: ''),
+            // The self-zap is verify-URL/server confirmed → verified (zaps.js
+            // `_recordOwnMessageZap(..., true)`, line 1102/1606).
+          );
+      // Announce the zap so OTHER clients update the badge (zaps.js
+      // `_publishOwnMessageZapEvent` / `_publishOwnPrivateZapEvent`). The
+      // controller reads the current view and picks public (channel) vs
+      // gift-wrapped (PM/group) delivery. Deduped end-to-end by bolt11 so this
+      // announce, the self-record above, and any public-receipt echo of the
+      // same payment count once.
+      unawaited(ref.read(nostrControllerProvider).announceMessageZap(
+            messageId: messageId,
+            recipientPubkey: widget.recipientPubkey,
+            bolt11: invoice.pr,
+            originalKind: widget.originalKind,
+          ));
+    }
     setState(() => _phase = _Phase.paid);
     Future<void>.delayed(const Duration(seconds: 2), () {
       if (mounted) Navigator.of(context).maybePop();

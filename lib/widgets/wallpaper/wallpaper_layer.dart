@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -140,13 +141,20 @@ class WallpaperLayer extends ConsumerWidget {
       final scrim = c.isLight
           ? const Color(0xD9F5F5F2)
           : const Color(0xD10A0A0F);
+      // The PWA only ever stores a remote upload URL; the Flutter upload flow
+      // (settings `_WallpaperPicker`) persists a locally-picked file's absolute
+      // path instead, so a value that isn't an http(s) URL is an on-device file.
+      final isRemote = url.startsWith('http://') || url.startsWith('https://');
+      final ImageProvider image = isRemote
+          // Route the remote custom wallpaper through the media proxy (hide IP /
+          // bypass hotlink-403), like every other remote image.
+          ? NetworkImage(proxiedAvatarUrl(url) ?? url)
+          : FileImage(File(url));
       return IgnorePointer(
         child: DecoratedBox(
           decoration: BoxDecoration(
             image: DecorationImage(
-              // Route the custom wallpaper through the media proxy (hide IP /
-              // bypass hotlink-403), like every other remote image.
-              image: NetworkImage(proxiedAvatarUrl(url) ?? url),
+              image: image,
               fit: BoxFit.cover,
               colorFilter: ColorFilter.mode(scrim, BlendMode.srcOver),
             ),

@@ -6,6 +6,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -14,12 +15,18 @@ import '../../../core/theme/nym_colors.dart';
 import '../../../core/theme/nym_metrics.dart';
 import '../../../core/theme/nym_theme.dart'
     show kEmojiFontFallback, kSansFont, kMonoFont;
+import '../../../core/utils/nym_utils.dart';
+import '../../../models/message.dart';
 import '../../../services/api/api_client.dart';
 import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
+import '../../../widgets/chat/messages_list.dart' show messageListScrollerProvider;
 import '../../../widgets/common/app_dialog.dart';
+import '../../../widgets/context_menu/context_menu_actions.dart';
+import '../../../widgets/context_menu/context_menu_panel.dart';
+import '../../commands/command_handler.dart' show resolveTarget;
 import '../inline_network_image.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
@@ -55,6 +62,7 @@ class MessageContent extends ConsumerWidget {
   const MessageContent({
     super.key,
     required this.content,
+    this.hostMessageId,
     this.baseColor,
     this.fontSize,
     this.blurImages = false,
@@ -63,6 +71,12 @@ class MessageContent extends ConsumerWidget {
   });
 
   final String content;
+
+  /// The id of the message this content belongs to. Lets a tapped blockquote
+  /// EXCLUDE its own host message when searching for the quoted source (mirrors
+  /// the PWA `hostKey` guard in `_scrollToQuotedMessage`, messages.js:2690). Null
+  /// for surfaces without a backing message (e.g. the `/me` action preview).
+  final String? hostMessageId;
 
   /// Body text color (defaults to `context.nym.text`).
   final Color? baseColor;
@@ -102,8 +116,10 @@ class MessageContent extends ConsumerWidget {
     final color = baseColor ?? c.text;
 
     // Emoji-only messages (1-6 emoji, no other text) render enlarged
-    // (`.emoji-only .emoji { font-size: 2.5em }`, `messages.js:922-924`).
-    final emojiOnly = isEmojiOnly(content);
+    // (`.emoji-only .emoji { font-size: 2.5em }`, `messages.js:922-924`) — for
+    // both unicode emoji and custom-emoji-only shortcode messages.
+    final emojiOnly =
+        isEmojiOnly(content) || isCustomEmojiOnly(content, ctx.customEmojis);
 
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
@@ -120,15 +136,70 @@ class MessageContent extends ConsumerWidget {
       }
     }
 
-    return Column(
+    // Tapping a `.nm-mention` chip opens the mentioned user's context menu
+    // (styles-chat.css:1308 `.nm-mention { cursor:pointer }`; ui-context.js:859-
+    // 870). The PWA resolves the mention to a pubkey (`_resolveMentionPubkey`)
+    // then calls `showContextMenu(e, nym#suffix, pubkey, null, null, false)` —
+    // the FULL menu with null content/messageId (NOT profile-only). We resolve
+    // the chip's base nym + optional `#suffix` via [resolveTarget] (the same
+    // matcher cmdSlap/cmdHug use) and build the matching [CtxTarget].
+    void onMentionTap(MentionNode node) {
+      final users = ref.read(usersProvider);
+      // `node.base` already carries the leading `@`; re-attach the `#suffix` so
+      // a suffixed mention disambiguates to the right pubkey.
+      final raw = node.suffix != null ? '${node.base}#${node.suffix}' : node.base;
+      final t = resolveTarget(raw, users);
+      if (t == null) return; // unknown mention → inert (PWA: no pubkey → no-op)
+      final app = ref.read(appStateProvider);
+      ContextMenuPanel.show(
+        context,
+        // Mirrors `showContextMenu(e, nym#suffix, pubkey, null, null, false)`:
+        // a full (non-profileOnly) target with no message content/id, so the
+        // action list reduces to Mention/PM/Slap/Hug/AddToGroup/GiftCredits/
+        // Friend/Report/Block (buildContextMenuActions with hasContent=false).
+        target: CtxTarget(
+          pubkey: t.pubkey,
+          nym: stripPubkeySuffix(t.nym),
+          isSelf: t.pubkey == app.selfPubkey,
+        ),
+      );
+    }
+
+    // Read-more height truncation (messages.js:1192-1265 + styles-chat.css:793-
+    // 822). Long bodies collapse to a 300px `.truncated-inner` with a "Read
+    // more"/"Show less" toggle. The char threshold (400 mobile ≤768 / 600
+    // desktop) only FLAGS a candidate; the collapse itself is height-based, so
+    // `_Collapsible` drops the toggle when the rendered body already fits 300px.
+    // The PWA measures `replyText` = the content with `>`-prefixed quote lines
+    // removed (blockquotes get their own separate truncation; primary path here
+    // is the reply body).
+    final replyText = content
+        .split('\n')
+        .where((line) => !line.startsWith('>'))
+        .join('\n')
+        .trim();
+    final threshold = truncateThreshold(context);
+    final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(height: 4),
           _block(context, c, blocks[i], color, size,
-              emojiOnly: emojiOnly, onChannelRef: onChannelRef),
+              emojiOnly: emojiOnly,
+              onChannelRef: onChannelRef,
+              onMentionTap: onMentionTap),
         ],
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Link-preview cards (`_attachLinkPreviews`) are appended OUTSIDE the
+        // `.truncated-inner` in the PWA, so they stay below the collapsible body.
+        if (replyText.length > threshold) _Collapsible(child: body) else body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
     );
@@ -188,6 +259,7 @@ class MessageContent extends ConsumerWidget {
     double size, {
     bool emojiOnly = false,
     void Function(String name, bool isGeohash)? onChannelRef,
+    void Function(MentionNode node)? onMentionTap,
   }) {
     switch (block) {
       case ParagraphBlock(:final inlines):
@@ -199,6 +271,7 @@ class MessageContent extends ConsumerWidget {
           shadows: glyphShadows,
           monospace: monospace,
           onChannelRef: onChannelRef,
+          onMentionTap: onMentionTap,
         );
       case HeadingBlock(:final level, :final inlines):
         final scale = level == 1 ? 1.5 : (level == 2 ? 1.3 : 1.15);
@@ -209,11 +282,20 @@ class MessageContent extends ConsumerWidget {
           size: size * scale,
           weight: FontWeight.w700,
           onChannelRef: onChannelRef,
+          onMentionTap: onMentionTap,
         );
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size);
       case QuoteBlock():
-        return _QuoteBox(block: block, color: color, size: size);
+        // Top-level blockquote (PWA `:scope > blockquote`) — eligible for its
+        // own read-more truncation, and tappable to jump to the quoted source.
+        return _QuoteBox(
+          block: block,
+          color: color,
+          size: size,
+          topLevel: true,
+          hostMessageId: hostMessageId,
+        );
       case MediaBlock(:final items):
         return _MediaGallery(items: items, blur: blurImages);
     }
@@ -235,13 +317,29 @@ final RegExp _rxEmojiOnly = RegExp('^(?:$_emojiUnit){1,6}\$', unicode: true);
 final RegExp _rxWhitespace = RegExp(r'\s', unicode: true);
 
 /// True when [content] is 1-6 emoji with optional whitespace and no other text
-/// (port of `isEmojiOnly`, `messages.js:1424-1430`). Custom-emoji-only messages
-/// (e.g. `:shrug:`) are out of scope here — those are detected by the formatter.
+/// (port of `isEmojiOnly`, `messages.js:1424-1430`).
 bool isEmojiOnly(String content) {
   if (content.isEmpty) return false;
   final stripped = content.replaceAll(_rxWhitespace, '');
   if (stripped.isEmpty) return false;
   return _rxEmojiOnly.hasMatch(stripped);
+}
+
+final RegExp _rxCustomEmojiToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
+/// True when [content] is 1-6 whitespace-separated custom-emoji shortcodes,
+/// every one a known [customEmojis] code (port of `isCustomEmojiOnly`,
+/// emoji.js:331). Drives the same `.emoji-only` 2.75em enlarge as a
+/// unicode-emoji-only message.
+bool isCustomEmojiOnly(String content, Map<String, String> customEmojis) {
+  if (content.isEmpty || customEmojis.isEmpty) return false;
+  final tokens = content.trim().split(RegExp(r'\s+'));
+  if (tokens.isEmpty || tokens.length > 6) return false;
+  for (final tok in tokens) {
+    final m = _rxCustomEmojiToken.firstMatch(tok);
+    if (m == null || !customEmojis.containsKey(m.group(1))) return false;
+  }
+  return true;
 }
 
 /// Renders a list of inline nodes as a single [Text.rich] (with [WidgetSpan]s
@@ -256,6 +354,7 @@ class _RichInline extends StatelessWidget {
     this.shadows,
     this.monospace = false,
     this.onChannelRef,
+    this.onMentionTap,
   });
 
   final List<InlineNode> inlines;
@@ -274,6 +373,9 @@ class _RichInline extends StatelessWidget {
 
   /// Switches the active channel when a `#ref` / `app.nym.bar/#…` link is tapped.
   final void Function(String name, bool isGeohash)? onChannelRef;
+
+  /// Opens the mentioned user's context menu when a `.nm-mention` chip is tapped.
+  final void Function(MentionNode node)? onMentionTap;
 
   @override
   Widget build(BuildContext context) {
@@ -332,17 +434,28 @@ class _RichInline extends StatelessWidget {
                     decoration: TextDecoration.lineThrough, color: c.textDim))),
         ]);
       case InlineCodeNode(:final code):
-        // `code { background: rgba(255,255,255,0.06); color: var(--secondary);
-        //  font-size:0.9em }` (styles-chat.css:1084-1092). Padding/radius need a
-        // WidgetSpan; kept as the styled span (color/bg/size).
-        return TextSpan(
-          text: code,
-          style: base.merge(TextStyle(
-            fontFamily: 'monospace',
-            color: c.secondary,
-            fontSize: size * 0.9,
-            backgroundColor: Colors.white.withValues(alpha: 0.06),
-          )),
+        // `code { background: rgba(255,255,255,0.06); padding:2px 6px;
+        //  border-radius:5px; font-family:mono; color: var(--secondary);
+        //  font-size:0.9em }` (styles-chat.css:1084-1092) — a rounded inline
+        //  pill, so a WidgetSpan carries the padding + radius the CSS needs.
+        return WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              code,
+              style: base.merge(TextStyle(
+                fontFamily: 'monospace',
+                color: c.secondary,
+                fontSize: size * 0.9,
+                shadows: const [],
+              )),
+            ),
+          ),
         );
       case LinkNode(:final url):
         return TextSpan(
@@ -364,7 +477,7 @@ class _RichInline extends StatelessWidget {
       case MentionNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
-          child: _MentionChip(node: node, size: size),
+          child: _MentionChip(node: node, size: size, onTap: onMentionTap),
         );
       case ChannelRefNode(:final name, :final isGeohash):
         // `.channel-reference`: underlined, inherits BODY text color (no tint),
@@ -443,14 +556,18 @@ class _LinkTap extends TapGestureRecognizer {
 }
 
 class _MentionChip extends StatelessWidget {
-  const _MentionChip({required this.node, required this.size});
+  const _MentionChip({required this.node, required this.size, this.onTap});
   final MentionNode node;
   final double size;
+
+  /// Tapping the chip opens the mentioned user's context menu
+  /// (`.nm-mention { cursor:pointer }`, ui-context.js:859-870). Null → inert.
+  final void Function(MentionNode node)? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Text.rich(
+    final chip = Text.rich(
       TextSpan(
         children: [
           TextSpan(
@@ -473,6 +590,12 @@ class _MentionChip extends StatelessWidget {
             ),
         ],
       ),
+    );
+    if (onTap == null) return chip;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onTap!(node),
+      child: chip,
     );
   }
 }
@@ -676,19 +799,280 @@ class _CodeBox extends StatelessWidget {
   }
 }
 
+/// The read-more char-count threshold (`truncateThreshold`, messages.js:1193-
+/// 1194): 400 on mobile (`innerWidth <= 768`), 600 on desktop. It only FLAGS a
+/// truncation candidate; the collapse itself is height-based (see [_Collapsible]).
+int truncateThreshold(BuildContext context) =>
+    MediaQuery.of(context).size.width <= 768 ? 400 : 600;
+
+/// The rendered text length of a [QuoteBlock], mirroring the PWA's
+/// `bq.textContent.length` (messages.js:1214) — the author header plus all child
+/// text, with custom-emoji images contributing nothing (they're `<img>`, no text)
+/// the same way `textContent` skips them. Used to flag a lone long blockquote as
+/// a read-more truncation candidate.
+int _quoteTextLength(QuoteBlock block) {
+  var n = block.author != null ? block.author!.length + 1 : 0; // header + ':'
+  for (final child in block.children) {
+    n += _blockTextLength(child);
+  }
+  return n;
+}
+
+int _blockTextLength(FormatBlock block) {
+  switch (block) {
+    case ParagraphBlock(:final inlines):
+    case HeadingBlock(:final inlines):
+      var n = 0;
+      for (final node in inlines) {
+        n += _inlineTextLength(node);
+      }
+      return n;
+    case CodeBlock(:final code):
+      return code.length;
+    case QuoteBlock():
+      return _quoteTextLength(block);
+    case MediaBlock():
+      return 0; // media renders as elements, no text content
+  }
+}
+
+int _inlineTextLength(InlineNode node) {
+  switch (node) {
+    case TextSpanNode(:final text):
+      return text.length;
+    case BoldNode(:final children):
+    case ItalicNode(:final children):
+    case StrikeNode(:final children):
+      var n = 0;
+      for (final ch in children) {
+        n += _inlineTextLength(ch);
+      }
+      return n;
+    case InlineCodeNode(:final code):
+      return code.length;
+    case LinkNode(:final url):
+      return url.length;
+    case EmojiNode(:final unicode):
+      return unicode.length;
+    case MentionNode(:final base, :final suffix):
+      return base.length + (suffix != null ? suffix.length + 1 : 0);
+    case ChannelRefNode(:final name):
+      return name.length + 1; // leading '#'
+    case ChannelLinkChip(:final label):
+      return label.length;
+    case CustomEmojiNode():
+    case GroupInviteChip():
+      return 0; // rendered as an image / chip, no text content
+    default:
+      // `_MediaInline` is flattened to blocks before render and never reaches
+      // here (it contributes no text content either way).
+      return 0;
+  }
+}
+
+// ===========================================================================
+// Jump-to-quoted-message resolution — the content-based search behind a tapped
+// blockquote, a 1:1 port of `_scrollToQuotedMessage`'s matcher
+// (messages.js:2676-2762). Given a [QuoteBlock] and the loaded view messages it
+// returns the best-matching SOURCE message (or null), so the caller can scroll
+// to + flash it. Public for the unit tests in `message_render_test.dart`.
+// ===========================================================================
+
+final RegExp _rxQuoteSuffix = RegExp(r'#([0-9a-f]{4})$', caseSensitive: false);
+final RegExp _rxWs = RegExp(r'\s+');
+
+/// The `textContent` of a quote's children (the PWA clones the blockquote and
+/// removes `.quote-author` before reading `textContent`), whitespace-collapsed.
+/// Custom-emoji / media contribute nothing, exactly like an `<img>` in
+/// `textContent`.
+String _quoteBodyText(QuoteBlock block) {
+  final buf = StringBuffer();
+  for (final child in block.children) {
+    _appendBlockText(buf, child);
+  }
+  return buf.toString().replaceAll(_rxWs, ' ').trim();
+}
+
+void _appendBlockText(StringBuffer buf, FormatBlock block) {
+  switch (block) {
+    case ParagraphBlock(:final inlines):
+    case HeadingBlock(:final inlines):
+      for (final node in inlines) {
+        _appendInlineText(buf, node);
+      }
+      buf.write(' ');
+    case CodeBlock(:final code):
+      buf
+        ..write(code)
+        ..write(' ');
+    case QuoteBlock():
+      // Nested quote: its author span + body are part of the outer textContent.
+      if (block.author != null) {
+        buf
+          ..write(block.author)
+          ..write(': ');
+      }
+      for (final child in block.children) {
+        _appendBlockText(buf, child);
+      }
+    case MediaBlock():
+      break; // <img>/<video> — no text content
+  }
+}
+
+void _appendInlineText(StringBuffer buf, InlineNode node) {
+  switch (node) {
+    case TextSpanNode(:final text):
+      buf.write(text);
+    case BoldNode(:final children):
+    case ItalicNode(:final children):
+    case StrikeNode(:final children):
+      for (final ch in children) {
+        _appendInlineText(buf, ch);
+      }
+    case InlineCodeNode(:final code):
+      buf.write(code);
+    case LinkNode(:final url):
+      buf.write(url);
+    case EmojiNode(:final unicode):
+      buf.write(unicode);
+    case MentionNode(:final base, :final suffix):
+      buf.write(base);
+      if (suffix != null) buf.write('#$suffix');
+    case ChannelRefNode(:final name):
+      buf.write('#$name');
+    case ChannelLinkChip(:final label):
+      buf.write(label);
+    case CustomEmojiNode():
+    case GroupInviteChip():
+      break; // rendered as image / chip — no text content
+    default:
+      break;
+  }
+}
+
+/// `stripQuoteLines` (messages.js:2711): the non-`>` lines of [raw], joined by a
+/// space and whitespace-collapsed — the "reply only" text the match scores
+/// against (so a reply whose body merely re-quotes doesn't shadow the original).
+String _stripQuoteLines(String raw) => raw
+    .split(RegExp(r'\r?\n'))
+    .where((l) => !l.startsWith('>'))
+    .join(' ')
+    .replaceAll(_rxWs, ' ')
+    .trim();
+
+/// `scoreHaystack` (messages.js:2695-2701): exact 1000 / contains 500 / long-
+/// prefix(80) 250 / else 0.
+int _scoreHaystack(String haystack, String needle) {
+  if (haystack.isEmpty) return 0;
+  if (haystack == needle) return 1000;
+  if (haystack.contains(needle)) return 500;
+  if (needle.length > 20 &&
+      haystack.contains(needle.substring(0, 80.clamp(0, needle.length)))) {
+    return 250;
+  }
+  return 0;
+}
+
+/// Finds the message a tapped quote points at, mirroring the DOM scan in
+/// `_scrollToQuotedMessage` (messages.js:2713-2728). Returns null when nothing
+/// scores above 0 (PWA: "Original message is not available").
+Message? resolveQuotedMessage(
+  QuoteBlock block,
+  List<Message> messages, {
+  String? hostMessageId,
+}) {
+  // Author: strip a leading '@'/trailing ':' (already done in QuoteBlock.author)
+  // then split a trailing `#xxxx` suffix from the base nym.
+  final authorText = (block.author ?? '').trim();
+  if (authorText.isEmpty && block.children.isEmpty) return null;
+  final sfx = _rxQuoteSuffix.firstMatch(authorText);
+  final quotedSuffix = sfx?.group(1)?.toLowerCase();
+  final quotedName = authorText.replaceAll(_rxQuoteSuffix, '').trim();
+
+  final quotedText = _quoteBodyText(block);
+  if (quotedText.isEmpty) return null;
+  final needle = quotedText.substring(0, quotedText.length.clamp(0, 200));
+
+  bool matchesAuthor(Message m) {
+    final suffix = m.pubkey.length >= 4
+        ? m.pubkey.substring(m.pubkey.length - 4).toLowerCase()
+        : m.pubkey.toLowerCase();
+    if (quotedSuffix != null && suffix != quotedSuffix) return false;
+    final trimmed = m.author.trim();
+    final baseAuthor = stripPubkeySuffix(trimmed);
+    if (quotedName.isNotEmpty &&
+        baseAuthor != quotedName &&
+        trimmed != quotedName) {
+      return false;
+    }
+    return true;
+  }
+
+  Message? best;
+  var bestScore = -1;
+  for (final m in messages) {
+    if (hostMessageId != null && m.id == hostMessageId) continue;
+    if (!matchesAuthor(m)) continue;
+    final raw = m.content.replaceAll(_rxWs, ' ').trim();
+    if (raw.isEmpty) continue;
+    final replyOnly = _stripQuoteLines(m.content);
+    final score = _scoreHaystack(replyOnly.isNotEmpty ? replyOnly : raw, needle);
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
 /// Left-bordered quote block, with an optional author header.
-class _QuoteBox extends StatelessWidget {
-  const _QuoteBox({required this.block, required this.color, required this.size});
+class _QuoteBox extends ConsumerWidget {
+  const _QuoteBox({
+    required this.block,
+    required this.color,
+    required this.size,
+    this.topLevel = false,
+    this.hostMessageId,
+  });
   final QuoteBlock block;
   final Color color;
   final double size;
 
+  /// True only for a direct child of `.message-content` (PWA `:scope >
+  /// blockquote`); a nested quote is measured as part of its parent's
+  /// `textContent` and is never independently truncated.
+  final bool topLevel;
+
+  /// The id of the host message (the one containing this quote), forwarded so a
+  /// tap can exclude the host from the quoted-source search (PWA `hostKey`).
+  final String? hostMessageId;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
+    final inner = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (block.author != null) _quoteAuthor(c, block.author!),
+        for (final child in block.children) _quoteChild(context, c, child),
+      ],
+    );
+    // A lone long blockquote gets its OWN read-more truncation in the PWA
+    // (messages.js:1213-1224): each top-level `> blockquote` whose
+    // `textContent.length` exceeds the threshold is wrapped in a 300px
+    // `.truncated-inner` + "Read more" toggle — independent of the reply-body
+    // truncation in [MessageContent]. (The reply-body path measures only the
+    // non-`>` lines, so a message that is purely one long quote is never caught
+    // there; this is what clamps it.)
+    final clamped =
+        topLevel && _quoteTextLength(block) > truncateThreshold(context)
+            ? _Collapsible(child: inner)
+            : inner;
     // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
     // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
-    return Container(
+    final box = Container(
       padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
       decoration: BoxDecoration(
         color: c.secondaryA(0.1),
@@ -698,16 +1082,40 @@ class _QuoteBox extends StatelessWidget {
           bottomRight: Radius.circular(8),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (block.author != null) _quoteAuthor(c, block.author!),
-          for (final child in block.children)
-            _quoteChild(context, c, child),
-        ],
-      ),
+      child: clamped,
     );
+    // `.message-content > blockquote { cursor: pointer }` (styles-chat.css:1276):
+    // ONLY the top-level quote is tappable; tapping it jumps the list to the
+    // quoted source message and flashes it (PWA `_scrollToQuotedMessage`, bound
+    // to `.message-content > blockquote` in ui-context.js:873). Inner links /
+    // mentions / code carry their own recognizers and win the hit-test, so the
+    // translucent wrapper only fires on the quote's own (inert) surface — the
+    // same effect as the PWA's `closest('a, .nm-mention, code, …')` exclusion.
+    if (!topLevel) return box;
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _jumpToQuotedSource(ref),
+      child: box,
+    );
+  }
+
+  /// Resolves the quoted SOURCE message in the current view and scrolls+flashes
+  /// it, mirroring `_scrollToQuotedMessage` (messages.js:2676-2777): a
+  /// content-based search keyed on the quote's author (base nym + optional 4-hex
+  /// suffix) and its quoted text, excluding the host message. No-ops gracefully
+  /// when the source isn't in the loaded set (the PWA bails the same way).
+  void _jumpToQuotedSource(WidgetRef ref) {
+    final messages = ref.read(messagesForCurrentViewProvider);
+    final target = resolveQuotedMessage(
+      block,
+      messages,
+      hostMessageId: hostMessageId,
+    );
+    if (target == null) return; // not in the loaded set → bail (PWA parity)
+    final scroller = ref.read(messageListScrollerProvider);
+    if (scroller.scrollToMessage(target.id)) {
+      ref.read(flashedMessageProvider.notifier).flash(target.id);
+    }
   }
 
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
@@ -760,7 +1168,14 @@ class _QuoteBox extends StatelessWidget {
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size - 1);
       case QuoteBlock():
-        return _QuoteBox(block: child, color: dim, size: size);
+        // Nested quote: NOT independently tappable (only `> blockquote` is); a
+        // tap anywhere in the outer box already jumps using the outer quote.
+        return _QuoteBox(
+          block: child,
+          color: dim,
+          size: size,
+          hostMessageId: hostMessageId,
+        );
       case MediaBlock(:final items):
         return _MediaGallery(items: items);
     }
@@ -778,14 +1193,15 @@ class _MediaGallery extends StatelessWidget {
   Widget build(BuildContext context) {
     // Single image/video: max 300×300, min-height 80 (`styles-chat.css:1029`).
     if (items.length == 1) {
-      return _MediaTile(item: items.first, maxSize: 300, blur: blur);
+      return _MediaTile(
+          item: items.first, maxSize: 300, blur: blur, gallery: items);
     }
     // The grid is ALWAYS 2 columns, gap 4, max-width 420, radius sm
     // (`styles-chat.css:987-1023`). 3 items = a tall left hero + two stacked
     // right; 2 / 4+ = a 2-column wrap. Tiles cap at 220px tall.
     const gap = 4.0;
-    Widget tile(MediaItem m) =>
-        _MediaTile(item: m, maxSize: 220, blur: blur, inGallery: true);
+    Widget tile(MediaItem m) => _MediaTile(
+        item: m, maxSize: 220, blur: blur, inGallery: true, gallery: items);
     Widget body;
     if (items.length == 3) {
       body = Row(
@@ -827,9 +1243,26 @@ class _MediaTile extends StatelessWidget {
     required this.maxSize,
     this.blur = false,
     this.inGallery = false,
+    this.gallery,
   });
   final MediaItem item;
   final double maxSize;
+
+  /// The sibling media of this tile's message — lets a tap open the fullscreen
+  /// viewer with prev/next paging across the message's images (`expandImage` /
+  /// `_imageModalGallery`). Null/single → a one-image viewer.
+  final List<MediaItem>? gallery;
+
+  /// Opens [item] (and its image siblings) in the fullscreen viewer.
+  void _openFullscreen(BuildContext context) {
+    final urls = (gallery ?? [item])
+        .where((m) => !m.isVideo)
+        .map((m) => m.url)
+        .toList();
+    if (urls.isEmpty) return;
+    final idx = urls.indexOf(item.url);
+    _FullscreenImageViewer.open(context, urls, idx < 0 ? 0 : idx);
+  }
 
   /// Apply the privacy blur (others' images), revealed on tap (`.blurred`).
   final bool blur;
@@ -878,11 +1311,22 @@ class _MediaTile extends StatelessWidget {
       ),
     );
 
+    // Tapping an image opens it fullscreen (after the privacy blur is first
+    // revealed, when blurred) — `data-action="expandImageFromData"`.
+    final tappableImage = blur
+        ? _BlurReveal(
+            onRevealedTap: () => _openFullscreen(context),
+            child: image,
+          )
+        : GestureDetector(
+            onTap: () => _openFullscreen(context),
+            child: image,
+          );
     final clipped = ClipRRect(
       borderRadius: radius,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
-        child: blur ? _BlurReveal(child: image) : image,
+        child: tappableImage,
       ),
     );
     // A lone image carries a 1px glass border (`.message-content img`); gallery
@@ -898,11 +1342,116 @@ class _MediaTile extends StatelessWidget {
   }
 }
 
+/// Fullscreen image viewer (`expandImage` + `_imageModalGallery`,
+/// messages.js:1432-1483): pinch-zoom via [InteractiveViewer], prev/next paging
+/// across a message's images, tap the backdrop or the ✕ to close.
+class _FullscreenImageViewer extends StatefulWidget {
+  const _FullscreenImageViewer(
+      {required this.urls, required this.initialIndex});
+  final List<String> urls;
+  final int initialIndex;
+
+  static Future<void> open(
+      BuildContext context, List<String> urls, int index) {
+    return Navigator.of(context, rootNavigator: true).push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        barrierColor: Colors.black.withValues(alpha: 0.92),
+        pageBuilder: (_, __, ___) =>
+            _FullscreenImageViewer(urls: urls, initialIndex: index),
+      ),
+    );
+  }
+
+  @override
+  State<_FullscreenImageViewer> createState() => _FullscreenImageViewerState();
+}
+
+class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
+  late int _index = widget.initialIndex;
+
+  void _step(int delta) => setState(() =>
+      _index = (_index + delta + widget.urls.length) % widget.urls.length);
+
+  @override
+  Widget build(BuildContext context) {
+    final multi = widget.urls.length > 1;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          // Tap the backdrop to dismiss.
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).maybePop(),
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Center(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 5,
+              child: Image.network(
+                proxiedMedia(widget.urls[_index]),
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image,
+                    color: Colors.white54, size: 48),
+              ),
+            ),
+          ),
+          if (multi) ...[
+            Positioned(
+              left: 4,
+              top: 0,
+              bottom: 0,
+              child: Center(child: _btn(Icons.chevron_left, () => _step(-1))),
+            ),
+            Positioned(
+              right: 4,
+              top: 0,
+              bottom: 0,
+              child: Center(child: _btn(Icons.chevron_right, () => _step(1))),
+            ),
+            Positioned(
+              bottom: 28,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Text('${_index + 1} / ${widget.urls.length}',
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 13)),
+              ),
+            ),
+          ],
+          Positioned(
+            top: 4,
+            right: 4,
+            child: SafeArea(
+              child: _btn(Icons.close, () => Navigator.of(context).maybePop()),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _btn(IconData icon, VoidCallback onTap) => Material(
+        color: Colors.black54,
+        shape: const CircleBorder(),
+        child:
+            IconButton(icon: Icon(icon, color: Colors.white), onPressed: onTap),
+      );
+}
+
 /// Wraps an image in a gaussian blur revealed on tap (`.blurred`,
 /// `messages.js:1267-1274` — the PWA clears the blur class on tap).
 class _BlurReveal extends StatefulWidget {
-  const _BlurReveal({required this.child});
+  const _BlurReveal({required this.child, this.onRevealedTap});
   final Widget child;
+
+  /// Tapped once the blur is cleared (e.g. to open the fullscreen viewer).
+  final VoidCallback? onRevealedTap;
 
   @override
   State<_BlurReveal> createState() => _BlurRevealState();
@@ -913,7 +1462,12 @@ class _BlurRevealState extends State<_BlurReveal> {
 
   @override
   Widget build(BuildContext context) {
-    if (_revealed) return widget.child;
+    if (_revealed) {
+      return GestureDetector(
+        onTap: widget.onRevealedTap,
+        child: widget.child,
+      );
+    }
     return GestureDetector(
       onTap: () => setState(() => _revealed = true),
       child: ImageFiltered(
@@ -1010,5 +1564,154 @@ class InlineEmojiText extends ConsumerWidget {
       overflow: overflow,
       textAlign: textAlign,
     );
+  }
+}
+
+/// The maximum collapsed height of a `.truncated-inner` block
+/// (`styles-chat.css:795 max-height:300px`).
+const double _kTruncateHeight = 300;
+
+/// Collapsible body wrapper for the read-more truncation (messages.js:1192-1265,
+/// `.truncated-inner` + `.read-more-btn`). Clamps [child] to [_kTruncateHeight]
+/// with overflow hidden and a "Read more"/"Show less" toggle.
+///
+/// The char-count threshold (checked by the caller) only flags this body as a
+/// candidate; the collapse itself is height-based, so the toggle is dropped once
+/// the body is measured to already fit 300px (PWA: `scrollHeight <= clientHeight
+/// + 2` → remove the button + expand).
+class _Collapsible extends StatefulWidget {
+  const _Collapsible({required this.child});
+  final Widget child;
+
+  @override
+  State<_Collapsible> createState() => _CollapsibleState();
+}
+
+class _CollapsibleState extends State<_Collapsible> {
+  bool _expanded = false;
+
+  /// The body's natural (unclamped) height, learned after the first layout.
+  /// Null until measured; `<= 300 + 2` means it fits and needs no toggle.
+  double? _fullHeight;
+
+  void _onMeasured(double height) {
+    if (_fullHeight != null && (height - _fullHeight!).abs() < 0.5) return;
+    // Defer the state update out of the layout phase.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _fullHeight = height);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // Content already fits 300px → no clamp, no button (PWA drops the toggle).
+    final fits = _fullHeight != null && _fullHeight! <= _kTruncateHeight + 2;
+    final collapsed = !fits && !_expanded;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ClipRect(
+          child: _MeasuredMaxHeight(
+            maxHeight: collapsed ? _kTruncateHeight : double.infinity,
+            onMeasured: _onMeasured,
+            child: widget.child,
+          ),
+        ),
+        // `.read-more-btn { display:block; width:100%; color:--primary; font-
+        // size:12px; padding:4px 0 }`. Shown only while the body overflows 300px.
+        if (!fits)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                _expanded ? 'Show less' : 'Read more',
+                style: TextStyle(color: c.primary, fontSize: 12),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Lays its [child] out at the incoming width with UNBOUNDED height to learn the
+/// child's natural height (reported via [onMeasured]), then sizes itself to
+/// `min(natural, maxHeight)` — clipping (via the enclosing [ClipRect]) anything
+/// past [maxHeight]. This lets [_Collapsible] decide whether the read-more toggle
+/// is needed without a flash: the child renders at full height and is clipped,
+/// rather than being measured in a separate offstage pass.
+class _MeasuredMaxHeight extends SingleChildRenderObjectWidget {
+  const _MeasuredMaxHeight({
+    required this.maxHeight,
+    required this.onMeasured,
+    required Widget super.child,
+  });
+
+  final double maxHeight;
+  final ValueChanged<double> onMeasured;
+
+  @override
+  _RenderMeasuredMaxHeight createRenderObject(BuildContext context) {
+    return _RenderMeasuredMaxHeight(
+      maxHeight: maxHeight,
+      onMeasured: onMeasured,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+      BuildContext context, _RenderMeasuredMaxHeight renderObject) {
+    renderObject
+      ..maxHeight = maxHeight
+      ..onMeasured = onMeasured;
+  }
+}
+
+class _RenderMeasuredMaxHeight extends RenderProxyBox {
+  _RenderMeasuredMaxHeight({
+    required double maxHeight,
+    required ValueChanged<double> onMeasured,
+  })  : _maxHeight = maxHeight,
+        _onMeasured = onMeasured;
+
+  double _maxHeight;
+  double get maxHeight => _maxHeight;
+  set maxHeight(double value) {
+    if (_maxHeight == value) return;
+    _maxHeight = value;
+    markNeedsLayout();
+  }
+
+  ValueChanged<double> _onMeasured;
+  set onMeasured(ValueChanged<double> value) => _onMeasured = value;
+
+  @override
+  void performLayout() {
+    final child = this.child;
+    if (child == null) {
+      size = constraints.smallest;
+      return;
+    }
+    // Lay the child out at our width with NO height bound to learn its natural
+    // height, then report it and clamp our own height to maxHeight.
+    child.layout(
+      BoxConstraints(
+        minWidth: constraints.minWidth,
+        maxWidth: constraints.maxWidth,
+        minHeight: 0,
+        maxHeight: double.infinity,
+      ),
+      parentUsesSize: true,
+    );
+    final natural = child.size.height;
+    _onMeasured(natural);
+    final clamped = natural > _maxHeight ? _maxHeight : natural;
+    size = constraints.constrain(Size(child.size.width, clamped));
   }
 }

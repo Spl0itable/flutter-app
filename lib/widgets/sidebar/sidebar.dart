@@ -100,13 +100,20 @@ class _SidebarState extends ConsumerState<Sidebar> {
   String _nymTerm = '';
 
   // View-more expansion per section: collapsed lists cap at 20 rows
-  // (`COLLAPSED_CAP`), expanded shows all (nyms step to 500 — we expand fully).
+  // (`COLLAPSED_CAP`). Channels/PMs expand fully (a simple bool).
   bool _channelExpanded = false;
   bool _pmExpanded = false;
-  bool _nymExpanded = false;
+
+  // The Nyms list grows in 500-row steps (`EXPANDED_STEP`) rather than fully:
+  // null = collapsed (cap 20); otherwise the live expanded cap, stepped up by
+  // 500 per "Show N more…" click (users.js:1411-1422, 1705-1728).
+  int? _nymExpandedCap;
 
   /// Collapsed row cap (`COLLAPSED_CAP` / `.list-collapsed :nth-child(n+21)`).
   static const int _collapsedCap = 20;
+
+  /// Per-click growth of the expanded Nyms list (`EXPANDED_STEP`, users.js:1412).
+  static const int _expandedStep = 500;
 
   bool _loaded = false;
 
@@ -452,12 +459,26 @@ class _SidebarState extends ConsumerState<Sidebar> {
           );
         case _SectionId.nyms:
           final term = _nymTerm.toLowerCase();
-          final r = capped<User>(
-            onlineUsers,
-            term,
-            (u) => u.nym.toLowerCase().contains(term),
-            _nymExpanded,
-          );
+          // Nyms list capping (users.js:1411-1424): searching shows every match;
+          // collapsed caps at 20; expanded renders `min(total, cap)` where the
+          // cap grows by `EXPANDED_STEP` (500) per "Show N more…" click.
+          final filtered = term.isEmpty
+              ? onlineUsers
+              : onlineUsers
+                  .where((u) => u.nym.toLowerCase().contains(term))
+                  .toList(growable: false);
+          final total = filtered.length;
+          final int renderCap;
+          if (term.isNotEmpty) {
+            renderCap = total;
+          } else if (_nymExpandedCap != null) {
+            renderCap = total < _nymExpandedCap! ? total : _nymExpandedCap!;
+          } else {
+            renderCap = total < _collapsedCap ? total : _collapsedCap;
+          }
+          final nymRows =
+              renderCap < total ? filtered.sublist(0, renderCap) : filtered;
+          final remaining = total - renderCap;
           // `.user-list` (gap F17): 10px padding, NO bottom divider.
           return _NavSection(
             key: const ValueKey('section-nyms'),
@@ -481,24 +502,37 @@ class _SidebarState extends ConsumerState<Sidebar> {
             onLongPressTitle: _toggleReorderMode,
             searchHint: 'Search nyms…',
             children: [
-              for (final u in r.rows)
+              for (final u in nymRows)
                 UserListItem(
                   user: u,
                   textSize: textSize,
                   onTap: () => select(ChatView.pm(u.pubkey)),
                 ),
-              if (r.more > 0)
-                _ViewMoreButton(
-                  more: r.more,
-                  onTap: () => setState(() => _nymExpanded = true),
-                )
-              else if (term.isEmpty &&
-                  _nymExpanded &&
-                  onlineUsers.length > _collapsedCap)
-                _ViewMoreButton(
-                  more: 0,
-                  onTap: () => setState(() => _nymExpanded = false),
-                ),
+              // The view-more control only exists for an unsearched list of >20
+              // (`_updateUserListViewMoreButton`, users.js:1683).
+              if (term.isEmpty && total > _collapsedCap)
+                if (_nymExpandedCap == null)
+                  // Collapsed → "View {total-20} more…" expands to the first step.
+                  _ViewMoreButton(
+                    more: total - _collapsedCap,
+                    onTap: () =>
+                        setState(() => _nymExpandedCap = _expandedStep),
+                  )
+                else if (remaining > 0)
+                  // Expanded with more rows → "Show {min(remaining,500)} more…",
+                  // each click adds another 500-row step.
+                  _ViewMoreButton(
+                    more: remaining < _expandedStep ? remaining : _expandedStep,
+                    stepMore: true,
+                    onTap: () => setState(() =>
+                        _nymExpandedCap = _nymExpandedCap! + _expandedStep),
+                  )
+                else
+                  // Fully expanded → "Show less" collapses back to 20.
+                  _ViewMoreButton(
+                    more: 0,
+                    onTap: () => setState(() => _nymExpandedCap = null),
+                  ),
             ],
           );
       }
@@ -1475,17 +1509,28 @@ class _GroupUnreadPill extends StatelessWidget {
 }
 
 /// `.view-more-btn` (styles-shell.css:284-304): a full-width pill that toggles
-/// the 20-item collapse. [more] > 0 → "VIEW {more} MORE…"; 0 → "SHOW LESS".
+/// the collapse. [more] > 0 → "VIEW {more} MORE…" (or "SHOW {more} MORE…" for a
+/// subsequent expand step when [stepMore]); 0 → "SHOW LESS". The PWA labels the
+/// first expand "View N more…" and each further 500-row step "Show N more…"
+/// (users.js:1707/1715/1722).
 class _ViewMoreButton extends StatelessWidget {
-  const _ViewMoreButton({required this.more, required this.onTap});
+  const _ViewMoreButton({
+    required this.more,
+    required this.onTap,
+    this.stepMore = false,
+  });
   final int more;
   final VoidCallback onTap;
+
+  /// A subsequent expand step (uses the "Show …" verb instead of "View …").
+  final bool stepMore;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final label =
-        more > 0 ? 'VIEW ${_abbreviateNumber(more)} MORE…' : 'SHOW LESS';
+    final label = more > 0
+        ? '${stepMore ? 'SHOW' : 'VIEW'} ${_abbreviateNumber(more)} MORE…'
+        : 'SHOW LESS';
     return Padding(
       // `margin: 6px 10px`.
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),

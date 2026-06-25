@@ -5,8 +5,10 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../models/message.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../widgets/chat/message_row.dart' show abbreviateNumber;
 import '../../widgets/context_menu/interaction_hooks.dart';
+import '../reactions/reaction_burst.dart';
 import 'zap_modal.dart';
 
 /// The lightning bolt fill color (`--lightning`, `#f7931a`).
@@ -21,21 +23,57 @@ const Color _kLightning = Color(0xFFF7931A);
 ///   12px/600 `--lightning` abbreviated total. `title` = "N zappers • M sats".
 /// - `.add-zap-btn` (`styles-chat.css:332-355`): white@.04 pill, glass border,
 ///   padding 4×8, radius 20, opacity 0.6, 16px bolt+plus glyph; tap → quick-zap.
-class ZapBadge extends ConsumerWidget {
+class ZapBadge extends ConsumerStatefulWidget {
   const ZapBadge({super.key, required this.message});
 
   final Message message;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ZapBadge> createState() => _ZapBadgeState();
+}
+
+class _ZapBadgeState extends ConsumerState<ZapBadge> {
+  final GlobalKey _badgeKey = GlobalKey();
+
+  /// Last observed total (sats). -1 = not yet observed; the first observation
+  /// (existing zaps on load) is recorded WITHOUT a burst so only live increases
+  /// pop. A zap-less message records 0 here, so its first zap still bursts.
+  int _lastTotal = -1;
+
+  Message get message => widget.message;
+
+  @override
+  Widget build(BuildContext context) {
     final zaps = ref.watch(zapsProvider)[message.id];
-    if (zaps == null || zaps.totalSats <= 0) return const SizedBox.shrink();
+    if (zaps == null || zaps.totalSats <= 0) {
+      if (_lastTotal < 0) _lastTotal = 0;
+      return const SizedBox.shrink();
+    }
 
     final total = zaps.totalSats;
+    // Lightning burst when the total ticks up while mounted (zaps.js
+    // `_playZapBurst`, fired from `_recordMessageZap`). Anchored to the badge.
+    if (_lastTotal >= 0 && total > _lastTotal) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final box = _badgeKey.currentContext?.findRenderObject() as RenderBox?;
+        if (box == null || !box.hasSize) return;
+        ReactionBurst.play(
+            context, box.localToGlobal(box.size.center(Offset.zero)), '⚡');
+      });
+    }
+    _lastTotal = total;
+
     final zappers = zaps.zapperCount;
+    // Tooltip mirrors zaps.js:1748-1751: "N zappers • M sats total", with a
+    // trailing " (U unverified)" when any zap on this message is unverified (a
+    // gift-wrapped, zapper-signed announcement not validated against the
+    // recipient's LNURL provider pubkey).
+    final unverifiedSats = zaps.unverifiedSats;
     final tooltip =
         '${abbreviateNumber(zappers)} zapper${zappers == 1 ? '' : 's'} • '
-        '${abbreviateNumber(total)} sats total';
+        '${abbreviateNumber(total)} sats total'
+        '${unverifiedSats > 0 ? ' (${abbreviateNumber(unverifiedSats)} unverified)' : ''}';
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -43,6 +81,7 @@ class ZapBadge extends ConsumerWidget {
         Tooltip(
           message: tooltip,
           child: Container(
+            key: _badgeKey,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
@@ -78,7 +117,7 @@ class ZapBadge extends ConsumerWidget {
         if (message.pubkey.isNotEmpty) ...[
           const SizedBox(width: 5),
           _QuickZapBtn(
-            onTap: () => _quickZap(context, ref),
+            onTap: () => _quickZap(context),
           ),
         ],
       ],
@@ -86,14 +125,19 @@ class ZapBadge extends ConsumerWidget {
   }
 
   /// Resolves the author's lightning address and opens the zap modal, mirroring
-  /// `handleQuickZap` (`zaps.js:1786`). Posts a system note when the author has
-  /// no lightning address.
-  Future<void> _quickZap(BuildContext context, WidgetRef ref) async {
+  /// `handleQuickZap` (`zaps.js:1786`). The PWA always does a FRESH fetch first
+  /// (`fetchLightningAddressForUser`) rather than trusting the cache, so an
+  /// author whose kind-0 hasn't arrived yet still gets zapped instead of a
+  /// spurious "cannot receive zaps". Posts the PWA's "Checking…" system note,
+  /// awaits the resolve, then either opens the modal or reports no address.
+  Future<void> _quickZap(BuildContext context) async {
     final baseNym = stripPubkeySuffix(message.author);
-    final user = ref.read(usersProvider)[message.pubkey];
-    final lnAddr = user?.profile?.lightningAddress;
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.addSystemMessage('Checking if @$baseNym can receive zaps...');
+    final controller = ref.read(nostrControllerProvider);
+    final lnAddr = await controller.resolveLightningAddressForZap(message.pubkey);
     if (lnAddr == null || lnAddr.isEmpty) {
-      ref.read(appStateProvider.notifier).addSystemMessage(
+      notifier.addSystemMessage(
           '@$baseNym cannot receive zaps (no lightning address set)');
       return;
     }

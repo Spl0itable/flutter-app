@@ -366,6 +366,52 @@ void main() {
       expect(z.totalSats, 21);
       expect(z.zapperCount, 1);
     });
+
+    test('unverified zap tracks into unverifiedSats; verified does not', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.recordMessageZap(
+        messageId: 'm',
+        zapperPubkey: 'z',
+        amountSats: 50,
+        dedupKey: 'b:lnbc1a',
+        verified: false,
+      );
+      n.recordMessageZap(
+        messageId: 'm',
+        zapperPubkey: 'z2',
+        amountSats: 30,
+        dedupKey: 'b:lnbc1b',
+      ); // verified default
+      final z = n.state.zaps['m']!;
+      expect(z.totalSats, 80);
+      expect(z.unverifiedSats, 50);
+    });
+
+    test('verified receipt upgrades a previously-unverified payment (no double count)', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      // Gift-wrapped (unverified) announcement lands first.
+      n.recordMessageZap(
+        messageId: 'm',
+        zapperPubkey: 'z',
+        amountSats: 21,
+        dedupKey: 'b:lnbc1x',
+        verified: false,
+      );
+      expect(n.state.zaps['m']!.unverifiedSats, 21);
+      // The verified receipt for the SAME bolt11 arrives → clears unverified,
+      // does NOT add sats again (zaps.js:1617-1624).
+      final upgraded = n.recordMessageZap(
+        messageId: 'm',
+        zapperPubkey: 'z',
+        amountSats: 21,
+        dedupKey: 'b:lnbc1x',
+      );
+      expect(upgraded, isTrue);
+      final z = n.state.zaps['m']!;
+      expect(z.totalSats, 21);
+      expect(z.unverifiedSats, 0);
+      expect(z.zapperCount, 1);
+    });
   });
 
   group('call signaling', () {

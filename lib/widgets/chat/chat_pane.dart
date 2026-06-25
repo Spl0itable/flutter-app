@@ -26,6 +26,7 @@ import '../context_menu/context_menu_actions.dart' show CtxTarget;
 import '../context_menu/context_menu_panel.dart' show ContextMenuPanel;
 import '../context_menu/group_context_menu_panel.dart'
     show GroupContextMenuPanel;
+import '../columns/columns_deck.dart';
 import 'message_row.dart' show formatRelativeTime;
 import 'composer.dart';
 import 'messages_list.dart';
@@ -47,6 +48,7 @@ class ChatPane extends ConsumerWidget {
     this.compact = false,
     this.onStartCall,
     this.onStartGroupCall,
+    this.useColumns = false,
   });
 
   /// Mobile/tablet: opens the off-canvas sidebar drawer (hamburger).
@@ -59,6 +61,15 @@ class ChatPane extends ConsumerWidget {
   /// Optional call-start hooks (wired by the calls feature; null = no calls).
   final OnStartCall? onStartCall;
   final OnStartGroupCall? onStartGroupCall;
+
+  /// Columns (deck) mode (`body.columns-mode`). The PWA hides ONLY
+  /// `#messagesScroller` (styles-columns.css:9-11) and shows `#columnsStrip` in
+  /// its place — the `.chat-header` and `.input-container` stay mounted, driven
+  /// by the focused column (`_cvFocusColumn` points the shared composer at the
+  /// focused column's conversation, columns.js:542-559). So in columns mode we
+  /// substitute the deck for the messages region only, keeping the header above
+  /// and the composer below.
+  final bool useColumns;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -73,14 +84,17 @@ class ChatPane extends ConsumerWidget {
             onStartCall: onStartCall,
             onStartGroupCall: onStartGroupCall,
           ),
-          // `#messagesContainer` — tutorial spotlight target.
+          // `#messagesContainer` (single view) / `#columnsStrip` (columns mode)
+          // — the deck replaces only the messages list, not the header/composer.
           Expanded(
             child: KeyedSubtree(
               key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
-              child: const MessagesList(),
+              child: useColumns ? const ColumnsDeck() : const MessagesList(),
             ),
           ),
-          // `.input-container` — tutorial spotlight target.
+          // `.input-container` — tutorial spotlight target. Stays mounted in
+          // columns mode; sends to the focused column's conversation (the deck
+          // re-points `currentViewProvider` on focus, mirroring `_cvFocusColumn`).
           KeyedSubtree(
             key: TutorialTargets.keyFor(TutorialTarget.composer),
             child: Composer(compact: compact),

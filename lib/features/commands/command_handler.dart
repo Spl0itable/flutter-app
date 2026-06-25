@@ -268,6 +268,10 @@ class CommandDispatcher {
         engine.clearAway();
       case 'zap':
         _zap(args);
+      case 'poll':
+        // `/poll` → the poll editor modal (polls agent). When no hook is wired
+        // (headless/tests) this degrades to nothing, matching the prior no-op.
+        hooks.openPoll?.call();
       case 'share':
         engine.share();
       case 'block':

@@ -11,20 +11,25 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
 import '../../features/autocomplete/autocomplete_triggers.dart';
 import '../../features/autocomplete/pending_edit.dart';
+import '../../features/commands/command_handler.dart';
 import '../../features/commands/command_palette.dart';
 import '../../features/commands/command_registry.dart';
 import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
+import '../../features/nymbot/nymbot_models.dart';
+import '../../features/polls/poll_create_modal.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
+import '../../features/zaps/zap_modal.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../context_menu/interaction_hooks.dart';
@@ -214,13 +219,121 @@ class _ComposerState extends ConsumerState<Composer> {
     // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
     // rebuild on focus change to swap those in/out.
     _focus.addListener(_onFocusChanged);
-    // Register the system-message sink so command feedback surfaces somewhere.
+    // Register the system-message sink + the modal/effect hooks so slash
+    // commands that open a UI surface (poll, zap, PM, group create/admin)
+    // actually fire instead of silently no-opping.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(nostrControllerProvider).setCommandHooks(
             onSystemMessage: _onSystemMessage,
+            hooks: _buildCommandHooks(),
           );
     });
+  }
+
+  /// Builds the modal/effect hooks for slash commands whose surface lives in
+  /// the UI layer. Mirrors the PWA's `cmd*` handlers (commands.js) that open
+  /// these surfaces; registered once with the dispatcher via [setCommandHooks].
+  CommandHooks _buildCommandHooks() {
+    final controller = ref.read(nostrControllerProvider);
+    return CommandHooks(
+      // `/poll` → the poll editor (`cmdPoll` → #pollModal).
+      openPoll: () {
+        if (mounted) PollCreateModal.open(context);
+      },
+      // `/pm @nym` → open/create the thread (target resolved by the dispatcher).
+      openPm: (pubkey, nym) => controller.startPM(pubkey, nym: nym),
+      // `/zap @nym` → resolve the LN address, then the zap modal (`cmdZap` →
+      // showZapModal), mirroring the context-menu zap path.
+      openZap: (pubkey, nym) async {
+        final lnAddr =
+            ref.read(usersProvider)[pubkey]?.profile?.lightningAddress;
+        if (lnAddr == null || lnAddr.isEmpty) {
+          _onSystemMessage(
+              '@${stripPubkeySuffix(nym)} cannot receive zaps (no lightning address set)');
+          return;
+        }
+        if (!mounted) return;
+        await ZapModal.show(
+          context,
+          recipientPubkey: pubkey,
+          recipientNym: nym,
+          lightningAddress: lnAddr,
+        );
+      },
+      // `/group @a @b [name]` → create the group (`cmdGroup` → createGroup).
+      createGroup: (members, name) {
+        if (members.isEmpty) {
+          _onSystemMessage('Usage: /group @nym1 @nym2 [group name]');
+          return;
+        }
+        unawaited(controller.createGroup(name, members));
+      },
+      // `/addmember @nym` (and `/invite @nym` in a group) → add to this group.
+      addMember: _addMemberToCurrentGroup,
+      invite: _addMemberToCurrentGroup,
+      // `/groupinfo` → list owner / mods / member count (`cmdGroupInfo`).
+      groupInfo: _showGroupInfo,
+      // Group moderation (groups.js `cmd*`): the dispatcher resolves the target,
+      // we act on the current group.
+      kick: (pubkey) =>
+          _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
+      ban: (pubkey) =>
+          _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
+      addMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
+      removeMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.revokeModerator(gid, pubkey)),
+      transferOwner: (pubkey) =>
+          _withCurrentGroup((gid) => controller.transferOwner(gid, pubkey)),
+    );
+  }
+
+  /// Runs [action] against the current group id when the active view is a group.
+  void _withCurrentGroup(Future<void> Function(String groupId) action) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind == ViewKind.group) unawaited(action(view.id));
+  }
+
+  /// Resolves [arg] and adds them to the current group (`/addmember`/`/invite`).
+  void _addMemberToCurrentGroup(String arg) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) {
+      _onSystemMessage('You must be in a group to add members.');
+      return;
+    }
+    final target = resolveTarget(arg, ref.read(usersProvider));
+    if (target == null) {
+      _onSystemMessage('User ${arg.trim()} not found');
+      return;
+    }
+    unawaited(
+        ref.read(nostrControllerProvider).addGroupMembers(view.id, [target.pubkey]));
+  }
+
+  /// Emits a `/groupinfo` summary (owner, mods, member count) as a system line.
+  void _showGroupInfo() {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final group = ref.read(appStateProvider.notifier).groupById(view.id);
+    if (group == null) return;
+    final users = ref.read(usersProvider);
+    String nymOf(String pk) {
+      final u = users[pk];
+      return u != null
+          ? stripPubkeySuffix(u.nym)
+          : 'nym#${pk.substring(pk.length - 4)}';
+    }
+
+    final owner =
+        group.createdBy != null ? nymOf(group.createdBy!) : 'unknown';
+    final lines = <String>[
+      'Group: ${group.name.isEmpty ? '(unnamed)' : group.name}',
+      'Owner: $owner',
+      if (group.mods.isNotEmpty) 'Mods: ${group.mods.map(nymOf).join(', ')}',
+      'Members: ${group.members.length}',
+    ];
+    _onSystemMessage(lines.join('\n'));
   }
 
   void _onFocusChanged() {
@@ -331,7 +444,12 @@ class _ComposerState extends ConsumerState<Composer> {
   void _onInputChanged() {
     final sel = _controller.selection;
     final caret = sel.isValid ? sel.start : _controller.text.length;
-    final trigger = detectTrigger(_controller.text, caret: caret);
+    // The verified-bot PM exposes PM-only `?` commands with multi-step
+    // subcommands, so the `?` palette must survive a space there
+    // (`showBotCommandPalette` with `inBotPM`, commands.js:436-468).
+    final botPM = _inBotPM();
+    final trigger =
+        detectTrigger(_controller.text, caret: caret, botPM: botPM);
     _trigger = trigger;
     _selectedIndex = 0;
 
@@ -345,8 +463,16 @@ class _ComposerState extends ConsumerState<Composer> {
       _botRows = const [];
       _acView = null;
     } else if (trigger.kind == TriggerKind.botCommand) {
-      // Public `?` Nymbot palette, filtered by `cmd.startsWith(input)`.
-      _botRows = buildBotPaletteRows(trigger.query);
+      // In the bot PM, surface the PM command set + `?model `/`?git `
+      // subcommands (`filterBotPMCommands`, mirrors `showBotCommandPalette`'s
+      // `inBotPM` branch, commands.js:441-454); elsewhere the PUBLIC `?` palette
+      // filtered by `cmd.startsWith(input)`.
+      _botRows = botPM
+          ? [
+              for (final c in filterBotPMCommands(trigger.query))
+                BotPaletteCommand(command: c.name, desc: c.desc),
+            ]
+          : buildBotPaletteRows(trigger.query);
       _paletteRows = const [];
       _acView = null;
     } else if (trigger.kind != TriggerKind.none) {
@@ -377,6 +503,15 @@ class _ComposerState extends ConsumerState<Composer> {
       lines += 1 + (line.length ~/ 36);
     }
     return lines;
+  }
+
+  /// Whether the active view is the private chat with the verified Nymbot
+  /// (`inPMMode && currentPM && isVerifiedBot(currentPM)`, commands.js:440). The
+  /// `?` palette uses the PM command set (with subcommands) only here.
+  bool _inBotPM() {
+    final view = ref.read(appStateProvider).view;
+    if (view.kind != ViewKind.pm) return false;
+    return ref.read(nostrControllerProvider).isVerifiedBot(view.id);
   }
 
   AutocompleteView? _buildAutocompleteView(TriggerMatch trigger) {
@@ -474,15 +609,21 @@ class _ComposerState extends ConsumerState<Composer> {
 
   void _completeBotCommand(BotPaletteCommand cmd) {
     // selectCommand inserts `"?<name> "` (cmd.command already carries the `?`)
-    // then hides the palette (commands.js:494). For the public set there are no
-    // subcommands, so the trailing space closes the token and the palette stays
-    // hidden until the user types a fresh `?`.
+    // then re-runs the palette (commands.js:494-504): a multi-step `?command`
+    // immediately shows its next-level options; anything without deeper options
+    // just hides. In the bot PM we re-evaluate so `?model`/`?git` cascade into
+    // their subcommands; the public set has none, so it stays hidden until a
+    // fresh `?`.
     _controller.value = TextEditingValue(
       text: '${cmd.command} ',
       selection: TextSelection.collapsed(offset: cmd.command.length + 1),
     );
-    _hideOverlay();
     _focus.requestFocus();
+    if (_inBotPM()) {
+      _onInputChanged();
+    } else {
+      _hideOverlay();
+    }
   }
 
   int get _navItemCount {
@@ -674,8 +815,18 @@ class _ComposerState extends ConsumerState<Composer> {
   /// Whether the SEND long-press anon affordance applies: a durable Nostr-login
   /// identity (`this.nostrLoginMethod`, ui-context.js:1215). Ephemeral geohash
   /// keys are already anonymous so the PWA doesn't offer it for them.
-  bool get _anonEligible =>
-      ref.read(nostrControllerProvider).identity?.loginMethod != null;
+  ///
+  /// The PWA reads `nostrLoginMethod` LIVE on every long-press (ui-context.js
+  /// :1215), so the affordance must track login/logout. The controller isn't a
+  /// reactive provider, but every login/logout transition rewrites `selfPubkey`
+  /// (`goLive`/`reset`) AND updates `_identity` first (init sets `_identity`
+  /// before `goLive`; signOut nulls it before `reset`). So we `ref.watch` the
+  /// `selfPubkey` signal — forcing a rebuild on the transition — then read the
+  /// now-current login method. Called only from `build` (via `_toolbar`).
+  bool get _anonEligible {
+    ref.watch(appStateProvider.select((s) => s.selfPubkey));
+    return ref.read(nostrControllerProvider).identity?.loginMethod != null;
+  }
 
   // --- Attachments: image upload (Blossom) + P2P file share -----------------
 
@@ -850,7 +1001,7 @@ class _ComposerState extends ConsumerState<Composer> {
       ref.read(pendingEditProvider.notifier).consume();
     });
 
-    final input = _inputWithChips(context);
+    final input = _inputWithChips(context, sendEnabled);
     // `.input-container` is `padding: 12px 16px` (desktop/tablet); the phone
     // breakpoint (≤768) collapses it to a flat `padding: 10px`
     // (styles-themes-responsive.css:221/304). `compact` spans the whole ≤1024
@@ -900,7 +1051,7 @@ class _ComposerState extends ConsumerState<Composer> {
   /// The input column with the quote/edit preview chip stacked above it
   /// (`.quote-preview` / `.edit-preview`, `bottom:100%`). The chip slides in
   /// (0.2s, dy 8→0) and the column height animates so the input shifts down.
-  Widget _inputWithChips(BuildContext context) {
+  Widget _inputWithChips(BuildContext context, bool inputEnabled) {
     final chip = _pendingEdit != null
         ? _EditPreviewChip(
             text: _quotePreviewText(_pendingEdit!.content),
@@ -928,7 +1079,7 @@ class _ComposerState extends ConsumerState<Composer> {
                   child: chip,
                 ),
         ),
-        _input(context),
+        _input(context, inputEnabled),
       ],
     );
   }
@@ -1019,7 +1170,7 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// `.message-input` wrapped with the autocomplete/command-palette overlay
   /// anchored above it (`bottom: 100%` like the PWA's inline dropdowns).
-  Widget _input(BuildContext context) {
+  Widget _input(BuildContext context, bool inputEnabled) {
     return CompositedTransformTarget(
       link: _acAnchor,
       child: OverlayPortal(
@@ -1027,7 +1178,7 @@ class _ComposerState extends ConsumerState<Composer> {
         overlayChildBuilder: _overlayChild,
         child: Focus(
           onKeyEvent: _onKey,
-          child: _textField(context),
+          child: _textField(context, inputEnabled),
         ),
       ),
     );
@@ -1085,20 +1236,27 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Resolves the verified/friend badge flags for a mention row (F3). Verified
   /// = verified developer OR Nymbot (Foundations `isVerifiedDeveloper/Bot`);
-  /// friend = in the friend set (`appState.isFriend`).
+  /// friend = in the friend set (`appState.isFriend`). The verified badge's
+  /// tooltip distinguishes the two: `verifiedDeveloper.title` ("Nymchat
+  /// Developer") vs "Nymchat Bot" (autocomplete.js:430).
   MentionBadges _mentionBadges(String pubkey) {
     final controller = ref.read(nostrControllerProvider);
-    final verified =
-        controller.isVerifiedDeveloper(pubkey) || controller.isVerifiedBot(pubkey);
+    final isDev = controller.isVerifiedDeveloper(pubkey);
+    final isBot = controller.isVerifiedBot(pubkey);
     final friend = ref.read(appStateProvider).isFriend(pubkey);
-    return (verified: verified, friend: friend);
+    return (
+      verified: isDev || isBot,
+      friend: friend,
+      verifiedTitle:
+          isDev ? 'Nymchat Developer' : (isBot ? 'Nymchat Bot' : null),
+    );
   }
 
   /// `.message-input` (+ `.message-input-row` with the translate button). When
   /// the draft is tall enough the field takes the `.composer-popout` treatment:
   /// bg-tertiary fill, primary@0.3 border, shadow-lg (F8). The 26×26 translate
   /// button + 230px language dropdown overlay the bottom-right (F7).
-  Widget _textField(BuildContext context) {
+  Widget _textField(BuildContext context, bool inputEnabled) {
     final c = context.nym;
     final hasText = _controller.text.trim().isNotEmpty;
     final focused = _focus.hasFocus;
@@ -1123,6 +1281,12 @@ class _ComposerState extends ConsumerState<Composer> {
     final field = TextField(
       controller: _controller,
       focusNode: _focus,
+      // `#messageInput` starts `disabled` and the PWA flips it to enabled ONLY
+      // once relays/identity connect (relays.js:1039/1168/1275 set
+      // `messageInput.disabled=false` in the exact same spots as `sendBtn`). Gate
+      // on the SAME [inputEnabled] (= the SEND `sendEnabled`) so the field is
+      // typable iff SEND is — never inert while SEND is live, nor vice-versa.
+      enabled: inputEnabled,
       maxLines: _popout ? 12 : 5,
       minLines: 1,
       textInputAction: TextInputAction.newline,
@@ -1409,16 +1573,20 @@ class _ComposerState extends ConsumerState<Composer> {
         svg: NymIcons.composerImage,
         tooltip: 'Upload Image/Video',
         expand: widget.compact,
+        // Inert until relays connect (same `sendEnabled` as SEND), then the
+        // existing in-upload guard takes over.
+        enabled: sendEnabled,
         onTap: _uploadProgress != null ? null : _pickAndUploadImage,
       ),
       _IconBtn(
         svg: NymIcons.composerFile,
         tooltip: 'Share File (P2P)',
         expand: widget.compact,
+        enabled: sendEnabled,
         onTap: _pickAndShareFile,
       ),
-      _emojiButton(context),
-      _gifButton(context),
+      _emojiButton(context, sendEnabled),
+      _gifButton(context, sendEnabled),
       // The PWA's `.input-buttons` (index.html:758-790) has EXACTLY 5 children:
       // Image, File, Emoji, GIF, SEND — there is NO Nymbot toolbar button (bot
       // access is via `?`/@Nymbot in the input, routed inside `sendCurrent`).
@@ -1461,7 +1629,7 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// Emoji toolbar button + its inline popover anchored above the button.
-  Widget _emojiButton(BuildContext context) {
+  Widget _emojiButton(BuildContext context, bool enabled) {
     return CompositedTransformTarget(
       link: _emojiAnchor,
       child: OverlayPortal(
@@ -1480,6 +1648,7 @@ class _ComposerState extends ConsumerState<Composer> {
           svg: NymIcons.composerEmoji,
           tooltip: 'Emoji',
           expand: widget.compact,
+          enabled: enabled,
           onTap: _toggleEmojiPicker,
         ),
       ),
@@ -1487,7 +1656,7 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// GIF toolbar button + its inline popover anchored above the button.
-  Widget _gifButton(BuildContext context) {
+  Widget _gifButton(BuildContext context, bool enabled) {
     return CompositedTransformTarget(
       link: _gifAnchor,
       child: OverlayPortal(
@@ -1505,6 +1674,7 @@ class _ComposerState extends ConsumerState<Composer> {
           label: 'GIF',
           tooltip: 'GIF',
           expand: widget.compact,
+          enabled: enabled,
           onTap: _toggleGifPicker,
         ),
       ),
@@ -1571,6 +1741,7 @@ class _IconBtn extends StatefulWidget {
     this.label,
     required this.tooltip,
     this.expand = false,
+    this.enabled = true,
     this.onTap,
   }) : assert(svg != null || label != null, 'provide an svg or a label');
   /// The exact-PWA glyph markup (image/file/emoji), or null for a [label] button.
@@ -1582,6 +1753,12 @@ class _IconBtn extends StatefulWidget {
   final String? label;
   final String tooltip;
   final bool expand;
+
+  /// When false the button is inert: dimmed (opacity 0.35, like the disabled
+  /// SEND/input) and unresponsive. The composer gates the Image/File/Emoji/GIF
+  /// buttons on the relay-connection flag so the toolbar starts inert until
+  /// connect, matching the PWA disabling the input row pre-connect (relays.js).
+  final bool enabled;
   final VoidCallback? onTap;
 
   @override
@@ -1594,19 +1771,25 @@ class _IconBtnState extends State<_IconBtn> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final enabled = widget.enabled;
+    // Hover highlight only while enabled (a disabled button never lifts to
+    // primary). `.icon-btn:disabled` is opacity 0.35 (mirrors the SEND/input).
+    final hovered = enabled && _hover;
+    final glyphColor = hovered ? c.primary : c.text;
     // `.icon-btn.input-btn`: transparent (no bg/border), 42 tall, 0 12 padding,
     // radius sm. The icon stroke goes text→primary on hover (F10).
-    return Tooltip(
+    final btn = Tooltip(
       message: widget.tooltip,
       child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
+        cursor:
+            enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: enabled ? (_) => setState(() => _hover = true) : null,
+        onExit: enabled ? (_) => setState(() => _hover = false) : null,
         child: Material(
           color: Colors.transparent,
           borderRadius: NymRadius.rsm,
           child: InkWell(
-            onTap: widget.onTap ?? () {},
+            onTap: enabled ? (widget.onTap ?? () {}) : null,
             borderRadius: NymRadius.rsm,
             child: Container(
               height: 42,
@@ -1620,19 +1803,20 @@ class _IconBtnState extends State<_IconBtn> {
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
                         letterSpacing: 0.5,
-                        color: _hover ? c.primary : c.text,
+                        color: glyphColor,
                       ),
                     )
                   : NymSvgIcon(
                       widget.svg!,
                       size: 18,
-                      color: _hover ? c.primary : c.text,
+                      color: glyphColor,
                     ),
             ),
           ),
         ),
       ),
     );
+    return enabled ? btn : Opacity(opacity: 0.35, child: btn);
   }
 }
 

@@ -36,6 +36,7 @@ import '../../services/relay/relay_stats.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../../widgets/common/nym_switch.dart';
 
 class RelayStatsModal extends ConsumerStatefulWidget {
   const RelayStatsModal({super.key});
@@ -1016,54 +1017,8 @@ class _LowDataPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          _NymSwitch(value: enabled, onChanged: onToggle),
+          NymSwitch(value: enabled, onChanged: onToggle),
         ],
-      ),
-    );
-  }
-}
-
-/// The `.nym-switch` toggle: 40×22 track, 16px thumb, off=white/0.12 +
-/// textBright thumb / on=primary track + white thumb (thumb slides 18px).
-class _NymSwitch extends StatelessWidget {
-  const _NymSwitch({required this.value, required this.onChanged});
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return GestureDetector(
-      onTap: () => onChanged(!value),
-      behavior: HitTestBehavior.opaque,
-      child: AnimatedContainer(
-        duration: NymMotion.transition,
-        curve: NymMotion.curve,
-        width: 40,
-        height: 22,
-        decoration: BoxDecoration(
-          color: value ? c.primary : Colors.white.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(color: value ? c.primary : c.glassBorder),
-        ),
-        child: Stack(
-          children: [
-            AnimatedPositioned(
-              duration: NymMotion.transition,
-              curve: NymMotion.curve,
-              top: 2,
-              left: value ? 18 : 2,
-              child: Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: value ? Colors.white : c.textBright,
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

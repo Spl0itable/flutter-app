@@ -43,6 +43,44 @@ String formatTime(DateTime t, String timeFormat) {
   return '$h12:$m $ampm';
 }
 
+const List<String> _shortMonths = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// The full "date, time" label shown when a message timestamp is tapped
+/// (`_formatFullTimestamp`, messages.js:3328): seconds-precision time in the
+/// user's 12/24h format, with the date per the `dateFormat` setting
+/// (`mdy`/`dmy`/`ymd`, else "Mon D, YYYY").
+String formatFullTimestamp(DateTime t, String timeFormat, String dateFormat) {
+  final h24 = t.hour;
+  final m = t.minute.toString().padLeft(2, '0');
+  final s = t.second.toString().padLeft(2, '0');
+  final String timeStr;
+  if (timeFormat == '24hr') {
+    timeStr = '${h24.toString().padLeft(2, '0')}:$m:$s';
+  } else {
+    final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+    final ampm = h24 < 12 ? 'AM' : 'PM';
+    timeStr = '${h12.toString().padLeft(2, '0')}:$m:$s $ampm';
+  }
+  final y = t.year;
+  final mo = t.month.toString().padLeft(2, '0');
+  final d = t.day.toString().padLeft(2, '0');
+  final String dateStr;
+  switch (dateFormat) {
+    case 'mdy':
+      dateStr = '$mo/$d/$y';
+    case 'dmy':
+      dateStr = '$d/$mo/$y';
+    case 'ymd':
+      dateStr = '$y-$mo-$d';
+    default:
+      dateStr = '${_shortMonths[t.month - 1]} ${t.day}, $y';
+  }
+  return '$dateStr, $timeStr';
+}
+
 /// Relative-time label for the in-bubble timestamp (a 1:1 port of
 /// `_formatRelativeTime`, `messages.js:3308-3325`): `now` / `1m ago` /
 /// `{m}m ago` / `{h}h ago` / `{d}d ago` / `Mon D[, YYYY]`.
@@ -295,21 +333,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   /// The author-name [TextStyle], bolding Genesis holders (`.has-genesis-flair`)
-  /// and gold-tinting active supporters whose author line should match the
-  /// supporter-style gold (`styles-features.css:1478-1481`).
+  /// The PWA only bold-weights the Genesis author line; supporters get gold on
+  /// the `.message-content`, NOT the author nym — `.message.supporter-style
+  /// .message-header` (styles-features.css:1478) is a DEAD selector (no JS ever
+  /// emits `.message-header`; the author element is `.message-author`), so the
+  /// author nym keeps the normal self/other color.
   TextStyle _authorStyle(NymColors c, {required bool self, required double size}) {
-    final cos = _cosmetics;
-    final genesis = hasGenesisFlair(cos);
-    final supporterGold = cos.supporter && cos.styleId == null;
+    final genesis = hasGenesisFlair(_cosmetics);
+    // `.message-author.cosmetic-redacted { color:#fff !important; opacity:0.8 }`
+    // (styles-features.css:1419-1422) — the redacted privacy cosmetic dims the
+    // author nym to white@0.8 as well as blanking the body.
+    final color = _cosmetics.isRedacted
+        ? Colors.white.withValues(alpha: 0.8)
+        : (self ? c.primary : c.secondary);
     return TextStyle(
-      color: supporterGold ? const Color(0xFFFFD700) : (self ? c.primary : c.secondary),
+      color: color,
       fontSize: size,
       fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
       // `.message-author { letter-spacing: 0.2px }` (styles-chat.css:697).
       letterSpacing: 0.2,
-      shadows: supporterGold
-          ? const [Shadow(color: Color(0x66FFD700), blurRadius: 10)]
-          : null,
     );
   }
 
@@ -348,16 +390,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isSystemRow) return _buildSystemMessage(context);
     // `/me …` emote → italic "* author action *" line.
     if (message.isMeAction) return _buildActionMessage(context);
-    final row =
+    Widget row =
         settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
     // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
     // current conversation is dimmed (`messages.js:652-656`). Own messages are
     // never flooded.
     if (!message.isOwn &&
         ref.watch(floodTrackerProvider).isFlooding(message.pubkey)) {
-      return Opacity(opacity: 0.2, child: row);
+      row = Opacity(opacity: 0.2, child: row);
     }
-    return row;
+    // `.message-scroll-flash`: a tapped blockquote scrolls to its quoted source
+    // and flashes it (`_scrollToQuotedMessage`, messages.js:2775). Watch the
+    // transient flash signal and pulse this row's highlight halo when it targets
+    // us (the `::after` primary-tinted overlay, styles-chat.css:1285-1306).
+    final flashing = ref.watch(flashedMessageProvider) == message.id;
+    return _ScrollFlashOverlay(active: flashing, child: row);
   }
 
   /// A centered `.system-message` (or `.action-message`) pill injected into the
@@ -568,9 +615,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  formatTime(message.dateTime, settings.timeFormat),
-                  style: TextStyle(color: c.textDim, fontSize: 12),
+                // `data-action="showFullTimestamp"`: tapping the clock shows the
+                // full date+time popup (messages.js:936-938, showTimestampPopup).
+                Tooltip(
+                  message: formatFullTimestamp(message.dateTime,
+                      settings.timeFormat, settings.dateFormat),
+                  triggerMode: TooltipTriggerMode.tap,
+                  child: Text(
+                    formatTime(message.dateTime, settings.timeFormat),
+                    style: TextStyle(color: c.textDim, fontSize: 12),
+                  ),
                 ),
                 // `.crypto-lock-irc`: the verification lock sits inside
                 // `.message-time` after the clock (PM/group only).
@@ -618,22 +672,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _bodyContent(context, c.text, fontSize, deco: deco),
-              // `.edited-indicator-irc`: right-aligned 10px italic dim (edited).
-              if (message.isEdited)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      '(edited)',
-                      style: TextStyle(
-                        color: c.textDim.withValues(alpha: 0.7),
-                        fontSize: 10,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-                ),
               // Reactions row renders only when reactions OR zaps exist (the PWA
               // `updateMessageReactions` early-returns on an empty reaction set,
               // removing the row entirely unless zaps remain). The zap badge sits
@@ -661,6 +699,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       mainAxisSize: MainAxisSize.min,
       children: [
         messageRow,
+        // `.edited-indicator-irc { display:block; text-align:right; margin-left:
+        // auto }` — the PWA appends `editedIRC` as a TOP-LEVEL sibling AFTER
+        // `.message-content` (messages.js:939), so it right-aligns across the
+        // WHOLE message row, not just the (possibly short) content column.
+        if (message.isEdited)
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '(edited)',
+                style: TextStyle(
+                  color: c.textDim.withValues(alpha: 0.7),
+                  fontSize: 10,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ),
         // `.message-translation`: full-width left-primary-bordered block BELOW
         // the message content (a sibling after `.message-content`, width:100%).
         if (_showTranslation)
@@ -700,6 +757,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       decoration: BoxDecoration(
         color: bg,
         borderRadius: bg != null ? NymRadius.rsm : null,
+        // IRC-layout auras add an inset 1px ring + an outer glow on the whole
+        // row (`body:not(.chat-bubbles) .message.cosmetic-aura-* { box-shadow:
+        // inset 0 0 0 1px <ring>, 0 0 Npx <glow> }`, styles-features.css:1099+).
+        // The bubble path routes these through CosmeticOverlayPainter/_decorate
+        // Bubble; here we approximate the inset ring with a 1px border.
+        border: strongestAura?.insetColor != null
+            ? Border.all(color: strongestAura!.insetColor!, width: 1)
+            : null,
+        boxShadow:
+            (strongestAura?.glowColor != null && strongestAura!.glowBlur > 0)
+                ? [
+                    BoxShadow(
+                        color: strongestAura.glowColor!,
+                        blurRadius: strongestAura.glowBlur),
+                  ]
+                : null,
       ),
       clipBehavior: bg != null ? Clip.antiAlias : Clip.none,
       child: barColor != null
@@ -793,9 +866,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
               ),
             // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-            Text(
-              formatRelativeTime(message.dateTime),
-              style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
+            // Tapping it shows the full date+time popup (showTimestampPopup).
+            Tooltip(
+              message: formatFullTimestamp(
+                  message.dateTime, settings.timeFormat, settings.dateFormat),
+              triggerMode: TooltipTriggerMode.tap,
+              child: Text(
+                formatRelativeTime(message.dateTime),
+                style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
+              ),
             ),
             // `.crypto-lock-bubble`: the verification lock follows the in-bubble
             // time (PM/group only).
@@ -1579,6 +1658,91 @@ class _RedactedRevealState extends State<_RedactedReveal> {
         color: Colors.white.withValues(alpha: 0.15),
         borderRadius: NymRadius.rxs,
       ),
+    );
+  }
+}
+
+/// The `.message-scroll-flash` highlight pulse (`styles-chat.css:1285-1306`): a
+/// non-interactive primary-tinted overlay (`::after`, primary@0.18 fill + 1px
+/// primary@0.5 border, radius-sm) that fades in then out over the
+/// `messageScrollFlash` keyframes (0→1 at 8%, hold to 45%, →0 at 100%) across
+/// 1.8s. Wraps a message row and plays once each time [active] rises (the row's
+/// `flashedMessageProvider` match), mirroring the class the PWA adds to a
+/// jumped-to message after `_scrollToQuotedMessage`.
+class _ScrollFlashOverlay extends StatefulWidget {
+  const _ScrollFlashOverlay({required this.active, required this.child});
+  final bool active;
+  final Widget child;
+
+  @override
+  State<_ScrollFlashOverlay> createState() => _ScrollFlashOverlayState();
+}
+
+class _ScrollFlashOverlayState extends State<_ScrollFlashOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    // `animation: messageScrollFlash 1.8s ease-out forwards`.
+    duration: const Duration(milliseconds: 1800),
+    vsync: this,
+  );
+
+  // The `@keyframes messageScrollFlash` opacity curve: 0% → 0, 8% → 1, 45% → 1,
+  // 100% → 0 (ease-out). A TweenSequence reproduces the in/hold/out timeline.
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.0, end: 1.0)
+          .chain(CurveTween(curve: Curves.easeOut)),
+      weight: 8,
+    ),
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 37), // 8% → 45%
+    TweenSequenceItem(
+      tween: Tween(begin: 1.0, end: 0.0)
+          .chain(CurveTween(curve: Curves.easeOut)),
+      weight: 55, // 45% → 100%
+    ),
+  ]).animate(_controller);
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) _controller.forward(from: 0);
+  }
+
+  @override
+  void didUpdateWidget(_ScrollFlashOverlay old) {
+    super.didUpdateWidget(old);
+    // Re-trigger the pulse each time the flash newly targets this row.
+    if (widget.active && !old.active) _controller.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Stack(
+      children: [
+        widget.child,
+        // `position: absolute; inset: 0; pointer-events: none; z-index: 5`.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: FadeTransition(
+              opacity: _opacity,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: c.primaryA(0.18),
+                  border: Border.all(color: c.primaryA(0.5)),
+                  borderRadius: NymRadius.rsm,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

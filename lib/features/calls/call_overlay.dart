@@ -24,6 +24,7 @@ import '../../widgets/context_menu/context_menu_actions.dart';
 import '../../widgets/context_menu/context_menu_panel.dart';
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
+import '../shop/cosmetics.dart';
 import '../reactions/quick_react_popup.dart';
 import 'call_nym.dart';
 import 'call_providers.dart';
@@ -831,7 +832,7 @@ class _ChatPanel extends ConsumerWidget {
 
 /// One chat row: decorated from-line (non-self) + mention-highlighted text +
 /// reaction badges, with long-press → quick-react, plus a self read receipt.
-class _ChatRow extends StatelessWidget {
+class _ChatRow extends ConsumerWidget {
   const _ChatRow({
     required this.msg,
     required this.isGroup,
@@ -857,9 +858,28 @@ class _ChatRow extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    final base = TextStyle(color: c.textBright, fontSize: 14, height: 1.3);
+    var base = TextStyle(color: c.textBright, fontSize: 14, height: 1.3);
+
+    // Carry the sender's purchased message flair (style / supporter) onto the
+    // call-chat text, mirroring `_appendCallChat` (calls.js:1407-1414) which
+    // adds `shop.style` / `supporter-style` classes that the `.call-chat-text`
+    // rules (styles-features.css:4901-4946) tint with a colour + glow. Kept
+    // lightweight (text colour + text-shadow only); supporter wins over a base
+    // message style, matching the CSS cascade order.
+    if (msg.pubkey.isNotEmpty) {
+      final cosmetics = ref.watch(userCosmeticsProvider(msg.pubkey));
+      final deco = cosmetics.supporter
+          ? supporterStyleDecoration
+          : messageStyleDecoration(cosmetics.styleId);
+      if (deco != null) {
+        base = base.copyWith(
+          color: deco.textColor,
+          shadows: deco.textShadows,
+        );
+      }
+    }
 
     return Stack(
       children: [
