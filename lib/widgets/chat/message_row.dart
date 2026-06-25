@@ -43,6 +43,44 @@ String formatTime(DateTime t, String timeFormat) {
   return '$h12:$m $ampm';
 }
 
+const List<String> _shortMonths = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/// The full "date, time" label shown when a message timestamp is tapped
+/// (`_formatFullTimestamp`, messages.js:3328): seconds-precision time in the
+/// user's 12/24h format, with the date per the `dateFormat` setting
+/// (`mdy`/`dmy`/`ymd`, else "Mon D, YYYY").
+String formatFullTimestamp(DateTime t, String timeFormat, String dateFormat) {
+  final h24 = t.hour;
+  final m = t.minute.toString().padLeft(2, '0');
+  final s = t.second.toString().padLeft(2, '0');
+  final String timeStr;
+  if (timeFormat == '24hr') {
+    timeStr = '${h24.toString().padLeft(2, '0')}:$m:$s';
+  } else {
+    final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+    final ampm = h24 < 12 ? 'AM' : 'PM';
+    timeStr = '${h12.toString().padLeft(2, '0')}:$m:$s $ampm';
+  }
+  final y = t.year;
+  final mo = t.month.toString().padLeft(2, '0');
+  final d = t.day.toString().padLeft(2, '0');
+  final String dateStr;
+  switch (dateFormat) {
+    case 'mdy':
+      dateStr = '$mo/$d/$y';
+    case 'dmy':
+      dateStr = '$d/$mo/$y';
+    case 'ymd':
+      dateStr = '$y-$mo-$d';
+    default:
+      dateStr = '${_shortMonths[t.month - 1]} ${t.day}, $y';
+  }
+  return '$dateStr, $timeStr';
+}
+
 /// Relative-time label for the in-bubble timestamp (a 1:1 port of
 /// `_formatRelativeTime`, `messages.js:3308-3325`): `now` / `1m ago` /
 /// `{m}m ago` / `{h}h ago` / `{d}d ago` / `Mon D[, YYYY]`.
@@ -572,9 +610,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  formatTime(message.dateTime, settings.timeFormat),
-                  style: TextStyle(color: c.textDim, fontSize: 12),
+                // `data-action="showFullTimestamp"`: tapping the clock shows the
+                // full date+time popup (messages.js:936-938, showTimestampPopup).
+                Tooltip(
+                  message: formatFullTimestamp(message.dateTime,
+                      settings.timeFormat, settings.dateFormat),
+                  triggerMode: TooltipTriggerMode.tap,
+                  child: Text(
+                    formatTime(message.dateTime, settings.timeFormat),
+                    style: TextStyle(color: c.textDim, fontSize: 12),
+                  ),
                 ),
                 // `.crypto-lock-irc`: the verification lock sits inside
                 // `.message-time` after the clock (PM/group only).
@@ -813,9 +858,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
               ),
             // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-            Text(
-              formatRelativeTime(message.dateTime),
-              style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
+            // Tapping it shows the full date+time popup (showTimestampPopup).
+            Tooltip(
+              message: formatFullTimestamp(
+                  message.dateTime, settings.timeFormat, settings.dateFormat),
+              triggerMode: TooltipTriggerMode.tap,
+              child: Text(
+                formatRelativeTime(message.dateTime),
+                style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
+              ),
             ),
             // `.crypto-lock-bubble`: the verification lock follows the in-bubble
             // time (PM/group only).

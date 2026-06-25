@@ -807,14 +807,15 @@ class _MediaGallery extends StatelessWidget {
   Widget build(BuildContext context) {
     // Single image/video: max 300×300, min-height 80 (`styles-chat.css:1029`).
     if (items.length == 1) {
-      return _MediaTile(item: items.first, maxSize: 300, blur: blur);
+      return _MediaTile(
+          item: items.first, maxSize: 300, blur: blur, gallery: items);
     }
     // The grid is ALWAYS 2 columns, gap 4, max-width 420, radius sm
     // (`styles-chat.css:987-1023`). 3 items = a tall left hero + two stacked
     // right; 2 / 4+ = a 2-column wrap. Tiles cap at 220px tall.
     const gap = 4.0;
-    Widget tile(MediaItem m) =>
-        _MediaTile(item: m, maxSize: 220, blur: blur, inGallery: true);
+    Widget tile(MediaItem m) => _MediaTile(
+        item: m, maxSize: 220, blur: blur, inGallery: true, gallery: items);
     Widget body;
     if (items.length == 3) {
       body = Row(
@@ -856,9 +857,26 @@ class _MediaTile extends StatelessWidget {
     required this.maxSize,
     this.blur = false,
     this.inGallery = false,
+    this.gallery,
   });
   final MediaItem item;
   final double maxSize;
+
+  /// The sibling media of this tile's message — lets a tap open the fullscreen
+  /// viewer with prev/next paging across the message's images (`expandImage` /
+  /// `_imageModalGallery`). Null/single → a one-image viewer.
+  final List<MediaItem>? gallery;
+
+  /// Opens [item] (and its image siblings) in the fullscreen viewer.
+  void _openFullscreen(BuildContext context) {
+    final urls = (gallery ?? [item])
+        .where((m) => !m.isVideo)
+        .map((m) => m.url)
+        .toList();
+    if (urls.isEmpty) return;
+    final idx = urls.indexOf(item.url);
+    _FullscreenImageViewer.open(context, urls, idx < 0 ? 0 : idx);
+  }
 
   /// Apply the privacy blur (others' images), revealed on tap (`.blurred`).
   final bool blur;
@@ -907,11 +925,22 @@ class _MediaTile extends StatelessWidget {
       ),
     );
 
+    // Tapping an image opens it fullscreen (after the privacy blur is first
+    // revealed, when blurred) — `data-action="expandImageFromData"`.
+    final tappableImage = blur
+        ? _BlurReveal(
+            onRevealedTap: () => _openFullscreen(context),
+            child: image,
+          )
+        : GestureDetector(
+            onTap: () => _openFullscreen(context),
+            child: image,
+          );
     final clipped = ClipRRect(
       borderRadius: radius,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
-        child: blur ? _BlurReveal(child: image) : image,
+        child: tappableImage,
       ),
     );
     // A lone image carries a 1px glass border (`.message-content img`); gallery
@@ -927,11 +956,116 @@ class _MediaTile extends StatelessWidget {
   }
 }
 
+/// Fullscreen image viewer (`expandImage` + `_imageModalGallery`,
+/// messages.js:1432-1483): pinch-zoom via [InteractiveViewer], prev/next paging
+/// across a message's images, tap the backdrop or the ✕ to close.
+class _FullscreenImageViewer extends StatefulWidget {
+  const _FullscreenImageViewer(
+      {required this.urls, required this.initialIndex});
+  final List<String> urls;
+  final int initialIndex;
+
+  static Future<void> open(
+      BuildContext context, List<String> urls, int index) {
+    return Navigator.of(context, rootNavigator: true).push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        barrierColor: Colors.black.withValues(alpha: 0.92),
+        pageBuilder: (_, __, ___) =>
+            _FullscreenImageViewer(urls: urls, initialIndex: index),
+      ),
+    );
+  }
+
+  @override
+  State<_FullscreenImageViewer> createState() => _FullscreenImageViewerState();
+}
+
+class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
+  late int _index = widget.initialIndex;
+
+  void _step(int delta) => setState(() =>
+      _index = (_index + delta + widget.urls.length) % widget.urls.length);
+
+  @override
+  Widget build(BuildContext context) {
+    final multi = widget.urls.length > 1;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          // Tap the backdrop to dismiss.
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).maybePop(),
+              behavior: HitTestBehavior.opaque,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Center(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 5,
+              child: Image.network(
+                proxiedMedia(widget.urls[_index]),
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image,
+                    color: Colors.white54, size: 48),
+              ),
+            ),
+          ),
+          if (multi) ...[
+            Positioned(
+              left: 4,
+              top: 0,
+              bottom: 0,
+              child: Center(child: _btn(Icons.chevron_left, () => _step(-1))),
+            ),
+            Positioned(
+              right: 4,
+              top: 0,
+              bottom: 0,
+              child: Center(child: _btn(Icons.chevron_right, () => _step(1))),
+            ),
+            Positioned(
+              bottom: 28,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Text('${_index + 1} / ${widget.urls.length}',
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 13)),
+              ),
+            ),
+          ],
+          Positioned(
+            top: 4,
+            right: 4,
+            child: SafeArea(
+              child: _btn(Icons.close, () => Navigator.of(context).maybePop()),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _btn(IconData icon, VoidCallback onTap) => Material(
+        color: Colors.black54,
+        shape: const CircleBorder(),
+        child:
+            IconButton(icon: Icon(icon, color: Colors.white), onPressed: onTap),
+      );
+}
+
 /// Wraps an image in a gaussian blur revealed on tap (`.blurred`,
 /// `messages.js:1267-1274` — the PWA clears the blur class on tap).
 class _BlurReveal extends StatefulWidget {
-  const _BlurReveal({required this.child});
+  const _BlurReveal({required this.child, this.onRevealedTap});
   final Widget child;
+
+  /// Tapped once the blur is cleared (e.g. to open the fullscreen viewer).
+  final VoidCallback? onRevealedTap;
 
   @override
   State<_BlurReveal> createState() => _BlurRevealState();
@@ -942,7 +1076,12 @@ class _BlurRevealState extends State<_BlurReveal> {
 
   @override
   Widget build(BuildContext context) {
-    if (_revealed) return widget.child;
+    if (_revealed) {
+      return GestureDetector(
+        onTap: widget.onRevealedTap,
+        child: widget.child,
+      );
+    }
     return GestureDetector(
       onTap: () => setState(() => _revealed = true),
       child: ImageFiltered(
