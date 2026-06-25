@@ -20,6 +20,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../calls/call_nym.dart';
+import '../messages/format/message_content.dart';
 
 /// Opens the notifications history as a centered modal (the PWA renders it as a
 /// `.modal` overlay).
@@ -402,9 +403,12 @@ class _NotificationRow extends ConsumerWidget {
                     // primary author color).
                     _Author(entry: entry, pubkey: pubkey),
                     const SizedBox(height: 2),
-                    // .notification-item-body: text 13, line-height 1.4, 2-line clamp.
-                    Text(
-                      body,
+                    // .notification-item-body: text 13, line-height 1.4, 2-line
+                    // clamp. Routed through [InlineEmojiText] so a `:shortcode:`
+                    // in the previewed message / reaction renders as its custom-
+                    // emoji image instead of literal text.
+                    InlineEmojiText(
+                      text: body,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style:

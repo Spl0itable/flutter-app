@@ -1454,12 +1454,15 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
                 ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
                 : null,
           ),
-          child: Text(
-            // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge
-            // label stays `--text` even when user-reacted (only bg/border/glow
-            // change — `styles-chat.css:439-443`).
-            '${r.emoji} ${abbreviateNumber(r.count)}',
+          // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
+          // stays `--text` even when user-reacted (only bg/border/glow change —
+          // `styles-chat.css:439-443`). Routed through [InlineEmojiText] so a
+          // NIP-30 `:shortcode:` reaction renders as its custom-emoji image, not
+          // literal text; unicode reactions stay a plain styled Text.
+          child: InlineEmojiText(
+            text: '${r.emoji} ${abbreviateNumber(r.count)}',
             style: TextStyle(color: c.text, fontSize: 12),
+            emojiSize: 18,
           ),
         ),
       ),
