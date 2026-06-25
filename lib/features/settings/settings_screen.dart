@@ -970,7 +970,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               (value: true, label: 'Enabled'),
               (value: false, label: 'Disabled'),
             ],
-            onChanged: ctrl.setCachePMs,
+            onChanged: (v) {
+              ctrl.setCachePMs(v);
+              // The hint promises disabling wipes the existing cached PM/group
+              // content (PWA clearPMCache) — not just future writes.
+              if (!v) ref.read(nostrControllerProvider).clearPmGroupCache();
+            },
           ),
         ),
         FormGroup(

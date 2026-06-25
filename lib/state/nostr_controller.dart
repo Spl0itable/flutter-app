@@ -1699,6 +1699,9 @@ class NostrController {
         emojiTags: _ref
             .read(liveCustomEmojiProvider.notifier)
             .emojiTagsForContent(content),
+        // Honor the user's Proof-of-Work Difficulty setting (settings.js
+        // `powDifficulty`); the service clamps it up to the Nymchat floor.
+        powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
         signerOverride: ephemeralSigner,
       );
       if (signed != null && echo != null) {
@@ -1759,6 +1762,9 @@ class NostrController {
           emojiTags: _ref
               .read(liveCustomEmojiProvider.notifier)
               .emojiTagsForContent(trimmed),
+          // Honor the user's Proof-of-Work Difficulty setting (clamped up to
+          // the Nymchat floor by the service).
+          powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
         );
         // Swap the temp id for the real signed-event id IN PLACE and register
         // it so the relay echo is deduped — never shown twice (the PWA's
@@ -2269,6 +2275,18 @@ class NostrController {
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
     await cache.wipe();
+  }
+
+  /// Wipes the on-device PM + group-chat cache (the shared `pms` table). Called
+  /// when the user disables "Cache PMs & Group Chats" — the PWA's `clearPMCache`
+  /// that the setting's hint promises ("Toggling off clears the existing cached
+  /// PM/group data"). Drops the dirty PM keys first so a pending flush can't
+  /// immediately re-persist what we just dropped.
+  Future<void> clearPmGroupCache() async {
+    final cache = _cache;
+    if (cache == null || !cache.isOpen) return;
+    _dirtyPmKeys.clear();
+    await cache.clearPms();
   }
 
   // --- moderation entry points (role-checked) -------------------------------
