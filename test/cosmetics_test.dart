@@ -216,6 +216,36 @@ void main() {
       expect(supporterStyleDecoration.borderAccent, isNotNull);
       expect(supporterStyleDecoration.textShadows, isNotNull);
     });
+
+    test('light mode swaps the bright dark colour for the PWA light tone + '
+        'drops the glow', () {
+      // style-neon: #FF00FF + glow (dark) → #990099, no glow (light).
+      final dark = messageStyleDecoration('style-neon');
+      final light = messageStyleDecoration('style-neon', isLight: true);
+      expect(dark!.textColor, const Color(0xFFFF00FF));
+      expect(dark.textShadows, isNotNull);
+      expect(light!.textColor, const Color(0xFF990099));
+      expect(light.textShadows, isNull, reason: 'light resets text-shadow');
+    });
+
+    test('aurora keeps a gradient in light mode (with the light stops)', () {
+      final light = messageStyleDecoration('style-aurora', isLight: true);
+      expect(light!.gradient, isNotNull);
+      expect(light.gradient!.first, const Color(0xFF007766));
+    });
+
+    test('glitch keeps its chromatic split in light mode', () {
+      final light = messageStyleDecoration('style-glitch', isLight: true);
+      expect(light!.textColor, const Color(0xFF006600));
+      // The red/cyan glyph offsets are not a glow, so light keeps them.
+      expect(light.textShadows, isNotNull);
+      expect(light.textShadows!.length, 2);
+    });
+
+    test('supporter light variant is darker gold with no glow', () {
+      expect(supporterStyleDecorationLight.textColor, const Color(0xFF8A6D00));
+      expect(supporterStyleDecorationLight.textShadows, isNull);
+    });
   });
 
   group('MessageRow cosmetics rendering', () {

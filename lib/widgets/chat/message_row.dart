@@ -202,11 +202,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// The author's active message-style decoration. The supporter badge also
   /// adds a gold "supporter-style" treatment to the message body
   /// (`.message.supporter-style`); an explicit style takes precedence.
-  MessageStyleDecoration? get _styleDecoration {
+  MessageStyleDecoration? _styleDecoration(BuildContext context) {
     final cos = _cosmetics;
-    final styled = messageStyleDecoration(cos.styleId);
+    final isLight = context.nym.isLight;
+    final styled = messageStyleDecoration(cos.styleId, isLight: isLight);
     if (styled != null) return styled;
-    if (cos.supporter) return supporterStyleDecoration;
+    if (cos.supporter) {
+      return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+    }
     return null;
   }
 
@@ -504,7 +507,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
 
-    final deco = _styleDecoration;
+    final deco = _styleDecoration(context);
 
     Color? bg;
     Color? barColor;
@@ -705,7 +708,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
     final align = self ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-    final deco = _styleDecoration;
+    final deco = _styleDecoration(context);
 
     // In bubble mode the CSS applies the message style to `.message-content`
     // (the bubble): a translucent style background plus a soft glow halo.
@@ -914,7 +917,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             : null;
 
     // Watermark from the active style or a frost/cosmic aura.
-    final watermark = _styleDecoration?.watermark ??
+    final watermark = _styleDecoration(context)?.watermark ??
         auras
             .map((a) => a.watermark)
             .firstWhere((w) => w != null, orElse: () => null);

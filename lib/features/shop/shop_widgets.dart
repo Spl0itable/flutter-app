@@ -6,7 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../core/theme/nym_colors.dart';
-import 'cosmetics.dart' show StyleWatermarkLayer, styleWatermarks;
+import 'cosmetics.dart'
+    show StyleWatermarkLayer, messageStyleDecoration, styleWatermarks;
 import 'shop_catalog.dart';
 import 'shop_models.dart';
 
@@ -328,29 +329,31 @@ class ShopStyleBubblePreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final v = ShopCatalog.styleVisuals[styleId];
+    // Resolve the MODE-AWARE decoration (same source the chat bubble uses), so
+    // the card preview switches to the PWA's `body.light-mode` style colours /
+    // dropped glow in light mode instead of showing the unreadable dark neons.
+    final deco = messageStyleDecoration(styleId, isLight: c.isLight);
     // The same tiled `--style-pattern` SVG the rendered message uses
     // (cosmetics.dart `styleWatermarks`), so the shop card preview matches the
     // chat bubble 1:1 instead of approximating with a single repeating glyph.
     final watermark = styleWatermarks[styleId];
-    if (v == null) {
+    if (deco == null) {
       return Text(text, style: TextStyle(color: c.text, fontSize: 12));
     }
-    // The glyph shadow(s): explicit multi-offset (glitch) or the single glow.
-    final shadows = v.glyphShadows ??
-        (v.glow != null ? [Shadow(color: v.glow!, blurRadius: 10)] : null);
+    // The glyph shadow(s): explicit multi-offset (glitch) or the single glow,
+    // already nulled in light mode by `messageStyleDecoration`.
     final base = TextStyle(
-      color: v.color,
+      color: deco.textColor,
       fontSize: 12,
       fontWeight: FontWeight.w600,
-      fontFamily: v.monospace ? 'monospace' : null,
-      shadows: shadows,
+      fontFamily: deco.monospace ? 'monospace' : null,
+      shadows: deco.textShadows,
     );
     Widget label;
-    if (v.gradient != null) {
+    if (deco.gradient != null) {
       label = ShaderMask(
         shaderCallback: (rect) =>
-            LinearGradient(colors: v.gradient!).createShader(rect),
+            LinearGradient(colors: deco.gradient!).createShader(rect),
         child: Text(text, style: base.copyWith(color: Colors.white)),
       );
     } else {
@@ -359,9 +362,11 @@ class ShopStyleBubblePreview extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        // Prefer the shop-card wash for the 8 preview styles; else the in-chat
-        // content background (satoshi/eclipse/crt).
-        color: _previewWash[styleId] ?? v.contentBackground,
+        // Dark: the shop-card wash for the 8 wash styles; else the in-chat
+        // content background (satoshi/eclipse/crt). The bright dark washes are
+        // dropped in light mode (the PWA's light previews carry text colour, not
+        // a tinted card), leaving the mode-aware content background.
+        color: (c.isLight ? null : _previewWash[styleId]) ?? deco.contentBackground,
         borderRadius: BorderRadius.circular(8),
       ),
       clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
