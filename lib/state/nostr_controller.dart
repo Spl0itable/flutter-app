@@ -295,6 +295,15 @@ class NostrController {
     }
   }
 
+  /// Public, throttled D1 activity refresh for the globe (GL3). The geohash
+  /// explorer calls this on open and on its 30s active-window tick so the
+  /// dots/heatmap reflect real D1 activity for channels we never loaded —
+  /// mirroring the PWA's `showGeohashExplorer` + the `ACTIVE_WINDOW_REFRESH_MS`
+  /// timer, both of which call `fetchGeohashActivityFromD1` (geohash-globe.js:210
+  /// / :1024). Delegates to [_discoverChannelActivity], which is already
+  /// ~30s-throttled and best-effort (so calling it on every tick is safe).
+  Future<void> refreshGeohashActivity() => _discoverChannelActivity();
+
   /// Relay connection-count sink. Forwards the live count to [AppState] (the old
   /// direct `setConnectedRelays` binding) AND re-fires the D1 activity discovery
   /// on a 0→connected edge, mirroring the PWA, which calls

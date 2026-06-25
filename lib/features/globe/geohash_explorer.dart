@@ -12,6 +12,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../models/channel.dart';
 import '../../services/api/api_client.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import 'geo_map_painter.dart';
 import 'geo_projection.dart';
@@ -156,10 +157,20 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   void initState() {
     super.initState();
     _loadFeatures();
-    // Activity tick (30s): bump the repaint notifier and rebuild so the dots /
-    // heatmap re-tally against the moving active window.
+    // GL3 — quietly pull recent-activity counts from D1 on open so the globe
+    // reflects real activity (especially the default 24h view) for channels we
+    // never loaded, mirroring the PWA's `showGeohashExplorer`, which calls
+    // `fetchGeohashActivityFromD1` (geohash-globe.js:210). Throttled + best-effort
+    // inside the controller; the rebuild on completion re-tallies the dots.
+    _refreshD1Activity();
+    // Activity tick (30s): refresh D1 activity (throttled), bump the repaint
+    // notifier, and rebuild so the dots / heatmap re-tally against the moving
+    // active window. Mirrors the PWA's ACTIVE_WINDOW_REFRESH_MS timer, which
+    // calls `fetchGeohashActivityFromD1` + `updateGeohashChannels`
+    // (geohash-globe.js:1020-1029).
     _activeWindowTimer = Timer.periodic(kActiveWindowRefresh, (_) {
       if (!mounted) return;
+      _refreshD1Activity();
       _ticker.value++;
       setState(() {}); // re-run _channels() against the new "now".
     });
@@ -167,6 +178,16 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
     _daynightTimer = Timer.periodic(kDaynightRefresh, (_) {
       if (mounted && _daynight) _ticker.value++;
     });
+  }
+
+  /// GL3 — fire the controller's throttled D1 activity refresh (the PWA's
+  /// `fetchGeohashActivityFromD1`). Folds discovered activity into
+  /// `channelLastActivity`, which [buildGeohashChannels] reads as the D1 presence
+  /// signal; the resulting `appStateProvider` change rebuilds this widget so the
+  /// dots/heatmap re-tally. Best-effort and self-throttling (~30s) in the
+  /// controller, so calling it on open and on every 30s tick is safe.
+  void _refreshD1Activity() {
+    unawaited(ref.read(nostrControllerProvider).refreshGeohashActivity());
   }
 
   @override
@@ -235,6 +256,19 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   List<GeohashChannelPoint> _channels() {
     final state = ref.read(appStateProvider);
     return buildGeohashChannels(state, windowHours: _activeWindowHours);
+  }
+
+  /// GL4 — change the active window and re-tally. The rebuild re-runs
+  /// [_channels] against [hours], and bumping [_ticker] (the painter's repaint
+  /// signal) forces the dots/heatmap to redraw immediately — mirroring the PWA's
+  /// `setGeohashActiveWindow`, which sets `_geohashActiveWindowHours` then calls
+  /// `geohashMap.updatePoints()` (channels.js:329-343). The heat image is keyed
+  /// on the windowed point set, so it rebuilds when the count changes too. No D1
+  /// refetch (the PWA's window change doesn't refetch either; the 30s tick does).
+  void _setActiveWindow(int hours) {
+    if (hours == _activeWindowHours) return;
+    setState(() => _activeWindowHours = hours);
+    _ticker.value++;
   }
 
   /// The user's location for the map marker / distance row, but only when the
@@ -831,7 +865,7 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
               DropdownMenuItem<int>(value: h, child: Text('${h}h')),
           ],
           onChanged: (h) {
-            if (h != null) setState(() => _activeWindowHours = h);
+            if (h != null) _setActiveWindow(h); // GL4
           },
         ),
       ),
@@ -840,7 +874,7 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
 
   Widget _windowBtn(int hours, bool active, NymColors nym) {
     return InkWell(
-      onTap: () => setState(() => _activeWindowHours = hours),
+      onTap: () => _setActiveWindow(hours), // GL4
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
         color: active ? nym.primaryA(0.18) : Colors.transparent,
