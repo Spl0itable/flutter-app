@@ -295,21 +295,19 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   /// The author-name [TextStyle], bolding Genesis holders (`.has-genesis-flair`)
-  /// and gold-tinting active supporters whose author line should match the
-  /// supporter-style gold (`styles-features.css:1478-1481`).
+  /// The PWA only bold-weights the Genesis author line; supporters get gold on
+  /// the `.message-content`, NOT the author nym — `.message.supporter-style
+  /// .message-header` (styles-features.css:1478) is a DEAD selector (no JS ever
+  /// emits `.message-header`; the author element is `.message-author`), so the
+  /// author nym keeps the normal self/other color.
   TextStyle _authorStyle(NymColors c, {required bool self, required double size}) {
-    final cos = _cosmetics;
-    final genesis = hasGenesisFlair(cos);
-    final supporterGold = cos.supporter && cos.styleId == null;
+    final genesis = hasGenesisFlair(_cosmetics);
     return TextStyle(
-      color: supporterGold ? const Color(0xFFFFD700) : (self ? c.primary : c.secondary),
+      color: self ? c.primary : c.secondary,
       fontSize: size,
       fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
       // `.message-author { letter-spacing: 0.2px }` (styles-chat.css:697).
       letterSpacing: 0.2,
-      shadows: supporterGold
-          ? const [Shadow(color: Color(0x66FFD700), blurRadius: 10)]
-          : null,
     );
   }
 

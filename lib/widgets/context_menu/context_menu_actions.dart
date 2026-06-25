@@ -99,10 +99,12 @@ List<CtxAction> buildContextMenuActions(CtxTarget t) {
   final showGiftCredits = !t.isSelf && !t.isBot;
 
   // Profile-only mode (nyms sidebar): the PWA explicitly hides Mention,
-  // Translate, Slap, Hug, mod items and Edit; everything else stays subject to
-  // its own gate. With no messageId/content present, React/Zap/Quote/Copy/Edit/
-  // Delete fall away too — leaving PM, AddToGroup, GiftCredits, Friend, Report,
-  // Block (ui-context.js:640-654).
+  // Translate, Slap, Hug, mod items and Edit *Message* (`editOption`); everything
+  // else stays subject to its own gate. With no messageId/content present,
+  // React/Zap/Quote/Copy/Delete fall away too — leaving PM, AddToGroup,
+  // GiftCredits, Friend, Report, Block, and (for self) Edit *Profile*, which the
+  // PWA keeps visible (`ctxEditProfile` is shown when pubkey === self, and the
+  // profile-only block never hides it) (ui-context.js:586-594, 640-654).
   if (t.profileOnly) {
     return [
       if (!t.isSelf) CtxAction.privateMessage,
@@ -111,6 +113,7 @@ List<CtxAction> buildContextMenuActions(CtxTarget t) {
       if (!t.isSelf) CtxAction.friend,
       if (!t.isSelf) CtxAction.report,
       if (!t.isSelf) CtxAction.block,
+      if (t.isSelf) CtxAction.editProfile,
     ];
   }
 

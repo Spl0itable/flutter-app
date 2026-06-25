@@ -102,8 +102,10 @@ class MessageContent extends ConsumerWidget {
     final color = baseColor ?? c.text;
 
     // Emoji-only messages (1-6 emoji, no other text) render enlarged
-    // (`.emoji-only .emoji { font-size: 2.5em }`, `messages.js:922-924`).
-    final emojiOnly = isEmojiOnly(content);
+    // (`.emoji-only .emoji { font-size: 2.5em }`, `messages.js:922-924`) — for
+    // both unicode emoji and custom-emoji-only shortcode messages.
+    final emojiOnly =
+        isEmojiOnly(content) || isCustomEmojiOnly(content, ctx.customEmojis);
 
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
@@ -235,13 +237,29 @@ final RegExp _rxEmojiOnly = RegExp('^(?:$_emojiUnit){1,6}\$', unicode: true);
 final RegExp _rxWhitespace = RegExp(r'\s', unicode: true);
 
 /// True when [content] is 1-6 emoji with optional whitespace and no other text
-/// (port of `isEmojiOnly`, `messages.js:1424-1430`). Custom-emoji-only messages
-/// (e.g. `:shrug:`) are out of scope here — those are detected by the formatter.
+/// (port of `isEmojiOnly`, `messages.js:1424-1430`).
 bool isEmojiOnly(String content) {
   if (content.isEmpty) return false;
   final stripped = content.replaceAll(_rxWhitespace, '');
   if (stripped.isEmpty) return false;
   return _rxEmojiOnly.hasMatch(stripped);
+}
+
+final RegExp _rxCustomEmojiToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
+/// True when [content] is 1-6 whitespace-separated custom-emoji shortcodes,
+/// every one a known [customEmojis] code (port of `isCustomEmojiOnly`,
+/// emoji.js:331). Drives the same `.emoji-only` 2.75em enlarge as a
+/// unicode-emoji-only message.
+bool isCustomEmojiOnly(String content, Map<String, String> customEmojis) {
+  if (content.isEmpty || customEmojis.isEmpty) return false;
+  final tokens = content.trim().split(RegExp(r'\s+'));
+  if (tokens.isEmpty || tokens.length > 6) return false;
+  for (final tok in tokens) {
+    final m = _rxCustomEmojiToken.firstMatch(tok);
+    if (m == null || !customEmojis.containsKey(m.group(1))) return false;
+  }
+  return true;
 }
 
 /// Renders a list of inline nodes as a single [Text.rich] (with [WidgetSpan]s
@@ -332,17 +350,28 @@ class _RichInline extends StatelessWidget {
                     decoration: TextDecoration.lineThrough, color: c.textDim))),
         ]);
       case InlineCodeNode(:final code):
-        // `code { background: rgba(255,255,255,0.06); color: var(--secondary);
-        //  font-size:0.9em }` (styles-chat.css:1084-1092). Padding/radius need a
-        // WidgetSpan; kept as the styled span (color/bg/size).
-        return TextSpan(
-          text: code,
-          style: base.merge(TextStyle(
-            fontFamily: 'monospace',
-            color: c.secondary,
-            fontSize: size * 0.9,
-            backgroundColor: Colors.white.withValues(alpha: 0.06),
-          )),
+        // `code { background: rgba(255,255,255,0.06); padding:2px 6px;
+        //  border-radius:5px; font-family:mono; color: var(--secondary);
+        //  font-size:0.9em }` (styles-chat.css:1084-1092) — a rounded inline
+        //  pill, so a WidgetSpan carries the padding + radius the CSS needs.
+        return WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              code,
+              style: base.merge(TextStyle(
+                fontFamily: 'monospace',
+                color: c.secondary,
+                fontSize: size * 0.9,
+                shadows: const [],
+              )),
+            ),
+          ),
         );
       case LinkNode(:final url):
         return TextSpan(
