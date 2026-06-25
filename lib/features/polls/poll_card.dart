@@ -177,6 +177,11 @@ class PollCard extends ConsumerWidget {
               users[e.key]?.nym ?? getNymFromPubkey('anon', e.key)),
           suffix: getPubkeySuffix(e.key),
           imageUrl: users[e.key]?.profile?.picture,
+          // Each voter's chosen option (polls.js showPollVotersModal renders the
+          // selected option label per voter).
+          subtitle: (e.value >= 0 && e.value < poll.options.length)
+              ? poll.options[e.value].text
+              : null,
         ),
     ];
     final total = poll.totalVotes;
@@ -186,6 +191,8 @@ class PollCard extends ConsumerWidget {
       emoji: '📊',
       reactors: reactors,
       title: '$total vote${total == 1 ? '' : 's'}',
+      // Tapping a voter opens a PM with them (polls.js click-to-open-PM).
+      onTapReactor: (r) => ref.read(nostrControllerProvider).startPM(r.pubkey),
     );
   }
 }

@@ -9,8 +9,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/api/api_client.dart';
+import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import 'lnurl.dart';
+import 'zap_logic.dart';
 
 /// `#zapModal` (`.zap-modal`, index.html lines 2021-2098; zaps.js
 /// `showZapModal` / `generateZapInvoice` / `displayZapInvoice`). Preset amounts
@@ -213,6 +215,19 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   void _markPaid(LnInvoice invoice) {
     if (!_settledInvoices.add(invoice.dedupKey)) return; // already counted
     HapticFeedback.lightImpact(); // PWA `window.nymHapticTap`
+    // Record our own zap on the target message's badge instantly (zaps.js
+    // `_recordOwnMessageZap`), deduped by the invoice's bolt11 so a later
+    // kind-9735 echo for the same payment can't double-count (same dedupKey
+    // scheme as the receipt path, _onPrivateZap).
+    final messageId = widget.messageId;
+    if (messageId != null && messageId.isNotEmpty) {
+      ref.read(appStateProvider.notifier).recordMessageZap(
+            messageId: messageId,
+            zapperPubkey: ref.read(appStateProvider).selfPubkey,
+            amountSats: invoice.amountSats,
+            dedupKey: ZapLogic.dedupKey(bolt11: invoice.pr, eventId: ''),
+          );
+    }
     setState(() => _phase = _Phase.paid);
     Future<void>.delayed(const Duration(seconds: 2), () {
       if (mounted) Navigator.of(context).maybePop();
