@@ -1,7 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/constants/storage_keys.dart';
@@ -17,6 +21,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../../widgets/common/nym_switch.dart';
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
 import '../identity/vault_settings_modal.dart';
@@ -423,6 +428,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     Navigator.of(context).maybePop();
   }
 
+  /// Chat-Wallpaper "Upload" tile: pick an image from the gallery, copy it into
+  /// the app documents dir so it persists across launches, store its absolute
+  /// path in `nym_wallpaper_custom_url`, then select custom mode. Mirrors the
+  /// PWA `triggerWallpaperUpload`/`handleWallpaperUpload` (app.js:4173-4209),
+  /// except the PWA uploads to a remote URL whereas here the file lives on-device
+  /// (the render path in wallpaper_layer.dart handles both). No-op on cancel.
+  Future<void> _uploadCustomWallpaper(SettingsController ctrl) async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked == null) return; // user cancelled the picker
+    final dir = await getApplicationDocumentsDirectory();
+    final dest = p.join(
+      dir.path,
+      'wallpaper_custom${p.extension(picked.path)}',
+    );
+    await File(picked.path).copy(dest);
+    await ref.read(keyValueStoreProvider).setString(
+          StorageKeys.wallpaperCustomUrl,
+          dest,
+        );
+    ctrl.setWallpaperType('custom');
+    if (!mounted) return;
+    _systemMessage('Wallpaper uploaded and applied.');
+  }
+
   /// Add Keyword (F4): persist + render the new row + confirm.
   void _addKeyword(SettingsController ctrl) {
     final raw = _keywordController.text.trim();
@@ -725,6 +754,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: _WallpaperPicker(
             value: s.wallpaperType,
             onChanged: ctrl.setWallpaperType,
+            onUploadCustom: () => _uploadCustomWallpaper(ctrl),
           ),
         ),
         // Message Layout (bubbles / irc).
@@ -1431,13 +1461,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           label: 'Low Data Mode',
           hint: 'Reduces bandwidth by connecting to only 5 default relays and '
               'loading geo relays on-demand when entering channels',
-          child: FormSelect<bool>(
-            value: s.lowDataMode,
-            items: const [
-              (value: false, label: 'Disabled'),
-              (value: true, label: 'Enabled'),
-            ],
-            onChanged: ctrl.setLowDataMode,
+          // PWA renders this as the lone `.nym-switch` iOS toggle
+          // (index.html:1139), not a dropdown.
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: NymSwitch(
+              value: s.lowDataMode,
+              onChanged: ctrl.setLowDataMode,
+            ),
           ),
         ),
         FormGroup(
@@ -1824,9 +1855,19 @@ class _ThemePicker extends ConsumerWidget {
 /// Wallpaper picker: 3-column grid of the 8 built-in patterns + Upload, with
 /// the selected option ringed in the accent color.
 class _WallpaperPicker extends StatelessWidget {
-  const _WallpaperPicker({required this.value, required this.onChanged});
+  const _WallpaperPicker({
+    required this.value,
+    required this.onChanged,
+    required this.onUploadCustom,
+  });
   final String value;
   final ValueChanged<String> onChanged;
+
+  /// Tapping the "Upload" tile runs this instead of `onChanged('custom')`: it
+  /// picks an image, persists it and selects custom mode (the picker stays
+  /// stateless — the async work lives in the parent state). PWA ref:
+  /// `triggerWallpaperUpload`/`handleWallpaperUpload` (app.js:4173-4209).
+  final Future<void> Function() onUploadCustom;
 
   static const _options = <({String id, String label})>[
     (id: 'none', label: 'None'),
@@ -1853,7 +1894,7 @@ class _WallpaperPicker extends StatelessWidget {
       children: [
         for (final o in _options)
           GestureDetector(
-            onTap: () => onChanged(o.id),
+            onTap: o.id == 'custom' ? onUploadCustom : () => onChanged(o.id),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
