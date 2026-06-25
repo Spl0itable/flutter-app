@@ -56,9 +56,10 @@ dependencies:
   # Web Audio equivalent — we feed it the rendered WAV bytes).
   audioplayers: ^6.0.0
 
-  # QR
+  # QR (generation only — the PWA has no camera QR-scanning, so the
+  # mobile_scanner plugin was unused; it was also the sole driver of the iOS
+  # 15.5 deployment floor that broke the CocoaPods install).
   qr_flutter: ^4.1.0
-  mobile_scanner: ^6.0.2
 
   # Auth / biometrics
   local_auth: ^2.3.0
