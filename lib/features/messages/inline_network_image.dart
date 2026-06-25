@@ -65,6 +65,7 @@ class InlineNetworkImage extends StatelessWidget {
     this.fit = BoxFit.contain,
     this.placeholder,
     this.errorChild,
+    this.memoryOnly = false,
   });
 
   /// Already-proxied image URL.
@@ -74,6 +75,18 @@ class InlineNetworkImage extends StatelessWidget {
   final BoxFit fit;
   final Widget? placeholder;
   final Widget? errorChild;
+
+  /// Skip the `cached_network_image` / `flutter_cache_manager` disk cache and
+  /// render through the in-memory `http` + `Image.memory` path instead. Set this
+  /// for EMOJI: a gridful of custom-emoji cells (the picker) or an emoji-heavy
+  /// conversation would otherwise fire dozens of concurrent writes at
+  /// flutter_cache_manager's sqflite DB, which serialises them behind a
+  /// transaction and floods the log with "database has been locked for
+  /// 0:00:10.000000" warnings (and can wedge the app). Emoji are small and
+  /// repeat heavily, so the in-memory [_cache] + framework image cache covers
+  /// them with zero disk I/O. Leave false for large one-off media, which benefit
+  /// from the on-disk cache.
+  final bool memoryOnly;
 
   /// URL → decoded SVG/raster (cached so a grid of repeats + rebuilds share one
   /// fetch+compile and bad URLs aren't retried into a crash loop).
@@ -133,7 +146,10 @@ class InlineNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (isSvgUrl(url)) {
+    // The in-memory http path handles BOTH svg and raster (and never touches the
+    // sqflite-backed disk cache). Use it for SVG-looking URLs and whenever the
+    // caller opts out of the disk cache ([memoryOnly], i.e. emoji).
+    if (memoryOnly || isSvgUrl(url)) {
       return FutureBuilder<_Decoded?>(
         future: _decode(url),
         builder: (ctx, snap) {

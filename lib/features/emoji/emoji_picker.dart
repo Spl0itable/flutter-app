@@ -405,6 +405,9 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         width: 30,
         height: 30,
         fit: BoxFit.contain,
+        // A gridful of cells would otherwise hammer flutter_cache_manager's
+        // sqflite DB (the "database has been locked 0:00:10" flood on open).
+        memoryOnly: true,
         placeholder: const SizedBox(width: 30, height: 30),
         errorChild: const SizedBox(
             width: 30, height: 30, child: Icon(Icons.broken_image, size: 16)),
