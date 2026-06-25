@@ -20,7 +20,12 @@ import 'autocomplete_queries.dart';
 /// query layer can't reach the controller, so these are looked up at render
 /// time (mirrors autocomplete.js:406-414 `isVerifiedDeveloper`/`isVerifiedBot`/
 /// `getFriendBadgeHtml`).
-typedef MentionBadges = ({bool verified, bool friend});
+///
+/// [verifiedTitle] is the verified badge's tooltip — `verifiedDeveloper.title`
+/// ("Nymchat Developer") for a dev, "Nymchat Bot" for the bot (autocomplete.js
+/// :430 `badge.title = isDev ? this.verifiedDeveloper.title : 'Nymchat Bot'`).
+/// Null when [verified] is false.
+typedef MentionBadges = ({bool verified, bool friend, String? verifiedTitle});
 
 /// Which dropdown content to render + its flat selectable items.
 class AutocompleteView {
@@ -271,9 +276,11 @@ class AutocompleteDropdown extends StatelessWidget {
             ),
           ],
           // `.verified-badge` / `.friend-badge svg` are 20×20 in this dropdown.
+          // The badge title distinguishes dev ("Nymchat Developer") from bot
+          // ("Nymchat Bot") — autocomplete.js:430.
           if (badges != null && badges.verified) ...[
             const SizedBox(width: 4),
-            const VerifiedBadge(size: 20),
+            VerifiedBadge(size: 20, tooltip: badges.verifiedTitle),
           ],
           if (badges != null && badges.friend) ...[
             const SizedBox(width: 2),
@@ -371,7 +378,11 @@ class AutocompleteDropdown extends StatelessWidget {
             errorBuilder: (_, __, ___) => const SizedBox(width: 23, height: 23),
           )
         : Text(e.emoji, style: const TextStyle(fontSize: 23));
-    final label = e.name;
+    // `name` may already be a `:shortcode:` token (custom-emoji recents) — strip
+    // wrapping colons so the label isn't shown as `::shortcode::`. Mirrors the
+    // PWA's defensive strip at render time (autocomplete.js:129-131,
+    // `name.replace(/^:+|:+$/g, '')`).
+    final label = e.name.replaceAll(RegExp(r'^:+|:+$'), '');
     return _selectable(
       c,
       selected: selected,

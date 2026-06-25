@@ -6,13 +6,19 @@ import 'package:flutter/material.dart';
 /// (ui-context.js:407-411). `margin-left:4px; margin-right:2px` is applied by
 /// the caller's row gap.
 class VerifiedBadge extends StatelessWidget {
-  const VerifiedBadge({super.key, this.size = 20});
+  const VerifiedBadge({super.key, this.size = 20, this.tooltip});
 
   final double size;
 
+  /// Optional hover/long-press title — the PWA sets `badge.title` to
+  /// `verifiedDeveloper.title` ("Nymchat Developer") or "Nymchat Bot" depending
+  /// on the holder (autocomplete.js:430). Null/empty = no tooltip (keeps the
+  /// existing callers that render a bare badge unchanged).
+  final String? tooltip;
+
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final badge = Container(
       width: size,
       height: size,
       alignment: Alignment.center,
@@ -31,6 +37,8 @@ class VerifiedBadge extends StatelessWidget {
         ),
       ),
     );
+    final t = tooltip;
+    return (t == null || t.isEmpty) ? badge : Tooltip(message: t, child: badge);
   }
 }
 

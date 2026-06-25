@@ -334,9 +334,14 @@ List<EmojiResult> queryEmoji({
     kEmojiShortcodeMap.forEach((name, emoji) {
       emojiToNames.putIfAbsent(emoji, () => name);
     });
+    // Recents may include `:shortcode:` custom-emoji tokens. When the live
+    // custom-emoji map still has the code, emit `customUrl` so the dropdown
+    // renders the IMAGE (not the literal text); otherwise fall back to the
+    // unicode/text glyph (autocomplete.js:116-126). The label colons are
+    // stripped here because `name` renders as `:$name:` (autocomplete.js:129-131
+    // — `name.replace(/^:+|:+$/g,'')`).
     final result = <EmojiResult>[
-      for (final e in recents)
-        EmojiResult(name: emojiToNames[e] ?? e, emoji: e),
+      for (final e in recents) _recentEmojiResult(e, emojiToNames, custom),
       ...index
           .where((e) => !recentSet.contains(e.emoji))
           .take(10)
@@ -371,6 +376,31 @@ List<EmojiResult> queryEmoji({
       .map((e) =>
           EmojiResult(name: e.name, emoji: e.emoji, customUrl: e.customUrl))
       .toList();
+}
+
+/// `:` matches a custom-emoji shortcode token, e.g. `:partyparrot:`
+/// (autocomplete.js:116 `emoji.match(/^:([a-zA-Z0-9_]+):$/)`).
+final _customEmojiTokenRe = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
+/// Builds the [EmojiResult] for a single recent. Custom-emoji recents (a
+/// `:shortcode:` token whose code is still in the live [custom] map) carry a
+/// [customUrl] so the dropdown renders the image; the label has its wrapping
+/// colons stripped because the row renders it as `:$name:` (autocomplete.js
+/// :116-131).
+EmojiResult _recentEmojiResult(
+    String e, Map<String, String> emojiToNames, CustomEmojiState custom) {
+  final cm = _customEmojiTokenRe.firstMatch(e);
+  if (cm != null) {
+    final code = cm.group(1)!;
+    final url = custom.codeToUrl[code];
+    if (url != null) {
+      // Image row: insert `:code:`, label `code` (rendered as `:code:`).
+      return EmojiResult(name: code, emoji: e, customUrl: url);
+    }
+  }
+  // Unicode / unknown token: strip any wrapping colons from the resolved name.
+  final name = emojiToNames[e] ?? e;
+  return EmojiResult(name: name.replaceAll(RegExp(r'^:+|:+$'), ''), emoji: e);
 }
 
 // ---------------------------------------------------------------------------
