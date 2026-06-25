@@ -707,24 +707,33 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       ],
     ];
 
-    // 2-column grid: each run holds up to two buttons (column-gap 2); runs stack
-    // with a 12px row-gap (`.channel-header-controls` grid). Pairing the buttons
-    // into per-run Rows keeps the 2-wide wrap regardless of available width.
-    return Wrap(
-      runSpacing: 12,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        for (var i = 0; i < buttons.length; i += 2)
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              buttons[i],
-              if (i + 1 < buttons.length) ...[
-                const SizedBox(width: 2),
-                buttons[i + 1],
-              ],
+    // `.channel-header-controls` is a FIXED 2-column CSS grid
+    // (`grid-template-columns: auto auto; row-gap: 12; column-gap: 2`), so the
+    // four buttons always form a 2×2 quadrant square — back/forward on top,
+    // favorite/share (or audio/video) beneath. A `Wrap` would keep them on one
+    // row whenever the header is wide enough, so stack explicit 2-up Rows in a
+    // Column instead to force the 2×2 grid at every width.
+    final rows = <Widget>[
+      for (var i = 0; i < buttons.length; i += 2)
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            buttons[i],
+            if (i + 1 < buttons.length) ...[
+              const SizedBox(width: 2), // column-gap
+              buttons[i + 1],
             ],
-          ),
+          ],
+        ),
+    ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start, // justify-content: start
+      children: [
+        for (var i = 0; i < rows.length; i++) ...[
+          if (i > 0) const SizedBox(height: 12), // row-gap
+          rows[i],
+        ],
       ],
     );
   }

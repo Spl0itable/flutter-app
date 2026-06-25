@@ -158,6 +158,12 @@ NymColors resolveNymColors({
 /// The monospace stack the PWA uses (`--font-mono`).
 const String kMonoFont = 'monospace';
 
+/// The primary UI family: the platform sans (Roboto on Android), which is what
+/// the PWA's `--font-sans` resolves to via `system-ui` on the same device. Set
+/// EXPLICITLY on every text style so Flutter doesn't fall into the null-primary
+/// trap below and lay text out with the colour-emoji font's metrics.
+const String kSansFont = 'Roboto';
+
 /// The bundled color-emoji family (declared in `pubspec.yaml`). Used as a
 /// `fontFamilyFallback` everywhere text is rendered so unicode emoji codepoints
 /// resolve to color glyphs instead of tofu (□) on devices whose system emoji
@@ -192,14 +198,19 @@ ThemeData buildNymThemeData(NymColors c) {
     error: c.danger,
   );
 
-  // Append the bundled color-emoji font to every text style's fallback chain so
-  // emoji codepoints render as color glyphs app-wide (not tofu) without
-  // changing the primary family. `.apply(fontFamilyFallback:)` REPLACES the
-  // per-style fallback list; the base Material themes don't set one, so this is
-  // purely additive here. (BUG: unicode emoji → □ on some Android devices.)
-  final textTheme = base.textTheme.apply(fontFamilyFallback: kEmojiFontFallback);
-  final primaryTextTheme =
-      base.primaryTextTheme.apply(fontFamilyFallback: kEmojiFontFallback);
+  // Set an EXPLICIT primary family ([kSansFont]) on every text style, THEN
+  // append the bundled colour-emoji fallback. The explicit primary is the real
+  // fix for "all the text looks wrong": with a NULL `fontFamily`, Flutter treats
+  // `fontFamilyFallback` (the bundled Noto Color Emoji) as the primary font list
+  // and lays every line out with the emoji font's metrics (huge ascent / line
+  // height), so Latin text came out mis-spaced. A real sans primary restores
+  // correct Latin metrics; emoji codepoints still fall through to the colour
+  // font for the glyph only. (Pure value change — no font is loaded here, so
+  // unit tests that call this without a binding stay green.)
+  final textTheme = base.textTheme
+      .apply(fontFamily: kSansFont, fontFamilyFallback: kEmojiFontFallback);
+  final primaryTextTheme = base.primaryTextTheme
+      .apply(fontFamily: kSansFont, fontFamilyFallback: kEmojiFontFallback);
 
   return base.copyWith(
     colorScheme: scheme,

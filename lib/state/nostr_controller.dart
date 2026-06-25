@@ -250,19 +250,21 @@ class NostrController {
       // hop at a time as their vouches arrive (relays.js:2536-2542).
       _subscribeVouches();
 
-      // Immediately backfill the active channel's D1 archive on boot — the PWA
-      // loads the current channel's (e.g. #nymchat) history right away on load,
-      // not only on a later view switch (`_onViewOpened`).
-      final bootView = _ref.read(appStateProvider).view;
-      if (bootView.kind == ViewKind.channel) {
-        unawaited(_backfillChannelArchive(bootView.id));
-      }
-
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
       // identities skip the durable PM archive. All calls are best-effort.
       _initStorageSync(identity, signer);
       unawaited(_bootStorageSync());
+
+      // Immediately backfill the active channel's D1 archive on boot — the PWA
+      // loads the current channel's (e.g. #nymchat) history right away on load,
+      // not only on a later view switch (`_onViewOpened`). This MUST run after
+      // `_initStorageSync` wires `_storageSync`; otherwise `_backfillChannelArchive`
+      // hits its `sync == null` early-return and the default channel never loads.
+      final bootView = _ref.read(appStateProvider).view;
+      if (bootView.kind == ViewKind.channel) {
+        unawaited(_backfillChannelArchive(bootView.id));
+      }
     } catch (e, st) {
       // Stay on seed/offline data if boot fails (e.g. no secure storage).
       debugPrint('NostrController.init failed: $e\n$st');
@@ -3565,30 +3567,38 @@ class NostrController {
     final state = _ref.read(appStateProvider);
     final cachePms = _ref.read(settingsProvider).cachePMs;
     try {
-      for (final key in _dirtyChannelKeys.toList()) {
-        final msgs = state.messages[key];
-        if (msgs != null) {
-          await cache.saveChannelMessages(key, _capChannel(msgs));
-        }
-      }
-      _dirtyChannelKeys.clear();
-      for (final key in _dirtyPmKeys.toList()) {
-        final msgs = state.messages[key];
-        if (msgs != null) {
-          await cache.savePmMessages(key, _capPm(msgs), enabled: cachePms);
-        }
-      }
-      _dirtyPmKeys.clear();
-      // Profiles + reactions.
-      for (final entry in state.users.entries) {
-        final p = entry.value.profile;
-        if (p != null) await cache.saveProfile(entry.key, p);
-      }
+      final channelKeys = _dirtyChannelKeys.toList();
+      final pmKeys = _dirtyPmKeys.toList();
       final reactionEntries =
           _ref.read(appStateProvider.notifier).reactionEntriesSnapshot();
-      for (final e in reactionEntries.entries) {
-        await cache.saveReactions(e.key, e.value);
-      }
+      // Commit the whole flush as ONE transaction so a busy channel's hundreds
+      // of channel/PM/profile/reaction rows don't queue up as hundreds of
+      // separately-locked inserts (which tripped sqflite's 10s lock warning and
+      // stalled D1 ingest). Dirty sets are cleared only after the tx succeeds.
+      await cache.runInTransaction((txn) async {
+        for (final key in channelKeys) {
+          final msgs = state.messages[key];
+          if (msgs != null) {
+            await cache.saveChannelMessages(key, _capChannel(msgs), txn);
+          }
+        }
+        for (final key in pmKeys) {
+          final msgs = state.messages[key];
+          if (msgs != null) {
+            await cache.savePmMessages(key, _capPm(msgs),
+                enabled: cachePms, executor: txn);
+          }
+        }
+        for (final entry in state.users.entries) {
+          final p = entry.value.profile;
+          if (p != null) await cache.saveProfile(entry.key, p, txn);
+        }
+        for (final e in reactionEntries.entries) {
+          await cache.saveReactions(e.key, e.value, txn);
+        }
+      });
+      _dirtyChannelKeys.clear();
+      _dirtyPmKeys.clear();
       await cache.enforceLruLimits();
     } catch (e) {
       debugPrint('cache flush failed: $e');

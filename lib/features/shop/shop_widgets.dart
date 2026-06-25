@@ -36,14 +36,28 @@ class ShopSvgIcon extends StatelessWidget {
   }
 }
 
-/// A flair's `.flair-X` glow — the CSS `text-shadow` (and, for the brighter
-/// star/flame/diamond/genesis, the additional `filter: drop-shadow`) rendered as
-/// blurred tinted copies of the glyph behind the crisp icon.
+/// A flair's `.flair-X` glow — blurred tinted copies of the glyph painted behind
+/// the crisp icon. The CSS expresses this as two SEPARATE properties:
+///   * `text-shadow` — the soft coloured halo. `body.light-mode .flair-X` sets
+///     `text-shadow: none`, so these copies are dropped in light mode.
+///   * `filter: drop-shadow(...)` — only on the brighter star/flame/diamond/
+///     genesis. The light-mode overrides reset `color`/`text-shadow` but NOT
+///     `filter`, so this copy SURVIVES into light mode (per the cascade).
+/// Keeping the two lists distinct lets us reproduce that asymmetry exactly.
 class _FlairGlow {
-  const _FlairGlow(this.shadows);
+  const _FlairGlow({this.textShadows = const [], this.dropShadows = const []});
 
-  /// Each (colour, blurRadius) pair: a blurred glyph copy in that colour.
-  final List<(Color, double)> shadows;
+  /// `text-shadow` blurs (colour, blurRadius) — dark mode only.
+  final List<(Color, double)> textShadows;
+
+  /// `filter: drop-shadow` blurs (colour, blurRadius) — both modes.
+  final List<(Color, double)> dropShadows;
+
+  /// The glow copies to paint for the given theme: in dark mode both the
+  /// `text-shadow` and `drop-shadow` copies; in light mode only the surviving
+  /// `drop-shadow` copies (`text-shadow: none`).
+  List<(Color, double)> shadowsFor({required bool isLight}) =>
+      isLight ? dropShadows : [...textShadows, ...dropShadows];
 }
 
 /// The `.flair-badge` — a flair item's SVG tinted to its themed colour, sized
@@ -110,43 +124,76 @@ class FlairBadge extends StatelessWidget {
     'flair-genesis': Color(0xFFB8860A),
   };
 
-  /// The `.flair-X` glow: the CSS `text-shadow` blur(s) (and for the brighter
-  /// star/flame/diamond/genesis the extra `filter: drop-shadow`). Each entry is
-  /// a blurred tinted copy of the glyph painted behind the crisp icon. The CSS
-  /// `0 0 Npx` blur maps directly to a Gaussian `blurRadius` of N.
+  /// The `.flair-X` glow, split into its CSS `text-shadow` halo (dark only) and
+  /// `filter: drop-shadow` (both modes — survives `body.light-mode`). Each entry
+  /// is a blurred tinted glyph copy; the CSS `0 0 Npx` blur maps directly to a
+  /// Gaussian `blurRadius` of N. Values are the exact CSS rgba()s
+  /// (`styles-features.css:323-356, 646-711, 1213-1216`).
   static const Map<String, _FlairGlow> _glows = {
-    'flair-crown': _FlairGlow([(Color(0x80FFD700), 10.0)]), // rgba(255,215,0,.5)
-    'flair-diamond': _FlairGlow([
-      (Color(0x8000FFFF), 10.0), // text-shadow rgba(0,255,255,.5)
-      (Color(0xF2B4FFFF), 7.0), // drop-shadow rgba(180,255,255,.95)
-    ]),
-    'flair-skull': _FlairGlow([(Color(0x80FF0000), 10.0)]), // rgba(255,0,0,.5)
-    'flair-star': _FlairGlow([
-      (Color(0x80FFFF00), 10.0), // text-shadow rgba(255,255,0,.5)
-      (Color(0xE6FFFF00), 6.0), // drop-shadow rgba(255,255,0,.9)
-    ]),
-    'flair-lightning': _FlairGlow([(Color(0x80F7931A), 10.0)]), // (247,147,26,.5)
-    'flair-heart': _FlairGlow([(Color(0x80FF1493), 10.0)]), // (255,20,147,.5)
-    'flair-mask': _FlairGlow([(Color(0x80FFFFFF), 10.0)]), // (255,255,255,.5)
-    'flair-rocket': _FlairGlow([(Color(0x99FF6B6B), 10.0)]), // (255,107,107,.6)
-    'flair-shield': _FlairGlow([(Color(0x9952FF9D), 10.0)]), // (82,255,157,.6)
-    'flair-flame': _FlairGlow([
-      (Color(0x99FF7A1A), 10.0), // text-shadow rgba(255,122,26,.6)
-      (Color(0xE6FF8C28), 6.0), // drop-shadow rgba(255,140,40,.9)
-    ]),
-    'flair-snowflake': _FlairGlow([(Color(0x997FDFFF), 10.0)]), // (127,223,255,.6)
-    'flair-moon': _FlairGlow([(Color(0x99CDD6FF), 10.0)]), // (205,214,255,.6)
-    'flair-sun': _FlairGlow([(Color(0xB3FFC93C), 12.0)]), // (255,201,60,.7) 12px
-    'flair-leaf': _FlairGlow([(Color(0x995FD35F), 10.0)]), // (95,211,95,.6)
-    'flair-music': _FlairGlow([(Color(0x99B388FF), 10.0)]), // (179,136,255,.6)
-    'flair-eye': _FlairGlow([(Color(0x9978DCFF), 10.0)]), // (120,220,255,.6)
-    'flair-anchor': _FlairGlow([(Color(0x995B9DFF), 10.0)]), // (91,157,255,.6)
-    'flair-gem': _FlairGlow([(Color(0x99FF3B6B), 10.0)]), // (255,59,107,.6)
-    'flair-genesis': _FlairGlow([
-      (Color(0xB3FFD700), 8.0), // text-shadow rgba(255,215,0,.7)
-      (Color(0x66FFAA00), 16.0), // text-shadow rgba(255,170,0,.4)
-      (Color(0xE6FFC800), 7.0), // drop-shadow rgba(255,200,0,.9)
-    ]),
+    'flair-crown': _FlairGlow(
+      textShadows: [(Color(0x80FFD700), 10.0)], // rgba(255,215,0,.5)
+    ),
+    'flair-diamond': _FlairGlow(
+      textShadows: [(Color(0x8000FFFF), 10.0)], // rgba(0,255,255,.5)
+      dropShadows: [(Color(0xF2B4FFFF), 7.0)], // rgba(180,255,255,.95)
+    ),
+    'flair-skull': _FlairGlow(
+      textShadows: [(Color(0x80FF0000), 10.0)], // rgba(255,0,0,.5)
+    ),
+    'flair-star': _FlairGlow(
+      textShadows: [(Color(0x80FFFF00), 10.0)], // rgba(255,255,0,.5)
+      dropShadows: [(Color(0xE6FFFF00), 6.0)], // rgba(255,255,0,.9)
+    ),
+    'flair-lightning': _FlairGlow(
+      textShadows: [(Color(0x80F7931A), 10.0)], // rgba(247,147,26,.5)
+    ),
+    'flair-heart': _FlairGlow(
+      textShadows: [(Color(0x80FF1493), 10.0)], // rgba(255,20,147,.5)
+    ),
+    'flair-mask': _FlairGlow(
+      textShadows: [(Color(0x80FFFFFF), 10.0)], // rgba(255,255,255,.5)
+    ),
+    'flair-rocket': _FlairGlow(
+      textShadows: [(Color(0x99FF6B6B), 10.0)], // rgba(255,107,107,.6)
+    ),
+    'flair-shield': _FlairGlow(
+      textShadows: [(Color(0x9952FF9D), 10.0)], // rgba(82,255,157,.6)
+    ),
+    'flair-flame': _FlairGlow(
+      textShadows: [(Color(0x99FF7A1A), 10.0)], // rgba(255,122,26,.6)
+      dropShadows: [(Color(0xE6FF8C28), 6.0)], // rgba(255,140,40,.9)
+    ),
+    'flair-snowflake': _FlairGlow(
+      textShadows: [(Color(0x997FDFFF), 10.0)], // rgba(127,223,255,.6)
+    ),
+    'flair-moon': _FlairGlow(
+      textShadows: [(Color(0x99CDD6FF), 10.0)], // rgba(205,214,255,.6)
+    ),
+    'flair-sun': _FlairGlow(
+      textShadows: [(Color(0xB3FFC93C), 12.0)], // rgba(255,201,60,.7) 12px
+    ),
+    'flair-leaf': _FlairGlow(
+      textShadows: [(Color(0x995FD35F), 10.0)], // rgba(95,211,95,.6)
+    ),
+    'flair-music': _FlairGlow(
+      textShadows: [(Color(0x99B388FF), 10.0)], // rgba(179,136,255,.6)
+    ),
+    'flair-eye': _FlairGlow(
+      textShadows: [(Color(0x9978DCFF), 10.0)], // rgba(120,220,255,.6)
+    ),
+    'flair-anchor': _FlairGlow(
+      textShadows: [(Color(0x995B9DFF), 10.0)], // rgba(91,157,255,.6)
+    ),
+    'flair-gem': _FlairGlow(
+      textShadows: [(Color(0x99FF3B6B), 10.0)], // rgba(255,59,107,.6)
+    ),
+    'flair-genesis': _FlairGlow(
+      textShadows: [
+        (Color(0xB3FFD700), 8.0), // rgba(255,215,0,.7)
+        (Color(0x66FFAA00), 16.0), // rgba(255,170,0,.4)
+      ],
+      dropShadows: [(Color(0xE6FFC800), 7.0)], // rgba(255,200,0,.9)
+    ),
   };
 
   @override
@@ -155,20 +202,23 @@ class FlairBadge extends StatelessWidget {
     if (svg.isEmpty) return const SizedBox.shrink();
     final isLight = context.nym.isLight;
     // Light mode swaps to the darker `body.light-mode .flair-X` colour and drops
-    // the glow (`text-shadow: none`); dark mode keeps the bright colour + glow.
+    // the `text-shadow` halo (`text-shadow: none`); dark mode keeps the bright
+    // colour + full glow. The `filter: drop-shadow` on star/flame/diamond/
+    // genesis is NOT reset by the light-mode rules, so it survives into light
+    // mode — `_FlairGlow.shadowsFor` keeps exactly those copies.
     final color =
         (isLight ? lightColors[flairId] : colors[flairId]) ?? context.nym.primary;
-    final glow = isLight ? null : _glows[flairId];
+    final shadows = _glows[flairId]?.shadowsFor(isLight: isLight) ?? const [];
     final icon = ShopSvgIcon(svg: svg, size: size, color: color);
     return Padding(
       padding: const EdgeInsets.only(left: 5),
-      child: glow == null
+      child: shadows.isEmpty
           ? icon
           : Stack(
               alignment: Alignment.center,
               children: [
                 // Blurred tinted glyph copies (`text-shadow`/`drop-shadow`).
-                for (final (glowColor, blur) in glow.shadows)
+                for (final (glowColor, blur) in shadows)
                   Positioned.fill(
                     child: IgnorePointer(
                       child: ImageFiltered(

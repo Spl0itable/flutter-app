@@ -164,17 +164,19 @@ class CacheStore {
   /// Persist a channel's messages, keeping only the last [channelMessageLimit]
   /// (mirrors `persistChannelMessages`: `messages.slice(-limit)`). Stamps
   /// `lastTouched`. An empty list deletes the record, as in the PWA.
-  Future<void> saveChannelMessages(String key, List<Message> msgs) async {
+  Future<void> saveChannelMessages(String key, List<Message> msgs,
+      [DatabaseExecutor? executor]) async {
     if (key.isEmpty) return;
+    final db = executor ?? _database;
     if (msgs.isEmpty) {
-      await _database.delete('channels', where: 'key = ?', whereArgs: [key]);
+      await db.delete('channels', where: 'key = ?', whereArgs: [key]);
       return;
     }
     final trimmed = msgs.length > channelMessageLimit
         ? msgs.sublist(msgs.length - channelMessageLimit)
         : msgs;
     final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
-    await _database.insert(
+    await db.insert(
       'channels',
       {'key': key, 'json': json, 'lastTouched': _now()},
       conflictAlgorithm: ConflictAlgorithm.replace,
@@ -205,18 +207,20 @@ class CacheStore {
     String key,
     List<Message> msgs, {
     required bool enabled,
+    DatabaseExecutor? executor,
   }) async {
     if (!enabled) return;
     if (key.isEmpty) return;
+    final db = executor ?? _database;
     if (msgs.isEmpty) {
-      await _database.delete('pms', where: 'key = ?', whereArgs: [key]);
+      await db.delete('pms', where: 'key = ?', whereArgs: [key]);
       return;
     }
     final trimmed = msgs.length > pmStorageLimit
         ? msgs.sublist(msgs.length - pmStorageLimit)
         : msgs;
     final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
-    await _database.insert(
+    await db.insert(
       'pms',
       {'key': key, 'json': json, 'lastTouched': _now()},
       conflictAlgorithm: ConflictAlgorithm.replace,
@@ -261,13 +265,14 @@ class CacheStore {
   /// Persist a kind-0 [UserProfile] keyed by pubkey, recording its `kind0Ts`
   /// alongside (mirrors `persistProfile`'s enriched snapshot). Stamps
   /// `lastTouched`.
-  Future<void> saveProfile(String pubkey, UserProfile profile) async {
+  Future<void> saveProfile(String pubkey, UserProfile profile,
+      [DatabaseExecutor? executor]) async {
     if (pubkey.isEmpty) return;
     final map = profile.toJson();
     // Persist kind0Ts inside the JSON too so it survives the round-trip even if
     // toJson() (which omits it today) ever changes.
     map['kind0Ts'] = profile.kind0Ts;
-    await _database.insert(
+    await (executor ?? _database).insert(
       'profiles',
       {
         'pubkey': pubkey,
@@ -399,14 +404,16 @@ class CacheStore {
   /// Persist a reaction record keyed by [messageId]. [entries] mirrors the
   /// PWA's `entries` shape: `[[emoji, [[reactor, value], ...]], ...]`. An empty
   /// list deletes the record (`persistReactions`).
-  Future<void> saveReactions(String messageId, List<dynamic> entries) async {
+  Future<void> saveReactions(String messageId, List<dynamic> entries,
+      [DatabaseExecutor? executor]) async {
     if (messageId.isEmpty) return;
+    final db = executor ?? _database;
     if (entries.isEmpty) {
-      await _database
+      await db
           .delete('reactions', where: 'messageId = ?', whereArgs: [messageId]);
       return;
     }
-    await _database.insert(
+    await db.insert(
       'reactions',
       {
         'messageId': messageId,
@@ -415,6 +422,17 @@ class CacheStore {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  /// Runs [body] inside a single SQLite transaction, passing the transaction
+  /// executor to thread into the `save*` methods. The whole flush thus commits
+  /// as ONE transaction instead of hundreds of individually-locked inserts —
+  /// which is what was tripping sqflite's "database locked for 10s" warning when
+  /// a busy channel re-persisted every profile/reaction on each 6s flush.
+  Future<void> runInTransaction(
+    Future<void> Function(DatabaseExecutor txn) body,
+  ) async {
+    await _database.transaction((txn) async => body(txn));
   }
 
   /// Load all reaction records, keyed by messageId. Each value is the decoded

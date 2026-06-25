@@ -296,6 +296,64 @@ void main() {
       expect(find.text('SUPPORTER'), findsOneWidget);
     });
   });
+
+  // The PWA's `body.light-mode .flair-X` rules reset `color` + `text-shadow:
+  // none` but DON'T touch `filter`, so the `filter: drop-shadow` on the bright
+  // star/flame/diamond/genesis flairs survives into light mode while the
+  // `text-shadow` halo is dropped. Each glow copy is an `ImageFiltered` layer
+  // behind the crisp glyph, so the layer count encodes that asymmetry.
+  group('FlairBadge glow (light vs dark, styles-features.css)', () {
+    Future<void> pumpFlair(
+      WidgetTester tester,
+      String flairId,
+      Brightness brightness,
+    ) async {
+      final colors = resolveNymColors(
+        theme: NymThemeKey.bitchat,
+        brightness: brightness,
+        solidUi: true,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildNymThemeData(colors),
+          home: Scaffold(body: Center(child: FlairBadge(flairId: flairId))),
+        ),
+      );
+      // `flutter_svg` rasterizes asynchronously; settle so the glyph copies for
+      // the current theme are the only ones mounted (a bare `pump` can briefly
+      // retain the previous pump's copies).
+      await tester.pumpAndSettle();
+    }
+
+    // One `ShopSvgIcon` per glyph copy: the crisp icon plus one per glow copy.
+    // So #glow copies == (#ShopSvgIcon - 1).
+    int glowCopies(WidgetTester tester) =>
+        tester.widgetList<ShopSvgIcon>(find.byType(ShopSvgIcon)).length - 1;
+
+    testWidgets('crown (text-shadow only): glow in dark, none in light',
+        (tester) async {
+      await pumpFlair(tester, 'flair-crown', Brightness.dark);
+      expect(glowCopies(tester), 1); // one text-shadow halo
+      await pumpFlair(tester, 'flair-crown', Brightness.light);
+      expect(glowCopies(tester), 0); // text-shadow: none, no drop-shadow
+    });
+
+    testWidgets('star (text-shadow + drop-shadow): drop-shadow survives light',
+        (tester) async {
+      await pumpFlair(tester, 'flair-star', Brightness.dark);
+      expect(glowCopies(tester), 2); // text-shadow + drop-shadow
+      await pumpFlair(tester, 'flair-star', Brightness.light);
+      expect(glowCopies(tester), 1); // only the drop-shadow survives
+    });
+
+    testWidgets('genesis (2 text-shadows + drop-shadow): one survives light',
+        (tester) async {
+      await pumpFlair(tester, 'flair-genesis', Brightness.dark);
+      expect(glowCopies(tester), 3); // two text-shadows + one drop-shadow
+      await pumpFlair(tester, 'flair-genesis', Brightness.light);
+      expect(glowCopies(tester), 1); // only the drop-shadow survives
+    });
+  });
 }
 
 /// Minimal [WidgetRef] shim wrapping a [ProviderContainer] so [resolveCosmetics]
