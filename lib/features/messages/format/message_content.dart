@@ -12,7 +12,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/nym_colors.dart';
 import '../../../core/theme/nym_metrics.dart';
-import '../../../core/theme/nym_theme.dart' show kEmojiFontFallback;
+import '../../../core/theme/nym_theme.dart'
+    show kEmojiFontFallback, kSansFont, kMonoFont;
 import '../../../services/api/api_client.dart';
 import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
@@ -283,11 +284,12 @@ class _RichInline extends StatelessWidget {
       fontWeight: weight,
       height: 1.4,
       shadows: shadows,
-      fontFamily: monospace ? 'monospace' : null,
-      // NO emoji fallback on the body base: with a null primary family Flutter
-      // would promote Noto Color Emoji to the primary for EVERY run, inflating
-      // line metrics and breaking Latin glyphs. The colour-emoji fallback is
-      // attached per-[EmojiNode] span below, where the text is purely emoji.
+      // Bundled [kSansFont] primary drives the (correct) line strut; the
+      // emoji/symbol [kEmojiFontFallback] resolves emoji + enclosed letters in
+      // body text per-glyph without touching Latin metrics. Mono bodies (CRT
+      // style) keep the monospace family and skip the fallback.
+      fontFamily: monospace ? kMonoFont : kSansFont,
+      fontFamilyFallback: monospace ? null : kEmojiFontFallback,
     );
     return Text.rich(
       TextSpan(
@@ -353,16 +355,11 @@ class _RichInline extends StatelessWidget {
         );
       case EmojiNode(:final unicode):
         // `.emoji` has no font-size (inherits 1em); only `.emoji-only .emoji` is
-        // 2.5em (styles-chat.css:824-837). The colour-emoji fallback is attached
-        // HERE — the span text is purely emoji, so promoting Noto Color Emoji to
-        // its primary covers the glyph (system font otherwise) without touching
-        // any Latin run's metrics; only emoji-bearing lines grow, as they should.
+        // 2.5em (styles-chat.css:824-837). The emoji/symbol fallback already
+        // rides on [base], so the glyph resolves to Noto Color Emoji here.
         return TextSpan(
           text: unicode,
-          style: base.merge(TextStyle(
-            fontSize: size * (emojiOnly ? 2.5 : 1.0),
-            fontFamilyFallback: kEmojiFontFallback,
-          )),
+          style: base.merge(TextStyle(fontSize: size * (emojiOnly ? 2.5 : 1.0))),
         );
       case MentionNode():
         return WidgetSpan(
@@ -398,6 +395,9 @@ class _RichInline extends StatelessWidget {
               width: side,
               height: side,
               fit: BoxFit.contain,
+              // Emoji bypass the sqflite disk cache (DB-lock storm) — see
+              // InlineNetworkImage.memoryOnly.
+              memoryOnly: true,
               errorChild: Text(':$shortcode:', style: base),
             ),
           ),
@@ -992,6 +992,7 @@ class InlineEmojiText extends ConsumerWidget {
             width: side,
             height: side,
             fit: BoxFit.contain,
+            memoryOnly: true, // emoji: skip the sqflite disk cache (lock storm)
             errorChild: Text(':${m.group(1)}:', style: style),
           ),
         ),
