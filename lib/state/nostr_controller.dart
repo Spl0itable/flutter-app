@@ -975,6 +975,13 @@ class NostrController {
               .toList(),
           shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
+
+    // Resolve this user's D1 profile so their custom avatar replaces the
+    // identicon even when they never send a message — the PWA resolves avatars
+    // for presence/list users too (`queueProfileFetch`/`ensureListProfiles`).
+    // No-op when presence already carried an `avatar-update` (picture set); the
+    // backfill guard keys on the picture, so it only fetches when one is missing.
+    _maybeBackfillProfiles(e.pubkey);
   }
 
   /// Per-pubkey newest presence timestamp (users.js `presenceTimestamps`) so a
@@ -1171,6 +1178,9 @@ class NostrController {
       awayMessage: status == 'away' ? away : null,
       lastSeenMs: DateTime.now().millisecondsSinceEpoch,
     );
+    // Resolve the friend's D1 profile so their custom avatar loads even without
+    // a message this session (guard no-ops once a picture is known).
+    _maybeBackfillProfiles(pubkey);
   }
 
   void _onRumorMessage(
@@ -3748,8 +3758,13 @@ class NostrController {
     if (_storageSync == null) return;
     final self = _service?.selfPubkey ?? _identity?.pubkey;
     if (pubkey == self) return;
-    // Already have a profile for this user → nothing to fetch.
-    if (_ref.read(appStateProvider).users[pubkey]?.profile != null) return;
+    // Already have this user's AVATAR → nothing to fetch. Keying on the picture
+    // (not profile-existence) mirrors the PWA, which guards on `userAvatars`
+    // (nostr-core.js:440/1771): a nym-only kind-0, or a presence that cleared the
+    // avatar, leaves a picture-less profile stub that must NOT permanently block
+    // the avatar backfill (the old `profile != null` guard did exactly that).
+    final pic = _ref.read(appStateProvider).users[pubkey]?.profile?.picture;
+    if (pic != null && pic.isNotEmpty) return;
     if (!_profileBackfillQueued.add(pubkey)) return;
     _profileBackfillQueue.add(pubkey);
     _profileBackfillTimer ??= Timer(
