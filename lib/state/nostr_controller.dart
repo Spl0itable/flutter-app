@@ -3890,6 +3890,17 @@ class NostrController {
     // the avatar backfill (the old `profile != null` guard did exactly that).
     final pic = _ref.read(appStateProvider).users[pubkey]?.profile?.picture;
     if (pic != null && pic.isNotEmpty) return;
+    // Staleness gate (PWA `profileFetchedAt`, 5 min): an AVATAR-LESS user (anon,
+    // or a kind-0 with no picture) would otherwise re-queue a fetch on EVERY
+    // presence/message/reaction — a steady background churn. Only re-attempt
+    // once the previous attempt is ≥5 min old.
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _profileBackfillAttemptedAt[pubkey];
+    if (last != null && now - last < 5 * 60 * 1000) return;
+    _profileBackfillAttemptedAt[pubkey] = now;
+    if (_profileBackfillAttemptedAt.length > 5000) {
+      _profileBackfillAttemptedAt.remove(_profileBackfillAttemptedAt.keys.first);
+    }
     if (!_profileBackfillQueued.add(pubkey)) return;
     _profileBackfillQueue.add(pubkey);
     _profileBackfillTimer ??= Timer(
@@ -3897,6 +3908,10 @@ class NostrController {
       _flushProfileBackfill,
     );
   }
+
+  /// Per-pubkey last profile-backfill ATTEMPT (ms) — the PWA's `profileFetchedAt`
+  /// staleness gate so an avatar-less user isn't re-fetched on every event.
+  final Map<String, int> _profileBackfillAttemptedAt = {};
 
   /// Drains the queued pubkeys and resolves their profiles D1-first
   /// (`resolveProfiles` → `profileGet`, falling back to a relay kind-0 sub for
