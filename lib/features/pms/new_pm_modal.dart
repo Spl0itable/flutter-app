@@ -13,6 +13,7 @@ import '../../services/platform/deep_links.dart' show parseGroupInvite;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/nym_icons.dart';
 
 /// A picked recipient: pubkey (64-hex) + a display nym.
 class PmRecipient {
@@ -462,7 +463,9 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
           color: Colors.white.withValues(alpha: 0.05),
           border: Border.all(color: c.glassBorder),
         ),
-        child: Icon(Icons.close, size: 16, color: c.textDim),
+        // `.modal-close` is a literal "✕" char in the PWA — styled text.
+        child: Text('✕',
+            style: TextStyle(color: c.textDim, fontSize: 16, height: 1)),
       ),
     );
   }
@@ -787,7 +790,8 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                 color: Colors.white.withValues(alpha: 0.05),
                 border: Border.all(color: c.glassBorder),
               ),
-              child: Icon(Icons.groups_outlined, color: c.primary, size: 16),
+              // `.group-suggestion-ico` (pms.js:3545) — the 3-figure group glyph.
+              child: NymSvgIcon(NymIcons.groupGlyph, color: c.primary, size: 16),
             ),
             const SizedBox(width: 6),
             Flexible(
@@ -949,7 +953,10 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
                     alignment: Alignment.center,
                     child: hasAvatar
                         ? null
-                        : Icon(Icons.group, color: c.primary, size: 26),
+                        // `#newGroupAvatarPreview` placeholder (index.html:326) —
+                        // the 3-figure group glyph.
+                        : NymSvgIcon(NymIcons.groupGlyph,
+                            color: c.primary, size: 26),
                   ),
                 ),
               ),
@@ -1109,11 +1116,13 @@ class _Chip extends StatelessWidget {
           // `.pm-chip-suffix` — text-dim 11px.
           Text('#$suffix', style: TextStyle(color: c.textDim, fontSize: 11)),
           const SizedBox(width: 4),
-          // `.pm-chip-remove` — text-dim 14px ✕ (danger on hover).
+          // `.pm-chip-remove` — text-dim "×" (U+00D7, NOT the modal-close ✕;
+          // pms.js:3672 uses `×`), danger on hover.
           InkWell(
             onTap: onRemove,
             borderRadius: const BorderRadius.all(Radius.circular(999)),
-            child: Icon(Icons.close, size: 14, color: c.textDim),
+            child: Text('×',
+                style: TextStyle(color: c.textDim, fontSize: 14, height: 1)),
           ),
         ],
       ),

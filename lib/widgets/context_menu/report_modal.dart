@@ -282,7 +282,9 @@ class _ReportModalState extends State<ReportModal> {
           color: c.subtleFill,
           border: Border.all(color: c.glassBorder),
         ),
-        child: Icon(Icons.close, size: 16, color: c.textDim),
+        // `.modal-close` is a literal "✕" char in the PWA — styled text.
+        child: Text('✕',
+            style: TextStyle(color: c.textDim, fontSize: 16, height: 1)),
       ),
     );
   }

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../widgets/nym_icons.dart';
 
 /// The six default quick-react emojis (calls.js `_messageQuickReactDefaults`,
 /// line 1491: `['👍', '❤️', '😂', '🔥', '👎', '😮']`). The PWA pads the user's
@@ -30,13 +31,15 @@ List<String> quickReactEmojis(List<String> recents) {
 class QuickContextItem {
   const QuickContextItem({
     required this.label,
-    required this.icon,
+    required this.svg,
     required this.onTap,
     this.color = QuickContextItemColor.normal,
   });
 
   final String label;
-  final IconData icon;
+
+  /// The leading glyph as a [NymIcons] SVG string.
+  final String svg;
   final VoidCallback onTap;
   final QuickContextItemColor color;
 }
@@ -139,7 +142,7 @@ class _QuickContextRowState extends State<_QuickContextRow> {
           ),
           child: Row(
             children: [
-              Icon(widget.item.icon, size: 16, color: iconColor),
+              NymSvgIcon(widget.item.svg, size: 16, color: iconColor),
               // `.nm-ico8` → margin-right:8px on the leading SVG.
               const SizedBox(width: 8),
               Expanded(
@@ -316,7 +319,7 @@ void showQuickReactPopup(
       contextItems: contextItems
           .map((it) => QuickContextItem(
                 label: it.label,
-                icon: it.icon,
+                svg: it.svg,
                 color: it.color,
                 onTap: () {
                   close();

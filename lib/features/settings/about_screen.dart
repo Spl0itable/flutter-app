@@ -222,7 +222,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                 color: c.text.withValues(alpha: 0.05),
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.close, size: 18, color: c.textDim),
+              // `.modal-close` is a literal "✕" char in the PWA — styled text.
+              child: Text('✕',
+                  style: TextStyle(color: c.textDim, fontSize: 18, height: 1)),
             ),
           ),
         ],

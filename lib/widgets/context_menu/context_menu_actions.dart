@@ -1,6 +1,5 @@
-import 'package:flutter/material.dart';
-
 import '../../models/message.dart';
+import '../nym_icons.dart';
 
 /// The identity of a context-menu action (mirrors the `#ctxXxx` items in
 /// index.html's `#contextMenu`). Order matches the PWA's markup.
@@ -226,58 +225,56 @@ String ctxActionLabel(CtxAction a, CtxTarget t) {
   }
 }
 
-/// The leading 16px icon for an action row, mirroring the PWA's per-item SVGs
-/// (index.html:94-266; the injected Slap/Hug glyphs at ui-context.js:504/524).
-/// Reused by the quick-context-menu (F3) for the shared items. Material
-/// equivalents chosen to read like the PWA glyphs (smiley/@/envelope/fish/two-
-/// heads/person+/bolt/gift/quote/copy/translate/person✓/!/pencil/trash/star/
-/// transfer/person−/∅).
-IconData ctxActionIcon(CtxAction a) {
+/// The leading 16px glyph (a [NymIcons] SVG string) for an action row,
+/// reproducing the PWA's per-item inline SVGs verbatim (index.html:94-266; the
+/// injected Slap/Hug glyphs at ui-context.js:504/524). Reused by the
+/// quick-context-menu (F3) for the shared items. Rendered through [NymSvgIcon].
+String ctxActionSvg(CtxAction a) {
   switch (a) {
     case CtxAction.react:
-      return Icons.sentiment_satisfied_outlined;
+      return NymIcons.ctxReact;
     case CtxAction.mention:
-      return Icons.alternate_email;
+      return NymIcons.ctxMention;
     case CtxAction.privateMessage:
-      return Icons.mail_outline;
+      return NymIcons.ctxPm;
     case CtxAction.slap:
-      return Icons.set_meal; // fish/trout
+      return NymIcons.ctxSlap;
     case CtxAction.hug:
-      return Icons.favorite_border;
+      return NymIcons.ctxHug;
     case CtxAction.addToGroup:
-      return Icons.group_add_outlined;
+      return NymIcons.ctxAddToGroup;
     case CtxAction.zap:
-      return Icons.bolt;
+      return NymIcons.ctxZap;
     case CtxAction.giftCredits:
-      return Icons.card_giftcard;
+      return NymIcons.ctxGiftCredits;
     case CtxAction.quote:
-      return Icons.format_quote;
+      return NymIcons.ctxQuote;
     case CtxAction.copyMessage:
-      return Icons.content_copy;
+      return NymIcons.ctxCopy;
     case CtxAction.translate:
-      return Icons.translate;
+      return NymIcons.translate;
     case CtxAction.friend:
-      return Icons.person_add_alt;
+      return NymIcons.ctxFriend;
     case CtxAction.report:
-      return Icons.error_outline;
+      return NymIcons.ctxReport;
     case CtxAction.edit:
-      return Icons.edit_outlined;
+      return NymIcons.ctxEdit;
     case CtxAction.delete:
-      return Icons.delete_outline;
+      return NymIcons.ctxDelete;
     case CtxAction.makeMod:
-      return Icons.star_outline;
+      return NymIcons.ctxMakeMod;
     case CtxAction.revokeMod:
-      return Icons.star_border;
+      return NymIcons.ctxRevokeMod;
     case CtxAction.transferOwner:
-      return Icons.swap_horiz;
+      return NymIcons.ctxTransferOwner;
     case CtxAction.kick:
-      return Icons.person_remove_outlined;
+      return NymIcons.ctxKick;
     case CtxAction.ban:
-      return Icons.block;
+      return NymIcons.ctxBan;
     case CtxAction.block:
-      return Icons.block;
+      return NymIcons.ctxBlock;
     case CtxAction.editProfile:
-      return Icons.manage_accounts_outlined;
+      return NymIcons.ctxEditProfile;
   }
 }
 

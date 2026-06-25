@@ -53,13 +53,13 @@ List<QuickContextItem> buildQuickContextItems(
   if (!isSelf && pubkey.isNotEmpty) {
     items.add(QuickContextItem(
       label: 'Slap with Trout',
-      icon: ctxActionIcon(CtxAction.slap),
+      svg: ctxActionSvg(CtxAction.slap),
       onTap: () => controller
           .sendCurrent('/me slaps @$fullNym around a bit with a large trout 🐟'),
     ));
     items.add(QuickContextItem(
       label: 'Give warm Hug',
-      icon: ctxActionIcon(CtxAction.hug),
+      svg: ctxActionSvg(CtxAction.hug),
       onTap: () => controller.sendCurrent('/me gives @$fullNym a warm hug 🫂'),
     ));
   }
@@ -67,7 +67,7 @@ List<QuickContextItem> buildQuickContextItems(
   if (!isSelf && hasMessageId && pubkey.isNotEmpty) {
     items.add(QuickContextItem(
       label: 'Zap Bitcoin',
-      icon: ctxActionIcon(CtxAction.zap),
+      svg: ctxActionSvg(CtxAction.zap),
       color: QuickContextItemColor.lightning,
       onTap: () => _zap(context, ref, message, baseNym),
     ));
@@ -76,14 +76,14 @@ List<QuickContextItem> buildQuickContextItems(
   if (hasContent) {
     items.add(QuickContextItem(
       label: 'Quote Message',
-      icon: ctxActionIcon(CtxAction.quote),
+      svg: ctxActionSvg(CtxAction.quote),
       onTap: () => ref
           .read(pendingComposerActionProvider.notifier)
           .requestQuote(fullNym: fullNym, content: content),
     ));
     items.add(QuickContextItem(
       label: 'Copy Message',
-      icon: ctxActionIcon(CtxAction.copyMessage),
+      svg: ctxActionSvg(CtxAction.copyMessage),
       onTap: () async {
         await Clipboard.setData(ClipboardData(text: content));
         ref
@@ -94,7 +94,7 @@ List<QuickContextItem> buildQuickContextItems(
     if (onTranslate != null) {
       items.add(QuickContextItem(
         label: 'Translate Message',
-        icon: ctxActionIcon(CtxAction.translate),
+        svg: ctxActionSvg(CtxAction.translate),
         onTap: onTranslate,
       ));
     }
@@ -103,7 +103,7 @@ List<QuickContextItem> buildQuickContextItems(
   if (isSelf && hasMessageId && hasContent && onEdit != null) {
     items.add(QuickContextItem(
       label: 'Edit Message',
-      icon: ctxActionIcon(CtxAction.edit),
+      svg: ctxActionSvg(CtxAction.edit),
       onTap: onEdit,
     ));
   }
@@ -111,7 +111,7 @@ List<QuickContextItem> buildQuickContextItems(
   if (isSelf && hasMessageId) {
     items.add(QuickContextItem(
       label: 'Delete Message',
-      icon: ctxActionIcon(CtxAction.delete),
+      svg: ctxActionSvg(CtxAction.delete),
       color: QuickContextItemColor.danger,
       onTap: () => _confirmDelete(context, ref, message.id),
     ));

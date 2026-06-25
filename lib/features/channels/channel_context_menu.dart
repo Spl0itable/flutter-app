@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/channel.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/nym_icons.dart';
 import '../../widgets/sidebar/pm_context_menu.dart';
 
 /// One entry in the channel `.quick-context-menu` (sidebar-sections.js
@@ -11,12 +12,14 @@ import '../../widgets/sidebar/pm_context_menu.dart';
 class ChannelMenuAction {
   const ChannelMenuAction({
     required this.label,
-    required this.icon,
+    required this.svg,
     required this.onSelected,
     this.danger = false,
   });
   final String label;
-  final IconData icon;
+
+  /// The leading glyph as a [NymIcons] SVG string.
+  final String svg;
   final VoidCallback onSelected;
   final bool danger;
 }
@@ -46,12 +49,14 @@ List<ChannelMenuAction> buildChannelMenuActions(
   return <ChannelMenuAction>[
     ChannelMenuAction(
       label: isPinned ? 'Unfavorite channel' : 'Favorite channel',
-      icon: isPinned ? Icons.star : Icons.star_border,
+      // PWA uses the same filled-star `favSvg` for both states.
+      svg: NymIcons.sidebarFavorite,
       onSelected: () => controller.togglePin(key),
     ),
     ChannelMenuAction(
       label: isHidden ? 'Unhide channel' : 'Hide channel',
-      icon: isHidden ? Icons.visibility : Icons.visibility_off_outlined,
+      // PWA uses the same eye-off `hideSvg` for both states.
+      svg: NymIcons.sidebarHide,
       onSelected: () {
         if (isHidden) {
           ref.read(appStateProvider.notifier).unhideChannel(key);
@@ -62,7 +67,7 @@ List<ChannelMenuAction> buildChannelMenuActions(
     ),
     ChannelMenuAction(
       label: 'Block channel',
-      icon: Icons.block,
+      svg: NymIcons.sidebarBlock,
       danger: true,
       onSelected: () => controller.blockChannel(key),
     ),
@@ -86,7 +91,7 @@ Future<void> showChannelContextMenu(
     for (final a in actions)
       SidebarQuickMenuItem(
         label: a.label,
-        icon: a.icon,
+        svg: a.svg,
         danger: a.danger,
         onSelected: a.onSelected,
       ),

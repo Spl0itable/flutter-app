@@ -364,7 +364,10 @@ class _ZapModalState extends ConsumerState<ZapModal> {
                 color: Colors.white.withValues(alpha: 0.05),
                 border: Border.all(color: c.glassBorder),
               ),
-              child: Icon(Icons.close, size: 16, color: c.textDim),
+              // `.modal-close` is a literal "✕" char in the PWA — styled text.
+              alignment: Alignment.center,
+              child: Text('✕',
+                  style: TextStyle(color: c.textDim, fontSize: 16, height: 1)),
             ),
           ),
         ],

@@ -21,6 +21,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/api/api_client.dart';
+import '../../widgets/nym_icons.dart';
 import '../messages/format/message_content.dart' show proxiedMedia;
 
 /// Giphy API key — same key the PWA uses (`this.giphyApiKey`, app.js:679).
@@ -350,7 +351,13 @@ class _GifPickerState extends ConsumerState<GifPicker> {
               child: SizedBox(
                 width: 28,
                 height: 28,
-                child: Icon(Icons.close, size: 16, color: c.textDim),
+                // `.modal-close.gif-modal-close` is a literal "✕" char in the
+                // PWA (ui-context.js:2009) — styled text.
+                child: Center(
+                  child: Text('✕',
+                      style: TextStyle(
+                          color: c.textDim, fontSize: 16, height: 1)),
+                ),
               ),
             ),
           ),
@@ -573,12 +580,19 @@ class _GifTileState extends State<_GifTile> {
                           child: SizedBox(
                             width: 24,
                             height: 24,
-                            child: Icon(
-                              widget.favorite ? Icons.star : Icons.star_border,
-                              size: 14,
-                              color: widget.favorite
-                                  ? c.warning
-                                  : Colors.white.withValues(alpha: 0.85),
+                            // `.gif-fav-btn` (ui-context.js:2133) — the custom
+                            // 5-point star: outline by default, filled gold
+                            // (`--warning`) when `.active`.
+                            child: Center(
+                              child: NymSvgIcon(
+                                widget.favorite
+                                    ? NymIcons.starFilled
+                                    : NymIcons.starOutline,
+                                size: 14,
+                                color: widget.favorite
+                                    ? c.warning
+                                    : Colors.white.withValues(alpha: 0.85),
+                              ),
                             ),
                           ),
                         ),

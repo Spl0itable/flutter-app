@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../widgets/nym_icons.dart';
 
 /// Shared form/control widgets that mirror the PWA's `.form-*` and
 /// `.settings-section` styling (docs/specs/02 §5.10, §5.6). All controls take
@@ -66,8 +67,10 @@ class SettingsSection extends StatelessWidget {
                     curve: NymMotion.curve,
                     // chevron points down when open, -90° (right) when collapsed.
                     turns: open ? 0 : -0.25,
-                    child: Icon(
-                      Icons.keyboard_arrow_down,
+                    // `.settings-section-chevron` (index.html:1363) — the down
+                    // chevron; the PWA rotates it -90° when collapsed.
+                    child: NymSvgIcon(
+                      NymIcons.chevronDown,
                       size: 18,
                       color: c.primary,
                     ),

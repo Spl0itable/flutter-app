@@ -133,7 +133,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
                 ),
               ),
               IconButton(
-                icon: Icon(Icons.close, color: c.textDim),
+                // `.shop-close` is a literal "✕" char in the PWA — styled text.
+                icon: Text('✕',
+                    style: TextStyle(
+                        color: c.textDim, fontSize: 20, height: 1)),
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ],
@@ -817,7 +820,11 @@ class _ShopItemCard extends StatelessWidget {
               // (styles-features.css:204-208).
               Row(
                 children: [
-                  const Icon(Icons.bolt, size: 16, color: Color(0xFFF7931A)),
+                  // `.shop-price-amount` prefixes a literal "⚡" emoji in the PWA
+                  // (`<span class="shop-price-amount">⚡ ${price} sats</span>`).
+                  const Text('⚡',
+                      style: TextStyle(
+                          fontSize: 16, color: Color(0xFFF7931A))),
                   const SizedBox(width: 2),
                   Text(
                     '${item.price} sats',

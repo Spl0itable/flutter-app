@@ -24,6 +24,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 import 'crypto_verified_badge.dart';
 import '../context_menu/context_menu_actions.dart';
 import '../context_menu/context_menu_panel.dart';
@@ -1451,9 +1452,9 @@ class _AddReactionButtonState extends State<_AddReactionButton> {
               ),
             ),
             // `.add-reaction-btn svg { width:16px; height:16px; fill:var(--text) }`
-            // — a smiley-plus glyph (`Icons.add_reaction_outlined`) tinted --text.
-            child: Icon(
-              Icons.add_reaction_outlined,
+            // (reactions.js:570) — the smiley-with-plus glyph, tinted --text.
+            child: NymSvgIcon(
+              NymIcons.addReaction,
               size: 16,
               color: c.text,
             ),
@@ -1529,25 +1530,27 @@ class FileOfferCard extends StatelessWidget {
   final P2PService service;
 
   /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
-  static (Color, IconData) _category(NymColors c, FileOffer o) {
+  /// The PWA uses ONE generic file glyph and only re-tints the stroke per
+  /// category (default → `--primary`), so this returns the colour alone.
+  static Color _category(NymColors c, FileOffer o) {
     final ext = o.name.contains('.') ? o.name.split('.').last.toLowerCase() : '';
     final mime = o.type.toLowerCase();
     bool any(List<String> exts) => exts.contains(ext);
     if (any(['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma']) ||
         mime.startsWith('audio/')) {
-      return (c.purple, Icons.audiotrack);
+      return c.purple; // `.file-offer-icon.audio`
     }
     if (any(['mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm']) ||
         mime.startsWith('video/')) {
-      return (c.danger, Icons.movie_outlined);
+      return c.danger; // `.file-offer-icon.video`
     }
     if (any(['zip', 'rar', '7z', 'tar', 'gz', 'bz2'])) {
-      return (c.warning, Icons.folder_zip_outlined);
+      return c.warning; // `.file-offer-icon.archive`
     }
     if (any(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'rtf'])) {
-      return (c.secondary, Icons.description_outlined);
+      return c.secondary; // `.file-offer-icon.document`
     }
-    return (c.textDim, Icons.insert_drive_file_outlined);
+    return c.primary; // default `.file-offer-icon svg { stroke: var(--primary) }`
   }
 
   @override
@@ -1556,7 +1559,7 @@ class FileOfferCard extends StatelessWidget {
     return ListenableBuilder(
       listenable: service,
       builder: (context, _) {
-        final (iconColor, iconData) = _category(c, offer);
+        final iconColor = _category(c, offer);
         final isTorrent = offer.isTorrent;
         final unseeded = service.isUnseeded(offer.offerId);
         // The active transfer for this offer, if any.
@@ -1584,9 +1587,9 @@ class FileOfferCard extends StatelessWidget {
               Row(
                 children: [
                   // `.file-offer-icon`: a 40×40 boxed icon (white@0.05 bg, 1px
-                  // glass border, radius-xs=8) wrapping a 24px primary-stroke
-                  // glyph (styles-features.css:2064-2080). The category colour
-                  // still drives the glyph shape; the stroke is primary.
+                  // glass border, radius-xs=8) wrapping the 24px generic file
+                  // glyph (styles-features.css:2064-2080). The category re-tints
+                  // the stroke (audio/video/archive/document, else --primary).
                   Container(
                     width: 40,
                     height: 40,
@@ -1596,7 +1599,8 @@ class FileOfferCard extends StatelessWidget {
                       border: Border.all(color: c.glassBorder),
                       borderRadius: NymRadius.rxs,
                     ),
-                    child: Icon(iconData, color: c.primary, size: 24),
+                    child: NymSvgIcon(NymIcons.fileOffer,
+                        color: iconColor, size: 24),
                   ),
                   const SizedBox(width: 10),
                   Expanded(

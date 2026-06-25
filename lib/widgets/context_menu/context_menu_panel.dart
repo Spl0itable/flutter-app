@@ -20,6 +20,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 import 'context_menu_actions.dart';
 import 'group_context_menu_panel.dart';
 import 'interaction_hooks.dart';
@@ -216,7 +217,7 @@ class ContextMenuPanel extends ConsumerWidget {
                   children: [
                     for (final a in actions)
                       _ActionItem(
-                        icon: ctxActionIcon(a),
+                        svg: ctxActionSvg(a),
                         label: ctxActionLabel(a, target),
                         color: _colorFor(a, c),
                         onTap: () => _invoke(context, ref, a, target, fullNym),
@@ -925,12 +926,12 @@ class _CopyPubkeyRowState extends State<_CopyPubkeyRow> {
 /// `.context-menu-item`: 10×14 padding, radius 8, hover tint, leading 16px icon.
 class _ActionItem extends StatefulWidget {
   const _ActionItem({
-    required this.icon,
+    required this.svg,
     required this.label,
     required this.color,
     required this.onTap,
   });
-  final IconData icon;
+  final String svg;
   final String label;
   final Color color;
   final VoidCallback onTap;
@@ -971,7 +972,7 @@ class _ActionItemState extends State<_ActionItem> {
           ),
           child: Row(
             children: [
-              Icon(widget.icon, size: 16, color: iconColor),
+              NymSvgIcon(widget.svg, size: 16, color: iconColor),
               // `.nm-ico8` → margin-right:8px on the leading SVG.
               const SizedBox(width: 8),
               Expanded(
@@ -1036,11 +1037,15 @@ class _CtxCloseButtonState extends State<CtxCloseButton> {
                   : (c.isLight ? const Color(0x14000000) : c.glassBorder),
             ),
           ),
-          child: Icon(Icons.close,
-              size: 16,
-              color: _hover
-                  ? c.danger
-                  : (c.isLight ? const Color(0x80000000) : c.textDim)),
+          // `.context-menu-close` is a literal "✕" char (`&#x2715;`) — styled
+          // text, not an SVG glyph.
+          child: Text('✕',
+              style: TextStyle(
+                  fontSize: 16,
+                  height: 1,
+                  color: _hover
+                      ? c.danger
+                      : (c.isLight ? const Color(0x80000000) : c.textDim))),
         ),
       ),
     );
@@ -1079,7 +1084,9 @@ class _BackButtonState extends State<_BackButton> {
                 ? const Color(0x99000000) // rgba(0,0,0,0.6)
                 : const Color(0x66000000), // rgba(0,0,0,0.4)
           ),
-          child: const Icon(Icons.chevron_left, size: 18, color: Colors.white),
+          // `.context-menu-back` — feather chevron-left (index.html:71).
+          child: const NymSvgIcon(NymIcons.chevronLeft,
+              size: 18, color: Colors.white),
         ),
       ),
     );

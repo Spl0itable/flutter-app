@@ -21,6 +21,7 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
+import '../nym_icons.dart';
 import '../context_menu/context_menu_actions.dart' show CtxTarget;
 import '../context_menu/context_menu_panel.dart' show ContextMenuPanel;
 import '../context_menu/group_context_menu_panel.dart'
@@ -234,8 +235,8 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                         children: [
                           // Lock glyph prefix for E2E PM/group meta (PWA
                           // `lockSvg`, 12px). Channel meta has no glyph.
-                          if (meta.icon != null) ...[
-                            Icon(meta.icon, size: 12, color: c.textDim),
+                          if (meta.svg != null) ...[
+                            NymSvgIcon(meta.svg!, size: 12, color: c.textDim),
                             const SizedBox(width: 4),
                           ],
                           Flexible(
@@ -441,11 +442,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
               // `.group-header-icon` → `.group-header-svg` (18×18, stroke-width
               // 1.75, currentColor = `.channel-title` `--primary`), margin-right
               // 5 (groups.js:2910, styles-features.css:2480-2491).
-              SizedBox(
-                width: 18,
-                height: 18,
-                child: CustomPaint(painter: _GroupGlyphPainter(color: c.primary)),
-              ),
+              NymSvgIcon(NymIcons.groupGlyph, size: 18, color: c.primary),
               const SizedBox(width: 5),
             ];
             for (var i = 0; i < shown.length; i++) {
@@ -625,16 +622,16 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           // exist (`openP2PTransfersModal`, p2p.js:732).
           _transfersMobileToggle(),
           _MobileToggle(
-            icon: settings.notificationsEnabled
-                ? Icons.notifications_none
-                : Icons.notifications_off_outlined,
+            svg: settings.notificationsEnabled
+                ? NymIcons.bell
+                : NymIcons.bellOff,
             tooltip: 'Notifications',
             badge: unread,
             onTap: _openNotifications,
           ),
           const SizedBox(width: 8),
           _MobileToggle(
-            icon: Icons.menu,
+            svg: NymIcons.menu,
             tooltip: 'Menu',
             onTap: widget.onOpenSidebar,
           ),
@@ -662,43 +659,48 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     final isCall = view.kind == ViewKind.pm || view.kind == ViewKind.group;
 
     final buttons = <Widget>[
+      // `.channel-nav-buttons` — boxed (28×28, radius 4, hover bg), dimmed.
       _NavBtn(
-        icon: Icons.chevron_left,
+        svg: NymIcons.chevronLeft,
         tooltip: 'Go back',
         onTap: _canBack ? _back : null,
         disabled: !_canBack,
       ),
       _NavBtn(
-        icon: Icons.chevron_right,
+        svg: NymIcons.chevronRight,
         tooltip: 'Go forward',
         onTap: _canForward ? _forward : null,
         disabled: !_canForward,
       ),
+      // `.channel-action-buttons` — no box; hover scales 1.1 + tints primary.
       if (isChannel) ...[
-        _NavBtn(
-          icon: isPinned ? Icons.star : Icons.star_border,
+        _ActionBtn(
+          // `.favorite-channel-btn`: outline star (text-dim) → FILLED gold
+          // (#f5c518) when `.active`.
+          svg: isPinned ? NymIcons.starFilled : NymIcons.starOutline,
           tooltip: isDefault
               ? '#nymchat is always favorited'
               : (isPinned ? 'Unfavorite channel' : 'Favorite channel'),
-          active: isPinned,
+          activeColor: isPinned ? const Color(0xFFF5C518) : null,
           disabled: isDefault,
           onTap: isDefault ? null : () => controller.togglePin(channelKey),
         ),
-        _NavBtn(
+        _ActionBtn(
           key: TutorialTargets.keyFor(TutorialTarget.shareButton),
-          icon: Icons.ios_share,
+          // `.share-channel-btn`: the filled share-NODES glyph (not iOS share).
+          svg: NymIcons.shareNodes,
           tooltip: 'Share channel URL',
           onTap: () => ShareChannelModal.open(context, channelKey),
         ),
       ] else if (isCall) ...[
         // PM/group only: audio + video (mirrors `_refreshCallButtons`).
-        _NavBtn(
-          icon: Icons.call_outlined,
+        _ActionBtn(
+          svg: NymIcons.phone,
           tooltip: 'Start audio call',
           onTap: () => _startCall(view, video: false),
         ),
-        _NavBtn(
-          icon: Icons.videocam_outlined,
+        _ActionBtn(
+          svg: NymIcons.video,
           tooltip: 'Start video call',
           onTap: () => _startCall(view, video: true),
         ),
@@ -746,28 +748,28 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           // appears/disappears live as the service notifies.
           _transfersPill(),
           _HeaderPill(
-            icon: Icons.notifications_none,
+            svg: NymIcons.bell,
             label: 'Notifications',
             badge: unread,
             onTap: _openNotifications,
           ),
           _HeaderPill(
-            icon: Icons.star_border,
+            svg: NymIcons.starFlair,
             label: 'Flair',
             onTap: () => ShopModal.open(context),
           ),
           _HeaderPill(
-            icon: Icons.settings_outlined,
+            svg: NymIcons.settings,
             label: 'Settings',
             onTap: () => SettingsScreen.open(context),
           ),
           _HeaderPill(
-            icon: Icons.info_outline,
+            svg: NymIcons.info,
             label: 'About',
             onTap: () => AboutScreen.open(context),
           ),
           _HeaderPill(
-            icon: Icons.logout,
+            svg: NymIcons.logout,
             label: 'Logout',
             // `data-action="signOut"` → confirm, then real sign-out (app.js
             // `signOut`, 6740-6741). `signOut()` clears the identity and bumps
@@ -820,7 +822,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           return const SizedBox.shrink();
         }
         return _HeaderPill(
-          icon: Icons.swap_vert,
+          svg: NymIcons.transfers,
           label: 'Transfers',
           onTap: _openTransfers,
         );
@@ -842,7 +844,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         return Padding(
           padding: const EdgeInsets.only(right: 8),
           child: _MobileToggle(
-            icon: Icons.swap_vert,
+            svg: NymIcons.transfers,
             tooltip: 'Transfers',
             onTap: _openTransfers,
           ),
@@ -885,7 +887,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   /// `"<n> online nyms"` (users.js `_renderUserList`, 1451). PM: lock glyph +
   /// `"End-to-end encrypted private message"` (pms.js:2940). Group: lock glyph +
   /// `"End-to-end encrypted group chat"` (groups.js:3264).
-  ({IconData? icon, String text}) _metaFor(AppState app, ChatView view) {
+  ({String? svg, String text}) _metaFor(AppState app, ChatView view) {
     switch (view.kind) {
       case ViewKind.channel:
         // `channelUserCount`: online/away nyms, excluding self (matches the
@@ -895,15 +897,15 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           final st = u.effectiveStatus();
           return st == UserStatus.online || st == UserStatus.away;
         }).length;
-        return (icon: null, text: '${_abbreviateCount(count)} online nyms');
+        return (svg: null, text: '${_abbreviateCount(count)} online nyms');
       case ViewKind.pm:
         return (
-          icon: Icons.lock_outline,
+          svg: NymIcons.lock,
           text: 'End-to-end encrypted private message',
         );
       case ViewKind.group:
         return (
-          icon: Icons.lock_outline,
+          svg: NymIcons.lock,
           text: 'End-to-end encrypted group chat',
         );
     }
@@ -923,19 +925,19 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
 /// `.channel-nav-btn`: 28×28 desktop / 24×24 compact, radius 4, textDim →
 /// primary; hover paints a white@0.08 fill (gap F18). Disabled buttons render at
 /// 0.3 opacity (PWA `.channel-nav-btn:disabled`).
+/// `.channel-nav-btn` (back / forward): a 28×28 box with radius 4, dim glyph,
+/// hover → bg `hoverOverlay` + primary tint, disabled → 0.3 opacity. Renders the
+/// exact PWA feather chevron SVG.
 class _NavBtn extends StatefulWidget {
   const _NavBtn({
-    super.key,
-    required this.icon,
+    required this.svg,
     this.onTap,
     this.tooltip,
-    this.active = false,
     this.disabled = false,
   });
-  final IconData icon;
+  final String svg;
   final VoidCallback? onTap;
   final String? tooltip;
-  final bool active;
   final bool disabled;
 
   @override
@@ -957,7 +959,7 @@ class _NavBtnState extends State<_NavBtn> {
 
     final color = widget.disabled
         ? c.textDim.withValues(alpha: 0.3)
-        : ((widget.active || _hover) ? c.primary : c.textDim);
+        : (_hover ? c.primary : c.textDim);
 
     final btn = MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
@@ -978,7 +980,70 @@ class _NavBtnState extends State<_NavBtn> {
                 : Colors.transparent,
             borderRadius: const BorderRadius.all(Radius.circular(4)),
           ),
-          child: Icon(widget.icon, size: 18, color: color),
+          child: NymSvgIcon(widget.svg, size: 18, color: color),
+        ),
+      ),
+    );
+    return widget.tooltip != null
+        ? Tooltip(message: widget.tooltip!, child: btn)
+        : btn;
+  }
+}
+
+/// `.favorite-channel-btn` / `.share-channel-btn` / `.call-channel-btn`: no box —
+/// just a 5px-padded 18px glyph that scales to 1.1 and tints `--primary` on
+/// hover. [activeColor] paints the resting glyph a fixed colour (the favorite
+/// star's gold `#f5c518` when pinned); otherwise it rests at `--text-dim`.
+/// Disabled rests dim and ignores taps (the always-favorited `#nymchat`).
+class _ActionBtn extends StatefulWidget {
+  const _ActionBtn({
+    super.key,
+    required this.svg,
+    this.onTap,
+    this.tooltip,
+    this.activeColor,
+    this.disabled = false,
+  });
+  final String svg;
+  final VoidCallback? onTap;
+  final String? tooltip;
+  final Color? activeColor;
+  final bool disabled;
+
+  @override
+  State<_ActionBtn> createState() => _ActionBtnState();
+}
+
+class _ActionBtnState extends State<_ActionBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final phone =
+        MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint;
+    // 18px glyph + 5px padding = 28px footprint (24px on phones), matching the
+    // `.channel-nav-btn` cells so the 2-column grid stays aligned.
+    final pad = phone ? 3.0 : 5.0;
+
+    final color = widget.disabled
+        ? c.textDim.withValues(alpha: 0.3)
+        : (widget.activeColor ?? (_hover ? c.primary : c.textDim));
+
+    final btn = MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.disabled ? null : widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedScale(
+          scale: (_hover && !widget.disabled) ? 1.1 : 1.0,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          child: Padding(
+            padding: EdgeInsets.all(pad),
+            child: NymSvgIcon(widget.svg, size: 18, color: color),
+          ),
         ),
       ),
     );
@@ -1033,12 +1098,12 @@ _IconBtnStyle _iconBtnStyle(NymColors c, bool hover) {
 /// border / `--primary` text). An optional unread [badge] overlays the top-right.
 class _HeaderPill extends StatefulWidget {
   const _HeaderPill({
-    required this.icon,
+    required this.svg,
     required this.label,
     required this.onTap,
     this.badge = 0,
   });
-  final IconData icon;
+  final String svg;
   final String label;
   final VoidCallback onTap;
   final int badge;
@@ -1070,7 +1135,7 @@ class _HeaderPillState extends State<_HeaderPill> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(widget.icon, size: 14, color: fg),
+          NymSvgIcon(widget.svg, size: 14, color: fg),
           const SizedBox(width: 5),
           Text(
             widget.label.toUpperCase(),
@@ -1110,12 +1175,12 @@ class _HeaderPillState extends State<_HeaderPill> {
 /// Optional unread [badge] overlay.
 class _MobileToggle extends StatelessWidget {
   const _MobileToggle({
-    required this.icon,
+    required this.svg,
     this.tooltip,
     this.onTap,
     this.badge = 0,
   });
-  final IconData icon;
+  final String svg;
   final String? tooltip;
   final VoidCallback? onTap;
   final int badge;
@@ -1132,7 +1197,7 @@ class _MobileToggle extends StatelessWidget {
         borderRadius: NymRadius.rxs,
         border: Border.all(color: style.border),
       ),
-      child: Icon(icon, size: 20, color: style.foreground),
+      child: NymSvgIcon(svg, size: 20, color: style.foreground),
     );
     final child = InkWell(
       onTap: onTap,
@@ -1252,92 +1317,6 @@ class _FriendBadge extends StatelessWidget {
     final color = context.nym.isLight
         ? const Color(0xFF0288D1)
         : const Color(0xFF4FC3F7);
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CustomPaint(painter: _FriendBadgePainter(color)),
-    );
+    return NymSvgIcon(NymIcons.friendBadge, size: size, color: color);
   }
-}
-
-class _FriendBadgePainter extends CustomPainter {
-  _FriendBadgePainter(this.color);
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final s = size.width / 16.0;
-    final fill = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-    final stroke = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5 * s
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = true;
-
-    canvas.drawCircle(Offset(6 * s, 5 * s), 2.5 * s, fill);
-    final body = Path()
-      ..moveTo(1.5 * s, 14 * s)
-      ..cubicTo(1.5 * s, 10.5 * s, 3.5 * s, 9 * s, 6 * s, 9 * s)
-      ..cubicTo(8.5 * s, 9 * s, 10.5 * s, 10.5 * s, 10.5 * s, 14 * s);
-    canvas.drawPath(body, fill);
-    canvas.drawLine(Offset(13 * s, 6 * s), Offset(13 * s, 10 * s), stroke);
-    canvas.drawLine(Offset(11 * s, 8 * s), Offset(15 * s, 8 * s), stroke);
-  }
-
-  @override
-  bool shouldRepaint(_FriendBadgePainter old) => old.color != color;
-}
-
-/// `.group-header-svg` (groups.js:2910): the three-figure group glyph, drawn in
-/// a 24×24 viewBox at stroke-width 1.75 (currentColor). A faithful copy of the
-/// PWA SVG path data; scaled to the requested box size.
-class _GroupGlyphPainter extends CustomPainter {
-  _GroupGlyphPainter({required this.color});
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final s = size.width / 24; // uniform scale from the 24×24 viewBox.
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.75 * s
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    Offset p(double x, double y) => Offset(x * s, y * s);
-
-    // Center head + shoulders: circle cx12 cy7 r2.75; M5 21v-1.5 a7 7 0 0 1 14 0 V21.
-    canvas.drawCircle(p(12, 7), 2.75 * s, paint);
-    final centre = Path()
-      ..moveTo(5 * s, 21 * s)
-      ..relativeLineTo(0, -1.5 * s)
-      ..arcToPoint(p(19, 19.5), radius: Radius.circular(7 * s), clockwise: true)
-      ..lineTo(19 * s, 21 * s);
-    canvas.drawPath(centre, paint);
-
-    // Left figure: circle cx4.5 cy9.5 r2; M1 20v-1 a4.5 4.5 0 0 1 5.5-4.35.
-    canvas.drawCircle(p(4.5, 9.5), 2 * s, paint);
-    final left = Path()
-      ..moveTo(1 * s, 20 * s)
-      ..relativeLineTo(0, -1 * s)
-      ..relativeArcToPoint(p(5.5, -4.35),
-          radius: Radius.circular(4.5 * s), clockwise: true);
-    canvas.drawPath(left, paint);
-
-    // Right figure: circle cx19.5 cy9.5 r2; M23 20v-1 a4.5 4.5 0 0 0-5.5-4.35.
-    canvas.drawCircle(p(19.5, 9.5), 2 * s, paint);
-    final right = Path()
-      ..moveTo(23 * s, 20 * s)
-      ..relativeLineTo(0, -1 * s)
-      ..relativeArcToPoint(p(-5.5, -4.35),
-          radius: Radius.circular(4.5 * s), clockwise: false);
-    canvas.drawPath(right, paint);
-  }
-
-  @override
-  bool shouldRepaint(_GroupGlyphPainter old) => old.color != color;
 }

@@ -13,6 +13,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../../widgets/common/nym_avatar.dart';
+import '../../widgets/nym_icons.dart';
 import 'dev_nsec_modal.dart';
 import 'modal_chrome.dart';
 import 'nym_identicon.dart';
@@ -571,10 +572,13 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
           onTap: () => setState(() => _revealOpen = !_revealOpen),
           child: Row(
             children: [
-              Icon(
+              // `#revealPrivkeyArrow` (app.js:2959) — a filled triangle that
+              // swaps down/right with the slideout (the PWA rewrites the SVG,
+              // no CSS rotation).
+              NymSvgIcon(
                 _revealOpen
-                    ? Icons.arrow_drop_down
-                    : Icons.arrow_right,
+                    ? NymIcons.revealArrowDown
+                    : NymIcons.revealArrowRight,
                 size: 18,
                 color: c.textDim,
               ),
@@ -600,7 +604,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.warning_amber_rounded,
+                    // The nsec-warning triangle (index.html:1237).
+                    NymSvgIcon(NymIcons.warningTriangle,
                         size: 16, color: c.warning),
                     const SizedBox(width: 6),
                     Expanded(
@@ -668,15 +673,17 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               ),
             ),
             IconButton(
-              icon: Icon(_nsecVisible ? Icons.visibility_off : Icons.visibility,
-                  size: 18, color: c.textDim),
+              // `toggleNsecVisibility` (index.html:1242) shows the SAME eye for
+              // both states — the PWA only flips the input type, never the glyph.
+              icon: NymSvgIcon(NymIcons.nsecEye, size: 18, color: c.textDim),
               onPressed: () => setState(() => _nsecVisible = !_nsecVisible),
             ),
-            // `copyRevealedNsec` (index.html:1243) — one-tap copy of the nsec.
+            // `copyRevealedNsec` (index.html:1243) — one-tap copy of the nsec
+            // (the two-sheet glyph, identical to the context-menu copy).
             if (nsec.isNotEmpty)
               IconButton(
                 tooltip: 'Copy',
-                icon: Icon(Icons.copy, size: 16, color: c.textDim),
+                icon: NymSvgIcon(NymIcons.ctxCopy, size: 16, color: c.textDim),
                 onPressed: () => _copyToClipboard(nsec, 'Private key copied'),
               ),
           ],
