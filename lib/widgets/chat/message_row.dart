@@ -667,22 +667,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _bodyContent(context, c.text, fontSize, deco: deco),
-              // `.edited-indicator-irc`: right-aligned 10px italic dim (edited).
-              if (message.isEdited)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      '(edited)',
-                      style: TextStyle(
-                        color: c.textDim.withValues(alpha: 0.7),
-                        fontSize: 10,
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-                ),
               // Reactions row renders only when reactions OR zaps exist (the PWA
               // `updateMessageReactions` early-returns on an empty reaction set,
               // removing the row entirely unless zaps remain). The zap badge sits
@@ -710,6 +694,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       mainAxisSize: MainAxisSize.min,
       children: [
         messageRow,
+        // `.edited-indicator-irc { display:block; text-align:right; margin-left:
+        // auto }` — the PWA appends `editedIRC` as a TOP-LEVEL sibling AFTER
+        // `.message-content` (messages.js:939), so it right-aligns across the
+        // WHOLE message row, not just the (possibly short) content column.
+        if (message.isEdited)
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                '(edited)',
+                style: TextStyle(
+                  color: c.textDim.withValues(alpha: 0.7),
+                  fontSize: 10,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ),
         // `.message-translation`: full-width left-primary-bordered block BELOW
         // the message content (a sibling after `.message-content`, width:100%).
         if (_showTranslation)

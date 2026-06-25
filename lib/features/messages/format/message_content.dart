@@ -6,6 +6,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -14,12 +15,16 @@ import '../../../core/theme/nym_colors.dart';
 import '../../../core/theme/nym_metrics.dart';
 import '../../../core/theme/nym_theme.dart'
     show kEmojiFontFallback, kSansFont, kMonoFont;
+import '../../../core/utils/nym_utils.dart';
 import '../../../services/api/api_client.dart';
 import '../../../services/platform/deep_links.dart';
 import '../../../state/app_state.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
 import '../../../widgets/common/app_dialog.dart';
+import '../../../widgets/context_menu/context_menu_actions.dart';
+import '../../../widgets/context_menu/context_menu_panel.dart';
+import '../../commands/command_handler.dart' show resolveTarget;
 import '../inline_network_image.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
@@ -122,15 +127,71 @@ class MessageContent extends ConsumerWidget {
       }
     }
 
-    return Column(
+    // Tapping a `.nm-mention` chip opens the mentioned user's context menu
+    // (styles-chat.css:1308 `.nm-mention { cursor:pointer }`; ui-context.js:859-
+    // 870). The PWA resolves the mention to a pubkey (`_resolveMentionPubkey`)
+    // then calls `showContextMenu(e, nym#suffix, pubkey, null, null, false)` —
+    // the FULL menu with null content/messageId (NOT profile-only). We resolve
+    // the chip's base nym + optional `#suffix` via [resolveTarget] (the same
+    // matcher cmdSlap/cmdHug use) and build the matching [CtxTarget].
+    void onMentionTap(MentionNode node) {
+      final users = ref.read(usersProvider);
+      // `node.base` already carries the leading `@`; re-attach the `#suffix` so
+      // a suffixed mention disambiguates to the right pubkey.
+      final raw = node.suffix != null ? '${node.base}#${node.suffix}' : node.base;
+      final t = resolveTarget(raw, users);
+      if (t == null) return; // unknown mention → inert (PWA: no pubkey → no-op)
+      final app = ref.read(appStateProvider);
+      ContextMenuPanel.show(
+        context,
+        // Mirrors `showContextMenu(e, nym#suffix, pubkey, null, null, false)`:
+        // a full (non-profileOnly) target with no message content/id, so the
+        // action list reduces to Mention/PM/Slap/Hug/AddToGroup/GiftCredits/
+        // Friend/Report/Block (buildContextMenuActions with hasContent=false).
+        target: CtxTarget(
+          pubkey: t.pubkey,
+          nym: stripPubkeySuffix(t.nym),
+          isSelf: t.pubkey == app.selfPubkey,
+        ),
+      );
+    }
+
+    // Read-more height truncation (messages.js:1192-1265 + styles-chat.css:793-
+    // 822). Long bodies collapse to a 300px `.truncated-inner` with a "Read
+    // more"/"Show less" toggle. The char threshold (400 mobile ≤768 / 600
+    // desktop) only FLAGS a candidate; the collapse itself is height-based, so
+    // `_Collapsible` drops the toggle when the rendered body already fits 300px.
+    // The PWA measures `replyText` = the content with `>`-prefixed quote lines
+    // removed (blockquotes get their own separate truncation; primary path here
+    // is the reply body).
+    final replyText = content
+        .split('\n')
+        .where((line) => !line.startsWith('>'))
+        .join('\n')
+        .trim();
+    final threshold =
+        MediaQuery.of(context).size.width <= 768 ? 400 : 600;
+    final body = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) const SizedBox(height: 4),
           _block(context, c, blocks[i], color, size,
-              emojiOnly: emojiOnly, onChannelRef: onChannelRef),
+              emojiOnly: emojiOnly,
+              onChannelRef: onChannelRef,
+              onMentionTap: onMentionTap),
         ],
+      ],
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Link-preview cards (`_attachLinkPreviews`) are appended OUTSIDE the
+        // `.truncated-inner` in the PWA, so they stay below the collapsible body.
+        if (replyText.length > threshold) _Collapsible(child: body) else body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
     );
@@ -190,6 +251,7 @@ class MessageContent extends ConsumerWidget {
     double size, {
     bool emojiOnly = false,
     void Function(String name, bool isGeohash)? onChannelRef,
+    void Function(MentionNode node)? onMentionTap,
   }) {
     switch (block) {
       case ParagraphBlock(:final inlines):
@@ -201,6 +263,7 @@ class MessageContent extends ConsumerWidget {
           shadows: glyphShadows,
           monospace: monospace,
           onChannelRef: onChannelRef,
+          onMentionTap: onMentionTap,
         );
       case HeadingBlock(:final level, :final inlines):
         final scale = level == 1 ? 1.5 : (level == 2 ? 1.3 : 1.15);
@@ -211,6 +274,7 @@ class MessageContent extends ConsumerWidget {
           size: size * scale,
           weight: FontWeight.w700,
           onChannelRef: onChannelRef,
+          onMentionTap: onMentionTap,
         );
       case CodeBlock(:final code, :final lang):
         return _CodeBox(code: code, lang: lang, size: size);
@@ -274,6 +338,7 @@ class _RichInline extends StatelessWidget {
     this.shadows,
     this.monospace = false,
     this.onChannelRef,
+    this.onMentionTap,
   });
 
   final List<InlineNode> inlines;
@@ -292,6 +357,9 @@ class _RichInline extends StatelessWidget {
 
   /// Switches the active channel when a `#ref` / `app.nym.bar/#…` link is tapped.
   final void Function(String name, bool isGeohash)? onChannelRef;
+
+  /// Opens the mentioned user's context menu when a `.nm-mention` chip is tapped.
+  final void Function(MentionNode node)? onMentionTap;
 
   @override
   Widget build(BuildContext context) {
@@ -393,7 +461,7 @@ class _RichInline extends StatelessWidget {
       case MentionNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
-          child: _MentionChip(node: node, size: size),
+          child: _MentionChip(node: node, size: size, onTap: onMentionTap),
         );
       case ChannelRefNode(:final name, :final isGeohash):
         // `.channel-reference`: underlined, inherits BODY text color (no tint),
@@ -472,14 +540,18 @@ class _LinkTap extends TapGestureRecognizer {
 }
 
 class _MentionChip extends StatelessWidget {
-  const _MentionChip({required this.node, required this.size});
+  const _MentionChip({required this.node, required this.size, this.onTap});
   final MentionNode node;
   final double size;
+
+  /// Tapping the chip opens the mentioned user's context menu
+  /// (`.nm-mention { cursor:pointer }`, ui-context.js:859-870). Null → inert.
+  final void Function(MentionNode node)? onTap;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Text.rich(
+    final chip = Text.rich(
       TextSpan(
         children: [
           TextSpan(
@@ -502,6 +574,12 @@ class _MentionChip extends StatelessWidget {
             ),
         ],
       ),
+    );
+    if (onTap == null) return chip;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onTap!(node),
+      child: chip,
     );
   }
 }
@@ -1178,5 +1256,154 @@ class InlineEmojiText extends ConsumerWidget {
       overflow: overflow,
       textAlign: textAlign,
     );
+  }
+}
+
+/// The maximum collapsed height of a `.truncated-inner` block
+/// (`styles-chat.css:795 max-height:300px`).
+const double _kTruncateHeight = 300;
+
+/// Collapsible body wrapper for the read-more truncation (messages.js:1192-1265,
+/// `.truncated-inner` + `.read-more-btn`). Clamps [child] to [_kTruncateHeight]
+/// with overflow hidden and a "Read more"/"Show less" toggle.
+///
+/// The char-count threshold (checked by the caller) only flags this body as a
+/// candidate; the collapse itself is height-based, so the toggle is dropped once
+/// the body is measured to already fit 300px (PWA: `scrollHeight <= clientHeight
+/// + 2` → remove the button + expand).
+class _Collapsible extends StatefulWidget {
+  const _Collapsible({required this.child});
+  final Widget child;
+
+  @override
+  State<_Collapsible> createState() => _CollapsibleState();
+}
+
+class _CollapsibleState extends State<_Collapsible> {
+  bool _expanded = false;
+
+  /// The body's natural (unclamped) height, learned after the first layout.
+  /// Null until measured; `<= 300 + 2` means it fits and needs no toggle.
+  double? _fullHeight;
+
+  void _onMeasured(double height) {
+    if (_fullHeight != null && (height - _fullHeight!).abs() < 0.5) return;
+    // Defer the state update out of the layout phase.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _fullHeight = height);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // Content already fits 300px → no clamp, no button (PWA drops the toggle).
+    final fits = _fullHeight != null && _fullHeight! <= _kTruncateHeight + 2;
+    final collapsed = !fits && !_expanded;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ClipRect(
+          child: _MeasuredMaxHeight(
+            maxHeight: collapsed ? _kTruncateHeight : double.infinity,
+            onMeasured: _onMeasured,
+            child: widget.child,
+          ),
+        ),
+        // `.read-more-btn { display:block; width:100%; color:--primary; font-
+        // size:12px; padding:4px 0 }`. Shown only while the body overflows 300px.
+        if (!fits)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                _expanded ? 'Show less' : 'Read more',
+                style: TextStyle(color: c.primary, fontSize: 12),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Lays its [child] out at the incoming width with UNBOUNDED height to learn the
+/// child's natural height (reported via [onMeasured]), then sizes itself to
+/// `min(natural, maxHeight)` — clipping (via the enclosing [ClipRect]) anything
+/// past [maxHeight]. This lets [_Collapsible] decide whether the read-more toggle
+/// is needed without a flash: the child renders at full height and is clipped,
+/// rather than being measured in a separate offstage pass.
+class _MeasuredMaxHeight extends SingleChildRenderObjectWidget {
+  const _MeasuredMaxHeight({
+    required this.maxHeight,
+    required this.onMeasured,
+    required Widget super.child,
+  });
+
+  final double maxHeight;
+  final ValueChanged<double> onMeasured;
+
+  @override
+  _RenderMeasuredMaxHeight createRenderObject(BuildContext context) {
+    return _RenderMeasuredMaxHeight(
+      maxHeight: maxHeight,
+      onMeasured: onMeasured,
+    );
+  }
+
+  @override
+  void updateRenderObject(
+      BuildContext context, _RenderMeasuredMaxHeight renderObject) {
+    renderObject
+      ..maxHeight = maxHeight
+      ..onMeasured = onMeasured;
+  }
+}
+
+class _RenderMeasuredMaxHeight extends RenderProxyBox {
+  _RenderMeasuredMaxHeight({
+    required double maxHeight,
+    required ValueChanged<double> onMeasured,
+  })  : _maxHeight = maxHeight,
+        _onMeasured = onMeasured;
+
+  double _maxHeight;
+  double get maxHeight => _maxHeight;
+  set maxHeight(double value) {
+    if (_maxHeight == value) return;
+    _maxHeight = value;
+    markNeedsLayout();
+  }
+
+  ValueChanged<double> _onMeasured;
+  set onMeasured(ValueChanged<double> value) => _onMeasured = value;
+
+  @override
+  void performLayout() {
+    final child = this.child;
+    if (child == null) {
+      size = constraints.smallest;
+      return;
+    }
+    // Lay the child out at our width with NO height bound to learn its natural
+    // height, then report it and clamp our own height to maxHeight.
+    child.layout(
+      BoxConstraints(
+        minWidth: constraints.minWidth,
+        maxWidth: constraints.maxWidth,
+        minHeight: 0,
+        maxHeight: double.infinity,
+      ),
+      parentUsesSize: true,
+    );
+    final natural = child.size.height;
+    _onMeasured(natural);
+    final clamped = natural > _maxHeight ? _maxHeight : natural;
+    size = constraints.constrain(Size(child.size.width, clamped));
   }
 }
