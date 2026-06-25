@@ -121,18 +121,41 @@ class MessageReaction {
 /// Per-message zap aggregate (zaps.js `this.zaps` entry, UI-facing form):
 /// total sats + the set of zappers. [receipts] holds the dedup keys (lowercased
 /// `b:<bolt11>` or receipt id) so the verify-URL confirmation and a later
-/// NIP-57 receipt for the same payment don't double-count.
+/// NIP-57 receipt for the same payment don't double-count. [unverified] maps a
+/// receipt's dedup key → its sats when the zap couldn't be cryptographically
+/// verified against the recipient's LNURL provider pubkey (a gift-wrapped,
+/// zapper-signed announcement) — mirrors the PWA's `messageZaps.unverified`
+/// (zaps.js:1613/1750); the badge tooltip surfaces the unverified sub-total.
 class MessageZaps {
-  MessageZaps({int? totalSats, Set<String>? zappers, Set<String>? receipts})
-      : totalSats = totalSats ?? 0,
+  MessageZaps({
+    int? totalSats,
+    Set<String>? zappers,
+    Set<String>? receipts,
+    Map<String, int>? unverified,
+  })  : totalSats = totalSats ?? 0,
         zappers = zappers ?? <String>{},
-        receipts = receipts ?? <String>{};
+        receipts = receipts ?? <String>{},
+        unverified = unverified ?? <String, int>{};
 
   int totalSats;
   final Set<String> zappers;
   final Set<String> receipts;
 
+  /// receiptId (dedup key) → sats for zaps that are NOT verified against the
+  /// recipient's LNURL provider pubkey (zaps.js `messageZaps.unverified`).
+  final Map<String, int> unverified;
+
   int get zapperCount => zappers.length;
+
+  /// Sum of all unverified zap sats on this message (zaps.js:1750 — the
+  /// `(N unverified)` tooltip suffix).
+  int get unverifiedSats {
+    var sum = 0;
+    for (final s in unverified.values) {
+      sum += s;
+    }
+    return sum;
+  }
 }
 
 /// In-memory UI state for the shell. This is intentionally a self-contained
@@ -1344,16 +1367,36 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Records a zap against [messageId], deduped by [dedupKey]. Returns true when
-  /// the zap was newly counted.
+  /// the zap was newly counted (or upgraded from unverified → verified).
+  ///
+  /// [verified] mirrors zaps.js `_recordMessageZap`'s trailing flag (line 1609):
+  /// a receipt is VERIFIED when its event pubkey is the recipient's LNURL
+  /// provider pubkey (or it's our own verify-URL-confirmed self-zap); a
+  /// gift-wrapped, zapper-signed announcement is UNVERIFIED. Defaults to true so
+  /// existing callers (the receipt-parse ingest, the self-zap record) are
+  /// unaffected. When a verified receipt later arrives for a dedup key already
+  /// counted as unverified, it is removed from [MessageZaps.unverified] without
+  /// double-counting the sats (zaps.js:1617-1624).
   bool recordMessageZap({
     required String messageId,
     required String zapperPubkey,
     required int amountSats,
     required String dedupKey,
+    bool verified = true,
   }) {
     if (messageId.isEmpty || amountSats <= 0) return false;
     final mz = state.zaps.putIfAbsent(messageId, MessageZaps.new);
-    if (!mz.receipts.add(dedupKey)) return false;
+    if (mz.receipts.contains(dedupKey)) {
+      // Already counted. A verified receipt for a previously-unverified payment
+      // clears the unverified mark (the sats stay, only the flag flips).
+      if (verified && mz.unverified.remove(dedupKey) != null) {
+        state = state.copyWith();
+        return true;
+      }
+      return false;
+    }
+    mz.receipts.add(dedupKey);
+    if (!verified) mz.unverified[dedupKey] = amountSats;
     mz.totalSats += amountSats;
     mz.zappers.add(zapperPubkey);
     state = state.copyWith();

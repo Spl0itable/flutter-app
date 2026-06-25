@@ -226,7 +226,21 @@ class _ZapModalState extends ConsumerState<ZapModal> {
             zapperPubkey: ref.read(appStateProvider).selfPubkey,
             amountSats: invoice.amountSats,
             dedupKey: ZapLogic.dedupKey(bolt11: invoice.pr, eventId: ''),
+            // The self-zap is verify-URL/server confirmed → verified (zaps.js
+            // `_recordOwnMessageZap(..., true)`, line 1102/1606).
           );
+      // Announce the zap so OTHER clients update the badge (zaps.js
+      // `_publishOwnMessageZapEvent` / `_publishOwnPrivateZapEvent`). The
+      // controller reads the current view and picks public (channel) vs
+      // gift-wrapped (PM/group) delivery. Deduped end-to-end by bolt11 so this
+      // announce, the self-record above, and any public-receipt echo of the
+      // same payment count once.
+      unawaited(ref.read(nostrControllerProvider).announceMessageZap(
+            messageId: messageId,
+            recipientPubkey: widget.recipientPubkey,
+            bolt11: invoice.pr,
+            originalKind: widget.originalKind,
+          ));
     }
     setState(() => _phase = _Phase.paid);
     Future<void>.delayed(const Duration(seconds: 2), () {

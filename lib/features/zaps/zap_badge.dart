@@ -5,6 +5,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../models/message.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../widgets/chat/message_row.dart' show abbreviateNumber;
 import '../../widgets/context_menu/interaction_hooks.dart';
 import '../reactions/reaction_burst.dart';
@@ -64,9 +65,15 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
     _lastTotal = total;
 
     final zappers = zaps.zapperCount;
+    // Tooltip mirrors zaps.js:1748-1751: "N zappers • M sats total", with a
+    // trailing " (U unverified)" when any zap on this message is unverified (a
+    // gift-wrapped, zapper-signed announcement not validated against the
+    // recipient's LNURL provider pubkey).
+    final unverifiedSats = zaps.unverifiedSats;
     final tooltip =
         '${abbreviateNumber(zappers)} zapper${zappers == 1 ? '' : 's'} • '
-        '${abbreviateNumber(total)} sats total';
+        '${abbreviateNumber(total)} sats total'
+        '${unverifiedSats > 0 ? ' (${abbreviateNumber(unverifiedSats)} unverified)' : ''}';
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -118,14 +125,19 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
   }
 
   /// Resolves the author's lightning address and opens the zap modal, mirroring
-  /// `handleQuickZap` (`zaps.js:1786`). Posts a system note when the author has
-  /// no lightning address.
+  /// `handleQuickZap` (`zaps.js:1786`). The PWA always does a FRESH fetch first
+  /// (`fetchLightningAddressForUser`) rather than trusting the cache, so an
+  /// author whose kind-0 hasn't arrived yet still gets zapped instead of a
+  /// spurious "cannot receive zaps". Posts the PWA's "Checking…" system note,
+  /// awaits the resolve, then either opens the modal or reports no address.
   Future<void> _quickZap(BuildContext context) async {
     final baseNym = stripPubkeySuffix(message.author);
-    final user = ref.read(usersProvider)[message.pubkey];
-    final lnAddr = user?.profile?.lightningAddress;
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.addSystemMessage('Checking if @$baseNym can receive zaps...');
+    final controller = ref.read(nostrControllerProvider);
+    final lnAddr = await controller.resolveLightningAddressForZap(message.pubkey);
     if (lnAddr == null || lnAddr.isEmpty) {
-      ref.read(appStateProvider.notifier).addSystemMessage(
+      notifier.addSystemMessage(
           '@$baseNym cannot receive zaps (no lightning address set)');
       return;
     }
