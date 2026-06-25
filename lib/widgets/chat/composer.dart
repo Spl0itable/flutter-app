@@ -11,20 +11,24 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
 import '../../features/autocomplete/autocomplete_triggers.dart';
 import '../../features/autocomplete/pending_edit.dart';
+import '../../features/commands/command_handler.dart';
 import '../../features/commands/command_palette.dart';
 import '../../features/commands/command_registry.dart';
 import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
+import '../../features/polls/poll_create_modal.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
+import '../../features/zaps/zap_modal.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../context_menu/interaction_hooks.dart';
@@ -214,13 +218,121 @@ class _ComposerState extends ConsumerState<Composer> {
     // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
     // rebuild on focus change to swap those in/out.
     _focus.addListener(_onFocusChanged);
-    // Register the system-message sink so command feedback surfaces somewhere.
+    // Register the system-message sink + the modal/effect hooks so slash
+    // commands that open a UI surface (poll, zap, PM, group create/admin)
+    // actually fire instead of silently no-opping.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(nostrControllerProvider).setCommandHooks(
             onSystemMessage: _onSystemMessage,
+            hooks: _buildCommandHooks(),
           );
     });
+  }
+
+  /// Builds the modal/effect hooks for slash commands whose surface lives in
+  /// the UI layer. Mirrors the PWA's `cmd*` handlers (commands.js) that open
+  /// these surfaces; registered once with the dispatcher via [setCommandHooks].
+  CommandHooks _buildCommandHooks() {
+    final controller = ref.read(nostrControllerProvider);
+    return CommandHooks(
+      // `/poll` → the poll editor (`cmdPoll` → #pollModal).
+      openPoll: () {
+        if (mounted) PollCreateModal.open(context);
+      },
+      // `/pm @nym` → open/create the thread (target resolved by the dispatcher).
+      openPm: (pubkey, nym) => controller.startPM(pubkey, nym: nym),
+      // `/zap @nym` → resolve the LN address, then the zap modal (`cmdZap` →
+      // showZapModal), mirroring the context-menu zap path.
+      openZap: (pubkey, nym) async {
+        final lnAddr =
+            ref.read(usersProvider)[pubkey]?.profile?.lightningAddress;
+        if (lnAddr == null || lnAddr.isEmpty) {
+          _onSystemMessage(
+              '@${stripPubkeySuffix(nym)} cannot receive zaps (no lightning address set)');
+          return;
+        }
+        if (!mounted) return;
+        await ZapModal.show(
+          context,
+          recipientPubkey: pubkey,
+          recipientNym: nym,
+          lightningAddress: lnAddr,
+        );
+      },
+      // `/group @a @b [name]` → create the group (`cmdGroup` → createGroup).
+      createGroup: (members, name) {
+        if (members.isEmpty) {
+          _onSystemMessage('Usage: /group @nym1 @nym2 [group name]');
+          return;
+        }
+        unawaited(controller.createGroup(name, members));
+      },
+      // `/addmember @nym` (and `/invite @nym` in a group) → add to this group.
+      addMember: _addMemberToCurrentGroup,
+      invite: _addMemberToCurrentGroup,
+      // `/groupinfo` → list owner / mods / member count (`cmdGroupInfo`).
+      groupInfo: _showGroupInfo,
+      // Group moderation (groups.js `cmd*`): the dispatcher resolves the target,
+      // we act on the current group.
+      kick: (pubkey) =>
+          _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
+      ban: (pubkey) =>
+          _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
+      addMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
+      removeMod: (pubkey) =>
+          _withCurrentGroup((gid) => controller.revokeModerator(gid, pubkey)),
+      transferOwner: (pubkey) =>
+          _withCurrentGroup((gid) => controller.transferOwner(gid, pubkey)),
+    );
+  }
+
+  /// Runs [action] against the current group id when the active view is a group.
+  void _withCurrentGroup(Future<void> Function(String groupId) action) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind == ViewKind.group) unawaited(action(view.id));
+  }
+
+  /// Resolves [arg] and adds them to the current group (`/addmember`/`/invite`).
+  void _addMemberToCurrentGroup(String arg) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) {
+      _onSystemMessage('You must be in a group to add members.');
+      return;
+    }
+    final target = resolveTarget(arg, ref.read(usersProvider));
+    if (target == null) {
+      _onSystemMessage('User ${arg.trim()} not found');
+      return;
+    }
+    unawaited(
+        ref.read(nostrControllerProvider).addGroupMembers(view.id, [target.pubkey]));
+  }
+
+  /// Emits a `/groupinfo` summary (owner, mods, member count) as a system line.
+  void _showGroupInfo() {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final group = ref.read(appStateProvider.notifier).groupById(view.id);
+    if (group == null) return;
+    final users = ref.read(usersProvider);
+    String nymOf(String pk) {
+      final u = users[pk];
+      return u != null
+          ? stripPubkeySuffix(u.nym)
+          : 'nym#${pk.substring(pk.length - 4)}';
+    }
+
+    final owner =
+        group.createdBy != null ? nymOf(group.createdBy!) : 'unknown';
+    final lines = <String>[
+      'Group: ${group.name.isEmpty ? '(unnamed)' : group.name}',
+      'Owner: $owner',
+      if (group.mods.isNotEmpty) 'Mods: ${group.mods.map(nymOf).join(', ')}',
+      'Members: ${group.members.length}',
+    ];
+    _onSystemMessage(lines.join('\n'));
   }
 
   void _onFocusChanged() {
