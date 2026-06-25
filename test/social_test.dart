@@ -182,21 +182,78 @@ void main() {
       );
     });
 
-    test('own messages are not keyword-filtered', () async {
+    test('an own message that hits a blocked keyword is hidden locally', () async {
+      // The PWA hides the user's OWN keyword-matching message from the local
+      // view (it was still sent) and posts a "hidden locally" notice
+      // (messages.js:638-642). [sendLocal] inserts the echo + the notice; the
+      // body is then filtered out by [isMessageFiltered].
       final c = await _container();
       addTearDown(c.dispose);
       final controller = c.read(nostrControllerProvider);
-      _seedChannelMessage(c,
-          id: 'ownSpam',
-          pubkey: _self,
-          author: 'you#1a2b',
-          content: 'my own spam',
-          isOwn: true);
       controller.addBlockedKeyword('spam');
+      c.read(appStateProvider.notifier).sendLocal('my own spam message');
+
+      final msgs = c.read(messagesForCurrentViewProvider);
+      // The flagged own message body is hidden...
       expect(
-        c.read(messagesForCurrentViewProvider).map((m) => m.id),
-        contains('ownSpam'),
+        msgs.any((m) => m.content == 'my own spam message'),
+        isFalse,
       );
+      // ...and a system notice explains it was hidden locally but still sent.
+      expect(
+        msgs.any((m) =>
+            m.kind == MessageKind.system &&
+            m.content.contains('hidden locally') &&
+            m.content.contains('It was still sent')),
+        isTrue,
+      );
+    });
+
+    test('an own message flagged as spam stays visible with a report action',
+        () async {
+      // Own heuristic-spam is NOT hidden from the sender — the PWA still shows it
+      // (with a self-only notice + "Report false positive" button,
+      // messages.js:643-647). A single random alphanumeric token trips the
+      // heuristic (cross-checked against the reference JS isSpamMessage).
+      final c = await _container();
+      addTearDown(c.dispose);
+      c.read(appStateProvider.notifier).sendLocal('Xq7zkwjpQmbvxz');
+
+      final msgs = c.read(messagesForCurrentViewProvider);
+      // The own spam message is still shown to the sender.
+      expect(msgs.any((m) => m.content == 'Xq7zkwjpQmbvxz'), isTrue);
+      // A system notice carries the "Report false positive" action.
+      final notice = msgs.firstWhere(
+        (m) => m.kind == MessageKind.system && m.systemAction != null,
+        orElse: () => Message(
+            id: '_none', pubkey: '', author: '', content: '', createdAt: 0),
+      );
+      expect(notice.id, isNot('_none'));
+      expect(notice.systemAction!.kind,
+          SystemActionKind.reportSpamFalsePositive);
+      expect(notice.systemAction!.label, 'Report false positive');
+      expect(notice.systemAction!.payload, 'Xq7zkwjpQmbvxz');
+      expect(notice.content, contains('flagged by the spam filter'));
+    });
+
+    test('an incoming non-own spam message is hidden from the view', () async {
+      // The `spamHit` term of the PWA non-own hide branch (messages.js:648):
+      // a stranger's gibberish message is filtered out of the list.
+      final c = await _container();
+      addTearDown(c.dispose);
+      _seedChannelMessage(c,
+          id: 'cleanGm',
+          pubkey: _other,
+          author: 'satoshi#beef',
+          content: 'gm everyone');
+      _seedChannelMessage(c,
+          id: 'spamMsg',
+          pubkey: _other,
+          author: 'satoshi#beef',
+          content: 'Xq7zkwjpQmbvxz');
+      final ids = c.read(messagesForCurrentViewProvider).map((m) => m.id);
+      expect(ids, contains('cleanGm'));
+      expect(ids, isNot(contains('spamMsg')));
     });
   });
 

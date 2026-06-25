@@ -98,6 +98,12 @@ class StorageKeys {
   static const friends = 'nym_friends';
   static const blockedKeywords = 'nym_blocked_keywords';
 
+  // Spam filter (heuristic content filter — PWA `spamFilterEnabled` /
+  // `spamFilterAggressive`, both default true; device-local, no UI in the PWA's
+  // settings modal). Distinct from the web-of-trust spam GATE.
+  static const spamFilterEnabled = 'nym_spam_filter_enabled';
+  static const spamFilterAggressive = 'nym_spam_filter_aggressive';
+
   // PMs / groups
   static const closedPms = 'nym_closed_pms';
   static const closedPmTimes = 'nym_closed_pm_times';

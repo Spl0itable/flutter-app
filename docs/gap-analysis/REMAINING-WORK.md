@@ -46,27 +46,35 @@ with `flutter analyze` clean + the full **675-test** suite green.
   composer); remove-column confirm + "don't ask again"; add-column search; sidebar
   nyms "view more" steps by 500.
 
-## Genuinely remaining (hard / niche — need careful design, intentionally not rushed)
+## Previously-deferred items — now ALL implemented
 
-- **Hardcore keypair mode** (`keypairMode == 'hardcore'`): the PWA rotates the
-  *durable* ephemeral identity + nym after EVERY send (messages.js:2399), only in
-  ephemeral-login mode. The fresh-per-message keypair primitive exists (the ANON
-  path), but rotating the live identity mid-session + refreshing presence/sidebar/
-  the signer is correctness-sensitive identity work; it currently behaves like
-  `random` (per-session). Needs an IdentityService rotate + a post-send hook.
-- **Private (PM/group) zap announce** (zaps.js `_publishOwnPrivateZapEvent`): peers
-  don't see PM/group zaps — needs a gift-wrapped own-message zap publish.
-- **Quick-zap LN resolve** (zaps.js `handleQuickZap`): the badge quick-zap reads
-  only the cached lightning address; if uncached it wrongly says "cannot receive
-  zaps". Needs an awaitable profile/LN-address resolve (the relay model has no
-  request/response fetch today).
-- **Unverified-zap tooltip suffix** (`(N unverified)`): needs `MessageZaps` to
-  track unverified sats + the receipt parser to mark verified vs not.
-- **Blockquote tap-to-jump** and **spam false-positive actionable row**: status
-  tracked in the latest chat round — deferred if the scroll-to-message anchor
-  infra / local own-message spam flag don't exist yet (do not half-build).
-- A message that is *purely* one long blockquote isn't height-truncated (the
-  read-more path keys off the reply body); rare edge.
+The hard/niche items that an earlier pass deferred have since been built in full
+(each verified: analyze clean + the suite green; the suite grew to 706 tests):
+
+- **Hardcore keypair mode**: `IdentityService.rotateEphemeral` + a post-send hook
+  rotate the ephemeral identity + nym after every channel send (ephemeral only).
+  `NostrService.rotateIdentity` swaps the key IN PLACE — the relay connections +
+  subscriptions persist, exactly like the PWA's `generateKeypair` (no per-message
+  reconnect).
+- **Private + public zap announce**: `announceMessageZap` gift-wraps a kind-9735
+  rumor to PM/group members and publishes a real signed kind-9735 for channels.
+  Flutter's missing **public-receipt subsystem** was built too: a `#p:[self]`
+  kind-9735 subscription + `_onPublicZapReceipt`, with verified = receipt pubkey
+  == the recipient's LNURL provider pubkey, and own-published-id + bolt11 dedup.
+- **Quick-zap LN resolve**: `resolveLightningAddressForZap` fetches the author's
+  kind-0 when the address isn't cached (no more spurious "cannot receive zaps").
+- **Unverified-zap tooltip**: `MessageZaps.unverified` + a `verified` flag on
+  `recordMessageZap`; the badge appends `(N unverified)`.
+- **Blockquote tap-to-jump**: built scroll-to-message infra
+  (`scrollable_positioned_list` + a `flashedMessageProvider`); a top-level quote
+  resolves its source by content and scrolls + flashes it.
+- **Spam false-positive row**: ported the full `isSpamMessage` heuristic
+  (`spam_filter.dart`, 29 tests) + incoming-hide + the own-message notice with a
+  "Report false positive" button that opens the About contact form.
+- The lone-long-blockquote read-more edge is also handled.
+
+**Nothing is deferred.** The only items not ported are the platform-limited ones
+below.
 
 ## Platform-limited (correct to stub — not gaps)
 WebTorrent large-file seeding (native fallback to direct-WebRTC), WebAuthn-PRF

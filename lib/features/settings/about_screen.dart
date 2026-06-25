@@ -25,13 +25,27 @@ const String kAboutVersion = 'v3.72.517';
 /// links), description, external links, divider, and the "Contact the
 /// developer" form.
 class AboutScreen extends ConsumerStatefulWidget {
-  const AboutScreen({super.key});
+  const AboutScreen({super.key, this.initialTopic, this.initialMessage});
 
-  static Future<void> open(BuildContext context) {
+  /// Pre-selected contact-form topic (must be one of the [FormSelect] options,
+  /// e.g. `'Spam false positive'`). Null keeps the default 'General feedback'.
+  final String? initialTopic;
+
+  /// Pre-filled contact-form message body. Null leaves it empty.
+  final String? initialMessage;
+
+  static Future<void> open(
+    BuildContext context, {
+    String? initialTopic,
+    String? initialMessage,
+  }) {
     return showDialog<void>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.7),
-      builder: (_) => const AboutScreen(),
+      builder: (_) => AboutScreen(
+        initialTopic: initialTopic,
+        initialMessage: initialMessage,
+      ),
     );
   }
 
@@ -49,6 +63,17 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   String? _status;
   bool _statusOk = false;
   bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-fill from `reportSpamFalsePositive(content)` (app.js:4399): topic
+    // 'Spam false positive' + the flagged message in a code block.
+    final topic = widget.initialTopic;
+    if (topic != null && topic.isNotEmpty) _topic = topic;
+    final msg = widget.initialMessage;
+    if (msg != null && msg.isNotEmpty) _messageController.text = msg;
+  }
 
   @override
   void dispose() {
