@@ -302,8 +302,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// author nym keeps the normal self/other color.
   TextStyle _authorStyle(NymColors c, {required bool self, required double size}) {
     final genesis = hasGenesisFlair(_cosmetics);
+    // `.message-author.cosmetic-redacted { color:#fff !important; opacity:0.8 }`
+    // (styles-features.css:1419-1422) — the redacted privacy cosmetic dims the
+    // author nym to white@0.8 as well as blanking the body.
+    final color = _cosmetics.isRedacted
+        ? Colors.white.withValues(alpha: 0.8)
+        : (self ? c.primary : c.secondary);
     return TextStyle(
-      color: self ? c.primary : c.secondary,
+      color: color,
       fontSize: size,
       fontWeight: genesis ? FontWeight.w700 : FontWeight.w600,
       // `.message-author { letter-spacing: 0.2px }` (styles-chat.css:697).
@@ -698,6 +704,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       decoration: BoxDecoration(
         color: bg,
         borderRadius: bg != null ? NymRadius.rsm : null,
+        // IRC-layout auras add an inset 1px ring + an outer glow on the whole
+        // row (`body:not(.chat-bubbles) .message.cosmetic-aura-* { box-shadow:
+        // inset 0 0 0 1px <ring>, 0 0 Npx <glow> }`, styles-features.css:1099+).
+        // The bubble path routes these through CosmeticOverlayPainter/_decorate
+        // Bubble; here we approximate the inset ring with a 1px border.
+        border: strongestAura?.insetColor != null
+            ? Border.all(color: strongestAura!.insetColor!, width: 1)
+            : null,
+        boxShadow:
+            (strongestAura?.glowColor != null && strongestAura!.glowBlur > 0)
+                ? [
+                    BoxShadow(
+                        color: strongestAura.glowColor!,
+                        blurRadius: strongestAura.glowBlur),
+                  ]
+                : null,
       ),
       clipBehavior: bg != null ? Clip.antiAlias : Clip.none,
       child: barColor != null
