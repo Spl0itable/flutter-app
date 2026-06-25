@@ -356,16 +356,23 @@ class AppState {
   }
 
   /// True when [m] should be hidden from message lists: blocked author, a
-  /// keyword match on its content / author (own messages are never filtered by
-  /// keyword — messages.js `if (!msg.isOwn && this.hasBlockedKeyword(...))`), a
-  /// heuristic-spam hit on a NON-own message ([SpamFilter.isSpamMessage]), or
-  /// spam-gated by the web-of-trust ([isSpamGated]). The PWA hides a non-own
-  /// message when `this.blockedUsers.has(pubkey) || keywordHit || spamHit`
-  /// (messages.js:648) and folds the `_spamGated` flag into every
-  /// visibility/unread filter (messages.js:2942, persistence.js:443).
+  /// keyword match on its content / author, a heuristic-spam hit on a NON-own
+  /// message ([SpamFilter.isSpamMessage]), or spam-gated by the web-of-trust
+  /// ([isSpamGated]).
+  ///
+  /// The PWA's `displayMessage` hides a message when blocked-user/keyword on
+  /// EITHER side (the own-message branch `return`s on keyword/block too,
+  /// messages.js:638-642) and additionally hides a NON-own message on a spam
+  /// hit (messages.js:648); it folds the `_spamGated` flag into every
+  /// visibility/unread filter (messages.js:2942, persistence.js:443). Own
+  /// heuristic-spam is deliberately NOT filtered here — the PWA still shows the
+  /// sender their own flagged message (with a self-only notice, see [sendLocal]).
   bool isMessageFiltered(Message m) {
     if (blockedUsers.contains(m.pubkey)) return true;
-    if (!m.isOwn && hasBlockedKeyword(m.content, m.author)) return true;
+    // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
+    // tripped a blocked keyword (hidden locally though still sent — the PWA's
+    // own-message `return`, messages.js:640-641).
+    if (hasBlockedKeyword(m.content, m.author)) return true;
     // Heuristic content spam — incoming-only (own-message spam is surfaced as a
     // self-only system notice instead, see [sendLocal]). Mirrors the `spamHit`
     // term of the PWA's non-own hide branch (messages.js:636,648).
@@ -2299,22 +2306,37 @@ class AppStateNotifier extends StateNotifier<AppState> {
     m.optimistic = true;
     if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
 
-    // Own-message heuristic-spam notice (messages.js:643-647): the message is
-    // NOT hidden (it still renders below), but a self-only system line explains
-    // it was filtered for everyone else, with a "Report false positive" action.
-    if (fileOffer == null &&
-        SpamFilter.isSpamMessage(trimmed,
-            enabled: appSpamFilterEnabled,
-            aggressive: appSpamFilterAggressive)) {
-      addSystemMessageWithAction(
-        'Your message was flagged by the spam filter and not shown to anyone '
-        'but yourself.',
-        SystemAction(
-          kind: SystemActionKind.reportSpamFalsePositive,
-          label: 'Report false positive',
-          payload: trimmed,
-        ),
-      );
+    // Own-message local-hide notices (messages.js:637-650). The message is still
+    // sent to relays regardless; these only govern the LOCAL view. A file-offer
+    // echo carries no user-typed body, so it is exempt. The message stays in the
+    // data model either way (render-time hiding via [isMessageFiltered], the
+    // native analogue of the PWA's `displayMessage` early-return).
+    if (fileOffer == null) {
+      final keywordHit = state.hasBlockedKeyword(trimmed, author);
+      if (keywordHit || state.blockedUsers.contains(pubkey)) {
+        // Blocked keyword / block rule → the body is hidden locally (filtered by
+        // [isMessageFiltered]); a system line explains it was still sent.
+        final reason = keywordHit
+            ? 'matched one of your blocked keywords'
+            : 'matched a block rule';
+        addSystemMessage(
+            'Your message $reason and was hidden locally. It was still sent.');
+      } else if (SpamFilter.isSpamMessage(trimmed,
+          enabled: appSpamFilterEnabled,
+          aggressive: appSpamFilterAggressive)) {
+        // Heuristic spam → the message is NOT hidden from us (own spam is not
+        // filtered), but a self-only line explains it was filtered for everyone
+        // else, with a "Report false positive" action (messages.js:643-647).
+        addSystemMessageWithAction(
+          'Your message was flagged by the spam filter and not shown to anyone '
+          'but yourself.',
+          SystemAction(
+            kind: SystemActionKind.reportSpamFalsePositive,
+            label: 'Report false positive',
+            payload: trimmed,
+          ),
+        );
+      }
     }
 
     // New list identity so listeners rebuild.
