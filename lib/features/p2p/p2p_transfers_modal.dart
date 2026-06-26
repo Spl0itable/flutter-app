@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
 import 'p2p_models.dart';
 import 'p2p_service.dart';
 
@@ -12,16 +14,54 @@ import 'p2p_service.dart';
 /// Rendered as a centered `.modal` (showDialog), matching the PWA. Shared modal
 /// chrome applies: 22px UPPERCASE primary header + bottom rule, 32px circular
 /// glass close chip, translucent `.icon-btn` Close action.
-class P2PTransfersModal extends StatelessWidget {
+class P2PTransfersModal extends ConsumerWidget {
   const P2PTransfersModal({super.key, required this.service});
 
   final P2PService service;
 
+  /// The geohash of the channel the user is *currently viewing*, or null when
+  /// the active view is a named channel / PM / group. The PWA's `stopSeeding`
+  /// reads `this.currentGeohash` at stop-time and, when set, appends the channel
+  /// wire tag so other channel viewers learn the file is gone (p2p.js:828). We
+  /// resolve it the same way the share / typing paths do: a channel is a geohash
+  /// when its key matches a `channels` entry flagged `isGeohash`
+  /// (nostr_controller.dart:5552-5554).
+  static String? _currentGeohash(WidgetRef ref) {
+    final state = ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return null;
+    final isGeo = state.channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    return isGeo ? view.id : null;
+  }
+
+  /// The NAMED (non-geohash) channel key of the current view, or null when the
+  /// active view is a geohash channel / PM / group. Companion to
+  /// [_currentGeohash]: the PWA's `stopSeeding` emits the channel wire tag for
+  /// whatever channel is open, which for a named channel is a `d` tag
+  /// (`channelWire`, channels.js:454; `currentGeohash` holds the channel name).
+  /// `stopSeeding` lets [_currentGeohash] win, so this only fires for a genuinely
+  /// named channel. F06-B3.
+  static String? _currentNamedChannel(WidgetRef ref) {
+    final state = ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return null;
+    final isGeo = state.channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    return isGeo ? null : view.id;
+  }
+
   /// Opens the transfers modal as a centered dialog (PWA `.modal`).
   static Future<void> open(BuildContext context, P2PService service) {
+    // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1635).
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: const Color(0xB3000000), // .modal overlay rgba(0,0,0,0.7)
+      barrierColor: isLight
+          ? const Color(0x73000000) // black @ 0.45
+          : const Color(0xBF000000), // black @ 0.75
       builder: (_) => P2PTransfersModal(service: service),
     );
   }
@@ -31,7 +71,7 @@ class P2PTransfersModal extends StatelessWidget {
       open(context, service);
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     return Center(
       child: Material(
@@ -51,17 +91,30 @@ class P2PTransfersModal extends StatelessWidget {
                 color: c.bgSecondary,
                 borderRadius: NymRadius.rxl,
                 border: Border.all(color: c.glassBorder),
-                boxShadow: [
-                  const BoxShadow(
-                    color: Color(0x80000000),
-                    blurRadius: 32,
-                    offset: Offset(0, 8),
-                  ),
-                  BoxShadow(color: c.primary.withValues(alpha: 0.1), blurRadius: 20),
-                  BoxShadow(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      spreadRadius: 1),
-                ],
+                // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+                // rgba(0,0,0,0.12) }` — one soft shadow, no glow, no white ring
+                // in light (styles-themes-responsive.css:1050-1052).
+                boxShadow: c.isLight
+                    ? const [
+                        BoxShadow(
+                          color: Color(0x1F000000), // black @ 0.12
+                          blurRadius: 40,
+                          offset: Offset(0, 8),
+                        ),
+                      ]
+                    : [
+                        const BoxShadow(
+                          color: Color(0x80000000),
+                          blurRadius: 32,
+                          offset: Offset(0, 8),
+                        ),
+                        BoxShadow(
+                            color: c.primary.withValues(alpha: 0.1),
+                            blurRadius: 20),
+                        BoxShadow(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            spreadRadius: 1),
+                      ],
               ),
               child: Stack(
                 children: [
@@ -113,8 +166,12 @@ class P2PTransfersModal extends StatelessWidget {
                                       for (final entry in seeding.entries)
                                         _SeedingRow(
                                           offer: entry.value,
-                                          onStop: () =>
-                                              service.stopSeeding(entry.key),
+                                          onStop: () => service.stopSeeding(
+                                            entry.key,
+                                            geohash: _currentGeohash(ref),
+                                            channelName:
+                                                _currentNamedChannel(ref),
+                                          ),
                                         ),
                                       for (final t in transfers)
                                         _TransferRow(
@@ -370,9 +427,15 @@ class _IconBtnState extends State<_IconBtn> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
           decoration: BoxDecoration(
+            // `body.light-mode .icon-btn { background: rgba(0,0,0,0.03);
+            // color: var(--primary) }`; hover `rgba(0,0,0,0.06)`
+            // (styles-themes-responsive.css:595-605). `subtleFill` is exactly
+            // black@.03 light / white@.05 dark (nym_colors.dart:112).
             color: _hover
-                ? c.primary.withValues(alpha: 0.12)
-                : Colors.white.withValues(alpha: 0.05),
+                ? (c.isLight
+                    ? const Color(0x0F000000) // black @ 0.06
+                    : c.primary.withValues(alpha: 0.12))
+                : c.subtleFill,
             borderRadius: NymRadius.rxs,
             border: Border.all(
               color: _hover ? c.primary.withValues(alpha: 0.3) : c.glassBorder,
@@ -381,7 +444,7 @@ class _IconBtnState extends State<_IconBtn> {
           child: Text(
             widget.label.toUpperCase(),
             style: TextStyle(
-              color: _hover ? c.primary : c.text,
+              color: _hover || c.isLight ? c.primary : c.text,
               fontSize: 12,
               fontWeight: FontWeight.w500,
               letterSpacing: 0.8,

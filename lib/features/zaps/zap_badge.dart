@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,7 +10,6 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/chat/message_row.dart' show abbreviateNumber;
 import '../../widgets/context_menu/interaction_hooks.dart';
-import '../reactions/reaction_burst.dart';
 import 'zap_modal.dart';
 
 /// The lightning bolt fill color (`--lightning`, `#f7931a`).
@@ -32,8 +33,14 @@ class ZapBadge extends ConsumerStatefulWidget {
   ConsumerState<ZapBadge> createState() => _ZapBadgeState();
 }
 
-class _ZapBadgeState extends ConsumerState<ZapBadge> {
+class _ZapBadgeState extends ConsumerState<ZapBadge>
+    with SingleTickerProviderStateMixin {
   final GlobalKey _badgeKey = GlobalKey();
+
+  /// `.zap-badge-shock` (`@keyframes zapBadgeShock`, styles-features.css:464):
+  /// a 0.55s scale-up-and-settle pulse with a gold/cyan box-shadow flash,
+  /// applied to the badge each time the total ticks up (zaps.js:1697).
+  late final AnimationController _shock;
 
   /// Last observed total (sats). -1 = not yet observed; the first observation
   /// (existing zaps on load) is recorded WITHOUT a burst so only live increases
@@ -41,6 +48,21 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
   int _lastTotal = -1;
 
   Message get message => widget.message;
+
+  @override
+  void initState() {
+    super.initState();
+    _shock = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 550),
+    );
+  }
+
+  @override
+  void dispose() {
+    _shock.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -52,14 +74,16 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
 
     final total = zaps.totalSats;
     // Lightning burst when the total ticks up while mounted (zaps.js
-    // `_playZapBurst`, fired from `_recordMessageZap`). Anchored to the badge.
+    // `_playZapBurst`, fired from `_recordMessageZap`): the SVG bolt flash +
+    // radiating mini-bolts over the badge, plus the `.zap-badge-shock` pulse on
+    // the badge pill itself. Anchored to the badge.
     if (_lastTotal >= 0 && total > _lastTotal) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
+        _shock.forward(from: 0); // `.zap-badge-shock` (deferred off-build)
         final box = _badgeKey.currentContext?.findRenderObject() as RenderBox?;
         if (box == null || !box.hasSize) return;
-        ReactionBurst.play(
-            context, box.localToGlobal(box.size.center(Offset.zero)), '⚡');
+        ZapBurst.play(context, box.localToGlobal(box.size.center(Offset.zero)));
       });
     }
     _lastTotal = total;
@@ -80,36 +104,59 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
       children: [
         Tooltip(
           message: tooltip,
-          child: Container(
-            key: _badgeKey,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [Color(0x26F7931A), Color(0x14F7931A)], // .15 / .08
-              ),
-              border: Border.all(color: const Color(0x4DF7931A)), // .3
-              borderRadius: const BorderRadius.all(Radius.circular(20)),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CustomPaint(painter: _BoltPainter(_kLightning)),
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  abbreviateNumber(total),
-                  style: const TextStyle(
-                    color: _kLightning,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+          // `.zap-badge-shock` — scale-pulse + glow flash while _shock runs.
+          // The scale/translate/glow all re-evaluate each tick inside the
+          // builder; the constant inner pill is passed as the cached `child`.
+          child: AnimatedBuilder(
+            animation: _shock,
+            builder: (context, child) {
+              final shock = _ZapBadgeShock.at(_shock.value, _shock.isAnimating);
+              return Transform.translate(
+                offset: Offset(shock.dx, 0),
+                child: Transform.scale(
+                  scale: shock.scale,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      borderRadius:
+                          const BorderRadius.all(Radius.circular(20)),
+                      boxShadow: _shockGlow(),
+                    ),
+                    child: child,
                   ),
                 ),
-              ],
+              );
+            },
+            child: Container(
+              key: _badgeKey,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0x26F7931A), Color(0x14F7931A)], // .15 / .08
+                ),
+                border: Border.all(color: const Color(0x4DF7931A)), // .3
+                borderRadius: const BorderRadius.all(Radius.circular(20)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CustomPaint(painter: _BoltPainter(_kLightning)),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    abbreviateNumber(total),
+                    style: const TextStyle(
+                      color: _kLightning,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -122,6 +169,30 @@ class _ZapBadgeState extends ConsumerState<ZapBadge> {
         ],
       ],
     );
+  }
+
+  /// The `.zap-badge-shock` box-shadow flash (`@keyframes zapBadgeShock`,
+  /// styles-features.css:467): no glow at rest, ramping to a gold+cyan flare
+  /// near 20% of the pulse, then a softer orange glow that fades out. Driven by
+  /// the same `_shock` controller as the scale.
+  List<BoxShadow> _shockGlow() {
+    if (!_shock.isAnimating) return const [];
+    final t = _shock.value;
+    // Envelope: 0 → 1 by t=0.2, then decays to 0 by t=1 (peak flare at 20%).
+    final env = t < 0.2 ? (t / 0.2) : (1 - (t - 0.2) / 0.8);
+    final e = env.clamp(0.0, 1.0);
+    return [
+      // Gold core (rgb 255,216,107 = #FFD86B) — peaks at .95, blur 10→18.
+      BoxShadow(
+        color: const Color(0xFFFFD86B).withValues(alpha: 0.5 + 0.45 * e),
+        blurRadius: 10 + 8 * e,
+      ),
+      // Cyan companion (rgb 159,232,255 = #9FE8FF) — only at the flare, to .7.
+      BoxShadow(
+        color: const Color(0xFF9FE8FF).withValues(alpha: 0.7 * e),
+        blurRadius: 26 * e,
+      ),
+    ];
   }
 
   /// Resolves the author's lightning address and opens the zap modal, mirroring
@@ -251,4 +322,258 @@ class _BoltPlusPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _BoltPlusPainter old) => old.color != color;
+}
+
+/// The instantaneous transform of the `.zap-badge-shock` pulse
+/// (`@keyframes zapBadgeShock`, styles-features.css:467): scale + a small
+/// horizontal wobble, keyed at 0/20/40/60/100% of the 0.55s window.
+class _ZapBadgeShock {
+  const _ZapBadgeShock(this.scale, this.dx);
+  final double scale;
+  final double dx;
+
+  static _ZapBadgeShock at(double t, bool animating) {
+    if (!animating) return const _ZapBadgeShock(1, 0);
+    // Keyframes: 0%(1,0) 20%(1.25,-1) 40%(1.12,2) 60%(1.18,-1) 100%(1,0).
+    if (t < 0.20) {
+      final f = t / 0.20;
+      return _ZapBadgeShock(_l(1, 1.25, f), _l(0, -1, f));
+    } else if (t < 0.40) {
+      final f = (t - 0.20) / 0.20;
+      return _ZapBadgeShock(_l(1.25, 1.12, f), _l(-1, 2, f));
+    } else if (t < 0.60) {
+      final f = (t - 0.40) / 0.20;
+      return _ZapBadgeShock(_l(1.12, 1.18, f), _l(2, -1, f));
+    } else {
+      final f = (t - 0.60) / 0.40;
+      return _ZapBadgeShock(_l(1.18, 1, f), _l(-1, 0, f));
+    }
+  }
+
+  static double _l(double a, double b, double t) =>
+      a + (b - a) * t.clamp(0.0, 1.0);
+}
+
+/// A one-shot zap "burst" overlay (`_playZapBurst`, zaps.js:1655): the PWA's
+/// `.zap-burst` SVG lightning-bolt flash (`@keyframes zapBurst`, 0.6s) plus 9
+/// `.zap-bolt` radiating mini-bolts (`@keyframes zapBolt`, 0.5s), drawn over the
+/// zap badge. Mirrors the `ReactionBurst` structure but with the electric bolt
+/// + radiating bolts instead of an emoji + dot sparks.
+///
+/// Inserted into the root [Overlay]; removes itself after ~800ms (the PWA's
+/// `setTimeout(…, 800)`).
+class ZapBurst {
+  ZapBurst._();
+
+  static const _durationMs = 800;
+  static const _boltCount = 9; // zaps.js:1675 `boltCount = 9`.
+
+  /// Spawns a zap burst centred at [globalCenter].
+  static void play(BuildContext context, Offset globalCenter) {
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+    late OverlayEntry entry;
+    entry = OverlayEntry(builder: (_) => _ZapBurstWidget(center: globalCenter));
+    overlay.insert(entry);
+    Future<void>.delayed(const Duration(milliseconds: _durationMs), () {
+      if (entry.mounted) entry.remove();
+    });
+  }
+}
+
+/// One radiating `.zap-bolt`: a direction (dx,dy), its rotation, and a 0..1
+/// start delay (the PWA's `animationDelay` up to 60ms).
+class _ZapBolt {
+  _ZapBolt(this.dx, this.dy, this.rot, this.delay);
+  final double dx;
+  final double dy;
+  final double rot; // radians
+  final double delay;
+}
+
+class _ZapBurstWidget extends StatefulWidget {
+  const _ZapBurstWidget({required this.center});
+  final Offset center;
+
+  @override
+  State<_ZapBurstWidget> createState() => _ZapBurstWidgetState();
+}
+
+class _ZapBurstWidgetState extends State<_ZapBurstWidget>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+  late final List<_ZapBolt> _bolts;
+
+  @override
+  void initState() {
+    super.initState();
+    final rng = math.Random();
+    // zaps.js:1676-1684: angle = i/N*2π + random±0.25; dist = 20+random*20;
+    // rotation = angle + 90°; animationDelay up to 60ms.
+    _bolts = List.generate(ZapBurst._boltCount, (i) {
+      final angle = (i / ZapBurst._boltCount) * math.pi * 2 +
+          (rng.nextDouble() - 0.5) * 0.5;
+      final dist = 20 + rng.nextDouble() * 20;
+      return _ZapBolt(
+        math.cos(angle) * dist,
+        math.sin(angle) * dist,
+        angle + math.pi / 2,
+        (rng.nextDouble() * 60) / ZapBurst._durationMs,
+      );
+    });
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: ZapBurst._durationMs),
+    )..forward();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // The burst is inserted into the root Overlay, which is NOT under a
+    // Material (app.dart). Painting is all CustomPaint/DecoratedBox (no Text),
+    // so there is no yellow-underline risk, but IgnorePointer keeps it
+    // non-interactive like `pointer-events: none`.
+    return IgnorePointer(
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (context, _) {
+          return Stack(
+            children: [
+              ..._buildBolts(),
+              _buildFlash(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// The `.zap-burst` 40×40 SVG bolt (`@keyframes zapBurst`, 0.6s of the 0.8s
+  /// window): scale 0→1.6→1.05→1.35→0.5, rotate -12°→6°→-7°→5°→0°, drifting up
+  /// ~16px (translate -50%→-90% of its 40px box), opacity 0→1→…→0.
+  Widget _buildFlash() {
+    final t = (_c.value * 800 / 600).clamp(0.0, 1.0);
+    double scale;
+    double rotDeg;
+    double opacity;
+    if (t < 0.15) {
+      final f = t / 0.15;
+      scale = _l(0, 1.6, f);
+      rotDeg = _l(-12, 6, f);
+      opacity = _l(0, 1, f);
+    } else if (t < 0.30) {
+      final f = (t - 0.15) / 0.15;
+      scale = _l(1.6, 1.05, f);
+      rotDeg = _l(6, -7, f);
+      opacity = 1;
+    } else if (t < 0.45) {
+      final f = (t - 0.30) / 0.15;
+      scale = _l(1.05, 1.35, f);
+      rotDeg = _l(-7, 5, f);
+      opacity = 1;
+    } else {
+      final f = (t - 0.45) / 0.55;
+      scale = _l(1.35, 0.5, f);
+      rotDeg = _l(5, 0, f);
+      opacity = _l(1, 0, f);
+    }
+    // -50%→-90% of the 40px box ⇒ up to -16px upward drift over t.
+    final yShift = _l(0, -16, t);
+    const box = 40.0;
+    return Positioned(
+      left: widget.center.dx - box / 2,
+      top: widget.center.dy - box / 2 + yShift,
+      child: Opacity(
+        opacity: opacity.clamp(0.0, 1.0),
+        child: Transform.rotate(
+          angle: rotDeg * math.pi / 180,
+          child: Transform.scale(
+            scale: scale,
+            // drop-shadow(0 0 10px rgba(247,147,26,.9)) +
+            // drop-shadow(0 0 18px rgba(159,232,255,.55)) — the bolt glow.
+            child: Container(
+              width: box,
+              height: box,
+              decoration: const BoxDecoration(
+                boxShadow: [
+                  BoxShadow(color: Color(0xE6F7931A), blurRadius: 10),
+                  BoxShadow(color: Color(0x8C9FE8FF), blurRadius: 18),
+                ],
+              ),
+              // `.zap-burst svg { fill: #ffd86b }` (24×24 bolt path, reused).
+              child: const CustomPaint(painter: _BoltPainter(Color(0xFFFFD86B))),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The 9 `.zap-bolt` mini-bolts (`@keyframes zapBolt`, 0.5s of the window):
+  /// scaleY 0→1→0.2, translating from the centre out to (dx,dy), each a 2×14px
+  /// rounded gradient bar (white→gold→orange) with a gold/cyan glow.
+  List<Widget> _buildBolts() {
+    return _bolts.map((b) {
+      final raw = ((_c.value - b.delay) * 800 / 500).clamp(0.0, 1.0);
+      // 0%→40%: travel half-way + grow to full height; 40%→100%: rest of the
+      // travel while shrinking to 0.2 and fading out.
+      final double prog; // 0..1 fraction of the (dx,dy) travel
+      final double scaleY;
+      final double opacity;
+      if (raw < 0.40) {
+        final f = raw / 0.40;
+        prog = _l(0, 0.5, f);
+        scaleY = _l(0, 1, f);
+        opacity = 1;
+      } else {
+        final f = (raw - 0.40) / 0.60;
+        prog = _l(0.5, 1, f);
+        scaleY = _l(1, 0.2, f);
+        opacity = _l(1, 0, f);
+      }
+      final x = widget.center.dx + b.dx * prog;
+      final y = widget.center.dy + b.dy * prog;
+      return Positioned(
+        left: x - 1, // 2px wide → centre by 1px
+        top: y - 7, // 14px tall, transform-origin top-centre
+        child: Opacity(
+          opacity: opacity.clamp(0.0, 1.0),
+          child: Transform.rotate(
+            angle: b.rot,
+            alignment: Alignment.topCenter,
+            child: Transform.scale(
+              scaleY: scaleY,
+              alignment: Alignment.topCenter,
+              child: Container(
+                width: 2,
+                height: 14,
+                decoration: const BoxDecoration(
+                  borderRadius: BorderRadius.all(Radius.circular(1)),
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Color(0xFFFFFFFF), Color(0xFFFFD86B), Color(0xFFF7931A)],
+                    stops: [0.0, 0.45, 1.0],
+                  ),
+                  boxShadow: [
+                    BoxShadow(color: Color(0xE6F7931A), blurRadius: 6),
+                    BoxShadow(color: Color(0x999FE8FF), blurRadius: 10),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }).toList();
+  }
+
+  static double _l(double a, double b, double t) =>
+      a + (b - a) * t.clamp(0.0, 1.0);
 }

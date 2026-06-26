@@ -85,6 +85,55 @@ class IdentityService {
     return bootEphemeral(unlockedSecrets: unlockedSecrets);
   }
 
+  /// Imports a pasted [nsec] as the durable login identity and PERSISTS it so a
+  /// later [boot] restores the same account. Mirrors the PWA's
+  /// `nostrLoginWithNsec` (app.js:5036-5074) + the identity-switch half of
+  /// `applyNostrLogin` (app.js:5487-5504):
+  ///   * validate via [bech32.decodeNsec] (32 bytes) — throws [FormatException]
+  ///     on an invalid key (the caller shows "Invalid nsec key …"),
+  ///   * derive the pubkey ([getPublicKeyHex]),
+  ///   * persist `nostr_login_method='nsec'` + `nostr_login_pubkey` (KV),
+  ///     `nostr_login_npub` (KV), and the nsec in secure storage
+  ///     (`nym_nostr_login_nsec`, the PWA's `nymSecretSet`),
+  ///   * clear the ephemeral `nym_avatar_url`/`nym_banner_url` so they don't
+  ///     overwrite the persistent identity's profile (app.js:5494-5495).
+  ///
+  /// Returns the durable [Identity] (`loginMethod:'nsec'`) with its nym resolved
+  /// exactly like [boot] (customNick → autoEphemeralNick → generated).
+  Future<Identity> loginWithNsec(String nsec) async {
+    final input = nsec.trim();
+    final sk = bech32.decodeNsec(input); // throws on invalid (len-checked below)
+    if (sk.length != 32) {
+      throw const FormatException('nsec must decode to 32 bytes');
+    }
+    final pubkey = getPublicKeyHex(sk);
+
+    // Persist the durable login (KV) + the nsec (secure store), mirroring the
+    // PWA's localStorage + nymSecretSet writes.
+    await _kv.setString(StorageKeys.nostrLoginMethod, 'nsec');
+    await _kv.setString(StorageKeys.nostrLoginPubkey, pubkey);
+    await _secure.set(SecretKeys.nostrLoginNsec, input);
+    try {
+      await _kv.setString(StorageKeys.nostrLoginNpub, bech32.encodeNpub(pubkey));
+    } catch (_) {}
+
+    // Drop ephemeral profile data so it doesn't clobber the persistent identity
+    // (app.js:5494-5495 `removeItem nym_avatar_url / nym_banner_url`).
+    await _kv.remove(StorageKeys.avatarUrl);
+    await _kv.remove(StorageKeys.bannerUrl);
+
+    final nym = _kv.getString(StorageKeys.customNick) ??
+        _kv.getString(StorageKeys.autoEphemeralNick) ??
+        _nymGen.generate(pubkey,
+            style: _kv.getString(StorageKeys.nickStyle) ?? 'fancy');
+    return Identity(
+      pubkey: pubkey,
+      privkey: sk,
+      nym: nym,
+      loginMethod: 'nsec',
+    );
+  }
+
   /// Loads the persisted ephemeral identity or creates a new one.
   Future<Identity> bootEphemeral({Map<String, String>? unlockedSecrets}) async {
     final randomPerSession =

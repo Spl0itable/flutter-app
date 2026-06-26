@@ -39,26 +39,31 @@ class ShopSvgIcon extends StatelessWidget {
 
 /// A flair's `.flair-X` glow — blurred tinted copies of the glyph painted behind
 /// the crisp icon. The CSS expresses this as two SEPARATE properties:
-///   * `text-shadow` — the soft coloured halo. `body.light-mode .flair-X` sets
-///     `text-shadow: none`, so these copies are dropped in light mode.
+///   * `text-shadow` — declared on every `.flair-X`, BUT the flair glyph is an
+///     inline path-only `<svg>` (no `<text>`), and CSS `text-shadow` shadows
+///     text runs only, never replaced inline-SVG paths. So the declared halo is
+///     INERT in the browser: the PWA renders these copies for NO flair, in
+///     either mode. We keep the values recorded for fidelity/reference, but they
+///     are never painted.
 ///   * `filter: drop-shadow(...)` — only on the brighter star/flame/diamond/
-///     genesis. The light-mode overrides reset `color`/`text-shadow` but NOT
-///     `filter`, so this copy SURVIVES into light mode (per the cascade).
-/// Keeping the two lists distinct lets us reproduce that asymmetry exactly.
+///     genesis. `filter` DOES apply to a replaced inline SVG, so this is the
+///     only glow the PWA actually renders. The light-mode overrides reset
+///     `color`/`text-shadow` but NOT `filter`, so it survives into light mode.
+/// Keeping the two lists distinct documents that asymmetry exactly.
 class _FlairGlow {
   const _FlairGlow({this.textShadows = const [], this.dropShadows = const []});
 
-  /// `text-shadow` blurs (colour, blurRadius) — dark mode only.
+  /// `text-shadow` blurs (colour, blurRadius). Recorded for reference only —
+  /// inert on a path SVG, so never painted (see class doc).
   final List<(Color, double)> textShadows;
 
   /// `filter: drop-shadow` blurs (colour, blurRadius) — both modes.
   final List<(Color, double)> dropShadows;
 
-  /// The glow copies to paint for the given theme: in dark mode both the
-  /// `text-shadow` and `drop-shadow` copies; in light mode only the surviving
-  /// `drop-shadow` copies (`text-shadow: none`).
-  List<(Color, double)> shadowsFor({required bool isLight}) =>
-      isLight ? dropShadows : [...textShadows, ...dropShadows];
+  /// The glow copies to paint. Only the `filter: drop-shadow` copies render in
+  /// the PWA — `text-shadow` does not shadow a path SVG — so we paint the
+  /// `drop-shadow` set in BOTH modes and ignore the inert `text-shadow` halo.
+  List<(Color, double)> shadowsFor({required bool isLight}) => dropShadows;
 }
 
 /// The `.flair-badge` — a flair item's SVG tinted to its themed colour, sized
@@ -199,26 +204,34 @@ class FlairBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final svg = ShopCatalog.flairIcon(flairId, edition);
+    // Genesis stamps an edition number. The PWA injects it as an SVG `<text>`,
+    // but `flutter_svg`/`vector_graphics` silently drops `<text>` elements, so
+    // we render the plain icon (NO dead `<text>`) and overlay the number as a
+    // real Flutter `Text` below (F2).
+    final showGenesisNumber =
+        flairId == 'flair-genesis' && edition != null && edition! > 0;
+    final svg = showGenesisNumber
+        ? ShopCatalog.flairIcon(flairId)
+        : ShopCatalog.flairIcon(flairId, edition);
     if (svg.isEmpty) return const SizedBox.shrink();
     final isLight = context.nym.isLight;
-    // Light mode swaps to the darker `body.light-mode .flair-X` colour and drops
-    // the `text-shadow` halo (`text-shadow: none`); dark mode keeps the bright
-    // colour + full glow. The `filter: drop-shadow` on star/flame/diamond/
-    // genesis is NOT reset by the light-mode rules, so it survives into light
-    // mode — `_FlairGlow.shadowsFor` keeps exactly those copies.
+    // Light mode swaps to the darker `body.light-mode .flair-X` colour; the
+    // `.flair-X` `text-shadow` halo is inert on a path SVG (never painted in
+    // either mode), and the `filter: drop-shadow` on star/flame/diamond/genesis
+    // is NOT reset by the light-mode rules, so it survives into light mode —
+    // `_FlairGlow.shadowsFor` returns exactly those drop-shadow copies.
     final color =
         (isLight ? lightColors[flairId] : colors[flairId]) ?? context.nym.primary;
     final shadows = _glows[flairId]?.shadowsFor(isLight: isLight) ?? const [];
     final icon = ShopSvgIcon(svg: svg, size: size, color: color);
     return Padding(
       padding: const EdgeInsets.only(left: 5),
-      child: shadows.isEmpty
+      child: (shadows.isEmpty && !showGenesisNumber)
           ? icon
           : Stack(
               alignment: Alignment.center,
               children: [
-                // Blurred tinted glyph copies (`text-shadow`/`drop-shadow`).
+                // Blurred tinted glyph copies (`filter: drop-shadow`).
                 for (final (glowColor, blur) in shadows)
                   Positioned.fill(
                     child: IgnorePointer(
@@ -235,6 +248,29 @@ class FlairBadge extends StatelessWidget {
                     ),
                   ),
                 icon,
+                // Genesis edition number, mirroring the PWA's SVG `<text>` at
+                // `x=12 y=19.4 font-size=7.5` on the 24-unit viewBox: horizontally
+                // centred, sitting near the base of the pyramid. `font-size 7.5`
+                // over the 24.1-unit viewBox ≈ 0.31·size; the digit's visual
+                // centre falls at ~0.71 of the badge height (Alignment y≈0.42).
+                if (showGenesisNumber)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Align(
+                        alignment: const Alignment(0, 0.42),
+                        child: Text(
+                          '$edition',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: color,
+                            fontSize: size * 0.31,
+                            fontWeight: FontWeight.w700,
+                            height: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
             ),
     );

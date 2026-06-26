@@ -57,9 +57,15 @@ class ZapModal extends ConsumerStatefulWidget {
     String? messageId,
     String? originalKind,
   }) {
+    // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1635).
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: const Color(0xB3000000), // rgba(0,0,0,0.7)
+      barrierColor: isLight
+          ? const Color(0x73000000) // black @ 0.45
+          : const Color(0xBF000000), // black @ 0.75
       builder: (_) => ZapModal(
         recipientPubkey: recipientPubkey,
         recipientNym: recipientNym,
@@ -316,8 +322,17 @@ class _ZapModalState extends ConsumerState<ZapModal> {
           color: c.bgSecondary,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rxl,
-          boxShadow: const [
-            BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+          // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+          // rgba(0,0,0,0.12) }` — softer single shadow in light mode
+          // (styles-themes-responsive.css:1050-1052).
+          boxShadow: [
+            BoxShadow(
+              color: c.isLight
+                  ? const Color(0x1F000000) // black @ 0.12
+                  : const Color(0x80000000), // black @ 0.5
+              blurRadius: c.isLight ? 40 : 32,
+              offset: const Offset(0, 8),
+            ),
           ],
         ),
         // `showDialog` does not insert a Material, so the InkWell-based buttons
@@ -700,14 +715,18 @@ class _ZapModalState extends ConsumerState<ZapModal> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
+          // `body.light-mode .icon-btn { background: rgba(0,0,0,0.03);
+          // color: var(--primary) }` (styles-themes-responsive.css:595-599);
+          // dark base white@0.05 + `--text`. `subtleFill` is exactly
+          // black@.03 light / white@.05 dark (nym_colors.dart:112).
+          color: c.subtleFill,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rxs,
         ),
         child: Text(
           label.toUpperCase(),
           style: TextStyle(
-            color: c.text,
+            color: c.isLight ? c.primary : c.text,
             fontSize: 12,
             fontWeight: FontWeight.w500,
             letterSpacing: 0.8,

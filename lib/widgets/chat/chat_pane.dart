@@ -16,6 +16,7 @@ import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
 import '../../models/group.dart';
 import '../../models/user.dart';
+import '../../services/api/api_client.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -87,9 +88,19 @@ class ChatPane extends ConsumerWidget {
           // `#messagesContainer` (single view) / `#columnsStrip` (columns mode)
           // — the deck replaces only the messages list, not the header/composer.
           Expanded(
-            child: KeyedSubtree(
-              key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
-              child: useColumns ? const ColumnsDeck() : const MessagesList(),
+            // Tap-outside dismisses the soft keyboard (01-B3): a translucent
+            // GestureDetector over the messages region drops focus when a tap
+            // isn't consumed by an interactive child (message rows / buttons
+            // still win the arena). Swipe-down dismissal lives in `MessagesList`
+            // (`keyboardDismissBehavior: onDrag`). On the web/browser PWA this is
+            // native browser behaviour; Flutter needs it wired explicitly.
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: () => FocusScope.of(context).unfocus(),
+              child: KeyedSubtree(
+                key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
+                child: useColumns ? const ColumnsDeck() : const MessagesList(),
+              ),
             ),
           ),
           // `.input-container` — tutorial spotlight target. Stays mounted in
@@ -130,6 +141,18 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   final List<ChatView> _history = [];
   int _index = -1;
   bool _navigating = false;
+
+  // Per-geohash reverse-geocoded place-name cache feeding `.channel-location`
+  // (mirrors `_geohashPlaceCache`, channels.js:1058/1070). Keyed by lowercased
+  // geohash → resolved "city, country" (or "Unknown location"). A monotonic
+  // token (mirrors `_geocodeToken`, geohash_explorer.dart:382) guards against a
+  // stale response overwriting the cache after the active view has changed.
+  final ApiClient _api = ApiClient();
+  final Map<String, String> _placeCache = {};
+  // Geohashes with a resolve already in flight, so the build path doesn't fire
+  // a duplicate request every rebuild.
+  final Set<String> _placePending = {};
+  int _geocodeToken = 0;
 
   bool get _canBack => _index > 0;
   bool get _canForward => _index >= 0 && _index < _history.length - 1;
@@ -571,8 +594,19 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           // `loc-country` → "Not a geohash" for a named channel.
           return (text: 'Not a geohash', dist: '');
         }
-        // `getGeohashLocation` coordinate label (the PWA's pre-resolve fallback).
-        final place = geohashLocationLabel(gh);
+        // `.channel-location` text (channels.js:1005-1006,1029): the resolved
+        // reverse-geocoded place name when cached, "Loading location…" while a
+        // geocode is in flight, and the coordinate label (`getGeohashLocation`)
+        // only as the catch fallback. Kick off resolution for this geohash.
+        final ghKey = gh.toLowerCase();
+        final cached = _placeCache[ghKey];
+        final String place;
+        if (cached != null) {
+          place = cached;
+        } else {
+          _resolvePlaceName(ghKey);
+          place = 'Loading location…';
+        }
         // ` (N.Nkm)` proximity, only with a known location + sortByProximity on.
         var dist = '';
         final settings = ref.watch(settingsProvider);
@@ -599,6 +633,46 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         }
         return (text: '', dist: '');
     }
+  }
+
+  /// Reverse-geocodes a geohash → "city, country" and caches it under [ghKey]
+  /// (lowercased geohash), mirroring `_resolveGeohashPlaceName`
+  /// (channels.js:1058) + the explorer's `_fetchLocation`
+  /// (geohash_explorer.dart:393-413). De-duped via [_placePending] so each
+  /// geohash resolves once; a monotonic [_geocodeToken] (mirrors
+  /// geohash_explorer.dart:382) keyed on the resolve order guards the rebuild so
+  /// a stale response never forces a redundant setState after the view moved on.
+  Future<void> _resolvePlaceName(String ghKey) async {
+    if (_placeCache.containsKey(ghKey) || _placePending.contains(ghKey)) return;
+    if (!isValidGeohash(ghKey)) return;
+    _placePending.add(ghKey);
+    final token = ++_geocodeToken;
+    String result;
+    try {
+      final coords = decodeGeohash(ghKey);
+      final data = await _api.geocode(coords.lat, coords.lng, zoom: 10);
+      final addr = (data['address'] as Map?) ?? const {};
+      String s(Object? v) => v is String ? v : '';
+      final city = [
+        s(addr['city']),
+        s(addr['town']),
+        s(addr['village']),
+        s(addr['county']),
+      ].firstWhere((x) => x.isNotEmpty, orElse: () => '');
+      final country = s(addr['country']);
+      result = [city, country].where((x) => x.isNotEmpty).join(', ');
+      if (result.isEmpty) result = 'Unknown location';
+    } catch (_) {
+      // Catch fallback: the PWA drops to the raw coordinate label on geocode
+      // failure (channels.js:1029).
+      result = geohashLocationLabel(ghKey);
+    }
+    _placePending.remove(ghKey);
+    // The result is cached by geohash (never the wrong key), so always store it;
+    // only rebuild if still mounted and this was the latest resolve requested.
+    _placeCache[ghKey] = result;
+    if (!mounted || token != _geocodeToken) return;
+    setState(() {});
   }
 
   /// PWA `_pmLastSeenText` (pms.js:36): bot → "Always at your service";
@@ -913,12 +987,31 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   ({String? svg, String text}) _metaFor(AppState app, ChatView view) {
     switch (view.kind) {
       case ViewKind.channel:
-        // `channelUserCount`: online/away nyms, excluding self (matches the
-        // sidebar "Nyms (N online)" active set).
+        // `channelUserCount` (users.js:1387): channel-SCOPED — counts only users
+        // seen in THIS channel within the active window, non-hidden, excluding
+        // self. The bare-lowercased `view.id` is the membership key the store
+        // populates (`u.channels` ← `(geohash||channel).toLowerCase()`). PWA gates
+        // on `isRecent` (lastSeen < ACTIVE_THRESHOLD), not `==online`, so an
+        // away-but-recent member in-channel still counts — mirror with the raw
+        // lastSeen check.
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final key = view.id.toLowerCase();
         final count = app.users.values.where((u) {
           if (u.pubkey == app.selfPubkey) return false;
-          final st = u.effectiveStatus();
-          return st == UserStatus.online || st == UserStatus.away;
+          if (!u.channels.contains(key)) return false;
+          // `statusHidden = getEffectiveUserStatus(pk) === 'hidden'`
+          // (users.js:1387) — computed with the verified-bot override (CC-2) so
+          // the hidden gate matches the PWA's single effective-status read.
+          // NOTE: `channelUserCount` does NOT carry the bot always-online
+          // bypass that `activeCount` does — it gates purely on `isRecent`
+          // (users.js:1387 has no `|| verifiedBotSet`), so the recency check
+          // below is intentionally left to stand for bots too.
+          if (u.effectiveStatus(
+                  isVerifiedBot: kVerifiedBotPubkeys.contains(u.pubkey)) ==
+              UserStatus.hidden) {
+            return false;
+          }
+          return now - u.lastSeen < kActiveThresholdMs;
         }).length;
         return (svg: null, text: '${_abbreviateCount(count)} online nyms');
       case ViewKind.pm:

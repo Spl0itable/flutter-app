@@ -88,6 +88,8 @@ void main() {
       expect(sections['data']!.containsKey('cachePMs'), true);
       expect(sections['data']!.containsKey('lowDataMode'), true);
       expect(sections['channels']!.containsKey('sortByProximity'), true);
+      // Landing channel is threaded in by the caller; absent when not supplied.
+      expect(sections['channels']!.containsKey('pinnedLandingChannel'), false);
       // Each section carries the v:2 envelope.
       for (final s in sections.values) {
         expect(s['v'], 2);
@@ -97,6 +99,63 @@ void main() {
       for (final local in StorageSync.deviceLocalKeys) {
         expect(allKeys.contains(local), false, reason: 'leaked $local');
       }
+    });
+
+    test(
+        'pinnedLandingChannel rides the channels section as a {type,geohash} '
+        'object when supplied (settings.js:21,116)', () {
+      // Supplied JSON → emitted into channels as the same object the PWA syncs.
+      final sections = StorageSync.buildSectionPayloads(
+        const Settings(),
+        pinnedLandingChannelJson: '{"type":"geohash","geohash":"9q8y"}',
+      );
+      final landing = sections['channels']!['pinnedLandingChannel'];
+      expect(landing, isA<Map>());
+      expect((landing as Map)['type'], 'geohash');
+      expect(landing['geohash'], '9q8y');
+
+      // Missing `type` defaults to 'geohash' (mirrors LandingChannel.tryParse).
+      final defaulted = StorageSync.buildSectionPayloads(
+        const Settings(),
+        pinnedLandingChannelJson: '{"geohash":"dr5r"}',
+      );
+      expect(
+        (defaulted['channels']!['pinnedLandingChannel'] as Map)['type'],
+        'geohash',
+      );
+
+      // Blank / invalid JSON / missing geohash → omitted (no poisoning).
+      for (final bad in ['', '   ', 'not json', '{"type":"geohash"}', '{}']) {
+        final none = StorageSync.buildSectionPayloads(
+          const Settings(),
+          pinnedLandingChannelJson: bad,
+        );
+        expect(none['channels']!.containsKey('pinnedLandingChannel'), false,
+            reason: 'should omit for "$bad"');
+      }
+    });
+
+    test('a landing-channel change re-publishes the channels section', () async {
+      final bodies = <Map<String, dynamic>>[];
+      final sync = _syncWith(
+        bodies.add,
+        respond: (_) => (200, jsonEncode({'ok': true}), const {}),
+      );
+      // First publish with a landing channel set.
+      final first = await sync.settingsSet(
+        const Settings(),
+        pinnedLandingChannelJson: '{"type":"geohash","geohash":"9q8y"}',
+      );
+      expect(first, contains('channels'));
+      bodies.clear();
+      // Changing it re-publishes channels (content hash differs).
+      final second = await sync.settingsSet(
+        const Settings(),
+        pinnedLandingChannelJson: '{"type":"geohash","geohash":"u4pr"}',
+      );
+      expect(second, contains('channels'));
+      expect(bodies.any((b) => b['category'] == 'nymchat-settings-channels'),
+          true);
     });
 
     test('unchanged section (same content hash) skips the second write',

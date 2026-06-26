@@ -110,10 +110,20 @@ class GroupManager {
   /// Sends a group message: rotates the self ephemeral key, builds the rumor
   /// advertising the new key, and gift-wraps to each member's encryption key.
   /// Returns the shared nymMessageId, or null if we can't send.
+  ///
+  /// [extraTags] threads the optional NIP-30 custom-emoji, NIP-92 imeta, and
+  /// `['offer', JSON]` file-offer tags that groups.js `sendGroupMessage`
+  /// (1699-1707) pushes after `ms`. They are forwarded verbatim into
+  /// [GroupLogic.buildGroupMessageRumor], mirroring the channel send path where
+  /// the caller supplies the already-built tag list (`publishChannelMessage`'s
+  /// `emojiTags`). The caller owns the provider state needed to build them
+  /// (`LiveCustomEmojiNotifier.emojiTagsForContent`, the imeta builder, and
+  /// `fileOfferTag`), so the manager stays free of provider lookups (F04-M5).
   Future<String?> sendGroupMessage({
     required Group group,
     required String selfPubkey,
     required String content,
+    List<List<String>> extraTags = const [],
     MessagingSettings settings = const MessagingSettings(),
   }) async {
     if (!_service.canSign) return null;
@@ -128,6 +138,7 @@ class GroupManager {
       content: content,
       nymMessageId: nymMessageId,
       ephemeralPk: next.pk,
+      extraTags: extraTags,
     );
     final ok = await _service.publishGroupMessage(
       rumor: rumor,

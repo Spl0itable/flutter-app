@@ -401,15 +401,18 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
       onKeyEvent: _onKey,
       child: Stack(
         children: [
-          // Dim backdrop. With a target → a 0.5 black cut-out around the ring;
-          // otherwise a flat 0.5 scrim (matches the welcome/final steps).
+          // Dim backdrop. With a target → a black cut-out around the ring;
+          // otherwise a flat scrim (matches the welcome/final steps).
+          // `.tutorial-highlight` box-shadow spread: dark `rgba(0,0,0,0.5)` →
+          // `body.light-mode .tutorial-highlight { … rgba(0,0,0,0.3) }`
+          // (styles-themes-responsive.css:693-695).
           Positioned.fill(
             child: IgnorePointer(
               child: CustomPaint(
                 painter: _SpotlightPainter(
                   hole: ring,
                   radius: NymRadius.md,
-                  dim: Colors.black.withValues(alpha: 0.5),
+                  dim: Colors.black.withValues(alpha: c.isLight ? 0.3 : 0.5),
                 ),
               ),
             ),
@@ -423,9 +426,15 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
                   decoration: BoxDecoration(
                     borderRadius: NymRadius.rmd,
                     border: Border.all(color: c.secondary, width: 2),
+                    // `.tutorial-highlight` glow: dark `0 0 30px rgb(secondary
+                    // /0.3)` → `body.light-mode … 0 0 30px rgba(0,0,0,0.15)`
+                    // (styles-themes-responsive.css:693-695) — a neutral black
+                    // glow, not the saturated cyan, in light mode.
                     boxShadow: [
                       BoxShadow(
-                        color: c.secondary.withValues(alpha: 0.3),
+                        color: c.isLight
+                            ? Colors.black.withValues(alpha: 0.15)
+                            : c.secondary.withValues(alpha: 0.3),
                         blurRadius: 30,
                         spreadRadius: 0,
                       ),
@@ -490,11 +499,16 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
           color: c.bgTertiary, // PWA `.tutorial-card` background
           borderRadius: NymRadius.rlg, // --radius-lg (20)
           border: Border.all(color: c.glassBorder),
+          // `body.light-mode .tutorial-card { box-shadow: 0 8px 40px
+          // rgba(0,0,0,0.12) }` — softer single shadow in light mode
+          // (styles-themes-responsive.css:1697-1699).
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.4),
-              blurRadius: 30,
-              offset: const Offset(0, 16),
+              color: c.isLight
+                  ? const Color(0x1F000000) // black @ 0.12
+                  : Colors.black.withValues(alpha: 0.4),
+              blurRadius: c.isLight ? 40 : 30,
+              offset: c.isLight ? const Offset(0, 8) : const Offset(0, 16),
             ),
           ],
         ),

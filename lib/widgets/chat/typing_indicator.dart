@@ -17,8 +17,18 @@ import '../common/nym_avatar.dart';
 /// Reads `AppState.typing` (`<storageKey>|<pubkey>` → expiry ms) directly with a
 /// live clock so the indicator self-expires even when no other state changes,
 /// matching the PWA's per-peer typing timeout.
+///
+/// By default it keys off the active view's storage key (`app.view.storageKey`).
+/// When [storageKey] is provided it keys off that instead, so the same canonical
+/// row can be hosted per-column inside the deck (`.cv-typing`, columns.js:410-412
+/// builds the identical `.typing-indicator` markup fed by `_renderTypingInto`),
+/// instead of a degraded re-implementation.
 class TypingIndicatorRow extends ConsumerStatefulWidget {
-  const TypingIndicatorRow({super.key});
+  const TypingIndicatorRow({super.key, this.storageKey});
+
+  /// The conversation storage key to watch (`<storageKey>|<pubkey>` in
+  /// `AppState.typing`). When null, the active view's key is used.
+  final String? storageKey;
 
   @override
   ConsumerState<TypingIndicatorRow> createState() => _TypingIndicatorRowState();
@@ -33,10 +43,12 @@ class _TypingIndicatorRowState extends ConsumerState<TypingIndicatorRow> {
     super.dispose();
   }
 
-  /// Pubkeys typing in the active view (non-expired), computed against `now` so
-  /// the row hides the instant an indicator lapses.
+  /// Pubkeys typing in the watched conversation (non-expired), computed against
+  /// `now` so the row hides the instant an indicator lapses. Keys off
+  /// [TypingIndicatorRow.storageKey] when provided (per-column reuse), else the
+  /// active view's storage key.
   List<String> _activeTypers(AppState app) {
-    final prefix = '${app.view.storageKey}|';
+    final prefix = '${widget.storageKey ?? app.view.storageKey}|';
     final now = DateTime.now().millisecondsSinceEpoch;
     final out = <String>[];
     app.typing.forEach((k, expiry) {

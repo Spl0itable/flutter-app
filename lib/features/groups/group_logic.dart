@@ -92,12 +92,24 @@ class GroupLogic {
   /// Builds the kind-14 group-message rumor with common tags + the rotated
   /// [ephemeralPk] advertisement (docs/specs/03 §4.2). [nymMessageId] is the
   /// shared id across per-member copies.
+  ///
+  /// A plain group message carries NO `['type', …]` tag — groups.js
+  /// `sendGroupMessage` (1686-1707) pushes only `p`/`g`/`subject`/`x`/meta/
+  /// `ephemeral_pk`/`ms` (+ optional emoji/imeta/offer); the inbound filter
+  /// treats a null `type` as a message (F04-M4).
+  ///
+  /// [extraTags] threads the optional NIP-30 custom-emoji, NIP-92 imeta, and
+  /// `['offer', JSON]` file-offer tags (groups.js 1699-1707) plus the
+  /// `_attachGroupMetaTags` meta piggyback (groups.js 1690); they are appended
+  /// after `ms`, matching the PWA push order (F04-M5/L4). The caller builds them
+  /// from provider/controller state (e.g. `customEmojiTagsForContent`).
   static UnsignedEvent buildGroupMessageRumor({
     required Group group,
     required String selfPubkey,
     required String content,
     required String nymMessageId,
     required String ephemeralPk,
+    List<List<String>> extraTags = const [],
     int? nowSec,
     int? nowMs,
   }) {
@@ -107,10 +119,10 @@ class GroupLogic {
       for (final pk in group.members) ['p', pk],
       ['g', group.id],
       if (group.name.isNotEmpty) ['subject', group.name],
-      ['type', GroupControlType.message],
       ['x', nymMessageId],
       ['ephemeral_pk', ephemeralPk],
       ['ms', '$ms'],
+      ...extraTags,
     ];
     return UnsignedEvent(
       pubkey: selfPubkey,
@@ -323,11 +335,13 @@ class GroupLogic {
     required String type,
     required String actor,
     String? target,
+    String? messageId,
   }) {
     g.modLog.add(ModLogEntry(
       type: type,
       actor: actor,
       target: target,
+      messageId: messageId,
       ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     ));
     if (g.modLog.length > 50) {
@@ -352,6 +366,8 @@ class GroupLogic {
   /// Role rules (docs/specs/03 §4.4–§4.5):
   /// - kick/ban: owner or mod; mods cannot act on the owner or other mods.
   /// - unban / promote / revoke / transfer: owner only.
+  /// - leave: the sender removes only themselves (no role required).
+  /// - delete-message: owner or mod; mods cannot delete the owner's messages.
   static GroupControlResult applyControlEvent({
     required Group group,
     required String type,
@@ -481,6 +497,49 @@ class GroupLogic {
         return _applyMetadata(group, tags, senderPubkey, ts)
             ? GroupControlResult.applied
             : GroupControlResult.noop;
+
+      case GroupControlType.leave:
+        // A member announcing their own departure (groups.js:765-781). No role
+        // required and never bans; the sender removes only themselves. The PWA
+        // doesn't stale-guard a leave, so neither do we.
+        if (!group.members.contains(senderPubkey)) {
+          return GroupControlResult.noop;
+        }
+        group.members.remove(senderPubkey);
+        group.mods.remove(senderPubkey);
+        _modLog(group, type: 'leave', actor: senderPubkey, target: senderPubkey);
+        return GroupControlResult.applied;
+
+      case GroupControlType.deleteMessage:
+        // Owner/mod deletes another member's message (groups.js:1171-1197). The
+        // target message id lives in the `e` tag, the original author in
+        // `target_pubkey`. Per-message + idempotent, so the PWA applies NO
+        // stale-mod-event guard and does NOT advance lastModTs. Returns
+        // `applied` when authorized; the actual message removal is performed by
+        // the caller (app_state `applyGroupControl`, which owns the message
+        // store) by reading the `e` tag and calling `removeMessage`.
+        final targetMessageId = tagValue(tags, 'e');
+        if (targetMessageId == null) return GroupControlResult.invalid;
+        final targetAuthor = tagValue(tags, 'target_pubkey');
+        final isOwnerSender = isOwner(group, senderPubkey);
+        final isModSender = isMod(group, senderPubkey);
+        if (!isOwnerSender && !isModSender) {
+          return GroupControlResult.unauthorized;
+        }
+        // Mods can't delete the owner's messages.
+        if (!isOwnerSender &&
+            targetAuthor != null &&
+            group.createdBy == targetAuthor) {
+          return GroupControlResult.unauthorized;
+        }
+        _modLog(
+          group,
+          type: 'delete-message',
+          actor: senderPubkey,
+          target: targetAuthor,
+          messageId: targetMessageId,
+        );
+        return GroupControlResult.applied;
 
       default:
         return GroupControlResult.ignored;

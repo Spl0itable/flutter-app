@@ -7,5 +7,14 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.nym.bar</string>
 	</array>
+	<!-- Universal Links: mirror the Android manifest's intent-filter hosts so
+	     https://… deep links open the app natively on iOS too. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:app.nymchat.app</string>
+		<string>applinks:app.nym.bar</string>
+		<string>applinks:web.nymchat.app</string>
+		<string>applinks:nymchat.app</string>
+	</array>
 </dict>
 </plist>

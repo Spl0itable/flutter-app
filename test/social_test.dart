@@ -4,8 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:nym_bar/core/constants/event_kinds.dart';
 import 'package:nym_bar/core/constants/storage_keys.dart';
 import 'package:nym_bar/models/message.dart';
+import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:nym_bar/state/app_state.dart';
 import 'package:nym_bar/state/nostr_controller.dart';
@@ -317,6 +319,62 @@ void main() {
       c.read(appStateProvider.notifier).removeMessage('d1');
       expect(c.read(messagesForCurrentViewProvider).map((m) => m.id),
           isNot(contains('d1')));
+    });
+
+    // The user-reported bug: an incoming edit (event carries ['edit', origId])
+    // must REWRITE the original in place, never append a second bubble.
+    NostrEvent channelMsg(String id, String content,
+            {String? editOf}) =>
+        NostrEvent(
+          id: id,
+          pubkey: _other,
+          createdAt: 1000,
+          kind: EventKind.namedChannel,
+          tags: [
+            ['d', 'nymchat'],
+            ['n', 'sat#beef'],
+            if (editOf != null) ['edit', editOf],
+          ],
+          content: content,
+        );
+
+    test('incoming channel edit rewrites in place (no duplicate)', () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      n.markNymchatPubkey(_other);
+      n.ingestEvent(channelMsg('orig', 'hello'));
+      // The edit event for the same original must not add a new row.
+      n.ingestEvent(channelMsg('editEvt', 'hello (edited)', editOf: 'orig'));
+      final msgs = c
+          .read(messagesForCurrentViewProvider)
+          .where((m) => m.id == 'orig' || m.id == 'editEvt')
+          .toList();
+      expect(msgs.length, 1, reason: 'edit must not append a second message');
+      expect(msgs.single.content, 'hello (edited)');
+      expect(msgs.single.isEdited, isTrue);
+    });
+
+    test('out-of-order channel edit is buffered then applied on arrival',
+        () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      n.markNymchatPubkey(_other);
+      // Edit arrives FIRST (original not seen yet) — buffered, not shown.
+      n.ingestEvent(channelMsg('editEvt', 'late edit', editOf: 'orig'));
+      expect(
+          c.read(messagesForCurrentViewProvider).map((m) => m.id),
+          isNot(contains('editEvt')));
+      // Original lands → the buffered edit is replayed onto it in place.
+      n.ingestEvent(channelMsg('orig', 'first text'));
+      final msgs = c
+          .read(messagesForCurrentViewProvider)
+          .where((m) => m.id == 'orig' || m.id == 'editEvt')
+          .toList();
+      expect(msgs.length, 1);
+      expect(msgs.single.content, 'late edit');
+      expect(msgs.single.isEdited, isTrue);
     });
   });
 

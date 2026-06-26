@@ -238,4 +238,48 @@ void main() {
       expect(SpamFilter.spamScore('1234567a'), greaterThanOrEqualTo(1));
     });
   });
+
+  group('isGibberishNym — randomized spam-bot nicknames', () {
+    test('null / non-string nyms are never gibberish', () {
+      // Mirrors the PWA `typeof nym !== 'string'` guard (nostr-core.js:946).
+      expect(SpamFilter.isGibberishNym(null), isFalse);
+      expect(SpamFilter.isGibberishNym(42), isFalse);
+    });
+
+    test('short nyms (<8 chars after trim) are never gibberish', () {
+      // nostr-core.js:948 `if (!n || n.length < 8) return false;`
+      expect(SpamFilter.isGibberishNym('alice'), isFalse);
+      expect(SpamFilter.isGibberishNym('   '), isFalse); // trims to empty
+      expect(SpamFilter.isGibberishNym('aBCDEFG'), isFalse); // 7 chars
+    });
+
+    test('an ordinary nym is not gibberish', () {
+      // All-lowercase real-word-ish handle: no repeated head, no upper → false.
+      expect(SpamFilter.isGibberishNym('goodvibes'), isFalse);
+      expect(SpamFilter.isGibberishNym('satoshifan'), isFalse);
+    });
+
+    test('a repeated-head random token is gibberish', () {
+      // `_looksLikeRandomToken` repeated-head branch (nostr-core.js:753-759):
+      // head 'abc' (>=3 distinct) repeated at offset 3.
+      expect(SpamFilter.isGibberishNym('abcabcde'), isTrue);
+    });
+
+    test('an interior-uppercase random token is gibberish', () {
+      // `_looksLikeRandomToken` interior-upper branch (nostr-core.js:761-769):
+      // 6 interior uppercase, ratio 6/7 >= 0.3.
+      expect(SpamFilter.isGibberishNym('aBCDEFGh'), isTrue);
+    });
+
+    test('leading/trailing whitespace is trimmed before the check', () {
+      expect(SpamFilter.isGibberishNym('  abcabcde  '), isTrue);
+    });
+
+    test('respects the enabled / aggressive gates (both default true)', () {
+      // Off when either gate is false, regardless of the nym (nostr-core.js:
+      // 944-945).
+      expect(SpamFilter.isGibberishNym('abcabcde', enabled: false), isFalse);
+      expect(SpamFilter.isGibberishNym('abcabcde', aggressive: false), isFalse);
+    });
+  });
 }

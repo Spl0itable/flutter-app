@@ -253,6 +253,183 @@ void main() {
       expect(g.createdBy, 'a');
       expect(g.mods, isNot(contains('a'))); // new owner dropped from mods
     });
+
+    test('inbound group-leave removes the departing sender (F04-H1)', () {
+      final g = makeGroup('owner', ['leaver', 'other'], mods: ['leaver']);
+      final r = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.leave,
+        tags: const [
+          ['p', 'owner'],
+          ['p', 'other'],
+        ],
+        senderPubkey: 'leaver',
+        ts: 100,
+        eventId: 'eLeave',
+      );
+      expect(r, GroupControlResult.applied);
+      expect(g.members, isNot(contains('leaver')));
+      expect(g.mods, isNot(contains('leaver'))); // departed mod also dropped
+      expect(g.members, contains('other'));
+      expect(g.modLog.last.type, 'leave');
+      // A leave from a non-member is a no-op.
+      final r2 = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.leave,
+        tags: const [],
+        senderPubkey: 'stranger',
+        ts: 101,
+        eventId: 'eLeave2',
+      );
+      expect(r2, GroupControlResult.noop);
+    });
+
+    test('delete-message authorizes owner/mod, blocks others (F04-B4)', () {
+      Group g() => makeGroup('owner', ['mod1', 'member'], mods: ['mod1']);
+
+      // Owner can delete anyone's message.
+      final byOwner = GroupLogic.applyControlEvent(
+        group: g(),
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msg1'],
+          ['target_pubkey', 'member'],
+        ],
+        senderPubkey: 'owner',
+        ts: 10,
+        eventId: 'd1',
+      );
+      expect(byOwner, GroupControlResult.applied);
+
+      // Mod can delete a plain member's message.
+      final gm = g();
+      final byMod = GroupLogic.applyControlEvent(
+        group: gm,
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msg2'],
+          ['target_pubkey', 'member'],
+        ],
+        senderPubkey: 'mod1',
+        ts: 11,
+        eventId: 'd2',
+      );
+      expect(byMod, GroupControlResult.applied);
+      expect(gm.modLog.last.type, 'delete-message');
+      expect(gm.modLog.last.messageId, 'msg2');
+
+      // Mod CANNOT delete the owner's message.
+      final modVsOwner = GroupLogic.applyControlEvent(
+        group: g(),
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msg3'],
+          ['target_pubkey', 'owner'],
+        ],
+        senderPubkey: 'mod1',
+        ts: 12,
+        eventId: 'd3',
+      );
+      expect(modVsOwner, GroupControlResult.unauthorized);
+
+      // A plain member can't delete anything.
+      final byMember = GroupLogic.applyControlEvent(
+        group: g(),
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msg4'],
+          ['target_pubkey', 'mod1'],
+        ],
+        senderPubkey: 'member',
+        ts: 13,
+        eventId: 'd4',
+      );
+      expect(byMember, GroupControlResult.unauthorized);
+
+      // Missing `e` tag → invalid.
+      final noTarget = GroupLogic.applyControlEvent(
+        group: g(),
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['target_pubkey', 'member'],
+        ],
+        senderPubkey: 'owner',
+        ts: 14,
+        eventId: 'd5',
+      );
+      expect(noTarget, GroupControlResult.invalid);
+    });
+  });
+
+  group('applyGroupControl message-store side effects (F04-B4)', () {
+    Message groupMsg(String gid, String id, String author) => Message(
+          id: id,
+          nymMessageId: id,
+          pubkey: author,
+          author: 'm#$author',
+          content: 'hi',
+          createdAt: 1000,
+          isGroup: true,
+          groupId: gid,
+          conversationKey: GroupLogic.groupStorageKey(gid),
+        );
+
+    test('inbound delete-message removes the target from the store', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'mod1', 'member', 'selfpk'],
+        createdBy: 'owner',
+        mods: ['mod1'],
+      );
+      n.upsertGroup(g);
+      n.ingestGroupMessage(groupMsg(g.id, 'msgX', 'member'));
+      final key = GroupLogic.groupStorageKey(g.id);
+      expect(n.state.messages[key]!.map((m) => m.id), contains('msgX'));
+
+      // A mod deletes the member's message → it's removed locally for everyone.
+      final r = n.applyGroupControl(
+        groupId: g.id,
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msgX'],
+          ['target_pubkey', 'member'],
+        ],
+        senderPubkey: 'mod1',
+        ts: 10,
+        eventId: 'del1',
+      );
+      expect(r, GroupControlResult.applied);
+      expect(n.state.messages[key]!.map((m) => m.id), isNot(contains('msgX')));
+    });
+
+    test('unauthorized delete (plain member) leaves the message intact', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'member', 'selfpk'],
+        createdBy: 'owner',
+      );
+      n.upsertGroup(g);
+      n.ingestGroupMessage(groupMsg(g.id, 'msgY', 'owner'));
+      final key = GroupLogic.groupStorageKey(g.id);
+
+      final r = n.applyGroupControl(
+        groupId: g.id,
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msgY'],
+          ['target_pubkey', 'owner'],
+        ],
+        senderPubkey: 'member', // not owner/mod
+        ts: 11,
+        eventId: 'del2',
+      );
+      expect(r, GroupControlResult.unauthorized);
+      expect(n.state.messages[key]!.map((m) => m.id), contains('msgY'));
+    });
   });
 
   group('Ephemeral key rotation', () {
@@ -394,10 +571,37 @@ void main() {
       expect(n.state.messages['pm-$peer']!.single.content, 'new ping');
       expect(n.closedPMs.contains(peer), isFalse);
     });
+
+    test('onClosedPmsChanged fires on close/re-open; hydrate restores (F02)', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      var fired = 0;
+      n.onClosedPmsChanged = () => fired++;
+      const peer = 'peerpk';
+
+      n.closePM(peer, nowSec: 1000);
+      expect(fired, 1, reason: 'close must notify for persistence');
+      expect(n.closedPMs.contains(peer), isTrue);
+      expect(n.closedPmTimes[peer], 1000);
+
+      // A strictly-newer inbound re-opens AND notifies again (so the re-open is
+      // persisted, not undone on relaunch).
+      n.ingestPMMessage(pmFrom(peer, 'newer', 1100));
+      expect(fired, 2);
+      expect(n.closedPMs.contains(peer), isFalse);
+
+      // Hydration restores a persisted closed set on a fresh store.
+      final n2 = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n2.hydrateClosedPMs({peer}, {peer: 2000});
+      expect(n2.closedPMs.contains(peer), isTrue);
+      // Backlog at/under the close time stays suppressed after hydration.
+      n2.ingestPMMessage(pmFrom(peer, 'old backlog', 1500));
+      expect(n2.state.messages.containsKey('pm-$peer'), isFalse);
+    });
   });
 
   group('Group message rumor', () {
-    test('carries p-per-member, g, type, x, ephemeral_pk, ms tags', () {
+    test('carries p-per-member, g, x, ephemeral_pk, ms tags but NO type tag',
+        () {
       final g = Group(
         id: GroupLogic.generateGroupId(),
         name: 'grp',
@@ -416,10 +620,40 @@ void main() {
       expect(rumor.kind, EventKind.dmRumor);
       expect(rumor.tags.where((t) => t[0] == 'p').length, 3);
       expect(GroupLogic.tagValue(rumor.tags, 'g'), g.id);
-      expect(GroupLogic.tagValue(rumor.tags, 'type'), GroupControlType.message);
+      // F04-M4: a plain group message carries no `type` tag (matches
+      // groups.js sendGroupMessage, which never pushes one).
+      expect(GroupLogic.tagValue(rumor.tags, 'type'), isNull);
       expect(GroupLogic.tagValue(rumor.tags, 'x'), 'nmid');
       expect(GroupLogic.tagValue(rumor.tags, 'ephemeral_pk'), 'ephpk');
       expect(GroupLogic.tagValue(rumor.tags, 'ms'), '1700000000999');
+    });
+
+    test('threads extraTags (emoji/imeta/offer) after ms in PWA push order',
+        () {
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'grp',
+        members: ['self', 'a'],
+        createdBy: 'self',
+      );
+      final rumor = GroupLogic.buildGroupMessageRumor(
+        group: g,
+        selfPubkey: 'self',
+        content: 'hi :smile:',
+        nymMessageId: 'nmid',
+        ephemeralPk: 'ephpk',
+        nowMs: 1700000000999,
+        extraTags: const [
+          ['emoji', 'smile', 'https://example/smile.png'],
+          ['offer', '{"hash":"abc"}'],
+        ],
+      );
+      expect(GroupLogic.tagValue(rumor.tags, 'emoji'), 'smile');
+      expect(GroupLogic.tagValue(rumor.tags, 'offer'), '{"hash":"abc"}');
+      // extraTags are appended after the `ms` tag (PWA push order).
+      final msIdx = rumor.tags.indexWhere((t) => t[0] == 'ms');
+      final emojiIdx = rumor.tags.indexWhere((t) => t[0] == 'emoji');
+      expect(emojiIdx, greaterThan(msIdx));
     });
 
     test('round-trips through a gift wrap to a member', () async {

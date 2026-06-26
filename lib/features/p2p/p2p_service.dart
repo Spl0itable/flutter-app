@@ -206,7 +206,8 @@ class P2PService extends ChangeNotifier {
   // Stop seeding — stopSeeding (broadcasts kind 25052 unseeded)
   // ---------------------------------------------------------------------------
 
-  Future<void> stopSeeding(String offerId, {String? geohash}) async {
+  Future<void> stopSeeding(String offerId,
+      {String? geohash, String? channelName}) async {
     final offer = _offers[offerId];
     _pendingFiles.remove(offerId);
     _unseeded.add(offerId);
@@ -217,7 +218,8 @@ class P2PService extends ChangeNotifier {
       cancelTransfer(id, silent: true);
     }
     if (offer != null) {
-      final payload = buildUnseededPayload(offer: offer, geohash: geohash);
+      final payload = buildUnseededPayload(
+          offer: offer, geohash: geohash, channelName: channelName);
       try {
         await _transport.publishP2P(
           kind: P2PConstants.fileStatusKind,

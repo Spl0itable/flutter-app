@@ -24,6 +24,7 @@ import '../../widgets/context_menu/context_menu_actions.dart';
 import '../../widgets/context_menu/context_menu_panel.dart';
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
+import '../messages/format/message_content.dart';
 import '../shop/cosmetics.dart';
 import '../reactions/quick_react_popup.dart';
 import 'call_nym.dart';
@@ -138,8 +139,13 @@ class _CallOverlayState extends ConsumerState<CallOverlay> {
     final service = ref.read(callServiceProvider);
 
     return Material(
-      // `.call-overlay`: background rgba(5,5,10,0.96) (#05050a @ 0.96).
-      color: const Color(0xF505050A),
+      // `.call-overlay`: dark rgba(5,5,10,0.96) (#05050a @ 0.96); light mode
+      // flips to rgba(245,245,242,0.95) (`body.light-mode .call-overlay`,
+      // styles-features.css:4799). The Material is the parent of SafeArea so
+      // the fill still reaches the screen edges (under the notch/status bar).
+      color: context.nym.isLight
+          ? const Color(0xF2F5F5F2)
+          : const Color(0xF505050A),
       child: SafeArea(
         child: Column(
           children: [
@@ -649,8 +655,13 @@ class _FlyItemState extends State<_FlyItem>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // `.call-react-emoji` 2.5rem ≈ 40px on a phone.
-          Text(widget.reaction.emoji, style: const TextStyle(fontSize: 40)),
+          // `.call-react-emoji` 2.5rem ≈ 40px on a phone. A custom `:shortcode:`
+          // fly-reaction renders as its image (PWA `renderReactionEmoji`,
+          // calls.js:1177); unicode falls through to a plain Text.
+          InlineEmojiText(
+              text: widget.reaction.emoji,
+              style: const TextStyle(fontSize: 40),
+              emojiSize: 40),
           const SizedBox(height: 2),
           // `.call-react-who`: white on black@0.5, radius 8.
           Container(
@@ -696,9 +707,14 @@ class _ReactionsBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // recents-first padded with the 8 defaults (custom shortcodes dropped here
-    // since the call surface renders unicode only).
-    final emojis = callReactionBarEmojis(recents);
+    // recents-first padded with the 8 defaults. Keep a custom `:shortcode:`
+    // recent when its pack is still known (PWA `_callReactionBarEmojis`,
+    // calls.js:1106-1118 → `known()`); without the predicate every custom code
+    // is treated as unknown and dropped.
+    final codeToUrl =
+        ProviderScope.containerOf(context).read(liveCustomEmojiProvider).codeToUrl;
+    final emojis = callReactionBarEmojis(recents,
+        isKnownCustom: (code) => codeToUrl.containsKey(code));
     return Center(
       child: Container(
         constraints: BoxConstraints(
@@ -725,7 +741,13 @@ class _ReactionsBar extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 child: Padding(
                   padding: const EdgeInsets.all(4),
-                  child: Text(e, style: const TextStyle(fontSize: 28)),
+                  // Known custom `:shortcode:` recents render as their image
+                  // (PWA `renderReactionEmoji`, calls.js:1130); unicode falls
+                  // through `InlineEmojiText`'s fast path to a plain Text.
+                  child: InlineEmojiText(
+                      text: e,
+                      style: const TextStyle(fontSize: 28),
+                      emojiSize: 28),
                 ),
               ),
             // `.call-react-more`: dim "+" opens the full picker.
@@ -848,12 +870,27 @@ class _ChatRow extends ConsumerWidget {
   void _openQuickReact(BuildContext context, Rect anchor) {
     final recents = ProviderScope.containerOf(context)
         .read(recentEmojisProvider);
+    // A non-self chat row's quick-react popup exposes a "User options" affordance
+    // (PWA `_showCallChatQuickReact` 3-dot `data-qr="menu"`, calls.js:1526,1566)
+    // that opens the shared user context menu. Rendered as the inline
+    // quick-context-menu card below the pill (the native popup has no in-pill
+    // ⋮ slot; `showQuickReactPopup.contextItems` is the supported channel).
+    final contextItems = (!msg.isSelf && msg.pubkey.isNotEmpty)
+        ? [
+            QuickContextItem(
+              label: 'User options',
+              svg: NymIcons.info,
+              onTap: () => showCallUserMenu(context, msg.pubkey),
+            ),
+          ]
+        : const <QuickContextItem>[];
     showQuickReactPopup(
       context,
       anchorRect: anchor,
       emojis: quickReactEmojis(recents),
       onReact: (e) => onReact(msg.mid, e),
       onMore: () => onMorePicker(msg.mid),
+      contextItems: contextItems,
     );
   }
 
@@ -1045,7 +1082,13 @@ class _ReactionBadges extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(entry.key, style: const TextStyle(fontSize: 13)),
+                    // Custom `:shortcode:` reaction renders as its image (PWA
+                    // `renderReactionEmoji`, calls.js:1689); unicode falls
+                    // through to a plain Text.
+                    InlineEmojiText(
+                        text: entry.key,
+                        style: const TextStyle(fontSize: 13),
+                        emojiSize: 16),
                     const SizedBox(width: 3),
                     Text('${entry.value.length}',
                         style: TextStyle(color: c.textDim, fontSize: 11)),

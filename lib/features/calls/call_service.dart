@@ -19,15 +19,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/relays.dart';
 import '../../models/group.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../emoji/custom_emoji.dart';
+import '../notifications/notification_sounds.dart';
 import 'call_signaling.dart';
 import 'call_state.dart';
 
@@ -128,6 +132,11 @@ class CallService {
   CallService(this._ref) {
     _self = _ref.read(nostrControllerProvider).identity?.pubkey ?? '';
     _ref.read(nostrControllerProvider).setCallSignalHandler(handleSignal);
+    // Hydrate the seen-calls cache from SharedPreferences so a call already
+    // answered/declined/missed here (or replayed by a relay) isn't re-rung
+    // after a reload (calls.js `_getSeenCalls`). Fire-and-forget; the in-memory
+    // map starts empty and fills in once prefs load.
+    unawaited(_hydrateSeenCalls());
   }
 
   final Ref _ref;
@@ -149,6 +158,16 @@ class CallService {
   /// Live floating reactions (self + incoming); each is dropped after ~3.2s.
   final List<CallFlyReaction> _flyReactions = [];
 
+  /// Incoming-call ringtone loop (calls.js `_ringInterval` / `_ringCtx`). A
+  /// 480 Hz beep replayed every 2 s while a call rings; `null` when silent. The
+  /// WAV is synthesized once and reused (synthesis is deterministic). Held on
+  /// the service (not the modal) so it stops in every exit path even if the
+  /// overlay never mounted, mirroring calls.js where `_startRingtone` /
+  /// `_stopRingtone` are owned by the call module.
+  Timer? _ringInterval;
+  AudioPlayer? _ringPlayer;
+  Uint8List? _ringWav;
+
   /// In-chat / toast system-message sink. Routed by [call_providers] to
   /// `appStateProvider.addSystemMessage` (the centered `.system-message` pill);
   /// mirrors calls.js `displaySystemMessage`. P2P has the same sink shape.
@@ -165,8 +184,12 @@ class CallService {
   /// [whenMs] timestamps the entry (defaults to now); a stale-invite missed call
   /// stamps it with the invite's own `created_at * 1000` so the notification
   /// reflects when the call actually came in (calls.js:328 passes
-  /// `createdAt * 1000`).
+  /// `createdAt * 1000`). [callId] keys the entry with a stable dedup id
+  /// `missed-call-$callId` (calls.js:296-307 `eventId: 'missed-call-'+callId`) so
+  /// the cancel-path and timeout-path can't double-record and a cross-device
+  /// retract has a target.
   void _recordMissedCall({
+    required String callId,
     required String callerPubkey,
     required String callerNym,
     required CallKind kind,
@@ -188,6 +211,7 @@ class CallService {
             body: body,
             route: isGroup ? (groupId ?? '') : callerPubkey,
             ts: whenMs,
+            eventId: callId.isNotEmpty ? 'missed-call-$callId' : null,
           );
     } catch (_) {
       // History store may be unavailable in a teardown; best-effort.
@@ -215,6 +239,14 @@ class CallService {
     }
     if (_active != null || _incoming != null) {
       _system('Already in a call');
+      return;
+    }
+    // Calling a verified bot is intercepted with a joke instead of dialing
+    // (calls.js:83-88 startCall PM branch). The bot never answers a real call.
+    if (_ref.read(nostrControllerProvider).isVerifiedBot(peer)) {
+      _system(video
+          ? 'You wish you could see my sexy body ദ്ദി(ᵔᗜᵔ)'
+          : 'You wish you could hear my sexy voice ദ്ദി(ᵔᗜᵔ)');
       return;
     }
     await _begin(
@@ -259,6 +291,11 @@ class CallService {
     final inc = _incoming;
     if (inc == null) return;
     inc.timeout?.cancel();
+    // Silence the ringtone the moment we accept (calls.js:384 `_stopRingtone`).
+    _stopRingtone();
+    // Remember we answered so a stale re-delivery (or another device's sync)
+    // doesn't re-ring or record a missed call (calls.js:386).
+    _markCallSeen(inc.callId, 'answered');
 
     final stream = await _getLocalMedia(inc.kind);
     if (stream == null) {
@@ -298,6 +335,11 @@ class CallService {
     final inc = _incoming;
     if (inc == null) return;
     inc.timeout?.cancel();
+    // Stop the ringtone on decline (calls.js:429 `_stopRingtone`).
+    _stopRingtone();
+    // Remember the decline so a re-delivery / cross-device sync doesn't re-ring
+    // it (calls.js:431).
+    _markCallSeen(inc.callId, 'declined');
     _send(inc.from, CallSignal.reject(inc.callId, 'declined'));
     _incoming = null;
     _publishIdle();
@@ -433,8 +475,11 @@ class CallService {
     try {
       _ref.read(recentEmojisProvider.notifier).record(emoji);
     } catch (_) {}
+    // Attach `emojiTags` for a custom `:shortcode:` so a peer that lacks the
+    // pack can still resolve+render the image (calls.js:1153-1155).
+    final tags = _emojiTagsFor(emoji);
     for (final pk in ac.members.where((pk) => pk != _self)) {
-      _send(pk, CallSignal.reaction(callId: ac.callId, emoji: emoji));
+      _send(pk, CallSignal.reaction(callId: ac.callId, emoji: emoji, emojiTags: tags));
     }
     _pushFly(emoji, who: 'You');
   }
@@ -444,6 +489,9 @@ class CallService {
     final emoji = data['emoji'];
     if (ac == null || ac.callId != data['callId'] || emoji is! String) return;
     if (emoji.isEmpty) return;
+    // Register any custom-emoji defs the sender included so the shortcode
+    // resolves to an image locally (calls.js:1165 `ingestEmojiTags`).
+    _ingestEmojiTags(data['emojiTags']);
     _pushFly(emoji, pubkey: sender);
   }
 
@@ -499,9 +547,14 @@ class CallService {
         _ref.read(recentEmojisProvider.notifier).record(emoji);
       } catch (_) {}
     }
+    // Custom `:shortcode:` chat-reactions carry their `emojiTags` too
+    // (calls.js:1645-1646), so a peer without the pack resolves the badge image.
+    final tags = _emojiTagsFor(emoji);
     for (final pk in ac.members.where((pk) => pk != _self)) {
-      _send(pk,
-          CallSignal.chatReaction(callId: ac.callId, mid: mid, emoji: emoji, op: op));
+      _send(
+          pk,
+          CallSignal.chatReaction(
+              callId: ac.callId, mid: mid, emoji: emoji, op: op, emojiTags: tags));
     }
     _publish();
   }
@@ -516,6 +569,10 @@ class CallService {
         emoji is! String) {
       return;
     }
+    // A blocked user's chat reactions are dropped (calls.js:1655).
+    if (_isBlocked(sender)) return;
+    // Register any custom-emoji defs the sender included (calls.js:1656).
+    _ingestEmojiTags(data['emojiTags']);
     final map = ac.chatReactions.putIfAbsent(mid, () => {});
     final set = map.putIfAbsent(emoji, () => <String>{});
     if (data['op'] == 'remove') {
@@ -767,6 +824,235 @@ class CallService {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Incoming-call ringtone (calls.js `_startRingtone` / `_stopRingtone`)
+  // ---------------------------------------------------------------------------
+  //
+  // The PWA loops a 480 Hz beep (gain 0.07, 0.4 s) every 2 s while an incoming
+  // call rings (calls.js:897-920). We synthesize the same tone with the shared
+  // [renderSoundWav] path and replay it on a 2 s [Timer.periodic] through an
+  // audioplayers instance — the native equivalent of the Web Audio oscillator.
+  // Best-effort throughout: a failed render/playback must never break ringing
+  // (the PWA wraps `_startRingtone` in try/catch and ignores errors).
+
+  /// Begin looping the incoming-call ringtone (calls.js `_startRingtone`). Plays
+  /// the beep immediately, then every 2 s until [_stopRingtone]. Idempotent: a
+  /// second call while already ringing is a no-op. Silent on web (audioplayers
+  /// has no byte-source playback there, matching [AudioPlayersTonePlayer]).
+  void _startRingtone() {
+    if (kIsWeb) return;
+    if (_ringInterval != null) return; // already ringing
+    _playRingBeep();
+    _ringInterval =
+        Timer.periodic(const Duration(seconds: 2), (_) => _playRingBeep());
+  }
+
+  /// Stop the ringtone loop and release the player (calls.js `_stopRingtone`:
+  /// `clearInterval` + `ctx.close()`). Safe to call when not ringing.
+  void _stopRingtone() {
+    _ringInterval?.cancel();
+    _ringInterval = null;
+    final player = _ringPlayer;
+    _ringPlayer = null;
+    if (player != null) {
+      // stop() then dispose() — fire-and-forget; never throw from teardown.
+      unawaited(() async {
+        try {
+          await player.stop();
+        } catch (_) {}
+        try {
+          await player.dispose();
+        } catch (_) {}
+      }());
+    }
+  }
+
+  /// Render-once + play one beep through the (lazily created) ring player.
+  void _playRingBeep() {
+    try {
+      final wav = _ringWav ??= renderSoundWav(kIncomingCallRingtone);
+      final player = _ringPlayer ??=
+          (AudioPlayer()..setReleaseMode(ReleaseMode.stop));
+      // Restart from the top each beep so the 2 s cadence is crisp.
+      unawaited(() async {
+        try {
+          await player.stop();
+          await player.play(BytesSource(wav, mimeType: 'audio/wav'));
+        } catch (_) {}
+      }());
+    } catch (_) {
+      // Synthesis/playback unavailable — ring silently rather than crash.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Seen-calls persistence (calls.js `_getSeenCalls` … `_markCallSeen`)
+  // ---------------------------------------------------------------------------
+  //
+  // A 24h-TTL'd `{callId: {t, s}}` map persisted under the SAME key the PWA uses
+  // (`nym_seen_calls`) so a call already pending/answered/declined/missed here —
+  // or replayed by a relay on reconnect — isn't re-rung. Status rank lets a
+  // resolution win over a weaker state (calls.js `_CALL_STATUS_RANK`).
+  //
+  // Held in-memory (`_seenCalls`) as the synchronous source of truth (the ring
+  // gate in `_onInvite` is sync); hydrated once at construction and persisted
+  // after each mark. Cross-device merge + missed-call retract (`_mergeSeenCalls`
+  // / `_retractMissedCallNotification`, F06-A3) is DEFERRED — it needs the
+  // controller's encrypted-settings sync and an app_state history-removal helper
+  // (neither owned here). `_seenCallsForSync` below is provided so the serial
+  // controller owner can include the map in the synced blob without re-deriving.
+
+  /// Status precedence on merge/mark — higher wins (calls.js
+  /// `_CALL_STATUS_RANK`, calls.js:200).
+  static const Map<String, int> _callStatusRank = {
+    'seen': 0,
+    'pending': 1,
+    'missed': 2,
+    'declined': 3,
+    'answered': 4,
+  };
+
+  /// In-memory mirror of the persisted seen-calls map (`callId → {t, s}`); `t`
+  /// is unix-seconds, `s` is the status string. Null until first hydrated.
+  Map<String, _SeenCall>? _seenCalls;
+  SharedPreferences? _seenPrefs;
+
+  static const String _seenCallsKey = 'nym_seen_calls';
+
+  Future<void> _hydrateSeenCalls() async {
+    try {
+      final prefs = await _ref.read(emojiPrefsProvider.future);
+      _seenPrefs = prefs;
+      // Merge anything marked before prefs finished loading (don't clobber).
+      final loaded = _decodeSeenCalls(prefs.getString(_seenCallsKey));
+      final pending = _seenCalls;
+      if (pending != null) loaded.addAll(pending);
+      _seenCalls = loaded;
+    } catch (_) {
+      _seenCalls ??= <String, _SeenCall>{};
+    }
+  }
+
+  Map<String, _SeenCall> _decodeSeenCalls(String? raw) {
+    final out = <String, _SeenCall>{};
+    if (raw == null || raw.isEmpty) return out;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        decoded.forEach((k, v) {
+          final r = _SeenCall.fromWire(v);
+          if (r != null && k is String) out[k] = r;
+        });
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  /// calls.js `_getSeenCalls` — the live map, created lazily.
+  Map<String, _SeenCall> _seenMap() => _seenCalls ??= <String, _SeenCall>{};
+
+  /// calls.js `_hasSeenCall` — has this call already been recorded here?
+  bool _hasSeenCall(String? callId) {
+    if (callId == null || callId.isEmpty) return false;
+    return _seenMap().containsKey(callId);
+  }
+
+  /// calls.js `_markCallSeen` — record [callId] with [status], keeping the
+  /// higher-ranked status if one already exists, then persist (TTL-pruned).
+  void _markCallSeen(String? callId, String status) {
+    if (callId == null || callId.isEmpty) return;
+    final map = _seenMap();
+    final next = status.isEmpty ? 'pending' : status;
+    final existing = map[callId];
+    final keep = (existing != null &&
+            (_callStatusRank[existing.s] ?? 0) > (_callStatusRank[next] ?? 0))
+        ? existing.s
+        : next;
+    map[callId] =
+        _SeenCall(DateTime.now().millisecondsSinceEpoch ~/ 1000, keep);
+    _persistSeenCalls(map);
+    // Cross-device sync (F06-A3): republish the seen-call map inside the
+    // encrypted settings blob so a call answered/declined/missed here is
+    // reflected on our other devices (calls.js:256 `_debouncedNostrSettingsSave()`).
+    // `syncSettings` is the 5s-debounced publish; it reads `seenCallsForSync()`
+    // when it flushes (nostr_controller `_flushSettingsSync`).
+    try {
+      _ref.read(nostrControllerProvider).syncSettings();
+    } catch (_) {}
+  }
+
+  /// Merges a synced seen-call map received from another device (calls.js
+  /// `_mergeSeenCalls`, calls.js:261) so a call already handled or answered
+  /// elsewhere isn't re-rung or left showing as missed here. TTL-expired entries
+  /// are skipped; on a per-call basis the higher-ranked status wins and the
+  /// newer timestamp is kept. Any call that transitions to `answered` via the
+  /// merge retracts a missed-call notification we already surfaced for it (the
+  /// `missed-call-<callId>` history id), via the [retract] callback the
+  /// controller wires to `NotificationHistoryNotifier.removeByEventId`.
+  void mergeSeenCalls(dynamic incoming,
+      {void Function(String eventId)? retract}) {
+    if (incoming is! Map) return;
+    final map = _seenMap();
+    final cutoff =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _callSeenTtlSec;
+    final nowAnswered = <String>[];
+    incoming.forEach((key, value) {
+      if (key is! String) return;
+      final r = _SeenCall.fromWire(value);
+      if (r == null || r.t < cutoff) return;
+      final cur = map[key];
+      if (cur == null) {
+        map[key] = _SeenCall(r.t, r.s);
+        if (r.s == 'answered') nowAnswered.add(key);
+        return;
+      }
+      final s = (_callStatusRank[r.s] ?? 0) > (_callStatusRank[cur.s] ?? 0)
+          ? r.s
+          : cur.s;
+      map[key] = _SeenCall(cur.t > r.t ? cur.t : r.t, s);
+      if (s == 'answered' && cur.s != 'answered') nowAnswered.add(key);
+    });
+    _persistSeenCalls(map);
+    // A call answered elsewhere retracts any missed-call we already surfaced
+    // (calls.js:282-284 → `missed-call-<callId>` notification id).
+    if (retract != null) {
+      for (final id in nowAnswered) {
+        retract('missed-call-$id');
+      }
+    }
+  }
+
+  /// calls.js `_persistSeenCalls` — TTL-prune then write back (best-effort; the
+  /// in-memory map is authoritative even if the disk write is unavailable).
+  void _persistSeenCalls(Map<String, _SeenCall> map) {
+    final cutoff =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _callSeenTtlSec;
+    map.removeWhere((_, r) => r.t < cutoff);
+    final prefs = _seenPrefs;
+    if (prefs == null) return; // not hydrated yet — will persist on next mark
+    try {
+      prefs.setString(_seenCallsKey, jsonEncode(_encodeSeenCalls(map)));
+    } catch (_) {}
+  }
+
+  Map<String, dynamic> _encodeSeenCalls(Map<String, _SeenCall> map) =>
+      {for (final e in map.entries) e.key: e.value.toWire()};
+
+  /// Top-100-by-recency seen-call map for cross-device sync (calls.js
+  /// `_seenCallsForSync`). Exposed for the serial controller owner that will
+  /// include it in the synced settings blob (F06-A3, DEFERRED here).
+  Map<String, dynamic> seenCallsForSync() {
+    final map = _seenMap();
+    final ids = map.keys.toList()
+      ..sort((a, b) => (map[b]?.t ?? 0) - (map[a]?.t ?? 0));
+    final out = <String, dynamic>{};
+    for (final id in ids.take(100)) {
+      final r = map[id];
+      if (r != null) out[id] = r.toWire();
+    }
+    return out;
+  }
+
   Map<String, dynamic>? _decodePayload(Map<String, dynamic> rumor) {
     // The engine hands us the rumor; calls.js parses event.content JSON. Here
     // the payload fields may already be on the rumor (engine-decoded) or nested
@@ -791,6 +1077,11 @@ class CallService {
   static const int _callSeenTtlSec = 86400;
 
   void _onInvite(String sender, Map<String, dynamic> data, [int createdAtSec = 0]) {
+    final callId = (data['callId'] as String?) ?? '';
+    // Skip a call already handled here or answered/seen on another device — this
+    // is what stops a relay-replayed invite from re-ringing (calls.js:312).
+    if (_hasSeenCall(callId)) return;
+
     // Accept-calls preference gate (calls.js _onCallInvite).
     final pref = _ref.read(settingsProvider).acceptCalls;
     final friend = _isFriend(sender);
@@ -807,7 +1098,11 @@ class CallService {
           (DateTime.now().millisecondsSinceEpoch ~/ 1000) - createdAtSec;
       if (ageSec > 60) {
         if (ageSec <= _callSeenTtlSec) {
+          // Remember it as missed so a re-delivery doesn't re-record it
+          // (calls.js:327).
+          _markCallSeen(callId, 'missed');
           _recordMissedCall(
+            callId: callId,
             callerPubkey: sender,
             callerNym: (data['nym'] as String?) ?? _nymFor(sender),
             kind: CallKind.fromWire(data['kind']),
@@ -820,9 +1115,14 @@ class CallService {
       }
     }
 
+    // A fresh ring is recorded pending; a relay replay then short-circuits at the
+    // `_hasSeenCall` gate above (calls.js:332).
+    _markCallSeen(callId, 'pending');
+
     if (_active != null || _incoming != null) {
-      _send(sender,
-          CallSignal.reject(data['callId'] as String, 'busy'));
+      // We're busy — mark missed and bounce the caller (calls.js:335).
+      _markCallSeen(callId, 'missed');
+      _send(sender, CallSignal.reject(callId, 'busy'));
       return;
     }
 
@@ -859,12 +1159,20 @@ class CallService {
       members: members,
     );
     _incoming = inc;
+    // Loop the ringtone while this call rings (calls.js:367 `_startRingtone`).
+    // Only reached on a fresh ring — the stale-missed / busy / pref-gated
+    // branches above all return before here, so no silent call ever rings.
+    _startRingtone();
     inc.timeout = Timer(kCallRingTimeout, () {
       if (_incoming == inc) {
         _incoming = null;
+        // The ring is over — stop the tone (calls.js:371 `_stopRingtone`).
+        _stopRingtone();
         // calls.js: surfaces "Missed call from X" + records it to history.
+        _markCallSeen(inc.callId, 'missed'); // calls.js:374
         _system('Missed call from ${inc.nym}');
         _recordMissedCall(
+          callId: inc.callId,
           callerPubkey: inc.from,
           callerNym: inc.nym,
           kind: inc.kind,
@@ -911,9 +1219,13 @@ class CallService {
     if (inc != null && inc.callId == data['callId'] && sender == inc.from) {
       inc.timeout?.cancel();
       _incoming = null;
+      // The caller withdrew — stop ringing (calls.js:471 `_stopRingtone`).
+      _stopRingtone();
       // calls.js `_onCallCancel`: a cancelled ring is a missed call.
+      _markCallSeen(inc.callId, 'missed'); // calls.js:473
       _system('Missed call from ${inc.nym}');
       _recordMissedCall(
+        callId: inc.callId,
         callerPubkey: inc.from,
         callerNym: inc.nym,
         kind: inc.kind,
@@ -1307,6 +1619,10 @@ class CallService {
     }
     _active = null;
     _flyReactions.clear();
+    // Unconditional safety net: every teardown path silences the ring, exactly
+    // like calls.js:653 `_stopRingtone()` at the tail of `_endCall`. Covers the
+    // media-failure answer path, outgoing-ring timeout, and remote hangup/reject.
+    _stopRingtone();
     if (_localRendererReady) _localRenderer.srcObject = null;
     _publishIdle();
   }
@@ -1376,6 +1692,36 @@ class CallService {
     final u = users[pubkey];
     if (u != null && u.nym.isNotEmpty) return u.nym;
     return pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
+  }
+
+  /// Builds the `['emoji', code, url]` tag tuples for any custom `:shortcode:`
+  /// in [content] (calls.js `customEmojiTagsForContent`), so a reaction sent to a
+  /// peer without the pack still resolves to its image. Empty for unicode-only
+  /// content. Best-effort: returns `null` if the store is unavailable so the
+  /// payload simply omits the field.
+  List<List<String>>? _emojiTagsFor(String content) {
+    try {
+      final tags = _ref.read(liveCustomEmojiProvider.notifier)
+          .emojiTagsForContent(content);
+      return tags.isEmpty ? null : tags;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Registers inbound custom-emoji defs carried on a reaction payload (calls.js
+  /// `ingestEmojiTags`), so a `:shortcode:` from a peer renders locally. Accepts
+  /// the loosely-typed wire value (`List<dynamic>` of `List<dynamic>`).
+  void _ingestEmojiTags(Object? raw) {
+    if (raw is! List) return;
+    final tags = <List<String>>[];
+    for (final t in raw) {
+      if (t is List) tags.add(t.map((e) => e.toString()).toList());
+    }
+    if (tags.isEmpty) return;
+    try {
+      _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(tags);
+    } catch (_) {}
   }
 
   /// Random source for floating-reaction positions (seedable in tests).
@@ -1651,4 +1997,28 @@ class CallService {
 Map<String, dynamic>? jsonDecodeMap(String s) {
   final decoded = jsonDecode(s);
   return decoded is Map<String, dynamic> ? decoded : null;
+}
+
+/// A single persisted seen-call record (calls.js stored shape `{t, s}`): unix
+/// seconds [t] + status [s] ∈ seen|pending|missed|declined|answered. Tolerates
+/// the PWA's legacy bare-number value (`_normCallRecord`, calls.js:211).
+class _SeenCall {
+  const _SeenCall(this.t, this.s);
+
+  final int t;
+  final String s;
+
+  Map<String, dynamic> toWire() => {'t': t, 's': s};
+
+  static _SeenCall? fromWire(Object? v) {
+    if (v is num) return _SeenCall(v.toInt(), 'seen');
+    if (v is Map) {
+      final t = v['t'];
+      if (t is num) {
+        final s = v['s'];
+        return _SeenCall(t.toInt(), s is String && s.isNotEmpty ? s : 'seen');
+      }
+    }
+    return null;
+  }
 }

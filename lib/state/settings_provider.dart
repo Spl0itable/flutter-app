@@ -258,6 +258,38 @@ class SettingsController extends StateNotifier<Settings> {
     _syncedChanged();
   }
 
+  /// Default landing channel (`nym_pinned_landing_channel`), persisted as the
+  /// `{"type":"geohash","geohash":"…"}` JSON string the PWA stores
+  /// (app.js:3899-3914). It is NOT a typed [Settings] field — it lives KV-only
+  /// (the `LandingChannel` model in settings_helpers.dart) — so this writes the
+  /// store directly. SYNCED: the PWA routes `pinnedLandingChannel` through the
+  /// `channels` settings-sync section (settings.js:21,116), so this fires
+  /// [_syncedChanged] like the other synced setters. The cross-device publish
+  /// reads the value back via [pinnedLandingChannelJson].
+  ///
+  /// [json] must be the serialized choice (`LandingChannel.toJsonString()`); an
+  /// empty/blank value clears the override (boot then falls back to the default
+  /// `nymchat`). Use this from the settings UI in place of a bare KV write so a
+  /// landing-channel change propagates to the user's other devices.
+  void setPinnedLandingChannel(String json) {
+    final v = json.trim();
+    if (v.isEmpty) {
+      _kv.remove(StorageKeys.pinnedLandingChannel);
+    } else {
+      _kv.setString(StorageKeys.pinnedLandingChannel, v);
+    }
+    _syncedChanged();
+  }
+
+  /// The persisted landing-channel JSON (`nym_pinned_landing_channel`), or null
+  /// when unset (boot defaults to `nymchat`). Consumed by the cross-device
+  /// settings publish so [StorageSync.settingsSet] can include it in the
+  /// `channels` section payload (the PWA's `_buildSettingsPayload`,
+  /// settings.js:116). Not part of the typed [Settings] state, so it is read
+  /// straight from the store.
+  String? get pinnedLandingChannelJson =>
+      _kv.getString(StorageKeys.pinnedLandingChannel);
+
   /// Hide-all-non-favorited toggle. Device-local-only (the PWA never syncs it,
   /// so this deliberately does NOT call [_syncedChanged]), but it now lives in
   /// the [Settings] state so the sidebar can react via

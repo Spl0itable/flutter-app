@@ -228,7 +228,8 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
             decoration: BoxDecoration(
               color: active
                   ? c.lightning.withValues(alpha: 0.12)
-                  : Colors.white.withValues(alpha: 0.04),
+                  // Inactive fill: white@0.04 dark / black@0.04 light (mode-aware).
+                  : c.insetFill,
               // `.bot-credit-tier-btn`: radius --radius-sm (12).
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
@@ -294,7 +295,8 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
         decoration: BoxDecoration(
           color: selected
               ? c.lightning.withValues(alpha: 0.12)
-              : Colors.white.withValues(alpha: 0.04),
+              // Unselected fill: white@0.04 dark / black@0.04 light (mode-aware).
+              : c.insetFill,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: selected ? c.lightning.withValues(alpha: 0.5) : c.border,

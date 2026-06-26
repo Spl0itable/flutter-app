@@ -43,7 +43,13 @@ class IncomingCallModal extends ConsumerWidget {
         '${call.isGroup ? ' (group)' : ''}';
 
     return Material(
-      color: Colors.black.withValues(alpha: 0.75),
+      // `.modal` backdrop: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+      // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+      // (styles-themes-responsive.css:1630-1635). This Material IS the overlay
+      // fill (not a barrier), so gate it on the resolved mode.
+      color: c.isLight
+          ? const Color(0x73000000) // black @ 0.45
+          : const Color(0xBF000000), // black @ 0.75
       child: Center(
         child: Container(
           // `.incoming-call-content`: max-width 320, padding 28/24, over
@@ -54,21 +60,33 @@ class IncomingCallModal extends ConsumerWidget {
             color: c.bgSecondary,
             borderRadius: BorderRadius.circular(24),
             border: Border.all(color: c.glassBorder),
-            boxShadow: [
-              const BoxShadow(
-                color: Color(0x80000000), // shadow-lg 0 8 32 black/0.5
-                blurRadius: 32,
-                offset: Offset(0, 8),
-              ),
-              BoxShadow(
-                color: c.primary.withValues(alpha: 0.1), // shadow-glow
-                blurRadius: 20,
-              ),
-              BoxShadow(
-                color: Colors.white.withValues(alpha: 0.05), // 1px white ring
-                spreadRadius: 1,
-              ),
-            ],
+            // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+            // rgba(0,0,0,0.12) }` — one soft shadow, no glow, no white ring in
+            // light (styles-themes-responsive.css:1050-1052).
+            boxShadow: c.isLight
+                ? const [
+                    BoxShadow(
+                      color: Color(0x1F000000), // black @ 0.12
+                      blurRadius: 40,
+                      offset: Offset(0, 8),
+                    ),
+                  ]
+                : [
+                    const BoxShadow(
+                      color: Color(0x80000000), // shadow-lg 0 8 32 black/0.5
+                      blurRadius: 32,
+                      offset: Offset(0, 8),
+                    ),
+                    BoxShadow(
+                      color: c.primary.withValues(alpha: 0.1), // shadow-glow
+                      blurRadius: 20,
+                    ),
+                    BoxShadow(
+                      color:
+                          Colors.white.withValues(alpha: 0.05), // 1px white ring
+                      spreadRadius: 1,
+                    ),
+                  ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,

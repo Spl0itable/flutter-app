@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -15,6 +16,8 @@ import '../../models/pm_conversation.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../chat/message_row.dart';
+import '../chat/message_skeleton.dart';
+import '../chat/typing_indicator.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
@@ -168,6 +171,13 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// focused column yet (`_cvEnable` focuses the first column on entry,
   /// columns.js:77-78). One-shot so later rebuilds don't re-fire it.
   bool _syncedInitialView = false;
+
+  /// Re-entrancy guard for the external-view nav-sink (`_onExternalView`). Set
+  /// while the deck itself is driving `switchView` (via `_syncFocusedView`) so
+  /// the `ref.listen(view)` it triggers doesn't recurse back into the sink and
+  /// add/duplicate a column. Mirrors the PWA `_cvOpenConversation` guard against
+  /// `_cvFocusColumn` re-entry (columns.js:274-296 / 550-559).
+  bool _syncingFromDeck = false;
 
   /// Mobile carousel page controller (`_cvScrollToIndex` on `innerWidth<=768`).
   final PageController _pageController = PageController();
@@ -357,8 +367,89 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       if (!mounted) return;
       final notifier = ref.read(appStateProvider.notifier);
       if (ref.read(appStateProvider).view == view) return;
+      // Flag the deck-driven switch so the `ref.listen(view)` nav-sink
+      // (`_onExternalView`) doesn't treat it as outside navigation and recurse.
+      _syncingFromDeck = true;
       notifier.switchView(view);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _syncingFromDeck = false;
+      });
     });
+  }
+
+  /// Inverse of [_viewForDesc]: turn the shared [ChatView] into the matching
+  /// column descriptor so the nav-sink can find/repurpose/add a column. For a
+  /// channel it recovers the registered [ChannelEntry] (so a fresh column shows
+  /// the right name/geohash); falling back to a bare descriptor keyed off
+  /// `view.id` (geohash vs named) when the channel isn't in the registry yet.
+  _ColumnDesc _descForView(ChatView v) {
+    switch (v.kind) {
+      case ViewKind.channel:
+        final channels = ref.read(channelsProvider);
+        for (final ch in channels) {
+          if (ch.key == v.id.toLowerCase()) {
+            return _ColumnDesc.channel(ch.channel, ch.geohash);
+          }
+        }
+        return isValidGeohash(v.id)
+            ? _ColumnDesc.channel('', v.id)
+            : _ColumnDesc.channel(v.id, '');
+      case ViewKind.pm:
+        final nym = ref.read(appStateProvider).users[v.id]?.nym ?? '';
+        return _ColumnDesc.pm(v.id, nym: nym);
+      case ViewKind.group:
+        return _ColumnDesc.group(v.id);
+    }
+  }
+
+  /// The columns-mode navigation sink (`_cvOpenConversation`, columns.js:274-296,
+  /// reached because `switchChannel`/`openPM`/`openGroup` short-circuit on
+  /// `_cvActive`). When the shared view changes from OUTSIDE the deck (sidebar
+  /// tap, notification, deep-link, back/forward), drive the deck instead of
+  /// leaving the header/composer pointed at a conversation with no visible
+  /// column:
+  ///   1. an existing column for [v] → focus + scroll it into view;
+  ///   2. a channel [v] with a primary channel column present → repurpose that
+  ///      column in place (`_cvNavigateColumn`);
+  ///   3. otherwise → append a new column, focus + scroll to it (`cvAddColumn`).
+  void _onExternalView(ChatView v) {
+    // Ignore our own `_syncFocusedView`-driven switches, and anything before the
+    // deck has seeded its initial columns.
+    if (_syncingFromDeck || !_seeded) return;
+    final desc = _descForView(v);
+
+    // (1) Existing column → focus + scroll (handles the back/forward + re-tap
+    // cases). `_scrollToIndex` records focus, animates the mobile carousel and
+    // re-points the shared view (a no-op here since it already equals [v]).
+    final existing = _columns.indexWhere((d) => d == desc);
+    if (existing >= 0) {
+      _scrollToIndex(existing);
+      return;
+    }
+
+    // (2) Channel view + a primary channel column exists → navigate it in place
+    // rather than spawning a duplicate channel column (`_cvNavigateColumn`).
+    if (v.kind == ViewKind.channel) {
+      final primary =
+          _columns.indexWhere((d) => d.kind == _ColumnKind.channel);
+      if (primary >= 0) {
+        setState(() {
+          _columns[primary] = desc;
+          _focused = primary;
+        });
+        _saveLayout();
+        _scrollToIndex(primary);
+        return;
+      }
+    }
+
+    // (3) Otherwise add a new column, focus + scroll to it (`cvAddColumn`).
+    setState(() {
+      _columns.add(desc);
+      _focused = _columns.length - 1;
+    });
+    _saveLayout();
+    _scrollToIndex(_columns.length - 1);
   }
 
   /// Step the visible column one slot left/right (`_cvStepFocused`, mobile
@@ -658,6 +749,14 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         ref.watch(settingsProvider.select((s) => s.columnsWallpaper));
     _seedIfNeeded(channels, pms, groups, pmOnly);
 
+    // Make the deck the navigation sink in columns mode: when the shared view
+    // changes from outside (sidebar/notification/deep-link/back-forward), focus,
+    // repurpose, or add the matching column (`_cvOpenConversation`, 08-B1).
+    ref.listen<ChatView>(
+      appStateProvider.select((s) => s.view),
+      (prev, next) => _onExternalView(next),
+    );
+
     if (_focused >= _columns.length) {
       _focused = _columns.isEmpty ? 0 : _columns.length - 1;
     }
@@ -872,8 +971,16 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
       child: _buildColumn(draggable: true),
     );
 
-    // The whole column is a drop target; dropping before its midpoint inserts
-    // the dragged column at this slot (`_cvStartColumnDrag`'s live reorder).
+    // The whole column is a drop target; dropping inserts the dragged column at
+    // this slot. The dim (0.4) + floating ghost (0.92) match the PWA, and the
+    // end-state order is identical. The one remaining delta vs the PWA's
+    // `_cvStartColumnDrag` (columns.js:706-713) is that the neighbours don't
+    // reflow *live* as the ghost passes their midpoints — Flutter commits the
+    // reorder on drop and just marks the hovered drop-slot with a primary edge
+    // (08-M3, med). True live reflow would require lifting drag state into the
+    // parent deck and reordering a working copy on midpoint crossings (the
+    // `Draggable.data` here is the captured old index, so reordering mid-drag
+    // desyncs the keyed slots); deferred as a behavioural-feel-only divergence.
     return DragTarget<int>(
       onWillAcceptWithDetails: (details) {
         if (details.data == widget.index) return false;
@@ -1076,11 +1183,6 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final messages = [...(app.messages[widget.desc.storageKey] ?? const <Message>[])];
     messages.sort(compareMessages);
 
-    // Per-column typing indicator (`.cv-typing`): the pubkeys typing in this
-    // column's conversation, keyed off `app.typing` (`<storageKey>|<pubkey>`,
-    // matching the focused-view `typingForCurrentViewProvider`).
-    final typingPubkeys = _typingFor(app);
-
     // `.cv-column.focused` (desktop): primary border + `--shadow-glow`
     // (`0 0 20px primary@0.1`). Mobile resets focused styling to none.
     final showFocus = widget.focused && !mobile;
@@ -1114,30 +1216,31 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
         children: [
           _buildHeader(c, mobile),
           // .cv-column-scroller / .cv-list (padding 10) + scroll-to-bottom.
-          // .messages-container background rgba(0,0,0,0.15) (transparent only
-          // under the columns wallpaper).
+          // .messages-container background rgba(0,0,0,0.15) dark; light-mode
+          // flips it to rgba(255,255,255,0.3) (themes-responsive.css:1230-1232),
+          // so it must be mode-aware or the column body looks dark-tinted in
+          // light mode. Transparent only under the columns wallpaper.
           Expanded(
             child: ColoredBox(
               color: transparent
                   ? Colors.transparent
-                  : Colors.black.withValues(alpha: 0.15),
+                  : (c.isLight
+                      ? const Color(0x4DFFFFFF) // white @ 0.3
+                      : const Color(0x26000000)), // black @ 0.15
               child: Stack(
                 children: [
                   Positioned.fill(
                     child: messages.isEmpty
-                        ? Center(
-                            // `.msg-empty-note`: text-dim, 13px, "No recent
-                            // messages[ in #channel]".
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 16, vertical: 24),
-                              child: Text(
-                                _emptyNoteText(),
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                    color: c.textDim, fontSize: 13),
-                              ),
-                            ),
+                        // PWA renders empty columns through
+                        // `_showMessageSkeleton(... () => _appendEmptyNote(...))`
+                        // (messages.js:3066-3070): a shimmer for up to 3s, then
+                        // the generic note if still empty (08-H1). Keyed on the
+                        // storage key so re-pointing the column replays it.
+                        ? _DeckEmptyOrLoading(
+                            key: ValueKey(
+                                'cvempty_${widget.desc.storageKey}'),
+                            useBubbles: settings.useBubbles,
+                            emptyNote: _emptyNoteText(),
                           )
                         : ListView.builder(
                             controller: _scroll,
@@ -1168,8 +1271,11 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
               ),
             ),
           ),
-          // `.cv-typing` per-column typing indicator (animated 0→24, black@0.15).
-          _TypingRow(pubkeys: typingPubkeys),
+          // `.cv-typing` per-column typing indicator. Reuses the canonical
+          // single-view widget (bouncing dots, bot "is thinking", 1.5px avatar
+          // ring, light-mode bg flip) keyed off this column's storage key
+          // (08-H2), rather than a degraded re-implementation.
+          TypingIndicatorRow(storageKey: widget.desc.storageKey),
         ],
       ),
     );
@@ -1177,30 +1283,14 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     return mobile ? body : SizedBox(width: _CvDimens.column, child: body);
   }
 
-  /// The empty-state text (`_appendEmptyNote`): "No recent messages in
-  /// #channel" for channels (`messages.js:2840`), else "No recent messages".
-  String _emptyNoteText() {
-    final d = widget.desc;
-    if (d.kind == _ColumnKind.channel) {
-      final name = d.geohash.isNotEmpty ? d.geohash : d.channel;
-      return 'No recent messages in #$name';
-    }
-    return 'No recent messages';
-  }
-
-  /// Resolves the pubkeys currently typing in this column's conversation from
-  /// `app.typing` (keyed `<storageKey>|<pubkey>`, non-expired).
-  List<String> _typingFor(AppState app) {
-    final prefix = '${widget.desc.storageKey}|';
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final out = <String>[];
-    app.typing.forEach((k, expiry) {
-      if (k.startsWith(prefix) && expiry > now) {
-        out.add(k.substring(prefix.length));
-      }
-    });
-    return out;
-  }
+  /// The empty-state text (`_appendEmptyNote`). Columns render through
+  /// `renderMessagesWithVirtualScroll` (columns.js:507-514) whose empty path is
+  /// `_showMessageSkeleton(container, () => _appendEmptyNote(container, 'No
+  /// recent messages'))` (messages.js:3066-3070) — i.e. the GENERIC bare string
+  /// in BOTH modes. The channel-specific "No recent messages in #&lt;name&gt;" is a
+  /// single-view-only string (the `loadChannelFromRelays` path, messages.js:2840)
+  /// and is NOT used by columns (08-H1).
+  String _emptyNoteText() => 'No recent messages';
 
   /// The `.cv-column-header` (padding 10/12, bottom border, gap 8). On desktop:
   /// 6-dot grip + icon + title (all draggable to reorder, `cursor:grab`) + a
@@ -1308,6 +1398,76 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: child,
+    );
+  }
+}
+
+/// The empty-column surface: a shimmer [MessageSkeleton] while history is
+/// plausibly still loading, settling into the centered "No recent messages"
+/// note after a ~3s grace period — a 1:1 port of the PWA's
+/// `_showMessageSkeleton` (shimmer) → `_appendEmptyNote` (note) flow for columns
+/// (`renderMessagesWithVirtualScroll`'s empty path, messages.js:3066-3070, with
+/// `this._msgSkeletonSettleMs || 3000`). The same widget the single view uses
+/// (`messages_list.dart`'s `_EmptyOrLoading`), recreated per column via a
+/// storage-key-keyed instance so the shimmer plays on every (re)entry. Once a
+/// message arrives `messages.isEmpty` is false and this widget stops rendering,
+/// matching the PWA where an incoming message clears the skeleton/note.
+class _DeckEmptyOrLoading extends StatefulWidget {
+  const _DeckEmptyOrLoading({
+    super.key,
+    required this.useBubbles,
+    required this.emptyNote,
+  });
+
+  /// Bubble vs IRC skeleton layout (`body.chat-bubbles`).
+  final bool useBubbles;
+
+  /// The settled-state note text (`_appendEmptyNote`); the generic "No recent
+  /// messages" for columns.
+  final String emptyNote;
+
+  @override
+  State<_DeckEmptyOrLoading> createState() => _DeckEmptyOrLoadingState();
+}
+
+class _DeckEmptyOrLoadingState extends State<_DeckEmptyOrLoading> {
+  // `this._msgSkeletonSettleMs || 3000`.
+  static const _settle = Duration(seconds: 3);
+
+  Timer? _timer;
+  bool _settled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(_settle, () {
+      if (mounted) setState(() => _settled = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_settled) {
+      return MessageSkeleton(useBubbles: widget.useBubbles);
+    }
+    final c = context.nym;
+    // `.msg-empty-note`: text-dim, 13px, centered, padding 24/16
+    // (`styles-chat.css:2045-2051`).
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: Text(
+          widget.emptyNote,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: c.textDim, fontSize: 13),
+        ),
+      ),
     );
   }
 }
@@ -1836,87 +1996,6 @@ class _TabRow extends StatelessWidget {
   }
 }
 
-/// The per-column typing indicator (`.typing-indicator.cv-typing`): hidden
-/// (height 0 / opacity 0) until someone is typing, then animates to a 24px-tall
-/// row (`padding 4px 20px`, 12px text-dim, bg `rgba(0,0,0,0.15)`) showing up to
-/// 3 overlapping 18px avatars + "X is typing" / "X and Y are typing" /
-/// "N people are typing" (`_renderTypingInto`, `styles-features.css:4227`).
-class _TypingRow extends ConsumerWidget {
-  const _TypingRow({required this.pubkeys});
-  final List<String> pubkeys;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.nym;
-    final active = pubkeys.isNotEmpty;
-    final app = ref.watch(appStateProvider);
-
-    String nymOf(String pk) {
-      final u = app.users[pk];
-      final nym = u?.nym;
-      return (nym != null && nym.isNotEmpty) ? nym : 'Someone';
-    }
-
-    final style = TextStyle(color: c.textDim, fontSize: 12, height: 1);
-
-    Widget content;
-    if (!active) {
-      content = const SizedBox.shrink();
-    } else {
-      final visible = pubkeys.take(3).toList();
-      final String text;
-      if (pubkeys.length == 1) {
-        text = '${nymOf(pubkeys[0])} is typing';
-      } else if (pubkeys.length == 2) {
-        text = '${nymOf(pubkeys[0])} and ${nymOf(pubkeys[1])} are typing';
-      } else {
-        text = '${pubkeys.length} people are typing';
-      }
-      content = Padding(
-        // `.typing-indicator.active` padding: 4px 20px (trimmed to 3px vertical
-        // so the 18px avatars sit inside the 24px row without overflow).
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 3),
-        child: Row(
-          children: [
-            // `.typing-indicator-avatars`: 18px round, +img margin-left -6.
-            for (var i = 0; i < visible.length; i++)
-              Transform.translate(
-                offset: Offset(-6.0 * i, 0),
-                child: NymAvatar(
-                  seed: visible[i],
-                  size: 18,
-                  imageUrl: app.users[visible[i]]?.profile?.picture,
-                ),
-              ),
-            // The avatars overlap by 6px each (Transform doesn't shrink layout),
-            // so claw back the shifted gap before the 8px text gap.
-            if (visible.isNotEmpty)
-              SizedBox(
-                  width: (8 - 6.0 * (visible.length - 1)).clamp(0, 8).toDouble()),
-            Expanded(child: Text(text, style: style, maxLines: 1)),
-          ],
-        ),
-      );
-    }
-
-    // Animate the 0↔24 height + opacity, matching the CSS transition.
-    return ClipRect(
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.ease,
-        height: active ? 24 : 0,
-        width: double.infinity,
-        color: Colors.black.withValues(alpha: 0.15),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 200),
-          opacity: active ? 1 : 0,
-          child: content,
-        ),
-      ),
-    );
-  }
-}
-
 /// `.cv-scroll-bottom`: 36×36 circle, glassBg fill, 1px border, primary chevron,
 /// shadow-md, hover scale 1.1 (gap F10).
 class _ScrollBottomButton extends StatefulWidget {
@@ -1933,6 +2012,29 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final light = c.isLight;
+    // `.cv-scroll-bottom` shares the `.scroll-to-bottom-btn` light-mode flip
+    // (`styles-themes-responsive.css:607-615`): rest fill white@0.85, border
+    // primary@0.2, shadow `0 2px 12px black@0.15`; hover stays primary-tinted in
+    // both modes. (The columns copy previously omitted this, matching the
+    // single-view `_ScrollToBottomButton` fix.)
+    final fill = _hover
+        ? c.primaryA(0.15)
+        : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
+    final border = _hover
+        ? c.primaryA(0.30)
+        : (light ? c.primaryA(0.20) : c.glassBorder);
+    final shadow = light
+        ? const BoxShadow(
+            color: Color(0x26000000), // black @ 0.15
+            offset: Offset(0, 2),
+            blurRadius: 12,
+          )
+        : const BoxShadow(
+            color: Color(0x66000000), // black @ 0.4 (shadow-md)
+            offset: Offset(0, 4),
+            blurRadius: 16,
+          );
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -1947,18 +2049,10 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
             height: 36,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: _hover ? c.primaryA(0.15) : c.glassBg,
+              color: fill,
               shape: BoxShape.circle,
-              border: Border.all(
-                color: _hover ? c.primaryA(0.30) : c.glassBorder,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.4),
-                  offset: const Offset(0, 4),
-                  blurRadius: 16,
-                ),
-              ],
+              border: Border.all(color: border),
+              boxShadow: [shadow],
             ),
             // `.cv-add-column` strip scroll FAB (columns.js:418) — down chevron.
             child: NymSvgIcon(NymIcons.chevronDown, size: 20, color: c.primary),

@@ -327,11 +327,14 @@ void main() {
     });
   });
 
-  // The PWA's `body.light-mode .flair-X` rules reset `color` + `text-shadow:
-  // none` but DON'T touch `filter`, so the `filter: drop-shadow` on the bright
-  // star/flame/diamond/genesis flairs survives into light mode while the
-  // `text-shadow` halo is dropped. Each glow copy is an `ImageFiltered` layer
-  // behind the crisp glyph, so the layer count encodes that asymmetry.
+  // The flair glyph is a path-only inline `<svg>`, and CSS `text-shadow` does
+  // not shadow replaced inline-SVG paths — only `filter: drop-shadow` does. So
+  // the `.flair-X` `text-shadow` halo is INERT in the PWA (painted for no flair,
+  // in either mode); the only glow rendered is the `filter: drop-shadow` on the
+  // bright star/flame/diamond/genesis flairs, which the `body.light-mode` rules
+  // do NOT reset, so it is present in BOTH modes. Each glow copy is an
+  // `ImageFiltered` layer behind the crisp glyph, so the layer count is the
+  // drop-shadow count (0 for text-shadow-only flairs, both modes).
   group('FlairBadge glow (light vs dark, styles-features.css)', () {
     Future<void> pumpFlair(
       WidgetTester tester,
@@ -360,28 +363,34 @@ void main() {
     int glowCopies(WidgetTester tester) =>
         tester.widgetList<ShopSvgIcon>(find.byType(ShopSvgIcon)).length - 1;
 
-    testWidgets('crown (text-shadow only): glow in dark, none in light',
+    testWidgets('crown (text-shadow only): no glow in either mode',
         (tester) async {
+      // text-shadow is inert on a path SVG and crown has no drop-shadow, so the
+      // crisp glyph paints with no halo in dark OR light.
       await pumpFlair(tester, 'flair-crown', Brightness.dark);
-      expect(glowCopies(tester), 1); // one text-shadow halo
+      expect(glowCopies(tester), 0);
       await pumpFlair(tester, 'flair-crown', Brightness.light);
-      expect(glowCopies(tester), 0); // text-shadow: none, no drop-shadow
+      expect(glowCopies(tester), 0);
     });
 
-    testWidgets('star (text-shadow + drop-shadow): drop-shadow survives light',
+    testWidgets('star (drop-shadow): drop-shadow renders in both modes',
         (tester) async {
+      // Only the `filter: drop-shadow` glows the SVG; the inert text-shadow adds
+      // nothing, and the drop-shadow survives `body.light-mode`.
       await pumpFlair(tester, 'flair-star', Brightness.dark);
-      expect(glowCopies(tester), 2); // text-shadow + drop-shadow
+      expect(glowCopies(tester), 1);
       await pumpFlair(tester, 'flair-star', Brightness.light);
-      expect(glowCopies(tester), 1); // only the drop-shadow survives
+      expect(glowCopies(tester), 1);
     });
 
-    testWidgets('genesis (2 text-shadows + drop-shadow): one survives light',
+    testWidgets('genesis (drop-shadow): drop-shadow renders in both modes',
         (tester) async {
+      // The two genesis text-shadows are inert; only its single drop-shadow
+      // glows, in both dark and light.
       await pumpFlair(tester, 'flair-genesis', Brightness.dark);
-      expect(glowCopies(tester), 3); // two text-shadows + one drop-shadow
+      expect(glowCopies(tester), 1);
       await pumpFlair(tester, 'flair-genesis', Brightness.light);
-      expect(glowCopies(tester), 1); // only the drop-shadow survives
+      expect(glowCopies(tester), 1);
     });
   });
 }

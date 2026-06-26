@@ -344,6 +344,12 @@ class CommandDispatcher {
       engine.systemMessage('User ${args.trim()} not found');
       return;
     }
+    if (t.pubkey == engine.selfPubkey) {
+      // PWA cmdZap blocks self-zapping via the command (zaps.js:1947/2007).
+      // Self-zapping your own MESSAGE via the badge is still allowed elsewhere.
+      engine.systemMessage("You can't zap yourself");
+      return;
+    }
     hooks.openZap?.call(t.pubkey, t.nym);
   }
 

@@ -28,8 +28,8 @@ String channelEntryShareUrl(ChannelEntry entry,
     buildChannelShareUrl(entry.key, host: host);
 
 /// `#shareModal` — "Share Channel": the channel URL in a readonly field with a
-/// COPY button (channels.js `copyShareUrl`), the share hint, plus a QR code so
-/// the link can be scanned on another device.
+/// COPY button (channels.js `copyShareUrl`) and the share hint. Mirrors the PWA
+/// `#shareModal` (index.html:2097-2114) exactly — it has no QR code.
 class ShareChannelModal extends StatefulWidget {
   const ShareChannelModal({super.key, required this.channelKey});
 

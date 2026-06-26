@@ -101,9 +101,11 @@ class StorageSync {
       'swipeReactEmoji',
       'notificationsEnabled',
       'syncMLSHistory',
+      'seenCalls', // cross-device seen-call map (calls.js, settings.js:20)
     ],
     'channels': [
       'sortByProximity',
+      'pinnedLandingChannel', // default landing channel ({type,geohash} object)
     ],
     'data': [
       'lowDataMode',
@@ -154,7 +156,20 @@ class StorageSync {
   /// matching the PWA field names (`_buildSettingsPayload` +
   /// `_splitSettingsBySection`). Each section carries `v: 2` like the PWA.
   /// Returns `{ '<section>': { ...fields } }`.
-  static Map<String, Map<String, dynamic>> buildSectionPayloads(Settings s) {
+  ///
+  /// [pinnedLandingChannelJson] is the default-landing-channel choice
+  /// (`nym_pinned_landing_channel`, the `{"type":"geohash","geohash":"…"}` JSON
+  /// the PWA stores) read from KV by the caller. It is NOT a typed [Settings]
+  /// field, so it is threaded in separately; when non-null and parseable it is
+  /// emitted into the `channels` section as the same `{type,geohash}` OBJECT the
+  /// PWA syncs (`pinnedLandingChannel`, settings.js:21,116). A null/blank/invalid
+  /// value omits it (the section then only carries the other channels keys),
+  /// keeping every existing caller (which passes nothing) byte-identical.
+  static Map<String, Map<String, dynamic>> buildSectionPayloads(
+    Settings s, {
+    String? pinnedLandingChannelJson,
+    Map<String, dynamic>? seenCalls,
+  }) {
     // The flat synced payload (PWA `_buildSettingsPayload`, subset the native
     // model owns). Booleans/strings/ints map 1:1 to the PWA field names.
     final flat = <String, dynamic>{
@@ -196,6 +211,26 @@ class StorageSync {
       'cachePMs': s.cachePMs,
     };
 
+    // Default landing channel: not a typed [Settings] field (KV-only), threaded
+    // in by the caller as JSON. Emit the same `{type,geohash}` OBJECT the PWA
+    // syncs (`pinnedLandingChannel`, settings.js:116) so the inbound apply on
+    // another device restores it. Drop a blank/invalid value (boot then defaults
+    // to `nymchat`); the `lookup` below routes it into the `channels` section.
+    final landing = _parsePinnedLandingChannel(pinnedLandingChannelJson);
+    if (landing != null) {
+      flat['pinnedLandingChannel'] = landing;
+    }
+
+    // Seen-call map: not a typed [Settings] field (owned by CallService),
+    // threaded in by the caller. Emit it into the `messaging` section as the
+    // same `{callId: {t,s}}` object the PWA syncs (`seenCalls`, settings.js:152)
+    // so another device can merge it. Included when the caller opts in (passes a
+    // map, even empty — matching the PWA, which always carries the field);
+    // existing callers pass null and stay byte-identical.
+    if (seenCalls != null) {
+      flat['seenCalls'] = seenCalls;
+    }
+
     final lookup = <String, String>{};
     syncedSectionKeys.forEach((section, keys) {
       for (final k in keys) {
@@ -219,6 +254,29 @@ class StorageSync {
     return true;
   }
 
+  /// Parses the persisted landing-channel JSON
+  /// (`{"type":"geohash","geohash":"…"}`) into the normalized `{type,geohash}`
+  /// Map the PWA syncs (`pinnedLandingChannel`, settings.js:116). Returns null
+  /// when [raw] is null/blank, isn't a JSON object, or lacks a non-empty
+  /// `geohash` string (so an absent/corrupt value is simply omitted from the
+  /// payload). Mirrors `LandingChannel.tryParse` in settings_helpers.dart: a
+  /// missing `type` defaults to `'geohash'`.
+  static Map<String, dynamic>? _parsePinnedLandingChannel(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final m = jsonDecode(trimmed);
+      if (m is Map && m['geohash'] is String && (m['geohash'] as String).isNotEmpty) {
+        final type = m['type'] is String ? m['type'] as String : 'geohash';
+        return {'type': type, 'geohash': m['geohash'] as String};
+      }
+    } catch (_) {
+      // Corrupt JSON — omit rather than poison the channels section.
+    }
+    return null;
+  }
+
   /// Publishes the synced settings sections to D1. For each section it encrypts
   /// the blob (NIP-44 to self) with the real category embedded as `__cat`,
   /// computes the `contentHash` (sha256 of `pubkey|blob-plaintext`) the worker
@@ -227,9 +285,23 @@ class StorageSync {
   /// Returns the set of section names that were sent (changed since last call).
   /// All failures are swallowed; an unchanged section (same content hash) is
   /// skipped without a network call. Mirrors `_saveSettingsBlobToD1`.
-  Future<Set<String>> settingsSet(Settings settings) async {
+  ///
+  /// [pinnedLandingChannelJson] is the KV-stored default-landing-channel choice
+  /// (not a typed [Settings] field); the caller reads it via
+  /// `SettingsController.pinnedLandingChannelJson` and passes it so it rides the
+  /// `channels` section like the PWA (settings.js:21,116). Omitting it (the
+  /// current callers) leaves the `channels` section landing-channel-free.
+  Future<Set<String>> settingsSet(
+    Settings settings, {
+    String? pinnedLandingChannelJson,
+    Map<String, dynamic>? seenCalls,
+  }) async {
     final sent = <String>{};
-    final sections = buildSectionPayloads(settings);
+    final sections = buildSectionPayloads(
+      settings,
+      pinnedLandingChannelJson: pinnedLandingChannelJson,
+      seenCalls: seenCalls,
+    );
     for (final entry in sections.entries) {
       final category = sectionCategory(entry.key);
       final ok = await _setSettingsCategory(category, jsonEncode(_withCat(
@@ -239,6 +311,27 @@ class StorageSync {
       if (ok) sent.add(entry.key);
     }
     return sent;
+  }
+
+  /// Publishes the cross-device notification read-state wrap — the PWA's
+  /// `nymchat-notifications` category (settings.js:559). N26 scopes this to the
+  /// seen-keys map (`seenNotifications`, the read-state); the bell history blob
+  /// itself stays device-local (its cross-device sync is out of N26's scope).
+  /// No-op (and no network call) when [seenNotifications] is empty or unchanged
+  /// since the last publish (content-hash dedup in [_setSettingsCategory]).
+  /// Returns whether the category was actually sent.
+  Future<bool> notificationsWrapSet(
+      Map<String, dynamic> seenNotifications) async {
+    if (seenNotifications.isEmpty) return false;
+    const category = 'nymchat-notifications';
+    final payload = <String, dynamic>{
+      'v': 2,
+      'seenNotifications': seenNotifications,
+    };
+    return _setSettingsCategory(
+      category,
+      jsonEncode(_withCat(payload, category)),
+    );
   }
 
   /// Embeds the real category into the (to-be-encrypted) blob as `__cat`
@@ -325,6 +418,13 @@ class StorageSync {
     }
     if (decoded.isEmpty) return null;
 
+    // N26: pull the cross-device notification read-state wrap (a separate
+    // category from the settings sections) so the caller can merge its seen-keys.
+    Map<String, dynamic>? notificationsPayload;
+    for (final d in decoded) {
+      if (d.category == 'nymchat-notifications') notificationsPayload = d.payload;
+    }
+
     bool isCore(String c) =>
         c == 'nymchat-settings' || c.startsWith('nymchat-settings-');
 
@@ -337,7 +437,17 @@ class StorageSync {
     final toApply = sections.isNotEmpty
         ? sections
         : core.where((d) => d.category == 'nymchat-settings').toList();
-    if (toApply.isEmpty) return null;
+    if (toApply.isEmpty) {
+      // No settings sections to apply — but a notifications wrap alone is still
+      // worth returning so the caller can merge the seen-keys (N26).
+      return notificationsPayload == null
+          ? null
+          : SettingsLoadResult(
+              payload: const {},
+              newestTs: 0,
+              notificationsPayload: notificationsPayload,
+            );
+    }
 
     final merged = <String, dynamic>{};
     var newestTs = 0;
@@ -345,7 +455,11 @@ class StorageSync {
       merged.addAll(d.payload);
       if (d.updatedAt > newestTs) newestTs = d.updatedAt;
     }
-    return SettingsLoadResult(payload: merged, newestTs: newestTs);
+    return SettingsLoadResult(
+      payload: merged,
+      newestTs: newestTs,
+      notificationsPayload: notificationsPayload,
+    );
   }
 
   /// Fetches inbound settings-transfer offers: the per-section encrypted
@@ -1056,9 +1170,19 @@ class _DecodedCategory {
 /// applies [payload] only when [newestTs] is newer than the stored
 /// `nym_last_settings_sync_ts`.
 class SettingsLoadResult {
-  const SettingsLoadResult({required this.payload, required this.newestTs});
+  const SettingsLoadResult({
+    required this.payload,
+    required this.newestTs,
+    this.notificationsPayload,
+  });
   final Map<String, dynamic> payload;
   final int newestTs;
+
+  /// The decrypted `nymchat-notifications` wrap payload (N26), when present —
+  /// carries `seenNotifications` (the cross-device notification read-state map).
+  /// Surfaced separately from the settings [payload] because the caller merges
+  /// it additively (idempotently) regardless of the settings ts gate.
+  final Map<String, dynamic>? notificationsPayload;
 }
 
 /// An inbound settings-transfer offer (one synced settings section another

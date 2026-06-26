@@ -61,6 +61,25 @@ const List<String> kCommonGeohashes = [
   'nymchat', '9q', 'w2', 'dr5r', '9q8y', 'u4pr', 'gcpv', 'f2m6', 'xn77', 'tjm5',
 ];
 
+/// A PM sent but not yet acknowledged by a delivery receipt, queued for
+/// automatic re-send (pms.js `trackPendingDM`/`retryPendingDMs`, lines 117-176).
+/// Keyed in [_pendingDms] by the stable `nymMessageId` (the `['x', …]` tag),
+/// NOT the optimistic bubble id — a re-publish rebuilds a fresh gift-wrap (new
+/// randomness, new wrap id), but the recipient dedups on `nymMessageId`, and the
+/// delivery receipt that clears the entry also references `nymMessageId`.
+class _PendingDm {
+  _PendingDm({
+    required this.rumor,
+    required this.recipientPubkey,
+    required this.lastAttemptMs,
+  });
+
+  final UnsignedEvent rumor;
+  final String recipientPubkey;
+  int attempts = 0;
+  int lastAttemptMs;
+}
+
 /// Ties identity + relay + crypto to the [AppState] store: boots an ephemeral
 /// identity, connects to relays, and routes inbound events into the store. Send
 /// requests from the composer flow through here.
@@ -90,6 +109,10 @@ class NostrController {
 
   /// Throttle: pubkey/groupId-scoped last typing-start send time (ms).
   final Map<String, int> _typingThrottle = {};
+
+  /// Minimum gap between typing-start broadcasts (PWA `_typingSendInterval`,
+  /// app.js:741), C03-D4.
+  static const int _typingSendIntervalMs = 3000;
 
   /// Reaction toggle rate-limit tracker: `messageId:emoji` → timestamps within
   /// the 30s window + a cooldown-until ms (reactions.js
@@ -214,6 +237,15 @@ class NostrController {
 
       // Restore friends / blocked users / blocked keywords from KV.
       _hydrateSocialState(appState);
+      // Restore the user's closed-PM set so deleted conversations don't
+      // resurrect from the D1 backlog on relaunch (F02; pms.js `nym_closed_pms`
+      // / `nym_closed_pm_times`).
+      _hydrateClosedPMs(appState);
+      // Seed the notification badge's blocked-sender exclusion from the restored
+      // block list (C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
 
       // Mirror the persisted heuristic-spam-filter flags (PWA `spamFilterEnabled`
       // / `spamFilterAggressive`, default true) onto the AppState module globals
@@ -245,10 +277,12 @@ class NostrController {
         onGiftWrap: _onGiftWrap,
       ));
 
-      // Broadcast presence on connect, then re-assert on a timer
-      // (nostr-core.js: presence on connect + on a 60s cadence).
+      // Broadcast presence on connect. The PWA's presence is purely
+      // event-driven (`recordOwnActivity` fires on send/react only — there is
+      // NO `setInterval` heartbeat), so a connected-but-idle user decays to
+      // offline for peers after the 5-min window (C03-D7). Re-broadcasts come
+      // from the send/react call sites below, not a timer.
       recordOwnActivity();
-      _startPresenceTimer();
 
       // Seed the sidebar with the well-known common geohash channels so the
       // channel list isn't empty before the user joins anything (PWA
@@ -285,8 +319,19 @@ class NostrController {
       // [_onConnectionChanged]). Best-effort; never blocks boot.
       unawaited(_discoverChannelActivity());
     } catch (e, st) {
-      // Stay on seed/offline data if boot fails (e.g. no secure storage).
+      // Boot failed (e.g. no secure storage). Never strand the user on demo
+      // data: if we never reached `goLive` (so the store is still the empty
+      // logged-out shell, AppState.empty), force it explicitly so a partial
+      // boot can't leave stale/seed content, and surface the error. A boot that
+      // already went live (identity != null) and only failed a later
+      // best-effort step keeps its live store.
       debugPrint('NostrController.init failed: $e\n$st');
+      if (_identity == null) {
+        try {
+          _ref.read(appStateProvider.notifier).reset();
+        } catch (_) {}
+      }
+      _emitSystemMessage('Connection failed — working offline.');
     }
   }
 
@@ -335,6 +380,10 @@ class NostrController {
       if (view.kind == ViewKind.channel) {
         unawaited(_backfillChannelArchive(view.id));
       }
+      // Re-send any PM still waiting on a delivery receipt — a reconnect is the
+      // most likely moment a stuck DM finally lands (pms.js
+      // `retryPendingDMsOnReconnect`, F02 auto-retry).
+      _retryPendingDmsOnReconnect();
     }
   }
 
@@ -459,12 +508,24 @@ class NostrController {
   /// After this returns the controller is back in its pre-boot state ([_started]
   /// is reset), so a fresh identity created through the setup flow can [init]
   /// again on the same provider instance.
-  Future<void> signOut() async {
-    // 1) Tear down the live session: cancel timers, close subs, flush + close the
-    //    cache, and stop the relay service. (Mirrors `cmdQuit` + the page reload
-    //    dropping all in-memory NYM state.)
+  /// Tears down the live session: cancel timers, close subs, flush + close the
+  /// cache, stop the relay service, drop the in-memory identity / signer /
+  /// service / storage-sync handles + session-scoped maps, and unbind the
+  /// settings/view callbacks that captured the old signer/sync. Shared by
+  /// [signOut] (followed by clearing persisted login + resetting the store) and
+  /// [loginWithNsec] (followed by re-booting as the imported account). Does NOT
+  /// touch persisted KV/secrets, [AppState], or `_started` — the caller decides
+  /// those. Idempotent and safe to call before [init].
+  ///
+  /// [flush] writes any dirty cache rows before closing (the default — sign-out /
+  /// login want a clean commit). The PANIC path passes `flush:false` so no
+  /// just-wiped data is re-persisted mid-wipe (panic.js stops persistence:
+  /// `_cacheDisabled = true`), matching the PWA's "destroy, don't save" intent.
+  Future<void> _teardownLiveSession({bool flush = true}) async {
+    // Cancel timers, close subs, flush + close the cache, and stop the relay
+    // service. (Mirrors `cmdQuit` + the page reload dropping all in-memory NYM
+    // state.)
     _flushTimer?.cancel();
-    _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
     _vouchPublishTimer?.cancel();
     _vouchPublishTimer = null;
@@ -473,6 +534,9 @@ class NostrController {
     _trustPersistTimer?.cancel();
     _trustPersistTimer = null;
     _lastVouchPublishAt = 0;
+    _dmRetryTimer?.cancel();
+    _dmRetryTimer = null;
+    _pendingDms.clear();
     _profileBackfillTimer?.cancel();
     _profileBackfillTimer = null;
     _profileBackfillQueue.clear();
@@ -484,9 +548,11 @@ class NostrController {
       _service?.pool.closeSubscription(_p2pSub!);
       _p2pSub = null;
     }
-    try {
-      await _flush();
-    } catch (_) {}
+    if (flush) {
+      try {
+        await _flush();
+      } catch (_) {}
+    }
     try {
       await _cache?.close();
     } catch (_) {}
@@ -501,8 +567,8 @@ class NostrController {
     // explicitly on identity teardown to be safe).
     Nip98Auth.clearAuthCache();
 
-    // 2) Drop in-memory identity + signer + group/service/storage-sync handles
-    //    (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
+    // Drop in-memory identity + signer + group/service/storage-sync handles
+    // (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
     _identity = null;
     _signer = null;
     _service = null;
@@ -512,14 +578,92 @@ class NostrController {
     _presenceTimestamps.clear();
     _typingThrottle.clear();
     _sentChannelReadReceipts.clear();
+    _sentPmReadReceipts.clear();
     _reactionToggleTracker.clear();
 
-    // 3) Stop syncing settings on change (the binding captured the old signer).
+    // Stop syncing settings on change (the binding captured the old signer).
     _ref.read(settingsProvider.notifier).onSyncedChange = null;
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
+  }
 
-    // 4) Remove the persisted login + auto-ephemeral + per-identity caches the
+  /// Switches the running session to a freshly-imported nsec account WITHOUT an
+  /// app restart — the native analogue of the PWA's `nostrLoginWithNsec` →
+  /// `applyNostrLogin` (app.js:5036-5074 / 5487-5612), whose key step is
+  /// `resubscribeAllRelays()` so the new pubkey's gift-wraps/PMs/zaps flow in.
+  ///
+  /// [IdentityService.loginWithNsec] persists `nostr_login_method='nsec'` + the
+  /// nsec (so a later [boot]/relaunch restores the same account) and returns the
+  /// durable identity; it throws [FormatException] on an invalid key (the modal
+  /// validates first, but we stay defensive). We then tear down the live
+  /// ephemeral session and re-run [init], which boots the now-persisted nsec
+  /// identity, rebuilds the relay service + subscriptions under the new pubkey,
+  /// and `goLive`s the store — the "re-run the boot→goLive path" that makes the
+  /// next state the real account. Finally we bump [bootEpochProvider] so the
+  /// boot gate (now seeing a saved login) lands on the shell.
+  Future<void> loginWithNsec(String nsec) async {
+    final kv = _ref.read(keyValueStoreProvider);
+    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    // Persist method + nsec + pubkey (throws on an invalid key — propagated so
+    // the modal can show its existing error and NOT complete).
+    await identityService.loginWithNsec(nsec);
+
+    // Re-boot as the persisted nsec account: tear down the ephemeral session,
+    // allow a fresh boot on this provider instance, then `init()` restores the
+    // saved login and re-subscribes under the new pubkey.
+    await _teardownLiveSession();
+    _started = false;
+    await init();
+
+    // Remount the boot gate so it re-checks (now has a saved login) and tears
+    // down the setup modal / shows the shell, mirroring the PWA's post-login
+    // `nostrLoginBypassSetup` → `initializeNym` transition out of setup.
+    _ref.read(bootEpochProvider.notifier).state++;
+  }
+
+  /// Resets the RUNNING session to a logged-out, first-run state after an
+  /// emergency wipe ([PanicWipe] has already shredded the on-disk stores). The
+  /// in-memory half of the PWA's `panicWipe` (panic.js:54-144): it nulls
+  /// `privkey/pubkey/_vaultMem` and reloads to a pristine first run.
+  ///
+  /// Drops the in-memory identity / signer / vault handles + the relay service
+  /// WITHOUT flushing (panic stops persistence so wiped data is never
+  /// re-written, `flush:false`), resets [AppState] to the empty logged-out shell,
+  /// allows a fresh boot ([_started] = false), and bumps [bootEpochProvider] so
+  /// `app.dart` remounts a fresh [BootGate] — which (no saved login + no
+  /// auto-ephemeral after the wipe) lands on the setup screen. The end state:
+  /// no identity, no data, setup shown. The boot-epoch bump's `popUntil(first)`
+  /// also tears down the panic overlay route, so the caller need not pop it.
+  Future<void> resetAfterPanic() async {
+    // In-memory teardown only — DO NOT flush (the stores were just wiped; a
+    // flush would re-persist the still-live AppState into the reset cache DB).
+    await _teardownLiveSession(flush: false);
+
+    // Allow a fresh identity to boot again on this provider instance.
+    _started = false;
+
+    // Reset the visible store + identity-scoped UI state to the empty shell.
+    _ref.read(appStateProvider.notifier).reset();
+    try {
+      _ref.read(notificationHistoryProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(pendingSettingsTransfersProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(liveCustomEmojiProvider.notifier).clearAll();
+    } catch (_) {}
+
+    // Drive the UI back to a pristine first-run gate (the PWA reloads the page).
+    _ref.read(bootEpochProvider.notifier).state++;
+  }
+
+  Future<void> signOut() async {
+    // 1) Tear down the live session (timers, subs, cache flush+close, relay
+    //    service, in-memory identity/signer/handles, unbind callbacks).
+    await _teardownLiveSession();
+
+    // 2) Remove the persisted login + auto-ephemeral + per-identity caches the
     //    PWA's `signOut()` clears (app.js:6743-6761).
     final kv = _ref.read(keyValueStoreProvider);
     for (final k in const [
@@ -554,7 +698,7 @@ class NostrController {
       } catch (_) {}
     }
 
-    // 5) Reset the in-memory store + identity-scoped UI state.
+    // 3) Reset the in-memory store + identity-scoped UI state.
     _ref.read(appStateProvider.notifier).reset();
     try {
       _ref.read(notificationHistoryProvider.notifier).clear();
@@ -566,10 +710,10 @@ class NostrController {
       _ref.read(liveCustomEmojiProvider.notifier).clearAll();
     } catch (_) {}
 
-    // 6) Allow a fresh identity to boot again on this provider instance.
+    // 4) Allow a fresh identity to boot again on this provider instance.
     _started = false;
 
-    // 7) Drive the UI back to a pristine first-run gate. The PWA reloads the
+    // 5) Drive the UI back to a pristine first-run gate. The PWA reloads the
     //    page here; we bump the boot generation so `app.dart` remounts a fresh
     //    BootGate (which re-checks setup-needed — now true — and tears down the
     //    signed-out HomeShell + any modals stacked above it).
@@ -583,9 +727,6 @@ class NostrController {
       dmTtlSeconds: s.dmTtlSeconds,
     );
   }
-
-  bool _readReceiptsAllowed() =>
-      _ref.read(settingsProvider).readReceiptsScope != 'disabled';
 
   // ---------------------------------------------------------------------------
   // Inbound routing
@@ -613,9 +754,16 @@ class NostrController {
       _ingestUserEmojiList(event);
       return;
     }
+    // Public channel typing (kind 24420) — a peer is typing in a geohash
+    // channel. Ephemeral; routed here from the active channel's typing/receipt
+    // sub (C03-D6).
+    if (event.kind == EventKind.channelTyping) {
+      _onChannelTypingEvent(event, appState);
+      return;
+    }
     // Public channel read receipt (kind 24421) — someone saw one of our channel
     // messages. Ephemeral; routed here from the active channel's typing/receipt
-    // sub. Channel typing (24420) inbound is handled elsewhere.
+    // sub.
     if (event.kind == EventKind.channelReceipt) {
       _onChannelReadReceipt(event);
       return;
@@ -1070,6 +1218,138 @@ class NostrController {
     );
   }
 
+  /// Abbreviates a sats count for the zap notification body, a 1:1 port of the
+  /// PWA's `abbreviateNumber` (users.js:2069-2073) used by `_notifyZapToOurMessage`
+  /// — kept local so the state layer doesn't import the widget that also exports
+  /// it. `<1000` verbatim, `1.2k`/`12k`, `1.2M`.
+  static String _abbreviateSats(int n) {
+    if (n < 1000) return '$n';
+    if (n < 1000000) {
+      final v = n / 1000;
+      return '${v.toStringAsFixed(n < 10000 ? 1 : 0)}k';
+    }
+    return '${(n / 1000000).toStringAsFixed(1)}M';
+  }
+
+  /// Notifies + records history when someone zaps OUR message (zaps.js
+  /// `_notifyZapToOurMessage`, lines 1347-1421), F07-Z15. Clones the reaction
+  /// path ([_maybeNotifyReaction]) with the zap body `⚡ zapped N sats to:
+  /// "&lt;preview&gt;"` (or `…to your message`). [messageId] is the zapped message
+  /// (`e` tag), [zapperPubkey] the zapper. Fires only when WE are the recipient
+  /// and the zapper isn't us (and isn't blocked / notifications are enabled). The
+  /// caller already verified `recipient == self` and counted the zap; this raises
+  /// the alert the PWA fires alongside the badge. [route] opens the zapper's PM.
+  void _maybeNotifyZapToMessage({
+    required String messageId,
+    required int amountSats,
+    required String zapperPubkey,
+    required int tsSec,
+    String? eventId,
+  }) {
+    if (messageId.isEmpty || amountSats <= 0) return;
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty || zapperPubkey == self) return;
+    if (!_notificationsEnabled) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(zapperPubkey)) return;
+    if (_notifyFriendsOnly && !appState.isFriend(zapperPubkey)) return;
+
+    // Preview of the zapped message (first non-quoted line, ≤80 chars) —
+    // mirrors `_notifyZapToOurMessage`'s `rawContent`/message-store lookup.
+    String? preview;
+    for (final list in appState.messages.values) {
+      for (final m in list) {
+        if (m.id == messageId || m.nymMessageId == messageId) {
+          preview = m.content
+              .split('\n')
+              .where((l) => !l.startsWith('>'))
+              .join(' ')
+              .trim();
+          break;
+        }
+      }
+      if (preview != null) break;
+    }
+    if (preview != null && preview.length > 80) {
+      preview = '${preview.substring(0, 80)}…';
+    }
+    final sats = _abbreviateSats(amountSats);
+    final body = (preview != null && preview.isNotEmpty)
+        ? '⚡ zapped $sats sats to: "$preview"'
+        : '⚡ zapped $sats sats to your message';
+
+    // PWA zap notifications route as `type: 'reaction'` to the zapper's PM and
+    // are silent (history-only) when historical (>10s, zaps.js:1419).
+    _dispatchNotification(
+      title: _nymDisplayFor(zapperPubkey),
+      body: body,
+      senderPubkey: zapperPubkey,
+      isFriend: appState.isFriend(zapperPubkey),
+      isMention: false,
+      historyType: 'reaction',
+      route: zapperPubkey,
+      eventId: eventId,
+      tsMs: tsSec * 1000,
+      silent: _isHistorical(tsSec),
+    );
+  }
+
+  /// Inbound PROFILE-zap receipt ids we've already handled, so a re-delivered
+  /// receipt can't double-notify (zaps.js `_profileZapReceipts`, line 1301).
+  final Set<String> _profileZapReceipts = <String>{};
+
+  /// Handles an inbound PROFILE zap (a kind-9735 receipt with NO `['e']` tag,
+  /// `['p'] == self`) — records nothing to a message badge but notifies the
+  /// recipient "⚡ zapped N sats to your profile" (zaps.js
+  /// `_handleIncomingProfileZap`, lines 1300-1345), F07-Z16. Deduped by event id;
+  /// skips our own zap + blocked senders. Verified iff the receipt author is our
+  /// LNURL provider; an unverified zap from a non-provider author appends
+  /// "(unverified)" exactly like the PWA. No-ops without an amount.
+  void _maybeNotifyProfileZap(NostrEvent event) {
+    if (!_profileZapReceipts.add(event.id)) return; // already handled
+    if (_profileZapReceipts.length > 2000) {
+      _profileZapReceipts
+        ..clear()
+        ..add(event.id);
+    }
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(event.pubkey)) return;
+    final amount = ZapLogic.parseAmountFromBolt11(event.tagValue('bolt11'));
+    if (amount == null || amount <= 0) return;
+    final zapper = event.pubkey;
+    if (zapper == self) return;
+    if (!_notificationsEnabled) return;
+    if (_notifyFriendsOnly && !appState.isFriend(zapper)) return;
+
+    // Verified iff the receipt author IS our LNURL provider (zaps.js:1322-1324).
+    _getZapProviderPubkey(self).then((providerPubkey) {
+      // PWA: a provider is configured but this receipt isn't from it → drop.
+      if (providerPubkey != null &&
+          event.pubkey.toLowerCase() != providerPubkey) {
+        return;
+      }
+      final verified = providerPubkey != null &&
+          event.pubkey.toLowerCase() == providerPubkey;
+      final sats = _abbreviateSats(amount);
+      final body =
+          '⚡ zapped $sats sats to your profile${verified ? '' : ' (unverified)'}';
+      _dispatchNotification(
+        title: _nymDisplayFor(zapper),
+        body: body,
+        senderPubkey: zapper,
+        isFriend: appState.isFriend(zapper),
+        isMention: false,
+        historyType: 'reaction',
+        route: zapper,
+        eventId: event.id,
+        tsMs: event.createdAt * 1000,
+        silent: _isHistorical(event.createdAt),
+      );
+    }).catchError((_) {});
+  }
+
   void _ingestPresence(NostrEvent e) {
     // nym-presence ingestion (users.js `handlePresenceEvent`). Skip our own
     // presence and stale (older than last-seen) events.
@@ -1098,7 +1378,13 @@ class NostrController {
           status: userStatusFromString(statusStr),
           nym: nym,
           awayMessage: away,
+          // A bare nym-presence broadcast is NOT activity: the PWA's
+          // `handlePresenceEvent` updates status/avatar but never touches
+          // `lastSeen` (users.js:1246-1255), so a replayed/older-but-<5min
+          // presence must NOT mark a user online (C01-4). Friend-presence and
+          // own-activity stay at the default `stampLastSeen: true`.
           lastSeenMs: e.createdAt * 1000,
+          stampLastSeen: false,
           avatarUrl: avatar,
           hasAvatarTag: avatar != null,
           shopUpdate: hasShopUpdate,
@@ -1285,7 +1571,7 @@ class NostrController {
       case EventKind.reaction: // 7 — gift-wrapped reaction
         _onPrivateReaction(rumor, appState);
       case EventKind.zapReceipt: // 9735 — gift-wrapped private zap announcement
-        _onPrivateZap(rumor, appState);
+        _onPrivateZap(rumor, appState, u.wrapId);
       case EventKind.callSignaling: // 25053 — call signaling transport
         if (u.senderVerified) _callSignalHandler?.call(rumor);
       case EventKind.friendPresence: // 25054 — friends-only private presence
@@ -1356,6 +1642,19 @@ class NostrController {
       return;
     }
 
+    // Incoming group/PM EDIT: a rumor carrying `['edit', originalId]` rewrites
+    // the original bubble in place (pms.js:1177-1182 / groups.js:1219-1224
+    // `handleIncomingPMEdit`) — it must NOT be ingested as a new message (the
+    // user-reported duplicate). `applyLocalEdit` matches PM/group bubbles on the
+    // shared nymMessageId; out-of-order arrival is buffered. Applies to both the
+    // group and 1:1 PM branches below.
+    final editId = _tagValue(tags, 'edit');
+    if (editId != null && editId.isNotEmpty) {
+      final content = rumor['content'] as String? ?? '';
+      appState.applyEditOrDefer(editId, content);
+      return;
+    }
+
     // Group message.
     if (groupId != null) {
       if (!u.senderVerified) return;
@@ -1386,6 +1685,18 @@ class NostrController {
       senderVerified: u.senderVerified,
     );
     if (m == null) return;
+    // "Who can PM you" enforcement (pms.js:1247-1250): `disabled` drops every
+    // incoming PM; `friends` drops PMs from non-friends. Our own self-copy is
+    // always kept. Previously inert (F02) — the setting persisted/synced but no
+    // ingest path consulted it.
+    if (!m.isOwn) {
+      final scope = _ref.read(settingsProvider).acceptPMs;
+      if (scope == 'disabled') return;
+      if (scope == 'friends' &&
+          !_ref.read(appStateProvider).isFriend(m.pubkey)) {
+        return;
+      }
+    }
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
@@ -1397,6 +1708,13 @@ class NostrController {
         receiptType: 'delivered',
         recipientPubkey: m.pubkey,
       );
+      // If this PM is the active view, also send a READ receipt right away
+      // (PWA send-while-viewing, pms.js:1345-1356) so the peer's bubble advances
+      // to '✓✓ read'. Scope-gated + deduped inside sendReadReceipt.
+      final key = m.conversationKey ?? PmLogic.pmStorageKey(m.pubkey);
+      if (_isActiveView(key)) {
+        unawaited(sendReadReceipt(m.nymMessageId!, m.pubkey));
+      }
     }
   }
 
@@ -1445,8 +1763,16 @@ class NostrController {
     GiftWrapUnwrapped u,
     AppStateNotifier appState,
   ) {
+    final inviteTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
+      // A fresh invite resurrects a group we previously left (F04-H3): clear the
+      // "left" mark FIRST so `upsertGroup` (which bails on a left group) accepts
+      // it. Mirrors the PWA `leftGroups.delete(groupId)` at the top of the
+      // `group-invite` handler (groups.js:798-804). The clear is gated on
+      // `created_at > leaveTime` (F04-H4, groups.js:719-722): a stale invite
+      // older than our leave is rejected and the group stays gone.
+      if (!appState.clearLeftGroup(groupId, createdAtSec: inviteTs)) return;
       if (appState.groupById(groupId) != null) return;
       final members = tags
           .where((t) => t.length > 1 && t[0] == 'p')
@@ -1454,11 +1780,27 @@ class NostrController {
           .toList();
       final owner = _tagValue(tags, 'owner') ?? senderPubkey;
       final name = _tagValue(tags, 'subject') ?? '';
+      // Restore the bootstrap metadata the invite carries (groups.js:805-873
+      // pre-creates the entry with createdBy/avatar/banner/description) so a
+      // re-created group isn't a bare shell (F04-H3 trustBootstrap). Each tag is
+      // only adopted when present, byte-matching the PWA's optional pushes.
+      final avatar = _tagValue(tags, 'avatar');
+      final banner = _tagValue(tags, 'banner');
+      final description = _tagValue(tags, 'description');
+      final mods = tags
+          .where((t) => t.length > 1 && t[0] == 'mod')
+          .map((t) => t[1])
+          .toList();
       appState.upsertGroup(Group(
         id: groupId,
         name: name,
         members: members,
+        mods: mods,
         createdBy: owner,
+        avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+        banner: (banner != null && banner.isNotEmpty) ? banner : null,
+        description:
+            (description != null && description.isNotEmpty) ? description : null,
         allowMemberInvites: _tagValue(tags, 'allow_invites') != '0',
         inviteEnabled: _tagValue(tags, 'invite_enabled') == '1',
         inviteEpoch: int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0,
@@ -1485,11 +1827,112 @@ class NostrController {
           contextLabel: 'in ${name.isNotEmpty ? name : 'a group'}',
         );
       }
+      // Render the invite's content as the first in-chat bubble (F04-M2): the
+      // PWA "falls through to display the invite message inline" after creating
+      // the group (groups.js:874), so the new group opens with the "You've been
+      // added to group …" message instead of empty. `_mapGroupMessage` returns
+      // null for an empty/own-copy rumor, so a content-less invite stays empty.
+      final inviteMsg =
+          _mapGroupMessage(rumor, u, _identity?.pubkey ?? '', groupId);
+      if (inviteMsg != null && inviteMsg.content.isNotEmpty) {
+        appState.ingestGroupMessage(inviteMsg);
+      }
       return;
     }
 
+    // Invite-link join approval (groups.js:506 `_handleGroupJoinRequest`, called
+    // at 790-792): when WE are the link sharer and receive a `group-join-request`,
+    // auto-admit the requester if invites are enabled, we can add members, the
+    // request's epoch matches our current invite epoch, and they aren't already a
+    // member/banned. Without this the joiner's request (joinGroupViaInvite,
+    // :2583, which sends `invite_epoch`) lands in the void — the whole invite-link
+    // join never completes (F04-H2). This must run BEFORE the generic
+    // `applyGroupControl` (join-request has no `applyControlEvent` case → ignored).
+    if (type == GroupControlType.joinRequest) {
+      final group = appState.groupById(groupId);
+      if (group == null) return;
+      if (!group.inviteEnabled) return;
+      final identity = _identity;
+      if (identity == null) return;
+      // Never act on our own request echoing back.
+      if (senderPubkey == identity.pubkey) return;
+      if (!GroupLogic.canAddMembers(group, identity.pubkey)) return;
+      final reqEpoch = int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0;
+      if (reqEpoch != group.inviteEpoch) return;
+      if (group.members.contains(senderPubkey)) return;
+      if (group.banned.contains(senderPubkey)) return;
+      unawaited(addGroupMembers(groupId, [senderPubkey]));
+      return;
+    }
+
+    // A `group-add-member` that re-adds US clears the "left" mark so the group
+    // can resurrect (F04-H3): mirrors the PWA `leftGroups.delete(groupId)` at the
+    // top of the `group-add-member` handler (groups.js:879-884). Runs before
+    // `applyGroupControl` so a still-known-but-left group accepts the re-add.
+    if (type == GroupControlType.addMember) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      final addsSelf = self.isNotEmpty &&
+          tags.any((t) => t.length > 1 && t[0] == 'p' && t[1] == self);
+      if (addsSelf) {
+        // Gate on `created_at > leaveTime` (F04-H4): a stale re-add older than
+        // our leave is rejected and the group stays gone (groups.js:719-722).
+        if (!appState.clearLeftGroup(groupId, createdAtSec: inviteTs)) return;
+        // F04-H3 (FULL): if the group was FULLY removed locally (self-kick did
+        // `state.groups.removeWhere`), `applyGroupControl` would bail with
+        // `groupById == null` and the add-member would never land. Re-create the
+        // entry from the add-member's trusted bootstrap tags — but only when the
+        // claimed owner IS the sender (`senderIsClaimedOwner`, groups.js:900-904)
+        // so a non-owner can't conjure a group into the sidebar. Mirrors the
+        // PWA's `trustBootstrap` create (groups.js:912-934).
+        if (appState.groupById(groupId) == null) {
+          final claimedOwner = _tagValue(tags, 'owner');
+          if (claimedOwner != null && claimedOwner == senderPubkey) {
+            final members = tags
+                .where((t) => t.length > 1 && t[0] == 'p')
+                .map((t) => t[1])
+                .toList();
+            final name = _tagValue(tags, 'subject') ?? '';
+            final avatar = _tagValue(tags, 'avatar');
+            final banner = _tagValue(tags, 'banner');
+            final description = _tagValue(tags, 'description');
+            final mods = tags
+                .where((t) => t.length > 1 && t[0] == 'mod')
+                .map((t) => t[1])
+                .toList();
+            final allowInv = _tagValue(tags, 'allow_invites');
+            final inviteEnabledTag = _tagValue(tags, 'invite_enabled');
+            final inviteEpochTag = _tagValue(tags, 'invite_epoch');
+            appState.upsertGroup(Group(
+              id: groupId,
+              name: name,
+              members: members,
+              mods: mods,
+              createdBy: claimedOwner,
+              avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+              banner: (banner != null && banner.isNotEmpty) ? banner : null,
+              description: (description != null && description.isNotEmpty)
+                  ? description
+                  : null,
+              allowMemberInvites: allowInv != null ? allowInv != '0' : true,
+              inviteEnabled: inviteEnabledTag == '1',
+              inviteEpoch: int.tryParse(inviteEpochTag ?? '') ?? 0,
+              lastMessageTime: inviteTs > 0
+                  ? inviteTs * 1000
+                  : DateTime.now().millisecondsSinceEpoch,
+            ));
+          }
+        }
+      }
+    }
+
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
-    appState.applyGroupControl(
+    // Resolve the group's display name BEFORE applying the control: a self-kick/
+    // ban makes `applyGroupControl` drop the group locally (app_state.dart:1671),
+    // after which `groupById` is null — but the "Removed from <group>"
+    // notification still needs the name (PWA `groupName`, groups.js:714 →
+    // `grp.name || groupName`).
+    final groupNameForNotif = appState.groupById(groupId)?.name;
+    final result = appState.applyGroupControl(
       groupId: groupId,
       type: type,
       tags: tags,
@@ -1497,6 +1940,167 @@ class NostrController {
       ts: ts,
       eventId: u.wrapId,
     );
+    if (result == GroupControlResult.applied) {
+      _emitGroupControlSystemLine(groupId, type, tags, senderPubkey);
+      _maybeNotifyGroupControl(
+        groupId: groupId,
+        groupName: groupNameForNotif,
+        type: type,
+        tags: tags,
+        senderPubkey: senderPubkey,
+        ts: ts,
+        eventId: u.wrapId,
+      );
+    }
+  }
+
+  /// Dispatches the PWA's SELF-TARGETED group-control notification when an
+  /// inbound control event (kick/ban/promote/revoke/transfer/unban) is applied
+  /// AND it targets us (F04-H4 / CC-18). The in-chat system line for ALL members
+  /// is emitted separately by [_emitGroupControlSystemLine]; this is the
+  /// "you might not have the group open" alert the PWA also fires
+  /// (groups.js:736/1016/1078/1116/1156). Gated exactly like the PWA's
+  /// `_addNotificationToHistory`/`showNotification`: skip when WE are the actor,
+  /// when the sender is blocked, and when notifications are disabled. A
+  /// historical event (>10s old) records to history only (no toast) — mirrored
+  /// here via `silent: true`. Title/body strings are verbatim from the PWA.
+  void _maybeNotifyGroupControl({
+    required String groupId,
+    required String? groupName,
+    required String type,
+    required List<List<String>> tags,
+    required String senderPubkey,
+    required int ts,
+    String? eventId,
+  }) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty) return;
+    // Never notify for our own action (PWA `if (isOwn) return`).
+    if (senderPubkey == self) return;
+    if (!_notificationsEnabled) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(senderPubkey)) return;
+
+    // PWA fallback chain: `grp.name || groupName` where `groupName = subjectTag
+    // ? subjectTag[1] : 'Group'` (groups.js:714).
+    final name = (groupName != null && groupName.isNotEmpty)
+        ? groupName
+        : (_tagValue(tags, 'subject') ?? 'Group');
+    final actor = _nymDisplayFor(senderPubkey);
+
+    String? title;
+    String? body;
+    switch (type) {
+      case GroupControlType.removeMember:
+        // Self-kick/ban only — the `kick` tag is the removed member.
+        if (_tagValue(tags, 'kick') != self) return;
+        final banned =
+            tags.any((t) => t.length > 1 && t[0] == 'ban' && t[1] == '1');
+        title = banned ? 'Banned from $name' : 'Removed from $name';
+        body = banned
+            ? '$actor banned you. You can be re-invited only by the group owner.'
+            : '$actor removed you from the group.';
+      case GroupControlType.promoteMod:
+        if (_tagValue(tags, 'mod') != self) return;
+        title = 'Promoted in $name';
+        body = '$actor made you a moderator.';
+      case GroupControlType.revokeMod:
+        if (_tagValue(tags, 'mod') != self) return;
+        title = 'Moderator removed in $name';
+        body = '$actor revoked your moderator role.';
+      case GroupControlType.transferOwner:
+        if (_tagValue(tags, 'owner') != self) return;
+        title = 'Owner of $name';
+        body = '$actor transferred group ownership to you.';
+      case GroupControlType.unban:
+        if (_tagValue(tags, 'unban') != self) return;
+        title = 'Unbanned from $name';
+        body = '$actor unbanned you from "$name". You may be re-invited.';
+      default:
+        return;
+    }
+    // Every non-returning case above assigns both title + body, and `default`
+    // returns — so the analyzer promotes them to non-null here for the
+    // `required String` notification params.
+
+    // Historical (>10s) → record to history only, no toast (PWA `isHistorical`).
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final silent = (nowSec - ts) > 10;
+
+    _dispatchNotification(
+      title: title,
+      body: body,
+      senderPubkey: senderPubkey,
+      isFriend: appState.isFriend(senderPubkey),
+      isMention: false,
+      isGroup: true,
+      historyType: 'group',
+      route: groupId,
+      eventId: eventId,
+      tsMs: ts > 0 ? ts * 1000 : null,
+      silent: silent,
+    );
+  }
+
+  /// Emits the PWA's in-chat system line for an applied inbound group control
+  /// (groups.js: leave 777 / removed 1045 / added 961 / promoted 1074 /
+  /// revoked 1113 / transferred 1153 / deleted 1194), F04-H4. Routed to the
+  /// group's message flow so it shows when the group is opened, mirroring
+  /// `displaySystemMessage`. Skipped when WE were the removed member (the group
+  /// is dropped locally, so there's nowhere to show it — the PWA navigates away).
+  void _emitGroupControlSystemLine(
+    String groupId,
+    String type,
+    List<List<String>> tags,
+    String senderPubkey,
+  ) {
+    final appState = _ref.read(appStateProvider.notifier);
+    // For a removal, the group may already be gone (we were kicked) — bail so we
+    // don't recreate an orphan message list for a group we just left.
+    if (appState.groupById(groupId) == null) return;
+    final actor = _nymDisplayFor(senderPubkey);
+    String? line;
+    switch (type) {
+      case GroupControlType.leave:
+        line = '$actor left the group.';
+      case GroupControlType.removeMember:
+        final target = _tagValue(tags, 'kick');
+        if (target == null) break;
+        final banned = tags.any((t) => t.length > 1 && t[0] == 'ban' && t[1] == '1');
+        line = banned
+            ? '${_nymDisplayFor(target)} was banned by $actor.'
+            : '${_nymDisplayFor(target)} was removed by $actor.';
+      case GroupControlType.addMember:
+        final added = tags
+            .where((t) => t.length > 1 && t[0] == 'p')
+            .map((t) => _nymDisplayFor(t[1]))
+            .toList();
+        if (added.isEmpty) break;
+        line = '${added.join(', ')} was added by $actor.';
+      case GroupControlType.promoteMod:
+        final target = _tagValue(tags, 'mod');
+        if (target != null) line = '$actor made ${_nymDisplayFor(target)} a moderator.';
+      case GroupControlType.revokeMod:
+        final target = _tagValue(tags, 'mod');
+        if (target != null) {
+          line = '$actor removed ${_nymDisplayFor(target)} as a moderator.';
+        }
+      case GroupControlType.transferOwner:
+        final target = _tagValue(tags, 'owner');
+        if (target != null) {
+          line = '$actor transferred ownership to ${_nymDisplayFor(target)}.';
+        }
+      case GroupControlType.unban:
+        final target = _tagValue(tags, 'unban');
+        if (target != null) line = '${_nymDisplayFor(target)} was unbanned by $actor.';
+      case GroupControlType.deleteMessage:
+        final author = _tagValue(tags, 'target_pubkey');
+        line = author != null
+            ? '$actor deleted a message from ${_nymDisplayFor(author)}.'
+            : '$actor deleted a message.';
+    }
+    if (line == null || line.isEmpty) return;
+    appState.addSystemMessage(line, storageKey: GroupLogic.groupStorageKey(groupId));
   }
 
   void _onReceiptOrTyping(
@@ -1504,10 +2108,11 @@ class NostrController {
     if (PmLogic.isTyping(rumor)) {
       final info = PmLogic.parseTyping(rumor);
       if (info == null || info.pubkey == null) return;
-      // Stale typing indicators are dropped.
+      // Stale typing indicators are dropped. PWA drops at `_typingExpireMs/1000`
+      // = 5s (pms.js:924 / nostr-core.js:1547), C03-D5.
       final age = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
           ((rumor['created_at'] as num?)?.toInt() ?? 0);
-      if (age > 8) return;
+      if (age > 5) return;
       final storageKey = info.groupId != null
           ? GroupLogic.groupStorageKey(info.groupId!)
           : PmLogic.pmStorageKey(info.pubkey!);
@@ -1520,7 +2125,13 @@ class NostrController {
     }
     if (PmLogic.isReceipt(rumor)) {
       final info = PmLogic.parseReceipt(rumor);
-      if (info != null) appState.applyReceipt(info);
+      if (info != null) {
+        appState.applyReceipt(info);
+        // A delivery/read receipt acks the PM → drop it from the auto-retry
+        // queue (pms.js: `retryPendingDMs` removes any entry whose status left
+        // 'sent'). Keyed by `nymMessageId`, which the receipt's messageId is.
+        _pendingDms.remove(info.messageId);
+      }
     }
   }
 
@@ -1568,7 +2179,8 @@ class NostrController {
   /// Routes a gift-wrapped private zap announcement (kind 9735 rumor, sent to
   /// PM/group members). Accrues sats to the zapped message's aggregate. The
   /// rumor carries an `['e', msgId]`, `['p', recipient]`, `['bolt11', …]`.
-  void _onPrivateZap(Map<String, dynamic> rumor, AppStateNotifier appState) {
+  void _onPrivateZap(
+      Map<String, dynamic> rumor, AppStateNotifier appState, String wrapId) {
     final tags = _tags(rumor);
     final messageId = _tagValue(tags, 'e');
     final bolt11 = _tagValue(tags, 'bolt11');
@@ -1582,7 +2194,7 @@ class NostrController {
     // Deduped by bolt11 so our own self-record (verified) and this announcement
     // of the SAME payment can't double-count: whichever lands first wins the
     // count, and the verified self-record upgrades it out of `unverified`.
-    appState.recordMessageZap(
+    final counted = appState.recordMessageZap(
       messageId: messageId,
       zapperPubkey: zapper,
       amountSats: amount,
@@ -1592,6 +2204,24 @@ class NostrController {
     // Resolve the zapper's avatar (the zappers sheet / badge), like the PWA
     // resolves zap-list authors (`ensureListProfiles`, zaps.js:223).
     if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+    // Notify the recipient when THEIR PM/group message was zapped (Z15): only on
+    // a freshly-counted zap and when the gift-wrap targets us (`['p'] == self`)
+    // from someone other than us. Mirrors pms.js:1102-1104 /
+    // groups.js:handleGroupZap which call `_notifyZapToOurMessage` after
+    // `_recordMessageZap`. The gift-wrap `p` is the recipient.
+    if (counted && zapper.isNotEmpty) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      final pTag = _tagValue(tags, 'p');
+      if (self.isNotEmpty && pTag == self && zapper != self) {
+        _maybeNotifyZapToMessage(
+          messageId: messageId,
+          amountSats: amount,
+          zapperPubkey: zapper,
+          tsSec: (rumor['created_at'] as num?)?.toInt() ?? 0,
+          eventId: wrapId, // wrap id = the PWA's `event.id` dedup key
+        );
+      }
+    }
   }
 
   /// Event ids of kind-9735 receipts WE published ourselves (channel announce,
@@ -1616,10 +2246,22 @@ class NostrController {
     if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
 
     final info = ZapLogic.parseReceipt(event);
-    if (info == null) return; // no `e` tag / unparseable bolt11 → not a msg zap
+    if (info == null) {
+      // No `['e']` tag → not a message zap. A PROFILE zap (`['p'] == self`, no
+      // `e`) still notifies the recipient (zaps.js:1217-1220 → Z16); everything
+      // else (unparseable bolt11, someone else's profile) is dropped.
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      if (event.tagValue('e') == null &&
+          self.isNotEmpty &&
+          event.tagValue('p') == self) {
+        _maybeNotifyProfileZap(event);
+      }
+      return;
+    }
     final messageId = info.messageId;
     final amount = info.amountSats;
     final recipientPubkey = info.recipientPubkey;
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
 
     // Resolve the recipient's LNURL provider pubkey, then decide verified:
     // VERIFIED ⇔ the receipt author IS that provider (zaps.js:1259-1260).
@@ -1633,7 +2275,7 @@ class NostrController {
       // peer-published-receipt cases).
       final zapper = info.zapperPubkey;
       if (_ref.read(appStateProvider).blockedUsers.contains(zapper)) return;
-      appState.recordMessageZap(
+      final counted = appState.recordMessageZap(
         messageId: messageId,
         zapperPubkey: zapper,
         amountSats: amount,
@@ -1641,6 +2283,23 @@ class NostrController {
         verified: verified,
       );
       if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+      // Notify the recipient when THEIR message was zapped (Z15): only on a
+      // freshly-counted zap, when we're the recipient, the zapper isn't us, and
+      // the zap is verified OR the recipient has no provider pubkey (matching
+      // zaps.js:1279-1283 `if (verified || !providerPubkey)`).
+      if (counted &&
+          self.isNotEmpty &&
+          recipientPubkey == self &&
+          zapper != self &&
+          (verified || providerPubkey == null)) {
+        _maybeNotifyZapToMessage(
+          messageId: messageId,
+          amountSats: amount,
+          zapperPubkey: zapper,
+          tsSec: event.createdAt,
+          eventId: event.id,
+        );
+      }
     }).catchError((_) {});
   }
 
@@ -1704,9 +2363,18 @@ class NostrController {
   /// Gift-wraps and sends a kind-25053 call-signaling rumor to [to]. [payload]
   /// is the SDP/ICE body the calls layer wants delivered (carried as the rumor
   /// content, JSON-encoded). A self-copy is NOT sent (signaling is 1:1).
+  ///
+  /// [groupId] (optional) makes a GROUP call-signal ride the group conversation
+  /// key (F06-A9): when set and the group's ephemeral keys are known, the gift
+  /// wrap to [to] is encrypted to that peer's group ephemeral pubkey instead of
+  /// their durable key — mirroring the PWA threading `_callSignalGroupId(callId)`
+  /// into `_sendGiftWrapsAsync` (calls.js:149-162). A 1:1 call passes no groupId
+  /// (the default) and wraps to the durable key as before. Falls back to the
+  /// durable wrap if the group/keys are unavailable.
   Future<bool> sendCallSignal({
     required String to,
     required Map<String, dynamic> payload,
+    String? groupId,
   }) async {
     final service = _service;
     final identity = _identity;
@@ -1727,7 +2395,23 @@ class NostrController {
       ],
       content: jsonEncode(content),
     );
-    return service.publishGiftWrappedRumor(rumor: rumor, recipients: [to]);
+    // Group call-signal: encrypt the wrap to the peer's group ephemeral pubkey
+    // (the same `encryptTo` the group message path uses) so it rides the group
+    // key. No-op fallback to the durable key when the group or its keys are
+    // unknown (e.g. we left the group mid-call).
+    String Function(String)? encryptTo;
+    if (groupId != null && groupId.isNotEmpty && _groups != null) {
+      final group = _ref.read(appStateProvider.notifier).groupById(groupId);
+      if (group != null) {
+        final ek = _groups!.keysFor(group.id);
+        encryptTo = (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey);
+      }
+    }
+    return service.publishGiftWrappedRumor(
+      rumor: rumor,
+      recipients: [to],
+      encryptTo: encryptTo,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -1864,6 +2548,125 @@ class NostrController {
     return '${adj}_$noun';
   }
 
+  // --- PM auto-retry queue (pms.js trackPendingDM/retryPendingDMs) -----------
+  //
+  // A PM sent while the recipient is briefly offline gets no delivery receipt;
+  // the PWA re-publishes it on a 5s cadence up to 3 times, then stops (a missing
+  // receipt means "recipient offline", not a send failure — the bubble stays
+  // '✓ sent', NOT '!'). Also re-fired on relay reconnect. F02 auto-retry.
+
+  /// Re-send cadence + cap (app.js:589-590: `dmRetryCheckMs = 5000`,
+  /// `dmRetryMaxAttempts = 3`).
+  static const int _kDmRetryCheckMs = 5000;
+  static const int _kDmRetryMaxAttempts = 3;
+
+  /// Outstanding sent-but-unacked PMs keyed by `nymMessageId`.
+  final Map<String, _PendingDm> _pendingDms = <String, _PendingDm>{};
+  Timer? _dmRetryTimer;
+
+  /// Enqueues a freshly-sent PM for receipt-driven auto-retry and starts the
+  /// retry checker if idle (pms.js:116-130 `trackPendingDM`).
+  void _trackPendingDm({
+    required String nymMessageId,
+    required UnsignedEvent rumor,
+    required String recipientPubkey,
+  }) {
+    _pendingDms[nymMessageId] = _PendingDm(
+      rumor: rumor,
+      recipientPubkey: recipientPubkey,
+      lastAttemptMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _dmRetryTimer ??= Timer.periodic(
+      const Duration(milliseconds: _kDmRetryCheckMs),
+      (_) => _retryPendingDms(),
+    );
+  }
+
+  /// True once the PM with [nymMessageId] has a delivery status past `sent`
+  /// (delivered/read) — used to drop it from the retry queue.
+  bool _isDmAcked(String nymMessageId) {
+    final lists = _ref.read(appStateProvider).messages.values;
+    for (final list in lists) {
+      for (final m in list) {
+        if (m.isOwn && m.nymMessageId == nymMessageId) {
+          return m.deliveryStatus != DeliveryStatus.sent &&
+              m.deliveryStatus != DeliveryStatus.sending &&
+              m.deliveryStatus != DeliveryStatus.failed;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Periodic tick (pms.js:133-176 `retryPendingDMs`): drop acked/maxed entries,
+  /// re-publish the rest whose cooldown elapsed. Stops the timer when the queue
+  /// empties.
+  void _retryPendingDms() {
+    if (_pendingDms.isEmpty) {
+      _dmRetryTimer?.cancel();
+      _dmRetryTimer = null;
+      return;
+    }
+    final service = _service;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final done = <String>[];
+    _pendingDms.forEach((id, pending) {
+      // Delivered/read → stop retrying.
+      if (_isDmAcked(id)) {
+        done.add(id);
+        return;
+      }
+      if (now - pending.lastAttemptMs < _kDmRetryCheckMs) return;
+      // Cap reached: leave the bubble '✓ sent' (recipient offline, not a failure).
+      if (pending.attempts >= _kDmRetryMaxAttempts) {
+        done.add(id);
+        return;
+      }
+      pending.attempts++;
+      pending.lastAttemptMs = now;
+      if (service != null) {
+        unawaited(service.publishPM(
+          rumor: pending.rumor,
+          recipientPubkey: pending.recipientPubkey,
+          settings: _msgSettings,
+        ));
+      }
+    });
+    for (final id in done) {
+      _pendingDms.remove(id);
+    }
+    if (_pendingDms.isEmpty) {
+      _dmRetryTimer?.cancel();
+      _dmRetryTimer = null;
+    }
+  }
+
+  /// Re-send every still-unacked pending PM on a relay reconnect, bypassing the
+  /// per-tick cooldown/cap (pms.js:225-293 `retryPendingDMsOnReconnect`) — a
+  /// reconnect is the most likely moment a stuck DM can finally land.
+  void _retryPendingDmsOnReconnect() {
+    if (_pendingDms.isEmpty) return;
+    final service = _service;
+    if (service == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final done = <String>[];
+    _pendingDms.forEach((id, pending) {
+      if (_isDmAcked(id)) {
+        done.add(id);
+        return;
+      }
+      pending.lastAttemptMs = now;
+      unawaited(service.publishPM(
+        rumor: pending.rumor,
+        recipientPubkey: pending.recipientPubkey,
+        settings: _msgSettings,
+      ));
+    });
+    for (final id in done) {
+      _pendingDms.remove(id);
+    }
+  }
+
   /// Publishes [content] to the active conversation surface
   /// (`_sendToCurrentTarget`), WITHOUT command interception. Used both by the
   /// composer (after the `/` check) and by formatting/action commands whose
@@ -1927,7 +2730,7 @@ class NostrController {
 
     if (view.kind == ViewKind.pm) {
       final nymMessageId = PmLogic.generateSharedEventId();
-      appState.sendLocal(trimmed, nymMessageId: nymMessageId);
+      final echo = appState.sendLocal(trimmed, nymMessageId: nymMessageId);
       if (service == null || identity == null) return;
       final rumor = PmLogic.buildPmRumor(
         selfPubkey: identity.pubkey,
@@ -1935,11 +2738,25 @@ class NostrController {
         content: trimmed,
         nymMessageId: nymMessageId,
       );
-      await service.publishPM(
-        rumor: rumor,
-        recipientPubkey: view.id,
-        settings: _msgSettings,
-      );
+      try {
+        await service.publishPM(
+          rumor: rumor,
+          recipientPubkey: view.id,
+          settings: _msgSettings,
+        );
+        // Queue for automatic re-send until a delivery receipt acks it
+        // (pms.js `trackPendingDM`). Cleared in [_onReceiptOrTyping] the moment
+        // a receipt for this `nymMessageId` lands, or dropped after the cap.
+        _trackPendingDm(
+          nymMessageId: nymMessageId,
+          rumor: rumor,
+          recipientPubkey: view.id,
+        );
+      } catch (_) {
+        // Publish failed → flip the bubble to the failed "!" state (F02; the
+        // channel branch already does this — PMs were silently left "✓ sent").
+        if (echo != null) appState.markOptimisticFailed(echo.id);
+      }
       return;
     }
 
@@ -2067,6 +2884,10 @@ class NostrController {
       return;
     }
     removeChannel(key);
+    // PWA `removeChannel` posts a "Left channel #X" confirmation
+    // (channels.js:1623). `key` is already the bare geohash/name, matching the
+    // PWA's `'#' + (geohash || channel)` since it never carries a leading '#'.
+    _emitSystemMessage('Left channel #$key');
   }
 
   /// `/who` — lists current-channel users active within 300s (cmdWho).
@@ -2528,22 +3349,27 @@ class NostrController {
       kickFromGroup(groupId, targetPubkey, ban: true);
 
   /// Promotes [targetPubkey] to moderator (owner-only). Mirrors users.js
-  /// `promoteModerator` → `group-promote-mod`.
+  /// `promoteModerator` → `group-promote-mod`. The role pubkey rides the `mod`
+  /// tag (groups.js:2004) — the inbound handler reads `tagValue(tags,'mod')`
+  /// (group_logic), so the previous `['promote']` tag applied NOWHERE (F04-B1).
   Future<bool> promoteModerator(String groupId, String targetPubkey) =>
       _sendModRoleControl(
-          groupId, targetPubkey, GroupControlType.promoteMod, ['promote', targetPubkey]);
+          groupId, targetPubkey, GroupControlType.promoteMod, ['mod', targetPubkey]);
 
   /// Revokes [targetPubkey]'s moderator role (owner-only). users.js
-  /// `revokeModerator` → `group-revoke-mod`.
+  /// `revokeModerator` → `group-revoke-mod`. Same `mod` tag the inbound handler
+  /// reads (groups.js:2045); the old `['revoke']` tag was a no-op (F04-B2).
   Future<bool> revokeModerator(String groupId, String targetPubkey) =>
       _sendModRoleControl(
-          groupId, targetPubkey, GroupControlType.revokeMod, ['revoke', targetPubkey]);
+          groupId, targetPubkey, GroupControlType.revokeMod, ['mod', targetPubkey]);
 
   /// Transfers ownership to [targetPubkey] (owner-only). users.js
-  /// `transferOwner` → `group-transfer-owner`.
+  /// `transferOwner` → `group-transfer-owner`. New owner rides the `owner` tag
+  /// (groups.js:2086); the old `['new_owner']` tag matched nothing inbound, so
+  /// ownership transfer was fully non-functional (F04-B3).
   Future<bool> transferOwner(String groupId, String targetPubkey) =>
       _sendModRoleControl(groupId, targetPubkey, GroupControlType.transferOwner,
-          ['new_owner', targetPubkey]);
+          ['owner', targetPubkey]);
 
   Future<bool> _sendModRoleControl(
     String groupId,
@@ -2592,9 +3418,14 @@ class NostrController {
     final modSelf = GroupLogic.isMod(group, identity.pubkey);
     final targetIsOwner = GroupLogic.isOwner(group, authorPubkey);
     if (!(ownerSelf || (modSelf && !targetIsOwner))) return false;
+    // PWA `group-delete-message` carries `['e', targetId]` + `['target_pubkey',
+    // author]` (groups.js:2403-2405); the inbound handler (group_logic +
+    // app_state) reads exactly those. The previous `['delete']`/`['p']` tags
+    // matched nothing, so the delete only ever applied on the actor's own device
+    // (F04-B4).
     final extraTags = [
-      ['delete', messageId],
-      ['p', authorPubkey],
+      ['e', messageId],
+      ['target_pubkey', authorPubkey],
     ];
     final ok = await groups.sendControl(
       group: group,
@@ -2901,6 +3732,11 @@ class NostrController {
     final added = appState.blockUser(pubkey);
     if (added) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
+      // A blocked sender's notifications stop counting toward the bell badge
+      // immediately (PWA count-time exclusion, notifications.js:404-426; C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Blocked ${_nymDisplayFor(pubkey)}');
       // Blocking mid-call ends a 1:1 call / drops the peer from a group call and
       // hides their chat (calls.js `_onUserBlockedForCall`).
@@ -2916,6 +3752,11 @@ class NostrController {
     final removed = appState.unblockUser(pubkey);
     if (removed) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
+      // Re-sync the badge's blocked-sender set so an unblocked user's
+      // notifications count again (C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Unblocked ${_nymDisplayFor(pubkey)}');
     }
     return removed;
@@ -3108,10 +3949,6 @@ class NostrController {
   /// broadcasts to ≤1/60s (nostr-core.js `_lastPresenceBroadcast`).
   int _lastPresenceBroadcast = 0;
 
-  /// Periodic presence re-assertion timer (nostr-core.js broadcasts presence on
-  /// a timer + on activity). Cancelled on dispose.
-  Timer? _presenceTimer;
-
   static const int _presenceBroadcastThrottleMs = 60000;
 
   /// The status-visibility mode from `nym_show_status`
@@ -3181,9 +4018,10 @@ class NostrController {
   }
 
   /// Records local activity so our own status stays "online" and other clients
-  /// see us as recently active. Called on connect, on every send, and on the
-  /// presence timer. Throttles relay broadcasts to ≤1/60s; skipped while away or
-  /// when status is disabled (nostr-core.js `recordOwnActivity`).
+  /// see us as recently active. Called on connect and on every send/react — the
+  /// PWA's presence is purely event-driven, with NO periodic heartbeat (C03-D7).
+  /// Throttles relay broadcasts to ≤1/60s; skipped while away or when status is
+  /// disabled (nostr-core.js `recordOwnActivity`).
   void recordOwnActivity() {
     final identity = _identity;
     if (identity == null) return;
@@ -3210,16 +4048,7 @@ class NostrController {
     unawaited(publishPresence('online'));
   }
 
-  /// Starts the periodic presence re-assertion timer (idempotent).
-  void _startPresenceTimer() {
-    _presenceTimer?.cancel();
-    _presenceTimer = Timer.periodic(
-      const Duration(milliseconds: _presenceBroadcastThrottleMs),
-      (_) => recordOwnActivity(),
-    );
-  }
-
-  /// Signals typing in the current PM/group view (throttled ~1/s).
+  /// Signals typing in the current PM/group view (throttled ~3/s — C03-D4).
   Future<void> sendTypingStart() async {
     final service = _service;
     final identity = _identity;
@@ -3239,7 +4068,9 @@ class NostrController {
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - (_typingThrottle[key] ?? 0) < 1000) return;
+    // PWA `_typingSendInterval = 3000` (app.js:741) — re-broadcast typing-start
+    // at most once per 3s, not 1s (C03-D4).
+    if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
     _typingThrottle[key] = now;
 
     if (view.kind == ViewKind.channel) {
@@ -3291,16 +4122,53 @@ class NostrController {
     }
   }
 
-  /// Sends a read receipt for [messageId] to [peerPubkey] (PM scope-gated).
+  /// PM message ids (nymMessageIds) we've already published a 'read' receipt
+  /// for, so opening / re-opening a PM never re-announces the same read (mirrors
+  /// [_sentChannelReadReceipts]); capped 2000 → trimmed to the most recent 1500.
+  final Set<String> _sentPmReadReceipts = <String>{};
+
+  /// Sends a read receipt for [messageId] to [peerPubkey], scope-gated to the
+  /// PM context (PWA `_indicatorScopeAllows(readReceiptsScope, 'pm')`, F02): a
+  /// scope of 'groups' / 'disabled' must NOT leak a PM read receipt. Deduped via
+  /// [_sentPmReadReceipts] so the same message is receipted at most once.
   Future<void> sendReadReceipt(String messageId, String peerPubkey) async {
-    if (!_readReceiptsAllowed()) return;
+    if (!_indicatorScopeAllows(
+        _ref.read(settingsProvider).readReceiptsScope, 'pm')) {
+      return;
+    }
+    if (messageId.isEmpty || peerPubkey.isEmpty) return;
     final service = _service;
     if (service == null) return;
+    if (!_sentPmReadReceipts.add(messageId)) return;
+    if (_sentPmReadReceipts.length > 2000) {
+      final keep = _sentPmReadReceipts
+          .toList()
+          .sublist(_sentPmReadReceipts.length - 1500);
+      _sentPmReadReceipts
+        ..clear()
+        ..addAll(keep);
+    }
     await service.publishReceipt(
       messageId: messageId,
       receiptType: 'read',
       recipientPubkey: peerPubkey,
     );
+  }
+
+  /// Receipts every loaded, non-own PM message in the open conversation with
+  /// [peerPubkey] as 'read' (PWA `openPM` send + send-while-viewing,
+  /// pms.js:3015-3019 / 1345-1356). Per-message dedup lives in [sendReadReceipt].
+  void markVisiblePmMessagesRead(String peerPubkey) {
+    if (peerPubkey.isEmpty) return;
+    final messages =
+        _ref.read(appStateProvider).messages[PmLogic.pmStorageKey(peerPubkey)];
+    if (messages == null || messages.isEmpty) return;
+    for (final m in messages) {
+      if (m.isOwn) continue;
+      final id = m.nymMessageId;
+      if (id == null || id.isEmpty) continue;
+      unawaited(sendReadReceipt(id, peerPubkey));
+    }
   }
 
   // --- Public channel read receipts (kind 24421) -----------------------------
@@ -3380,6 +4248,41 @@ class NostrController {
   /// a channel read receipt is sent).
   static final RegExp _channelMessageIdRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
   bool _isChannelMessageId(String id) => _channelMessageIdRe.hasMatch(id);
+
+  /// Routes an inbound public channel typing indicator (kind 24420): a peer is
+  /// typing in a geohash channel. Mirrors the PWA's `handleChannelTypingEvent`
+  /// (nostr-core.js:1542-1578): skips our own + scope-disallowed + stale (>5s,
+  /// `_typingExpireMs`) signals + blocked senders, parses the `['typing',
+  /// status]` / `['g'|'d', geo]` tags, and feeds the per-channel typing store
+  /// keyed by the active channel's storageKey (`#<geohash>`) with a 5s TTL —
+  /// status `'stop'` clears the indicator immediately. Without this the public
+  /// channel typing indicator never appeared (C03-D6).
+  void _onChannelTypingEvent(NostrEvent event, AppStateNotifier appState) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (event.pubkey == self) return;
+    // Scope gate (PWA `isTypingIndicatorAllowedFor('channel')`): channel typing
+    // only shows when the typing-indicator scope is 'everywhere'.
+    final scope = _ref.read(settingsProvider).typingIndicatorsScope;
+    if (!_indicatorScopeAllows(scope, 'channel')) return;
+    // Stale-drop at 5s (`_typingExpireMs`), matching the receive-side TTL.
+    final ageMs = DateTime.now().millisecondsSinceEpoch - event.createdAt * 1000;
+    if (ageMs > 5000) return;
+    if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
+
+    final status = event.tagValue('typing');
+    final geohash = event.tagValue('g') ?? event.tagValue('d');
+    if (status == null || geohash == null || geohash.isEmpty) return;
+
+    // The typing store keys on the active view's storageKey; a geohash channel
+    // view is `ChatView.channel(geohash)` → storageKey `'#<geohash>'`
+    // (app_state.dart:94). `setTyping` removes the entry on `typing: false`,
+    // mirroring the PWA's `status === 'stop'` branch.
+    appState.setTyping(
+      storageKey: '#${geohash.toLowerCase()}',
+      pubkey: event.pubkey,
+      typing: status == 'start',
+    );
+  }
 
   /// Routes an inbound public channel read receipt (kind 24421): someone saw a
   /// channel message. Mirrors the PWA's `handleChannelReadReceipt`: skips our
@@ -3808,6 +4711,38 @@ class NostrController {
     );
   }
 
+  /// Persists the closed-PM set + close-times to KV (F02). Closed peers go to
+  /// `nym_closed_pms` as a JSON string array (reusing [_persistSet]); the
+  /// peer→close-time map goes to `nym_closed_pm_times` as a JSON object — so a
+  /// deleted conversation isn't re-opened by stale D1 backlog after a relaunch.
+  void _persistClosedPMs() {
+    final appState = _ref.read(appStateProvider.notifier);
+    _persistSet(StorageKeys.closedPms, appState.closedPMs);
+    _ref
+        .read(keyValueStoreProvider)
+        .setString(StorageKeys.closedPmTimes, jsonEncode(appState.closedPmTimes));
+  }
+
+  /// Hydrates the closed-PM set + close-times from KV at boot (F02), mirroring
+  /// the PWA constructor parsing `nym_closed_pms` / `nym_closed_pm_times`.
+  void _hydrateClosedPMs(AppStateNotifier appState) {
+    final closed = _readSet(StorageKeys.closedPms);
+    final times = <String, int>{};
+    final raw = _ref.read(keyValueStoreProvider).getString(StorageKeys.closedPmTimes);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            final t = v is num ? v.toInt() : int.tryParse('$v');
+            if (t != null) times['$k'] = t;
+          });
+        }
+      } catch (_) {}
+    }
+    appState.hydrateClosedPMs(closed, times);
+  }
+
   void _subscribeActiveChannelTyping() {
     final state = _ref.read(appStateProvider);
     if (state.view.kind != ViewKind.channel) return;
@@ -4138,6 +5073,12 @@ class NostrController {
     api.activateApiSocket();
     _storageSync = sync;
 
+    // N26: republish the notification read-state wrap whenever the seen-keys map
+    // grows here (a notification read/dismissed), the native equivalent of the
+    // PWA's debounced settings save on `_rememberNotificationSeen`. Routed
+    // through the same 5s-debounced `syncSettings` as every other synced change.
+    _ref.read(notificationHistoryProvider.notifier).onSeenChanged = syncSettings;
+
     // The other-users shop-status fetcher (cosmetics for OTHER pubkeys) must
     // never query our own pubkey — our own record loads via shop-get below.
     _ref.read(otherUsersShopProvider.notifier).selfPubkey =
@@ -4151,6 +5092,10 @@ class NostrController {
     // per-open `channelRestoreFromD1` in `switchChannel`, plus the ephemeral
     // group inbox). Best-effort; gated/idempotent inside the handler.
     _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
+
+    // Persist the closed-PM set on every mutation so a deleted PM stays deleted
+    // across a relaunch (F02; pms.js `nym_closed_pms` / `nym_closed_pm_times`).
+    _ref.read(appStateProvider.notifier).onClosedPmsChanged = _persistClosedPMs;
   }
 
   /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
@@ -4181,6 +5126,15 @@ class NostrController {
   /// also restores all 1:1 PMs up front rather than per-conversation. All work
   /// is best-effort and never blocks the (already-committed) view switch.
   void _onViewOpened(ChatView view) {
+    // Reading a conversation clears ITS bell-badge entries WITHOUT opening the
+    // notifications modal (PWA `_markChannelRead` → `_markConversationNotifications
+    // Seen`, channels.js:1738-1739; C02-4). The notification `route` is the bare
+    // channel key / peer pubkey / group id — all `view.id` — and the open marks
+    // everything up to now seen.
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    _ref
+        .read(notificationHistoryProvider.notifier)
+        .markConversationSeen(view.id, tsSec: nowSec);
     switch (view.kind) {
       case ViewKind.channel:
         unawaited(_backfillChannelArchive(view.id));
@@ -4191,7 +5145,10 @@ class NostrController {
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
       case ViewKind.pm:
-        break;
+        // Send a read receipt to the peer for each of their loaded messages
+        // (PWA `openPM` → read-receipt send, pms.js:3015-3019; F02 blocker —
+        // `sendReadReceipt` previously had zero callers). Scope-gated + deduped.
+        markVisiblePmMessagesRead(view.id);
     }
   }
 
@@ -4376,6 +5333,19 @@ class NostrController {
     try {
       final result = await sync.settingsGet();
       if (result == null) return;
+      // N26 inbound: merge the cross-device notification read-state additively
+      // (idempotent) BEFORE the settings ts gate — a notification read on another
+      // device clears its badge here even if no settings section changed
+      // (app.js:5760, `seenNotifications` → `_mergeSeenNotifications`).
+      final notif = result.notificationsPayload;
+      if (notif != null) {
+        final seen = notif['seenNotifications'];
+        if (seen is Map) {
+          _ref
+              .read(notificationHistoryProvider.notifier)
+              .mergeSeenNotifications(seen);
+        }
+      }
       final kv = _ref.read(keyValueStoreProvider);
       final lastTs = int.tryParse(
               kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
@@ -4448,6 +5418,18 @@ class NostrController {
     str('acceptCalls', c.setAcceptCalls);
     boolean('groupChatPMOnlyMode', c.setGroupChatPMOnlyMode);
     str('translateLanguage', c.setTranslateLanguage);
+    // Default landing channel rides the sync as a `{type,geohash}` OBJECT (PWA
+    // `pinnedLandingChannel`, settings.js:116), not a string — re-encode it to
+    // the JSON the KV store + `setPinnedLandingChannel` expect. SETTINGS-SYNC
+    // seam (inbound apply).
+    final landing = p['pinnedLandingChannel'];
+    if (landing is Map &&
+        landing['geohash'] is String &&
+        (landing['geohash'] as String).isNotEmpty) {
+      try {
+        c.setPinnedLandingChannel(jsonEncode(landing));
+      } catch (_) {}
+    }
     boolean('gesturesEnabled', c.setGesturesEnabled);
     str('swipeLeftAction', c.setSwipeLeftAction);
     str('swipeRightAction', c.setSwipeRightAction);
@@ -4462,6 +5444,22 @@ class NostrController {
       c.setShowStatus(ss ? 'true' : 'false');
     } else if (ss == 'friends') {
       c.setShowStatus('friends');
+    }
+    // Seen-call map merged from another device (app.js:6422 `_mergeSeenCalls`):
+    // a call answered/declined elsewhere stops re-ringing here, and one that
+    // becomes `answered` retracts a missed-call notification we surfaced
+    // (`missed-call-<id>` → NotificationHistoryNotifier.removeByEventId).
+    // F06-A3 inbound seam.
+    final sc = p['seenCalls'];
+    if (sc is Map) {
+      try {
+        _ref.read(callServiceProvider).mergeSeenCalls(
+              sc,
+              retract: _ref
+                  .read(notificationHistoryProvider.notifier)
+                  .removeByEventId,
+            );
+      } catch (_) {}
     }
   }
 
@@ -4542,7 +5540,26 @@ class NostrController {
 
   Future<void> _flushSettingsSync(StorageSync sync) async {
     try {
-      await sync.settingsSet(_ref.read(settingsProvider));
+      // The default landing channel is KV-only (not a typed Settings field), so
+      // thread it in explicitly so it rides the `channels` section like the PWA
+      // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.
+      await sync.settingsSet(
+        _ref.read(settingsProvider),
+        pinnedLandingChannelJson:
+            _ref.read(settingsProvider.notifier).pinnedLandingChannelJson,
+        // Seen-call map rides the `messaging` section so a call answered/
+        // declined/missed on this device reflects on our others (calls.js
+        // `_seenCallsForSync`, settings.js:152). F06-A3 outbound seam.
+        seenCalls: _ref.read(callServiceProvider).seenCallsForSync(),
+      );
+      // N26 outbound: publish the cross-device notification read-state wrap (the
+      // `nymchat-notifications` category) so a notification read/dismissed here
+      // is silenced on our other devices (settings.js:559). No-op when unchanged.
+      await sync.notificationsWrapSet(
+        _ref
+            .read(notificationHistoryProvider.notifier)
+            .seenNotificationsForSync(),
+      );
     } catch (_) {
       // Best-effort.
     }
@@ -4725,24 +5742,93 @@ class NostrController {
     p2p.start();
     final offer = p2p.shareFile(bytes: bytes, name: name, type: type);
 
+    final appState = _ref.read(appStateProvider.notifier);
     final state = _ref.read(appStateProvider);
     final view = state.view;
     final content =
         'Sharing file through Nymchat: ${offer.name} (${formatFileSize(offer.size)})';
 
-    // Local echo as a file-offer message (displayMessage isFileOffer path,
-    // p2p.js:158-173: own send sets isFileOffer:true + fileOffer so the sender
-    // sees the same card peers do).
-    final echo = _ref
-        .read(appStateProvider.notifier)
-        .sendLocal(content, fileOffer: offer.toJson());
-
-    if (identity == null || service == null) return;
-    if (view.kind != ViewKind.channel) {
-      // PM/group offers gift-wrap the message with the offer tag; not yet wired
-      // for the native PM path. TODO(verify): carry ['offer', …] on the PM rumor.
+    // PM / group offers gift-wrap the SAME message a normal send would, with the
+    // `['offer', JSON]` tag threaded onto the rumor so the peer/members pick up a
+    // download card (`publishFileOffer` → `sendPM`/`sendGroupMessage` with
+    // `{fileOffer}`, p2p.js:128-135). The local echo carries the shared
+    // nymMessageId so the relay echo dedupes (same guarantee as a plain send).
+    if (view.kind == ViewKind.pm) {
+      if (identity == null || service == null) {
+        appState.sendLocal(content, fileOffer: offer.toJson());
+        return;
+      }
+      final nymMessageId = PmLogic.generateSharedEventId();
+      appState.sendLocal(
+        content,
+        fileOffer: offer.toJson(),
+        nymMessageId: nymMessageId,
+      );
+      final base = PmLogic.buildPmRumor(
+        selfPubkey: identity.pubkey,
+        recipientPubkey: view.id,
+        content: content,
+        nymMessageId: nymMessageId,
+      );
+      // buildPmRumor has no extra-tag seam (unlike the group builder), so append
+      // the offer tag to the rumor we just built before wrapping.
+      final rumor = UnsignedEvent(
+        pubkey: base.pubkey,
+        createdAt: base.createdAt,
+        kind: base.kind,
+        tags: [...base.tags, fileOfferTag(offer)],
+        content: base.content,
+      );
+      try {
+        await service.publishPM(
+          rumor: rumor,
+          recipientPubkey: view.id,
+          settings: _msgSettings,
+        );
+      } catch (_) {
+        // PM send paths don't expose the echo id here; leave the optimistic
+        // bubble in its sent state (mirrors a normal PM send with no receipt).
+      }
       return;
     }
+
+    if (view.kind == ViewKind.group) {
+      final group = appState.groupById(view.id);
+      if (identity == null || service == null || group == null) {
+        appState.sendLocal(content, fileOffer: offer.toJson());
+        return;
+      }
+      final ek = _groups!.keysFor(group.id);
+      final next = ek.rotateSelf();
+      _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      final nymMessageId = GroupLogic.generateGroupId();
+      appState.sendLocal(
+        content,
+        fileOffer: offer.toJson(),
+        nymMessageId: nymMessageId,
+      );
+      final rumor = GroupLogic.buildGroupMessageRumor(
+        group: group,
+        selfPubkey: identity.pubkey,
+        content: content,
+        nymMessageId: nymMessageId,
+        ephemeralPk: next.pk,
+        // Thread the file-offer tag the same way the PWA does (groups.js:1707).
+        extraTags: [fileOfferTag(offer)],
+      );
+      await service.publishGroupMessage(
+        rumor: rumor,
+        recipients: group.members,
+        encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+        settings: _msgSettings,
+      );
+      return;
+    }
+
+    // Channel branch: local echo + re-publish the channel message with the offer
+    // tag (displayMessage isFileOffer path, p2p.js:158-173).
+    final echo = appState.sendLocal(content, fileOffer: offer.toJson());
+    if (identity == null || service == null) return;
     final isGeo = state.channels
         .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
     // Re-publish the channel message with the extra offer tag so peers can pick
@@ -5072,7 +6158,6 @@ class NostrController {
 
   Future<void> dispose() async {
     _flushTimer?.cancel();
-    _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
     if (_p2pSub != null) {

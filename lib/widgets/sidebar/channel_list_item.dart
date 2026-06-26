@@ -12,6 +12,15 @@ import '../../models/channel.dart';
 /// styles-shell.css:348-366).
 const Color _pinnedGrey = Color(0xFF9696A0); // rgb(150,150,160)
 
+/// Global-coordinate centre of [c]'s render box — the anchor for a long-press
+/// context menu (`InkWell.onLongPress` carries no pointer position, unlike a
+/// secondary-tap).
+Offset _rowCenter(BuildContext c) {
+  final box = c.findRenderObject() as RenderBox?;
+  if (box == null || !box.hasSize) return Offset.zero;
+  return box.localToGlobal(box.size.center(Offset.zero));
+}
+
 /// A single channel row in the sidebar PUBLIC CHANNELS list.
 ///
 /// Mirrors `.channel-item` (docs/specs/02 §5.3): padding 9/12, margin 2/4,
@@ -88,14 +97,20 @@ class ChannelListItem extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) =>
-              showChannelContextMenu(context, ref, entry, d.globalPosition),
-          onSecondaryTapDown: (d) =>
-              showChannelContextMenu(context, ref, entry, d.globalPosition),
-          child: InkWell(
+        // Tap, long-press and secondary-tap share ONE InkWell recognizer set so
+        // the long-press reliably wins the gesture arena inside the scrollable
+        // sidebar. The previous GestureDetector-wrapped-around-InkWell split let
+        // the InkWell's tap claim the pointer and the parent long-press never
+        // resolved — so channel rows opened no context menu on long-press.
+        // InkWell.onLongPress also fires Feedback.forLongPress (the PWA's
+        // `nymHapticTap`) for free.
+        child: Builder(
+          builder: (rowContext) => InkWell(
             onTap: onTap,
+            onLongPress: () => showChannelContextMenu(
+                rowContext, ref, entry, _rowCenter(rowContext)),
+            onSecondaryTapDown: (d) =>
+                showChannelContextMenu(rowContext, ref, entry, d.globalPosition),
             borderRadius: NymRadius.rxs,
             child: Stack(
               children: [

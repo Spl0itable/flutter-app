@@ -156,12 +156,22 @@ class CallSignal {
   static Map<String, dynamic> share({required String callId, required bool on}) =>
       {'type': 'share', 'callId': callId, 'on': on};
 
-  /// `{ type:'reaction', callId, emoji }`
+  /// `{ type:'reaction', callId, emoji }`, plus an optional `emojiTags` array of
+  /// `['emoji', code, url]` tuples when [emoji] is a custom `:shortcode:` whose
+  /// pack the receiver may not have. calls.js `sendCallReaction` (1149-1160):
+  /// `const tags = customEmojiTagsForContent(emoji); if (tags.length)
+  /// payload.emojiTags = tags;` — the field is omitted entirely when empty.
   static Map<String, dynamic> reaction({
     required String callId,
     required String emoji,
+    List<List<String>>? emojiTags,
   }) =>
-      {'type': 'reaction', 'callId': callId, 'emoji': emoji};
+      {
+        'type': 'reaction',
+        'callId': callId,
+        'emoji': emoji,
+        if (emojiTags != null && emojiTags.isNotEmpty) 'emojiTags': emojiTags,
+      };
 
   /// `{ type:'chat', callId, text, mid }`
   static Map<String, dynamic> chat({
@@ -177,13 +187,16 @@ class CallSignal {
         'mid': mid,
       };
 
-  /// `{ type:'chat-reaction', callId, mid, emoji, op }` (op ∈ add|remove).
-  /// calls.js `_toggleCallChatReaction` (1644).
+  /// `{ type:'chat-reaction', callId, mid, emoji, op }` (op ∈ add|remove), plus
+  /// an optional `emojiTags` array when [emoji] is a custom `:shortcode:`. calls.js
+  /// `_toggleCallChatReaction` (1644-1646) attaches `customEmojiTagsForContent(emoji)`
+  /// the same way the fly-reaction does, omitting the field when empty.
   static Map<String, dynamic> chatReaction({
     required String callId,
     required String mid,
     required String emoji,
     required String op,
+    List<List<String>>? emojiTags,
   }) =>
       {
         'type': 'chat-reaction',
@@ -191,6 +204,7 @@ class CallSignal {
         'mid': mid,
         'emoji': emoji,
         'op': op,
+        if (emojiTags != null && emojiTags.isNotEmpty) 'emojiTags': emojiTags,
       };
 
   /// `{ type:'chat-typing', callId, status }` (status ∈ start|stop).

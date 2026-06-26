@@ -1,7 +1,8 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 import '../../models/channel.dart';
-import '../../models/message.dart';
 import '../../state/app_state.dart';
 
 /// A geohash channel plotted on the globe: its decoded center, recent message
@@ -59,12 +60,12 @@ const int kD1ActiveHeatFloor = 1;
 /// [kGlobeSeedGeohashes], registered channels, geohash-tagged messages in the
 /// store, AND any geohash D1 reported activity for (via `channelLastActivity`).
 ///
-/// Per-geohash weight is `max(localWindowCount, d1WindowHeat)` (the PWA's
-/// `_combineGeohashActivity` `max(local[i], d1[i])` per hourly bucket,
-/// channels.js:113-125). Because the native store discards the per-hour D1
-/// buckets (see [kD1ActiveHeatFloor]), `d1WindowHeat` is a presence floor: a
-/// geohash whose D1 last-activity falls inside the window contributes
-/// [kD1ActiveHeatFloor] so it plots even with zero locally-loaded messages.
+/// Per-geohash weight is the PWA's `_combineGeohashActivity`: bucket local
+/// messages into 24 hourly slots and sum `max(local[i], d1[i])` across the
+/// window (channels.js:113-125), where `d1[i]` is the per-hour D1 count kept in
+/// [AppState.geohashD1Activity] (C05-3). A geohash with D1 activity inside the
+/// window but no per-hour buckets (e.g. discovered only via last-activity) falls
+/// back to a [kD1ActiveHeatFloor] presence floor so it still plots.
 List<GeohashChannelPoint> buildGeohashChannels(
   AppState state, {
   required int windowHours,
@@ -72,16 +73,8 @@ List<GeohashChannelPoint> buildGeohashChannels(
   final nowMs = DateTime.now().millisecondsSinceEpoch;
   final cutoffMs = nowMs - windowHours * 3600 * 1000;
 
-  // geohash -> recent message count (max of local-window and D1-window weight).
+  // geohash -> recent message heat (Σ per-hour max of local + D1 buckets).
   final counts = <String, int>{};
-
-  void tallyFromList(String geohash, List<Message> list) {
-    var n = 0;
-    for (final m in list) {
-      if (m.timestamp >= cutoffMs) n++;
-    }
-    counts[geohash] = (counts[geohash] ?? 0) + n;
-  }
 
   // The candidate geohash set, mirroring the PWA's `allGeohashes`:
   //   1. seed (common) geohashes (channels.js:53),
@@ -125,21 +118,47 @@ List<GeohashChannelPoint> buildGeohashChannels(
 
   if (candidates.isEmpty) return const [];
 
-  // Tally each candidate: local window count, then mix in the D1 window weight.
+  // Tally each candidate the PWA way (`updateGeohashChannels` +
+  // `_combineGeohashActivity`, channels.js:84-125): bucket local messages into
+  // 24 hourly slots, then sum `max(local[i], d1[i])` across the active window.
+  final n = math.max(1, math.min(24, windowHours));
   for (final gh in candidates) {
-    counts.putIfAbsent(gh, () => 0);
+    // (a) Bucket locally-stored messages into 24 hourly slots aligned with the
+    // D1 buckets (index 0 = most recent hour). C05-4 — skip spam-gated messages
+    // (`if (m._spamGated) continue;`, channels.js:88-89) so a geohash flooded
+    // only by un-vouched strangers stays cold.
+    final localBuckets = List<int>.filled(24, 0);
     final list = state.messages['#$gh'];
-    if (list != null) tallyFromList(gh, list);
-
-    // GL1 — mix local + D1 (PWA `_combineGeohashActivity`, channels.js:113-125,
-    // `total += max(local[i], d1[i])`). The native store has no per-hour D1
-    // buckets, so D1 contributes a presence floor when its last-activity ms for
-    // this geohash falls inside the active window: `max(localCount, floor)`.
-    final d1LastMs = state.channelLastActivity['#$gh'] ?? 0;
-    if (d1LastMs >= cutoffMs) {
-      final local = counts[gh] ?? 0;
-      if (kD1ActiveHeatFloor > local) counts[gh] = kD1ActiveHeatFloor;
+    if (list != null) {
+      for (final m in list) {
+        if (m.spamGated) continue;
+        final ts = m.timestamp;
+        if (ts <= 0) continue;
+        var ageH = (nowMs - ts) ~/ (3600 * 1000);
+        if (ageH < 0) ageH = 0;
+        if (ageH < 24) localBuckets[ageH]++;
+      }
     }
+    // (b) Faithful per-hour combine: Σ_{i<n} max(local[i], d1[i]) over the
+    // window, where d1[i] is the D1-reported count for that hour (channels.js
+    // `_combineGeohashActivity`, :113-125).
+    final d1Buckets = state.geohashD1Activity[gh];
+    var total = 0;
+    for (var i = 0; i < n; i++) {
+      final local = localBuckets[i];
+      final d1c =
+          (d1Buckets != null && i < d1Buckets.length) ? d1Buckets[i] : 0;
+      total += math.max(local, d1c);
+    }
+    // (c) Coverage fallback (no PWA analogue — its `_geohashD1Activity` always
+    // carries buckets for a D1-active geohash): a geohash with a D1 last-activity
+    // inside the window but no per-hour buckets still plots at the presence floor
+    // rather than vanishing. Real buckets, when present, always win.
+    if (total < 1 && (d1Buckets == null || d1Buckets.isEmpty)) {
+      final d1LastMs = state.channelLastActivity['#$gh'] ?? 0;
+      if (d1LastMs >= cutoffMs) total = kD1ActiveHeatFloor;
+    }
+    counts[gh] = total;
   }
 
   // GL5 — joined geohashes. The native store has no separate
