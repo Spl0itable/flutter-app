@@ -45,9 +45,15 @@ class RelayStatsModal extends ConsumerStatefulWidget {
   /// `.modal` overlay, not a sheet). Wire this to the sidebar status-indicator
   /// (see CROSS_FILE_NEEDS).
   static Future<void> open(BuildContext context) {
+    // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1635).
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: const Color(0xB3000000), // .modal overlay rgba(0,0,0,0.7)
+      barrierColor: isLight
+          ? const Color(0x73000000) // black @ 0.45
+          : const Color(0xBF000000), // black @ 0.75
       builder: (_) => const RelayStatsModal(),
     );
   }
@@ -117,21 +123,32 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
             color: c.bgSecondary,
             borderRadius: NymRadius.rxl,
             border: Border.all(color: c.glassBorder),
-            boxShadow: [
-              const BoxShadow(
-                color: Color(0x80000000), // shadow-lg 0 8 32 black/0.5
-                blurRadius: 32,
-                offset: Offset(0, 8),
-              ),
-              BoxShadow(
-                color: c.primary.withValues(alpha: 0.1), // shadow-glow
-                blurRadius: 20,
-              ),
-              BoxShadow(
-                color: Colors.white.withValues(alpha: 0.05), // 1px white ring
-                spreadRadius: 1,
-              ),
-            ],
+            // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+            // rgba(0,0,0,0.12) }` — a single soft shadow, no glow/white ring
+            // (styles-themes-responsive.css:1050-1052).
+            boxShadow: c.isLight
+                ? const [
+                    BoxShadow(
+                      color: Color(0x1F000000), // black @ 0.12
+                      blurRadius: 40,
+                      offset: Offset(0, 8),
+                    ),
+                  ]
+                : [
+                    const BoxShadow(
+                      color: Color(0x80000000), // shadow-lg 0 8 32 black/0.5
+                      blurRadius: 32,
+                      offset: Offset(0, 8),
+                    ),
+                    BoxShadow(
+                      color: c.primary.withValues(alpha: 0.1), // shadow-glow
+                      blurRadius: 20,
+                    ),
+                    BoxShadow(
+                      color: Colors.white.withValues(alpha: 0.05), // 1px white ring
+                      spreadRadius: 1,
+                    ),
+                  ],
           ),
           child: Stack(
             children: [
@@ -285,7 +302,11 @@ class _StatCard extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 3),
       decoration: BoxDecoration(
         // .relay-stat-card: white/0.03 fill, glass border, radius 12.
-        color: Colors.white.withValues(alpha: 0.03),
+        // `body.light-mode .relay-stat-card { rgba(0,0,0,0.03) }`
+        // (styles-themes-responsive.css:1479-1481).
+        color: c.isLight
+            ? const Color(0x08000000) // black @ 0.03
+            : Colors.white.withValues(alpha: 0.03),
         borderRadius: NymRadius.rsm,
         border: Border.all(color: c.glassBorder),
       ),
@@ -371,7 +392,11 @@ class _ThroughputSection extends StatelessWidget {
           // padding 10. Canvas is 100px tall.
           padding: const EdgeInsets.all(10),
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.02),
+            // `body.light-mode .relay-stats-graph-wrap { rgba(0,0,0,0.02) }`
+            // (styles-themes-responsive.css:1483-1486).
+            color: c.isLight
+                ? const Color(0x05000000) // black @ 0.02
+                : Colors.white.withValues(alpha: 0.02),
             borderRadius: NymRadius.rsm,
             border: Border.all(color: c.glassBorder),
           ),
@@ -594,7 +619,11 @@ class _RelayListSection extends StatelessWidget {
           constraints: const BoxConstraints(maxHeight: 240),
           decoration: BoxDecoration(
             // .relay-stats-relay-list: white/0.02 fill, glass border, radius 12.
-            color: Colors.white.withValues(alpha: 0.02),
+            // `body.light-mode .relay-stats-relay-list { rgba(0,0,0,0.02) }`
+            // (styles-themes-responsive.css:1483-1486).
+            color: c.isLight
+                ? const Color(0x05000000) // black @ 0.02
+                : Colors.white.withValues(alpha: 0.02),
             borderRadius: NymRadius.rsm,
             border: Border.all(color: c.glassBorder),
           ),
@@ -688,10 +717,17 @@ class _StatsRow extends StatelessWidget {
       onTap: onTap,
       child: Container(
         // .relay-stats-row: padding 8/12, gap 10, bottom border white/0.04.
+        // `body.light-mode .relay-stats-row { border-bottom-color: rgba(0,0,0,0.06) }`
+        // (styles-themes-responsive.css:1492-1494).
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
         decoration: BoxDecoration(
           border: Border(
-              bottom: BorderSide(color: Colors.white.withValues(alpha: 0.04))),
+            bottom: BorderSide(
+              color: c.isLight
+                  ? const Color(0x0F000000) // black @ 0.06
+                  : Colors.white.withValues(alpha: 0.04),
+            ),
+          ),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -982,7 +1018,11 @@ class _LowDataPanel extends StatelessWidget {
       // glass border, radius 12.
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.03),
+        // `body.light-mode .relay-stats-low-data { rgba(0,0,0,0.03) }`
+        // (styles-themes-responsive.css:1467-1469 / :596-598).
+        color: c.isLight
+            ? const Color(0x08000000) // black @ 0.03
+            : Colors.white.withValues(alpha: 0.03),
         borderRadius: NymRadius.rsm,
         border: Border.all(color: c.glassBorder),
       ),

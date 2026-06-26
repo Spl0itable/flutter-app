@@ -41,9 +41,15 @@ Future<void> showNotificationsPanel(BuildContext context) {
   // Freeze the unread state per entry as a parallel list of bools (a public
   // type, so the widget constructor doesn't leak a private one).
   final viewedAtOpen = [for (final e in entries) e.viewed];
+  // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+  // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+  // (styles-themes-responsive.css:1630-1635).
+  final isLight = context.nym.isLight;
   return showDialog<void>(
     context: context,
-    barrierColor: const Color(0xB3000000), // .modal overlay rgba(0,0,0,0.7)
+    barrierColor: isLight
+        ? const Color(0x73000000) // black @ 0.45
+        : const Color(0xBF000000), // black @ 0.75
     builder: (_) => NotificationsPanel(
       entries: entries,
       viewedAtOpen: viewedAtOpen,
@@ -148,16 +154,30 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
             color: c.bgSecondary,
             borderRadius: NymRadius.rxl,
             border: Border.all(color: c.glassBorder),
-            boxShadow: [
-              const BoxShadow(
-                color: Color(0x80000000),
-                blurRadius: 32,
-                offset: Offset(0, 8),
-              ),
-              BoxShadow(color: c.primary.withValues(alpha: 0.1), blurRadius: 20),
-              BoxShadow(
-                  color: Colors.white.withValues(alpha: 0.05), spreadRadius: 1),
-            ],
+            // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+            // rgba(0,0,0,0.12) }` — one soft shadow, no glow, no white ring in
+            // light (styles-themes-responsive.css:1050-1052).
+            boxShadow: c.isLight
+                ? const [
+                    BoxShadow(
+                      color: Color(0x1F000000), // black @ 0.12
+                      blurRadius: 40,
+                      offset: Offset(0, 8),
+                    ),
+                  ]
+                : [
+                    const BoxShadow(
+                      color: Color(0x80000000),
+                      blurRadius: 32,
+                      offset: Offset(0, 8),
+                    ),
+                    BoxShadow(
+                        color: c.primary.withValues(alpha: 0.1),
+                        blurRadius: 20),
+                    BoxShadow(
+                        color: Colors.white.withValues(alpha: 0.05),
+                        spreadRadius: 1),
+                  ],
           ),
           child: Stack(
             children: [

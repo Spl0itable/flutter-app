@@ -5,12 +5,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
 import '../../features/polls/poll_card.dart';
 import '../../features/reactions/reaction_picker.dart';
+import '../../models/channel.dart';
 import '../../models/message.dart';
 import '../../models/poll.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
+import '../nym_icons.dart';
 import 'message_row.dart';
 import 'message_skeleton.dart';
 import 'typing_indicator.dart';
@@ -89,6 +92,60 @@ class _MessagesListState extends ConsumerState<MessagesList> {
   /// feature; bound into [messageListScrollerProvider] on every build.
   final ItemScrollController _itemScrollController = ItemScrollController();
 
+  /// Reports the currently-visible render-index range so the scroll-to-bottom
+  /// FAB can mirror the PWA's `distanceFromBottom > 150` gate (`app.js:7120`).
+  /// In the `reverse:true` list, index 0 is the newest message at the bottom;
+  /// the FAB shows once the bottom-most visible unit is a couple of rows up.
+  final ItemPositionsListener _positionsListener =
+      ItemPositionsListener.create();
+
+  /// Whether the jump-to-latest FAB is currently shown (the user has scrolled
+  /// up away from the newest message).
+  bool _showScrollButton = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _positionsListener.itemPositions.addListener(_onPositionsChanged);
+  }
+
+  @override
+  void dispose() {
+    _positionsListener.itemPositions.removeListener(_onPositionsChanged);
+    super.dispose();
+  }
+
+  /// Recomputes [_showScrollButton] from the visible item positions. Analogue
+  /// of the PWA's `distanceFromBottom > 150` (`app.js:7120-7124`): in the
+  /// reversed list the bottom edge is index 0, so we show the FAB once the
+  /// smallest visible index is at least 2 render units off the bottom.
+  void _onPositionsChanged() {
+    final positions = _positionsListener.itemPositions.value;
+    if (positions.isEmpty) return;
+    // The visually-bottom-most item is the one with the smallest index whose
+    // trailing edge is still within the viewport.
+    final minIndex = positions
+        .where((p) => p.itemTrailingEdge > 0)
+        .map((p) => p.index)
+        .fold<int>(1 << 30, (a, b) => a < b ? a : b);
+    final shouldShow = minIndex >= 2;
+    if (shouldShow != _showScrollButton) {
+      setState(() => _showScrollButton = shouldShow);
+    }
+  }
+
+  /// Smooth-scrolls the list back to the newest message (index 0 in the
+  /// reversed list), mirroring the PWA `scrollToBottom()` (`app.js:2142`).
+  void _scrollToBottom() {
+    if (!_itemScrollController.isAttached) return;
+    _itemScrollController.scrollTo(
+      index: 0,
+      alignment: 0,
+      duration: NymMotion.transition,
+      curve: NymMotion.curve,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -122,6 +179,7 @@ class _MessagesListState extends ConsumerState<MessagesList> {
               child: _EmptyOrLoading(
                 key: ValueKey(app.view),
                 useBubbles: settings.useBubbles,
+                emptyNote: _emptyNoteText(app),
               ),
             ),
             const TypingIndicatorRow(),
@@ -194,23 +252,46 @@ class _MessagesListState extends ConsumerState<MessagesList> {
       child: Column(
         children: [
           Expanded(
-            child: ScrollablePositionedList.builder(
-              itemScrollController: _itemScrollController,
-              reverse: true,
-              padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-              itemCount: units.length,
-              itemBuilder: (context, revIndex) {
-                final unit = units[units.length - 1 - revIndex];
-                if (unit is _PollUnit) {
-                  return PollCard(poll: unit.poll, settings: settings);
-                }
-                return MessageGroup(
-                  entries: (unit as _GroupUnit).entries,
-                  settings: settings,
-                  onReactionPicker: (msg) =>
-                      showReactionPicker(context, ref, msg),
-                );
-              },
+            // A Stack so the scroll-to-bottom FAB (`.scroll-to-bottom-btn`) can
+            // float over the conversation, mirroring the PWA's always-present
+            // single-view jump-to-latest control (`styles-chat.css:9-43`).
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: ScrollablePositionedList.builder(
+                    itemScrollController: _itemScrollController,
+                    itemPositionsListener: _positionsListener,
+                    reverse: true,
+                    // Swipe-down on the messages dismisses the soft keyboard
+                    // (01-B3): the browser does this natively on the PWA.
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                    itemCount: units.length,
+                    itemBuilder: (context, revIndex) {
+                      final unit = units[units.length - 1 - revIndex];
+                      if (unit is _PollUnit) {
+                        return PollCard(poll: unit.poll, settings: settings);
+                      }
+                      return MessageGroup(
+                        entries: (unit as _GroupUnit).entries,
+                        settings: settings,
+                        onReactionPicker: (msg) =>
+                            showReactionPicker(context, ref, msg),
+                      );
+                    },
+                  ),
+                ),
+                // `.scroll-to-bottom-btn`: 40×40 FAB, bottom:90 (clears the
+                // composer — NOT the columns' 16), right:24, shown >150px from
+                // the bottom (`app.js:7120`, `styles-chat.css:9-43`).
+                if (_showScrollButton)
+                  Positioned(
+                    right: 24,
+                    bottom: 90,
+                    child: _ScrollToBottomButton(onTap: _scrollToBottom),
+                  ),
+              ],
             ),
           ),
           const TypingIndicatorRow(),
@@ -234,6 +315,22 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     final hash = nym.indexOf('#');
     return hash > 0 ? nym.substring(0, hash) : nym;
   }
+
+  /// The empty-state note text (`_appendEmptyNote`): "No recent messages in
+  /// #channel" for a channel view (`messages.js:2840`), else the bare
+  /// "No recent messages" (`messages.js:3069`). Mirrors `_titleFor`'s channel
+  /// lookup (`chat_pane.dart:955-962`) and `columns_deck._emptyNoteText`.
+  String _emptyNoteText(AppState app) {
+    final view = app.view;
+    if (view.kind == ViewKind.channel) {
+      final ch = app.channels.firstWhere(
+        (c) => c.key == view.id,
+        orElse: () => ChannelEntry(channel: view.id),
+      );
+      return 'No recent messages in #${ch.isGeohash ? ch.geohash : ch.channel}';
+    }
+    return 'No recent messages';
+  }
 }
 
 /// The empty-conversation surface: the shimmer [MessageSkeleton] while history
@@ -246,9 +343,17 @@ class _MessagesListState extends ConsumerState<MessagesList> {
 /// empty branch stops rendering, which removes this widget — matching the PWA
 /// where an incoming message clears the skeleton/note immediately.
 class _EmptyOrLoading extends StatefulWidget {
-  const _EmptyOrLoading({super.key, required this.useBubbles});
+  const _EmptyOrLoading({
+    super.key,
+    required this.useBubbles,
+    required this.emptyNote,
+  });
 
   final bool useBubbles;
+
+  /// The settled-state note text — "No recent messages in #channel" for a
+  /// channel view, else the bare "No recent messages" (`_appendEmptyNote`).
+  final String emptyNote;
 
   @override
   State<_EmptyOrLoading> createState() => _EmptyOrLoadingState();
@@ -281,10 +386,16 @@ class _EmptyOrLoadingState extends State<_EmptyOrLoading> {
       return MessageSkeleton(useBubbles: widget.useBubbles);
     }
     final c = context.nym;
+    // `.msg-empty-note`: text-dim, 13px, centered, padding 24/16
+    // (`styles-chat.css:2045-2051`).
     return Center(
-      child: Text(
-        'No recent messages',
-        style: TextStyle(color: c.textDim, fontSize: 13),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: Text(
+          widget.emptyNote,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: c.textDim, fontSize: 13),
+        ),
       ),
     );
   }
@@ -322,4 +433,74 @@ class _PollUnit extends _RenderUnit {
 class _GroupUnit extends _RenderUnit {
   _GroupUnit(this.entries);
   final List<MessageGroupEntry> entries;
+}
+
+/// `.scroll-to-bottom-btn` (`styles-chat.css:9-43`): a 40×40 round glass FAB
+/// with a primary down-chevron, hover glow + scale 1.1 (`:34-39`). A single-view
+/// analogue of the columns deck's `_ScrollBottomButton`, but 40px (vs 36) and —
+/// unlike the columns copy — it carries the light-mode style
+/// (`styles-themes-responsive.css:607-615`): rest fill white@0.85 / border
+/// primary@0.2 / shadow `0 2px 12px black@0.15`. Hover stays primary@0.15 fill /
+/// primary@0.30 border in both modes.
+class _ScrollToBottomButton extends StatefulWidget {
+  const _ScrollToBottomButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  State<_ScrollToBottomButton> createState() => _ScrollToBottomButtonState();
+}
+
+class _ScrollToBottomButtonState extends State<_ScrollToBottomButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final light = c.isLight;
+    // Rest fill/border flip in light mode (the columns copy omits this); hover
+    // is primary-tinted in both modes.
+    final fill = _hover
+        ? c.primaryA(0.15)
+        : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
+    final border = _hover
+        ? c.primaryA(0.30)
+        : (light ? c.primaryA(0.20) : c.glassBorder);
+    // shadow-md (dark) vs light `0 2px 12px black@0.15`.
+    final shadow = light
+        ? const BoxShadow(
+            color: Color(0x26000000), // black @ 0.15
+            offset: Offset(0, 2),
+            blurRadius: 12,
+          )
+        : const BoxShadow(
+            color: Color(0x66000000), // black @ 0.4
+            offset: Offset(0, 4),
+            blurRadius: 16,
+          );
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedScale(
+          scale: _hover ? 1.1 : 1.0,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          child: Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: fill,
+              shape: BoxShape.circle,
+              border: Border.all(color: border),
+              boxShadow: [shadow],
+            ),
+            child: NymSvgIcon(NymIcons.chevronDown, size: 20, color: c.primary),
+          ),
+        ),
+      ),
+    );
+  }
 }

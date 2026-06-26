@@ -97,7 +97,11 @@ class PollCard extends ConsumerWidget {
             child: Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.04),
+                // `body.light-mode .poll-container { background: rgba(0,0,0,0.03) }`
+                // (styles-themes-responsive.css:1510-1513); dark white@0.04.
+                color: c.isLight
+                    ? const Color(0x08000000) // black @ 0.03
+                    : Colors.white.withValues(alpha: 0.04),
                 border: Border.all(color: c.glassBorder),
                 borderRadius: NymRadius.rmd,
               ),
@@ -248,15 +252,23 @@ class _PollOption extends StatelessWidget {
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     borderRadius: NymRadius.rsm,
+                    // `body.light-mode .poll-option-bar` flips to black@.06→.02
+                    // and the selected bar to a blue rgb(0,100,200) tint
+                    // (styles-themes-responsive.css:1519-1525). Dark base is
+                    // white@.06→.02 / primary@.15→.05 (styles-features.css:4044).
                     gradient: LinearGradient(
                       begin: Alignment.centerLeft,
                       end: Alignment.centerRight,
                       colors: selected
-                          ? [c.primaryA(0.15), c.primaryA(0.05)]
-                          : [
-                              Colors.white.withValues(alpha: 0.06),
-                              Colors.white.withValues(alpha: 0.02),
-                            ],
+                          ? (c.isLight
+                              ? const [Color(0x1F0064C8), Color(0x0A0064C8)]
+                              : [c.primaryA(0.15), c.primaryA(0.05)])
+                          : (c.isLight
+                              ? const [Color(0x0F000000), Color(0x05000000)]
+                              : [
+                                  Colors.white.withValues(alpha: 0.06),
+                                  Colors.white.withValues(alpha: 0.02),
+                                ]),
                     ),
                   ),
                 ),

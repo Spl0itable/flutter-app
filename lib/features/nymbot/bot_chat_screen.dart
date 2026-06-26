@@ -6,7 +6,8 @@ import '../../core/utils/nym_utils.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
-import '../../widgets/chat/message_row.dart' show formatRelativeTime;
+import '../../widgets/chat/message_row.dart'
+    show formatRelativeTime, formatFullTimestamp;
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/interaction_hooks.dart';
 import '../../widgets/context_menu/profile_badges.dart' show VerifiedBadge;
@@ -111,11 +112,28 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Nymbot',
-                    style: TextStyle(
-                        color: c.textBright,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600)),
+                // Canonical header name = base nym + dim `#suffix`
+                // (PWA `displayNym`, pms.js:2607; suffix dims the base color to
+                // 0.7 / 0.9em / weight 100 — message_row.dart:307-316).
+                Text.rich(
+                  TextSpan(children: [
+                    const TextSpan(text: 'Nymbot'),
+                    TextSpan(
+                      text:
+                          '#${getPubkeySuffix(NostrController.nymbotPubkey)}',
+                      style: TextStyle(
+                        color: c.textBright.withValues(alpha: 0.7),
+                        fontSize: 16 * 0.9,
+                        fontWeight: FontWeight.w100,
+                      ),
+                    ),
+                  ]),
+                  style: TextStyle(
+                      color: c.textBright,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2),
+                ),
                 Text(
                   state.isPro
                       ? 'Pro · ${state.proModel!.label}'
@@ -683,7 +701,9 @@ class _TierSwitch extends StatelessWidget {
           decoration: BoxDecoration(
             color: active
                 ? c.lightning.withValues(alpha: 0.12)
-                : Colors.white.withValues(alpha: 0.04),
+                // Inactive fill: white@0.04 dark / black@0.04 light. `insetFill`
+                // is mode-aware so the pill stays visible in light mode.
+                : c.insetFill,
             // `.bot-credit-tier-btn`: radius --radius-sm (12).
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
@@ -739,7 +759,8 @@ class _MessageBubble extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = colors;
     final fromUser = message.fromUser;
-    final fontSize = ref.watch(settingsProvider).textSize.toDouble();
+    final settings = ref.watch(settingsProvider);
+    final fontSize = settings.textSize.toDouble();
 
     // Canonical `.message-content` fill (message_row.dart:761-767): self =
     // primary@0.25 (dark) / 0.20 (light); others (bot) = white@0.14 (dark) /
@@ -759,7 +780,9 @@ class _MessageBubble extends ConsumerWidget {
         maxWidth: MediaQuery.of(context).size.width * 0.85,
       ),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        // Canonical `.message-content { padding: 8px 12px 6px }`
+        // (styles-features.css:3608).
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
         decoration: BoxDecoration(
           color: bubbleColor,
           borderRadius: _bubbleRadius(fromUser),
@@ -772,6 +795,13 @@ class _MessageBubble extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // The collapsed reasoning is PREPENDED inside `.message-content`
+                  // (PWA `messages.js:796-797` prepends `.bot-think` into the
+                  // bubble), so it renders on the bubble background above the
+                  // reply text — not floating above the bubble.
+                  if (message.hasReasoning)
+                    _ReasoningSection(
+                        reasoning: message.reasoning!, colors: c),
                   // Full canonical inline formatting (markdown / links / emoji /
                   // mentions / fenced code) — not a raw Text — so bot replies
                   // render identically to channel/PM messages.
@@ -781,14 +811,21 @@ class _MessageBubble extends ConsumerWidget {
                     fontSize: fontSize,
                   ),
                   // `.bubble-time-inner`: relative time pinned bottom-right,
-                  // 4px below the body, inside the bubble.
+                  // 4px below the body, inside the bubble. Tapping it reveals the
+                  // full date+time (canonical `showTimestampPopup`,
+                  // message_row.dart:932-940).
                   const SizedBox(height: 4),
                   Align(
                     alignment: Alignment.centerRight,
-                    child: Text(
-                      formatRelativeTime(message.timestamp),
-                      style:
-                          TextStyle(color: c.textDim, fontSize: 10, height: 1),
+                    child: Tooltip(
+                      message: formatFullTimestamp(message.timestamp,
+                          settings.timeFormat, settings.dateFormat),
+                      triggerMode: TooltipTriggerMode.tap,
+                      child: Text(
+                        formatRelativeTime(message.timestamp),
+                        style: TextStyle(
+                            color: c.textDim, fontSize: 10, height: 1),
+                      ),
                     ),
                   ),
                 ],
@@ -832,26 +869,41 @@ class _MessageBubble extends ConsumerWidget {
               children: [
                 if (!grouped)
                   Padding(
-                    padding: const EdgeInsets.only(left: 2, bottom: 3),
+                    // `.message-author { margin-bottom: 2px }`
+                    // (styles-features.css:3582).
+                    padding: const EdgeInsets.only(left: 2, bottom: 2),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          'Nymbot',
-                          style: TextStyle(
-                              color: c.secondary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600),
+                        // Canonical name = base nym + dim `#suffix` span with
+                        // letter-spacing 0.2 (message_row.dart:307-316,358).
+                        Flexible(
+                          child: Text.rich(
+                            TextSpan(children: [
+                              const TextSpan(text: 'Nymbot'),
+                              TextSpan(
+                                text:
+                                    '#${getPubkeySuffix(NostrController.nymbotPubkey)}',
+                                style: TextStyle(
+                                  color: c.secondaryA(0.7),
+                                  fontSize: 11 * 0.9,
+                                  fontWeight: FontWeight.w100,
+                                ),
+                              ),
+                            ]),
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: c.secondary,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.2),
+                          ),
                         ),
                         const SizedBox(width: 4),
                         const VerifiedBadge(size: 14),
                       ],
                     ),
                   ),
-                // The collapsed reasoning sits just above the reply bubble
-                // (PWA `.bot-think` precedes the reply text).
-                if (message.hasReasoning)
-                  _ReasoningSection(reasoning: message.reasoning!, colors: c),
                 Align(alignment: Alignment.centerLeft, child: bubble),
               ],
             ),
@@ -935,19 +987,38 @@ class _BotWelcomeBubble extends StatelessWidget {
                     child: const Text('🤖', style: TextStyle(fontSize: 16)),
                   ),
                   const SizedBox(width: 6),
-                  Text('Nymbot',
+                  // Canonical name = base nym + dim `#suffix`, letter-spacing 0.2
+                  // (message_row.dart:307-316,358).
+                  Flexible(
+                    child: Text.rich(
+                      TextSpan(children: [
+                        const TextSpan(text: 'Nymbot'),
+                        TextSpan(
+                          text:
+                              '#${getPubkeySuffix(NostrController.nymbotPubkey)}',
+                          style: TextStyle(
+                            color: c.secondaryA(0.7),
+                            fontSize: 11 * 0.9,
+                            fontWeight: FontWeight.w100,
+                          ),
+                        ),
+                      ]),
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                           color: c.secondary,
                           fontSize: 11,
-                          fontWeight: FontWeight.w600)),
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.2),
+                    ),
+                  ),
                   const SizedBox(width: 4),
                   const VerifiedBadge(size: 14),
                 ],
               ),
             ),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              // Canonical `.message-content { padding: 8px 12px 6px }`.
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
               decoration: BoxDecoration(
                 // Canonical bot-bubble fill (others = white@0.14 dark /
                 // black@0.10 light), borderless — matches the reply bubbles.
@@ -1093,11 +1164,12 @@ class _ReasoningSectionState extends State<_ReasoningSection> {
                   const SizedBox(width: 6),
                   const Text('💭', style: TextStyle(fontSize: 13)),
                   const SizedBox(width: 4),
+                  // `.bot-think summary` has no font-weight (normal/w400).
                   Text('Reasoning',
                       style: TextStyle(
                           color: c.textDim,
                           fontSize: 12,
-                          fontWeight: FontWeight.w600)),
+                          fontWeight: FontWeight.w400)),
                 ],
               ),
             ),
@@ -1285,12 +1357,16 @@ class _ComposerState extends State<_Composer> {
       constraints: const BoxConstraints(maxHeight: 200),
       padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: const Color(0xE6141423),
+        // `body.light-mode .command-palette { background: rgba(255,255,255,0.92);
+        // box-shadow: 0 8px 32px rgba(0,0,0,0.12); border-color: rgba(0,0,0,0.08) }`
+        // (styles-themes-responsive.css:1155-1158) vs dark rgba(20,20,35,0.9).
+        color: c.isLight ? const Color(0xEBFFFFFF) : const Color(0xE6141423),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-        border: Border.all(color: c.glassBorder),
+        border: Border.all(
+            color: c.isLight ? const Color(0x14000000) : c.glassBorder),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
+            color: Colors.black.withValues(alpha: c.isLight ? 0.12 : 0.5),
             blurRadius: 32,
             offset: const Offset(0, 8),
           ),
@@ -1308,8 +1384,10 @@ class _ComposerState extends State<_Composer> {
             onTap: () => _pick(cmd),
             child: Container(
               decoration: BoxDecoration(
-                // `.command-item.selected`: background white@0.08, radius xs (8).
-                color: selected ? Colors.white.withValues(alpha: 0.08) : null,
+                // `.command-item.selected`: background white@0.08 dark, flipped to
+                // black@0.06 in light mode — `hoverOverlay` is mode-aware. Radius
+                // xs (8).
+                color: selected ? c.hoverOverlay : null,
                 borderRadius: BorderRadius.circular(8),
               ),
               padding:

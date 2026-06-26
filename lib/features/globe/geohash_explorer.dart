@@ -83,7 +83,12 @@ class GeohashExplorer extends ConsumerStatefulWidget {
   static Route<String> route() {
     return PageRouteBuilder<String>(
       opaque: false,
-      barrierColor: const Color(0x66000000), // rgba(0,0,0,0.4)
+      // The scrim is painted by the Scaffold below (which has a `context` and
+      // so can resolve light/dark): dark `rgba(0,0,0,0.4)` →
+      // `body.light-mode .geohash-explorer-modal { rgba(0,0,0,0.3) }`
+      // (styles-themes-responsive.css:681-683). A static `route()` can't read
+      // `context.nym`, so the barrier stays transparent here.
+      barrierColor: Colors.transparent,
       barrierDismissible: false,
       transitionDuration: const Duration(milliseconds: 180),
       pageBuilder: (_, __, ___) => const GeohashExplorer(),
@@ -461,16 +466,19 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
       warning: nym.warning,
     );
 
-    // F11 — the PWA explorer is a centered overlay (scrim rgba(0,0,0,0.4)) that
-    // floats over the still-visible app, with a 90%×90% (max 1200×800) card
-    // carrying `shadow-lg` + `shadow-glow`. When pushed via [route] the route is
-    // non-opaque (barrier supplies the scrim), so the scaffold itself must be
-    // transparent to let the app show through; under a plain opaque route we
-    // keep the scrim on the scaffold so there's no black void behind the card.
-    final opaqueRoute = ModalRoute.of(context)?.opaque ?? true;
+    // F11 — the PWA explorer is a centered overlay that floats over the
+    // still-visible app, with a 90%×90% (max 1200×800) card carrying
+    // `shadow-lg` + `shadow-glow`. The scaffold paints the translucent scrim
+    // (it has a context, so it resolves light/dark): dark `rgba(0,0,0,0.4)` →
+    // `body.light-mode .geohash-explorer-modal { rgba(0,0,0,0.3) }`
+    // (styles-themes-responsive.css:681-683). Under a non-opaque [route] the
+    // barrier is transparent and this scrim is the only dimming layer (still
+    // translucent, so the app shows through); under a plain opaque route it also
+    // covers the black void behind the card.
     return Scaffold(
-      backgroundColor:
-          opaqueRoute ? const Color(0x66000000) : Colors.transparent,
+      backgroundColor: nym.isLight
+          ? const Color(0x4D000000) // black @ 0.3
+          : const Color(0x66000000), // black @ 0.4
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
@@ -484,16 +492,27 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
                   border: Border.all(color: nym.glassBorder),
                   // `.geohash-explorer-content border-radius: var(--radius-xl)` = 24px.
                   borderRadius: BorderRadius.circular(24),
-                  boxShadow: [
-                    // --shadow-lg: 0 8px 32px rgba(0,0,0,0.5)
-                    const BoxShadow(
-                      color: Color(0x80000000),
-                      blurRadius: 32,
-                      offset: Offset(0, 8),
-                    ),
-                    // --shadow-glow: 0 0 20px rgb(from primary / 0.1)
-                    BoxShadow(color: nym.primaryA(0.1), blurRadius: 20),
-                  ],
+                  // `body.light-mode .geohash-explorer-content { box-shadow:
+                  // 0 8px 40px rgba(0,0,0,0.12) }` — one soft shadow, no glow in
+                  // light (styles-themes-responsive.css:1054-1056).
+                  boxShadow: nym.isLight
+                      ? const [
+                          BoxShadow(
+                            color: Color(0x1F000000), // black @ 0.12
+                            blurRadius: 40,
+                            offset: Offset(0, 8),
+                          ),
+                        ]
+                      : [
+                          // --shadow-lg: 0 8px 32px rgba(0,0,0,0.5)
+                          const BoxShadow(
+                            color: Color(0x80000000),
+                            blurRadius: 32,
+                            offset: Offset(0, 8),
+                          ),
+                          // --shadow-glow: 0 0 20px rgb(from primary / 0.1)
+                          BoxShadow(color: nym.primaryA(0.1), blurRadius: 20),
+                        ],
                 ),
                 clipBehavior: Clip.antiAlias,
                 // `.modal-close` is `position:absolute` within

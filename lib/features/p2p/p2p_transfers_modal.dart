@@ -19,9 +19,15 @@ class P2PTransfersModal extends StatelessWidget {
 
   /// Opens the transfers modal as a centered dialog (PWA `.modal`).
   static Future<void> open(BuildContext context, P2PService service) {
+    // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1635).
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: const Color(0xB3000000), // .modal overlay rgba(0,0,0,0.7)
+      barrierColor: isLight
+          ? const Color(0x73000000) // black @ 0.45
+          : const Color(0xBF000000), // black @ 0.75
       builder: (_) => P2PTransfersModal(service: service),
     );
   }
@@ -51,17 +57,30 @@ class P2PTransfersModal extends StatelessWidget {
                 color: c.bgSecondary,
                 borderRadius: NymRadius.rxl,
                 border: Border.all(color: c.glassBorder),
-                boxShadow: [
-                  const BoxShadow(
-                    color: Color(0x80000000),
-                    blurRadius: 32,
-                    offset: Offset(0, 8),
-                  ),
-                  BoxShadow(color: c.primary.withValues(alpha: 0.1), blurRadius: 20),
-                  BoxShadow(
-                      color: Colors.white.withValues(alpha: 0.05),
-                      spreadRadius: 1),
-                ],
+                // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+                // rgba(0,0,0,0.12) }` — one soft shadow, no glow, no white ring
+                // in light (styles-themes-responsive.css:1050-1052).
+                boxShadow: c.isLight
+                    ? const [
+                        BoxShadow(
+                          color: Color(0x1F000000), // black @ 0.12
+                          blurRadius: 40,
+                          offset: Offset(0, 8),
+                        ),
+                      ]
+                    : [
+                        const BoxShadow(
+                          color: Color(0x80000000),
+                          blurRadius: 32,
+                          offset: Offset(0, 8),
+                        ),
+                        BoxShadow(
+                            color: c.primary.withValues(alpha: 0.1),
+                            blurRadius: 20),
+                        BoxShadow(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            spreadRadius: 1),
+                      ],
               ),
               child: Stack(
                 children: [
@@ -370,9 +389,15 @@ class _IconBtnState extends State<_IconBtn> {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
           decoration: BoxDecoration(
+            // `body.light-mode .icon-btn { background: rgba(0,0,0,0.03);
+            // color: var(--primary) }`; hover `rgba(0,0,0,0.06)`
+            // (styles-themes-responsive.css:595-605). `subtleFill` is exactly
+            // black@.03 light / white@.05 dark (nym_colors.dart:112).
             color: _hover
-                ? c.primary.withValues(alpha: 0.12)
-                : Colors.white.withValues(alpha: 0.05),
+                ? (c.isLight
+                    ? const Color(0x0F000000) // black @ 0.06
+                    : c.primary.withValues(alpha: 0.12))
+                : c.subtleFill,
             borderRadius: NymRadius.rxs,
             border: Border.all(
               color: _hover ? c.primary.withValues(alpha: 0.3) : c.glassBorder,
@@ -381,7 +406,7 @@ class _IconBtnState extends State<_IconBtn> {
           child: Text(
             widget.label.toUpperCase(),
             style: TextStyle(
-              color: _hover ? c.primary : c.text,
+              color: _hover || c.isLight ? c.primary : c.text,
               fontSize: 12,
               fontWeight: FontWeight.w500,
               letterSpacing: 0.8,
