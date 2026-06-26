@@ -5426,6 +5426,22 @@ class NostrController {
     } else if (ss == 'friends') {
       c.setShowStatus('friends');
     }
+    // Seen-call map merged from another device (app.js:6422 `_mergeSeenCalls`):
+    // a call answered/declined elsewhere stops re-ringing here, and one that
+    // becomes `answered` retracts a missed-call notification we surfaced
+    // (`missed-call-<id>` → NotificationHistoryNotifier.removeByEventId).
+    // F06-A3 inbound seam.
+    final sc = p['seenCalls'];
+    if (sc is Map) {
+      try {
+        _ref.read(callServiceProvider).mergeSeenCalls(
+              sc,
+              retract: _ref
+                  .read(notificationHistoryProvider.notifier)
+                  .removeByEventId,
+            );
+      } catch (_) {}
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -5512,6 +5528,10 @@ class NostrController {
         _ref.read(settingsProvider),
         pinnedLandingChannelJson:
             _ref.read(settingsProvider.notifier).pinnedLandingChannelJson,
+        // Seen-call map rides the `messaging` section so a call answered/
+        // declined/missed on this device reflects on our others (calls.js
+        // `_seenCallsForSync`, settings.js:152). F06-A3 outbound seam.
+        seenCalls: _ref.read(callServiceProvider).seenCallsForSync(),
       );
     } catch (_) {
       // Best-effort.

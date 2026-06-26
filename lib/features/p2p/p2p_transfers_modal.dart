@@ -35,6 +35,22 @@ class P2PTransfersModal extends ConsumerWidget {
     return isGeo ? view.id : null;
   }
 
+  /// The NAMED (non-geohash) channel key of the current view, or null when the
+  /// active view is a geohash channel / PM / group. Companion to
+  /// [_currentGeohash]: the PWA's `stopSeeding` emits the channel wire tag for
+  /// whatever channel is open, which for a named channel is a `d` tag
+  /// (`channelWire`, channels.js:454; `currentGeohash` holds the channel name).
+  /// `stopSeeding` lets [_currentGeohash] win, so this only fires for a genuinely
+  /// named channel. F06-B3.
+  static String? _currentNamedChannel(WidgetRef ref) {
+    final state = ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return null;
+    final isGeo = state.channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    return isGeo ? null : view.id;
+  }
+
   /// Opens the transfers modal as a centered dialog (PWA `.modal`).
   static Future<void> open(BuildContext context, P2PService service) {
     // `.modal` barrier: solid-ui (default) dark `rgba(0,0,0,0.75)` →
@@ -153,6 +169,8 @@ class P2PTransfersModal extends ConsumerWidget {
                                           onStop: () => service.stopSeeding(
                                             entry.key,
                                             geohash: _currentGeohash(ref),
+                                            channelName:
+                                                _currentNamedChannel(ref),
                                           ),
                                         ),
                                       for (final t in transfers)

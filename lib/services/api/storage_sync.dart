@@ -101,6 +101,7 @@ class StorageSync {
       'swipeReactEmoji',
       'notificationsEnabled',
       'syncMLSHistory',
+      'seenCalls', // cross-device seen-call map (calls.js, settings.js:20)
     ],
     'channels': [
       'sortByProximity',
@@ -167,6 +168,7 @@ class StorageSync {
   static Map<String, Map<String, dynamic>> buildSectionPayloads(
     Settings s, {
     String? pinnedLandingChannelJson,
+    Map<String, dynamic>? seenCalls,
   }) {
     // The flat synced payload (PWA `_buildSettingsPayload`, subset the native
     // model owns). Booleans/strings/ints map 1:1 to the PWA field names.
@@ -217,6 +219,16 @@ class StorageSync {
     final landing = _parsePinnedLandingChannel(pinnedLandingChannelJson);
     if (landing != null) {
       flat['pinnedLandingChannel'] = landing;
+    }
+
+    // Seen-call map: not a typed [Settings] field (owned by CallService),
+    // threaded in by the caller. Emit it into the `messaging` section as the
+    // same `{callId: {t,s}}` object the PWA syncs (`seenCalls`, settings.js:152)
+    // so another device can merge it. Included when the caller opts in (passes a
+    // map, even empty — matching the PWA, which always carries the field);
+    // existing callers pass null and stay byte-identical.
+    if (seenCalls != null) {
+      flat['seenCalls'] = seenCalls;
     }
 
     final lookup = <String, String>{};
@@ -282,11 +294,13 @@ class StorageSync {
   Future<Set<String>> settingsSet(
     Settings settings, {
     String? pinnedLandingChannelJson,
+    Map<String, dynamic>? seenCalls,
   }) async {
     final sent = <String>{};
     final sections = buildSectionPayloads(
       settings,
       pinnedLandingChannelJson: pinnedLandingChannelJson,
+      seenCalls: seenCalls,
     );
     for (final entry in sections.entries) {
       final category = sectionCategory(entry.key);

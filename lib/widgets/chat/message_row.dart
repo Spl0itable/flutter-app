@@ -382,10 +382,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }) {
     if (message.isFileOffer && message.fileOffer != null) {
       final p2p = ref.read(p2pServiceProvider);
+      // Resolve the channel currently open so the inline Stop broadcasts the
+      // unseeded event with the matching wire tag — `g` for a geohash channel,
+      // `d` for a named one — like the PWA's `stopSeeding`, which reads
+      // `this.currentGeohash` regardless of where Stop fires (p2p.js:828). F06-B3.
+      final app = ref.read(appStateProvider);
+      final v = app.view;
+      final isGeoChannel = v.kind == ViewKind.channel &&
+          app.channels
+              .any((ch) => ch.key == v.id.toLowerCase() && ch.isGeohash);
+      final isNamedChannel = v.kind == ViewKind.channel && !isGeoChannel;
       return FileOfferCard(
         offer: FileOffer.fromJson(message.fileOffer!),
         isOwn: message.isOwn,
         service: p2p,
+        seedGeohash: isGeoChannel ? v.id : null,
+        seedChannelName: isNamedChannel ? v.id : null,
       );
     }
     // cosmetic-redacted (`shop.js:498-512`): the REAL text shows for 10s, then a
@@ -2021,11 +2033,22 @@ class FileOfferCard extends StatelessWidget {
     required this.offer,
     required this.isOwn,
     required this.service,
+    this.seedGeohash,
+    this.seedChannelName,
   });
 
   final FileOffer offer;
   final bool isOwn;
   final P2PService service;
+
+  /// Wire key of the channel currently open, so the inline Stop broadcasts the
+  /// unseeded event with the right channel tag — `['g', geohash]` for a geohash
+  /// channel via [seedGeohash], `['d', name]` for a named channel via
+  /// [seedChannelName] — exactly like the PWA's `stopSeeding`, which reads
+  /// `this.currentGeohash` regardless of where Stop was clicked (p2p.js:828).
+  /// Both null (PM/group/no channel) → no tag. F06-B3.
+  final String? seedGeohash;
+  final String? seedChannelName;
 
   /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
   /// The PWA uses ONE generic file glyph and only re-tints the stroke per
@@ -2155,7 +2178,9 @@ class FileOfferCard extends StatelessWidget {
             child: Text('Seeding - available for download',
                 style: TextStyle(color: c.primary, fontSize: 11)),
           ),
-          _StopBtn(onTap: () => service.stopSeeding(offer.offerId)),
+          _StopBtn(
+              onTap: () => service.stopSeeding(offer.offerId,
+                  geohash: seedGeohash, channelName: seedChannelName)),
         ],
       );
     }

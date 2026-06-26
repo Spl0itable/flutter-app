@@ -971,9 +971,55 @@ class CallService {
     map[callId] =
         _SeenCall(DateTime.now().millisecondsSinceEpoch ~/ 1000, keep);
     _persistSeenCalls(map);
-    // DEFERRED (F06-A3): the PWA also calls `_debouncedNostrSettingsSave()` here
-    // to sync the seen map across devices — wire from the serial
-    // nostr_controller owner once cross-device call sync lands.
+    // Cross-device sync (F06-A3): republish the seen-call map inside the
+    // encrypted settings blob so a call answered/declined/missed here is
+    // reflected on our other devices (calls.js:256 `_debouncedNostrSettingsSave()`).
+    // `syncSettings` is the 5s-debounced publish; it reads `seenCallsForSync()`
+    // when it flushes (nostr_controller `_flushSettingsSync`).
+    try {
+      _ref.read(nostrControllerProvider).syncSettings();
+    } catch (_) {}
+  }
+
+  /// Merges a synced seen-call map received from another device (calls.js
+  /// `_mergeSeenCalls`, calls.js:261) so a call already handled or answered
+  /// elsewhere isn't re-rung or left showing as missed here. TTL-expired entries
+  /// are skipped; on a per-call basis the higher-ranked status wins and the
+  /// newer timestamp is kept. Any call that transitions to `answered` via the
+  /// merge retracts a missed-call notification we already surfaced for it (the
+  /// `missed-call-<callId>` history id), via the [retract] callback the
+  /// controller wires to `NotificationHistoryNotifier.removeByEventId`.
+  void mergeSeenCalls(dynamic incoming,
+      {void Function(String eventId)? retract}) {
+    if (incoming is! Map) return;
+    final map = _seenMap();
+    final cutoff =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - _callSeenTtlSec;
+    final nowAnswered = <String>[];
+    incoming.forEach((key, value) {
+      if (key is! String) return;
+      final r = _SeenCall.fromWire(value);
+      if (r == null || r.t < cutoff) return;
+      final cur = map[key];
+      if (cur == null) {
+        map[key] = _SeenCall(r.t, r.s);
+        if (r.s == 'answered') nowAnswered.add(key);
+        return;
+      }
+      final s = (_callStatusRank[r.s] ?? 0) > (_callStatusRank[cur.s] ?? 0)
+          ? r.s
+          : cur.s;
+      map[key] = _SeenCall(cur.t > r.t ? cur.t : r.t, s);
+      if (s == 'answered' && cur.s != 'answered') nowAnswered.add(key);
+    });
+    _persistSeenCalls(map);
+    // A call answered elsewhere retracts any missed-call we already surfaced
+    // (calls.js:282-284 → `missed-call-<callId>` notification id).
+    if (retract != null) {
+      for (final id in nowAnswered) {
+        retract('missed-call-$id');
+      }
+    }
   }
 
   /// calls.js `_persistSeenCalls` — TTL-prune then write back (best-effort; the
