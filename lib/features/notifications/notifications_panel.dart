@@ -14,10 +14,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../calls/call_nym.dart';
 import '../messages/format/message_content.dart';
@@ -184,14 +186,12 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // .modal-header: 22px UPPERCASE primary + ls1.5 + bottom rule.
-                  // (padding 32 top/sides, 14 bottom, then a 1px glass divider.)
+                  // .modal-header (`.nm-h-76`): 22px UPPERCASE primary + ls1.5.
+                  // In this modal the header drops its own bottom rule (padding
+                  // 32/32/10, `border-bottom: none`) — the rule moves onto the
+                  // toggle block below (no-inline.css:94).
                   Container(
-                    padding: const EdgeInsets.fromLTRB(32, 32, 32, 14),
-                    decoration: BoxDecoration(
-                      border:
-                          Border(bottom: BorderSide(color: c.glassBorder)),
-                    ),
+                    padding: const EdgeInsets.fromLTRB(32, 32, 32, 10),
                     child: Text(
                       'NOTIFICATIONS',
                       style: TextStyle(
@@ -202,6 +202,11 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
                       ),
                     ),
                   ),
+                  // The three notification preference checkboxes
+                  // (`.nm-h-77` block, index.html:2265-2280): Enable / group
+                  // mentions-only / friends-only. Carries the header's bottom
+                  // rule (no-inline.css:95).
+                  const _NotifToggles(),
                   // .notifications-mark-read-row (flex-end, padding 8/24/0).
                   if (_hasUnread)
                     Padding(
@@ -250,6 +255,156 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The notifications modal's three preference checkboxes (`.nm-h-77` block,
+/// index.html:2265-2280): "Enable notifications" (`toggleNotificationsEnabled`,
+/// settings.js:852), "Only notify for mentions in group chats"
+/// (`toggleGroupMentionsOnly`, groups.js:3530), "Only notify for messages from
+/// friends" (`toggleNotifyFriendsOnly`, settings.js:859).
+///
+/// The PWA persists each to localStorage (`nym_notifications_enabled` /
+/// `nym_group_notify_mentions_only` / `nym_notify_friends_only`). We mirror
+/// that here:
+/// * Enable → reactive `Settings.notificationsEnabled` (so the bell glyph
+///   chat_pane.dart:713 + the gate nostr_controller.dart:931 flip live) AND the
+///   `nym_notifications_enabled` KV key.
+/// * The other two → KV only; the gates read those keys directly
+///   (nostr_controller.dart:932-938), so no `Settings` field is involved.
+///
+/// NOT done here (cross-file, deferred): the PWA's `nostrSettingsSave()` push
+/// after each toggle (cross-device settings sync) and `_updateNotificationBadge`
+/// (the badge is owned by the shell via `notificationHistoryProvider.unread`).
+class _NotifToggles extends ConsumerStatefulWidget {
+  const _NotifToggles();
+
+  @override
+  ConsumerState<_NotifToggles> createState() => _NotifTogglesState();
+}
+
+class _NotifTogglesState extends ConsumerState<_NotifToggles> {
+  // The two KV-only flags are mirrored into local state so the checkbox flips
+  // immediately on tap (the gates read KV directly, so there's no provider to
+  // watch). Seeded from KV in initState; 'true' string == on, default off to
+  // match the unchecked PWA checkboxes (index.html:2272/2277).
+  late bool _mentionsOnly;
+  late bool _friendsOnly;
+
+  @override
+  void initState() {
+    super.initState();
+    final kv = ref.read(keyValueStoreProvider);
+    _mentionsOnly =
+        kv.getString(StorageKeys.groupNotifyMentionsOnly) == 'true';
+    _friendsOnly = kv.getString(StorageKeys.notifyFriendsOnly) == 'true';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final kv = ref.read(keyValueStoreProvider);
+    // Enable is a real Settings field (watched so the box reflects it live).
+    final enabled =
+        ref.watch(settingsProvider.select((s) => s.notificationsEnabled));
+
+    return Container(
+      // `.nm-h-77`: padding 0/32/16 + 1px glass bottom rule.
+      padding: const EdgeInsets.fromLTRB(32, 0, 32, 16),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // `.nm-h-78` — top option, no indent.
+          _ToggleRow(
+            label: 'Enable notifications',
+            value: enabled,
+            onChanged: (v) {
+              // Reactive state so the bell + gate update without a relaunch
+              // (mirror toggleNotificationsEnabled, settings.js:853-854). The
+              // plain `update` escape-hatch keeps this within the panel's
+              // ownership (the typed setter lives in settings_provider, owned
+              // elsewhere); it does NOT fire the cross-device sync hook.
+              ref
+                  .read(settingsProvider.notifier)
+                  .update((s) => s.copyWith(notificationsEnabled: v));
+              kv.setString(StorageKeys.notificationsEnabled, '$v');
+            },
+          ),
+          // `.nm-h-80` — indented sub-options (margin-top 6, margin-left 20).
+          _ToggleRow(
+            label: 'Only notify for mentions in group chats',
+            value: _mentionsOnly,
+            indent: true,
+            onChanged: (v) {
+              setState(() => _mentionsOnly = v);
+              kv.setString(StorageKeys.groupNotifyMentionsOnly, '$v');
+            },
+          ),
+          _ToggleRow(
+            label: 'Only notify for messages from friends',
+            value: _friendsOnly,
+            indent: true,
+            onChanged: (v) {
+              setState(() => _friendsOnly = v);
+              kv.setString(StorageKeys.notifyFriendsOnly, '$v');
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One checkbox + label row (`.nm-h-78` / `.nm-h-80`): primary-accented box,
+/// 8px gap, 13px text-dim label, whole row tappable. [indent] applies the
+/// sub-option `margin-top: 6; margin-left: 20`.
+class _ToggleRow extends StatelessWidget {
+  const _ToggleRow({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+    this.indent = false,
+  });
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  final bool indent;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Padding(
+      padding: EdgeInsets.only(top: indent ? 6 : 0, left: indent ? 20 : 0),
+      child: InkWell(
+        onTap: () => onChanged(!value),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 22×22 primary-accented checkbox (the shared `.modal` checkbox
+            // pattern, app_dialog.dart:343-352).
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: Checkbox(
+                value: value,
+                onChanged: (v) => onChanged(v ?? false),
+                activeColor: c.primary,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(label,
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
+            ),
+          ],
         ),
       ),
     );

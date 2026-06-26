@@ -104,6 +104,7 @@ class StorageSync {
     ],
     'channels': [
       'sortByProximity',
+      'pinnedLandingChannel', // default landing channel ({type,geohash} object)
     ],
     'data': [
       'lowDataMode',
@@ -154,7 +155,19 @@ class StorageSync {
   /// matching the PWA field names (`_buildSettingsPayload` +
   /// `_splitSettingsBySection`). Each section carries `v: 2` like the PWA.
   /// Returns `{ '<section>': { ...fields } }`.
-  static Map<String, Map<String, dynamic>> buildSectionPayloads(Settings s) {
+  ///
+  /// [pinnedLandingChannelJson] is the default-landing-channel choice
+  /// (`nym_pinned_landing_channel`, the `{"type":"geohash","geohash":"…"}` JSON
+  /// the PWA stores) read from KV by the caller. It is NOT a typed [Settings]
+  /// field, so it is threaded in separately; when non-null and parseable it is
+  /// emitted into the `channels` section as the same `{type,geohash}` OBJECT the
+  /// PWA syncs (`pinnedLandingChannel`, settings.js:21,116). A null/blank/invalid
+  /// value omits it (the section then only carries the other channels keys),
+  /// keeping every existing caller (which passes nothing) byte-identical.
+  static Map<String, Map<String, dynamic>> buildSectionPayloads(
+    Settings s, {
+    String? pinnedLandingChannelJson,
+  }) {
     // The flat synced payload (PWA `_buildSettingsPayload`, subset the native
     // model owns). Booleans/strings/ints map 1:1 to the PWA field names.
     final flat = <String, dynamic>{
@@ -196,6 +209,16 @@ class StorageSync {
       'cachePMs': s.cachePMs,
     };
 
+    // Default landing channel: not a typed [Settings] field (KV-only), threaded
+    // in by the caller as JSON. Emit the same `{type,geohash}` OBJECT the PWA
+    // syncs (`pinnedLandingChannel`, settings.js:116) so the inbound apply on
+    // another device restores it. Drop a blank/invalid value (boot then defaults
+    // to `nymchat`); the `lookup` below routes it into the `channels` section.
+    final landing = _parsePinnedLandingChannel(pinnedLandingChannelJson);
+    if (landing != null) {
+      flat['pinnedLandingChannel'] = landing;
+    }
+
     final lookup = <String, String>{};
     syncedSectionKeys.forEach((section, keys) {
       for (final k in keys) {
@@ -219,6 +242,29 @@ class StorageSync {
     return true;
   }
 
+  /// Parses the persisted landing-channel JSON
+  /// (`{"type":"geohash","geohash":"…"}`) into the normalized `{type,geohash}`
+  /// Map the PWA syncs (`pinnedLandingChannel`, settings.js:116). Returns null
+  /// when [raw] is null/blank, isn't a JSON object, or lacks a non-empty
+  /// `geohash` string (so an absent/corrupt value is simply omitted from the
+  /// payload). Mirrors `LandingChannel.tryParse` in settings_helpers.dart: a
+  /// missing `type` defaults to `'geohash'`.
+  static Map<String, dynamic>? _parsePinnedLandingChannel(String? raw) {
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    try {
+      final m = jsonDecode(trimmed);
+      if (m is Map && m['geohash'] is String && (m['geohash'] as String).isNotEmpty) {
+        final type = m['type'] is String ? m['type'] as String : 'geohash';
+        return {'type': type, 'geohash': m['geohash'] as String};
+      }
+    } catch (_) {
+      // Corrupt JSON — omit rather than poison the channels section.
+    }
+    return null;
+  }
+
   /// Publishes the synced settings sections to D1. For each section it encrypts
   /// the blob (NIP-44 to self) with the real category embedded as `__cat`,
   /// computes the `contentHash` (sha256 of `pubkey|blob-plaintext`) the worker
@@ -227,9 +273,21 @@ class StorageSync {
   /// Returns the set of section names that were sent (changed since last call).
   /// All failures are swallowed; an unchanged section (same content hash) is
   /// skipped without a network call. Mirrors `_saveSettingsBlobToD1`.
-  Future<Set<String>> settingsSet(Settings settings) async {
+  ///
+  /// [pinnedLandingChannelJson] is the KV-stored default-landing-channel choice
+  /// (not a typed [Settings] field); the caller reads it via
+  /// `SettingsController.pinnedLandingChannelJson` and passes it so it rides the
+  /// `channels` section like the PWA (settings.js:21,116). Omitting it (the
+  /// current callers) leaves the `channels` section landing-channel-free.
+  Future<Set<String>> settingsSet(
+    Settings settings, {
+    String? pinnedLandingChannelJson,
+  }) async {
     final sent = <String>{};
-    final sections = buildSectionPayloads(settings);
+    final sections = buildSectionPayloads(
+      settings,
+      pinnedLandingChannelJson: pinnedLandingChannelJson,
+    );
     for (final entry in sections.entries) {
       final category = sectionCategory(entry.key);
       final ok = await _setSettingsCategory(category, jsonEncode(_withCat(

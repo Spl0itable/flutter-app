@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../widgets/nym_icons.dart';
+import '../messages/format/message_content.dart';
 
 /// The six default quick-react emojis (calls.js `_messageQuickReactDefaults`,
 /// line 1491: `['👍', '❤️', '😂', '🔥', '👎', '😮']`). The PWA pads the user's
@@ -274,7 +275,14 @@ class _EmojiButtonState extends State<_EmojiButton> {
           duration: const Duration(milliseconds: 120),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            child: Text(widget.emoji, style: const TextStyle(fontSize: 28, height: 1)),
+            // A `:shortcode:` recent renders as its custom-emoji image (PWA
+            // ui-context.js:1315 `renderCustomEmojiImg`); unicode stays text on
+            // the fast path. Reused by the call-chat quick-react (surface #19).
+            child: InlineEmojiText(
+              text: widget.emoji,
+              style: const TextStyle(fontSize: 28, height: 1),
+              emojiSize: 28,
+            ),
           ),
         ),
       ),

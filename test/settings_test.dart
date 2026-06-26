@@ -139,6 +139,28 @@ void main() {
       expect(ctrl.hideNonPinned, true);
     });
 
+    test('landing channel persists, reads back, and is a SYNCED setting', () {
+      var synced = 0;
+      ctrl.onSyncedChange = () => synced++;
+
+      // Default: unset.
+      expect(ctrl.pinnedLandingChannelJson, isNull);
+
+      const json = '{"type":"geohash","geohash":"9q8y"}';
+      ctrl.setPinnedLandingChannel(json);
+      expect(kv.getString(StorageKeys.pinnedLandingChannel), json);
+      expect(ctrl.pinnedLandingChannelJson, json);
+      // It fires the synced-change hook (the PWA routes it through the
+      // channels sync section + nostrSettingsSave, settings.js:21,116).
+      expect(synced, 1);
+
+      // A blank value clears the override (boot then defaults to nymchat).
+      ctrl.setPinnedLandingChannel('   ');
+      expect(kv.getString(StorageKeys.pinnedLandingChannel), isNull);
+      expect(ctrl.pinnedLandingChannelJson, isNull);
+      expect(synced, 2);
+    });
+
     test('mobile gesture setters', () {
       ctrl.setGesturesEnabled(false);
       expect(reload().gesturesEnabled, false);

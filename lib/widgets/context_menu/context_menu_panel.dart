@@ -339,7 +339,15 @@ class ContextMenuPanel extends ConsumerWidget {
                 ),
               ],
             ),
-      child: NymAvatar(seed: target.pubkey, size: 64, imageUrl: avatarUrl),
+      // The PWA avatar carries `data-action="expandImageFromSrcStop"` →
+      // `expandImage(getAvatarUrl)` + `closeContextMenu` (inline-bindings.js:244).
+      // Only a real (remote) picture is worth expanding; the identicon fallback
+      // (`avatarUrl` null/empty) stays inert.
+      child: _ExpandableProfileImage(
+        imageUrl: proxiedAvatarUrl(avatarUrl),
+        onClose: onClose,
+        child: NymAvatar(seed: target.pubkey, size: 64, imageUrl: avatarUrl),
+      ),
     );
 
     final header = Container(
@@ -503,13 +511,19 @@ class ContextMenuPanel extends ConsumerWidget {
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // The PWA banner also carries `expandImageFromSrcStop` → opens the
+            // banner fullscreen + closes the menu (index.html:74).
             SizedBox(
               height: 140,
               width: double.infinity,
-              child: CachedNetworkImage(
+              child: _ExpandableProfileImage(
                 imageUrl: bannerUrl,
-                fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                onClose: onClose,
+                child: CachedNetworkImage(
+                  imageUrl: bannerUrl,
+                  fit: BoxFit.cover,
+                  errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                ),
               ),
             ),
             bannerHeader,
@@ -1088,6 +1102,99 @@ class _BackButtonState extends State<_BackButton> {
           child: const NymSvgIcon(NymIcons.chevronLeft,
               size: 18, color: Colors.white),
         ),
+      ),
+    );
+  }
+}
+
+/// Wraps the profile-card avatar / banner so a tap opens the image fullscreen
+/// and closes the context menu — the PWA's `data-action="expandImageFromSrcStop"`
+/// (inline-bindings.js:244 → `expandImage(src)` + `closeContextMenu()`).
+///
+/// When [imageUrl] is null/empty (e.g. the identicon-only avatar) the child is
+/// rendered inert, matching the PWA which only expands a real remote image.
+/// A self-contained fullscreen viewer is used here because the message-format
+/// viewer (`_FullscreenImageViewer`) is private to that file; the behavior
+/// (rootNavigator push, black@0.92 barrier, pinch-zoom, tap-to-close) mirrors it.
+class _ExpandableProfileImage extends StatelessWidget {
+  const _ExpandableProfileImage({
+    required this.imageUrl,
+    required this.onClose,
+    required this.child,
+  });
+
+  final String? imageUrl;
+  final VoidCallback onClose;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = imageUrl;
+    if (url == null || url.isEmpty) return child;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        // Capture the root navigator before closing this panel (its own context
+        // is defunct after onClose()).
+        final rootContext = Navigator.of(context, rootNavigator: true).context;
+        onClose();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (rootContext.mounted) _ProfileImageViewer.open(rootContext, url);
+        });
+      },
+      child: MouseRegion(cursor: SystemMouseCursors.click, child: child),
+    );
+  }
+}
+
+/// Self-contained fullscreen image viewer for the profile card's avatar/banner.
+/// Mirrors `_FullscreenImageViewer` (message_content.dart:1345 — `expandImage`):
+/// opaque:false route over the root navigator, black@0.92 barrier, pinch-zoom
+/// via [InteractiveViewer], tap the backdrop or the ✕ to close.
+class _ProfileImageViewer extends StatelessWidget {
+  const _ProfileImageViewer({required this.url});
+  final String url;
+
+  static Future<void> open(BuildContext context, String url) {
+    return Navigator.of(context, rootNavigator: true).push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        barrierColor: Colors.black.withValues(alpha: 0.92),
+        pageBuilder: (_, __, ___) => _ProfileImageViewer(url: url),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          // Tap anywhere on the backdrop to dismiss.
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.of(context).maybePop(),
+            ),
+          ),
+          Center(
+            child: InteractiveViewer(
+              minScale: 1,
+              maxScale: 4,
+              child: CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.contain,
+                errorWidget: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 14,
+            right: 14,
+            child: SafeArea(child: CtxCloseButton(onTap: () => Navigator.of(context).maybePop())),
+          ),
+        ],
       ),
     );
   }
