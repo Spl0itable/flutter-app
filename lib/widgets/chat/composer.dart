@@ -24,7 +24,9 @@ import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
-import '../../features/messages/format/message_content.dart' show InlineEmojiText;
+import '../../features/messages/format/message_content.dart'
+    show InlineEmojiText, proxiedMedia;
+import '../../features/messages/inline_network_image.dart';
 import '../../features/nymbot/nymbot_models.dart';
 import '../../features/polls/poll_create_modal.dart';
 import '../../features/shop/cosmetics.dart';
@@ -50,7 +52,7 @@ class Composer extends ConsumerStatefulWidget {
 }
 
 class _ComposerState extends ConsumerState<Composer> {
-  final _controller = TextEditingController();
+  final _controller = EmojiSentinelController();
   final _focus = FocusNode();
 
   // Inline composer popovers (`#emojiPicker` / `#gifPicker`). Only one open at
@@ -484,6 +486,11 @@ class _ComposerState extends ConsumerState<Composer> {
   /// Recomputes the active trigger + dropdown contents on every input change
   /// (mirrors handleInputChange + refresh*IfOpen). Re-queries as the user types.
   void _onInputChanged() {
+    // INLINE-EMOJI-WHILE-TYPING (02-F-02-E): swap any just-completed known
+    // `:shortcode:` to a single sentinel char (rendered as the emoji <img> by
+    // [EmojiSentinelController.buildTextSpan]) BEFORE trigger/popout math, so the
+    // rest of this method already sees the collapsed text + corrected caret.
+    _controller.resolveInput();
     final sel = _controller.selection;
     final caret = sel.isValid ? sel.start : _controller.text.length;
     // The verified-bot PM exposes PM-only `?` commands with multi-step
@@ -809,8 +816,17 @@ class _ComposerState extends ConsumerState<Composer> {
     return KeyEventResult.ignored;
   }
 
+  /// WIRE-SAFETY (02-F-02-E, non-negotiable): the draft text as it must reach the
+  /// relay / services / history — every inline-emoji sentinel char expanded back
+  /// to its literal `:shortcode:`. A sentinel PUA code point must NEVER leave the
+  /// composer, so EVERY read of the draft headed for the wire routes through here
+  /// (`_send`, `_sendAnon`, the translate read). Raw `_controller.text` is fine
+  /// only for local UI checks (autocomplete triggers, `hasText`/empty) where a
+  /// 1-char sentinel is a harmless token.
+  String _draftText() => _controller.expand(_controller.text);
+
   void _send() {
-    final typed = _controller.text;
+    final typed = _draftText();
     final controller = ref.read(nostrControllerProvider);
 
     // Edit mode: route the (next) send to editMessage and exit edit mode
@@ -904,7 +920,9 @@ class _ComposerState extends ConsumerState<Composer> {
   /// send. Routed through the controller's [NostrController.sendCurrentPseudonymous]
   /// (nostr_controller.dart) — the shared-core ephemeral-key publish.
   void _sendAnon() {
-    final typed = _controller.text;
+    // Expand inline-emoji sentinels back to `:shortcode:` BEFORE the wire
+    // (02-F-02-E wire-safety) — a sentinel PUA char must never reach the relay.
+    final typed = _draftText();
     // Edit-in-progress isn't a pseudonymous flow in the PWA (the long-press still
     // calls sendMessagePseudonymous which ignores edit state) — fall back to the
     // normal send so an in-flight edit is never silently dropped.
@@ -1103,6 +1121,10 @@ class _ComposerState extends ConsumerState<Composer> {
     // Keep the live NIP-30 custom-emoji snapshot in sync so the open emoji
     // picker / `:` autocomplete refresh when packs arrive over relays.
     _customEmojis = ref.watch(liveCustomEmojiProvider);
+    // Feed the same shortcode→url map into the controller so its overridden
+    // `buildTextSpan` can resolve a sentinel char to its emoji <img>, and the
+    // resolve-on-input pass knows which `:code:` are real (02-F-02-E).
+    _controller.codeToUrl = _customEmojis.codeToUrl;
 
     // Apply mention/quote requests published by the context menu (one-shot).
     ref.listen(pendingComposerActionProvider, (_, action) {
@@ -1466,16 +1488,17 @@ class _ComposerState extends ConsumerState<Composer> {
     );
     // INLINE-EMOJI-WHILE-TYPING (02-F-02-E): the PWA's input is a `contenteditable`
     // div, so a just-completed `:shortcode:` is swapped to its custom-emoji <img>
-    // live in the field (`_maybeRenderTypedEmoji`, ui-context.js:1034). Flutter's
-    // `TextField`/`EditableText` cannot render inline `WidgetSpan` images while
-    // keeping a working cursor + selection (the framework lays out the editing
-    // value as plain text glyphs only — there is no public hook to substitute a
-    // span at a code point without breaking caret math). This is a framework
-    // limitation, NOT a styling choice: we deliberately keep the literal `:code:`
-    // text in the draft here. The shortcode IS resolved to its image everywhere it
-    // is *rendered* (sent messages, the quote-reply preview chip via
-    // [InlineEmojiText], reactions, etc.) — only the in-progress editable draft
-    // shows the literal token, exactly as the user typed it.
+    // live in the field (`_maybeRenderTypedEmoji`, ui-context.js:1034). We do the
+    // same here with the SENTINEL technique: [EmojiSentinelController] keeps each
+    // rendered emoji as exactly ONE Private-Use-Area char in the controller text
+    // (one per distinct shortcode) and overrides `buildTextSpan` to paint that
+    // char as the emoji image via a [WidgetSpan]. One char == one caret slot, so
+    // selection/backspace stay correct (backspace removes the whole emoji). The
+    // resolve-on-input pass ([EmojiSentinelController.resolveInput], run from
+    // `_onInputChanged`) replaces a completed known `:code:` with its sentinel;
+    // unknown shortcodes stay literal text. WIRE-SAFETY: the sentinel never leaves
+    // the composer — every draft read headed for the wire goes through
+    // [_draftText] (= `expand`), which maps each sentinel back to its `:code:`.
     final field = TextField(
       controller: _controller,
       focusNode: _focus,
@@ -1757,7 +1780,11 @@ class _ComposerState extends ConsumerState<Composer> {
   /// (the PWA's in-input translate flow). The quote/edit chips are preserved.
   Future<void> _translateDraft(String targetLang) async {
     _translatePortal.hide();
-    final text = _controller.text.trim();
+    // Expand inline-emoji sentinels to `:shortcode:` before the (external)
+    // translate service ever sees the draft (02-F-02-E wire-safety). The
+    // returned text is written back raw; `_onInputChanged` re-resolves any
+    // `:code:` it contains into sentinels/images.
+    final text = _draftText().trim();
     if (text.isEmpty) return;
     setState(() => _translating = true);
     try {
@@ -2642,5 +2669,230 @@ class _TranslateLangRowState extends State<_TranslateLangRow> {
         ),
       ),
     );
+  }
+}
+
+/// Lowest Unicode Private-Use-Area code point (U+E000). Sentinels are allocated
+/// upward from here (the BMP PUA runs U+E000…U+F8FF = 6400 slots — far more than
+/// the handful of distinct custom emoji a single draft can hold).
+const int _kSentinelBase = 0xE000;
+const int _kSentinelEnd = 0xF8FF;
+
+/// Matches one PUA sentinel code point (for `expand` / `buildTextSpan` walks and
+/// the wire-safety test invariant). The BMP Private-Use-Area block.
+final RegExp _rxSentinel = RegExp('[\u{E000}-\u{F8FF}]', unicode: true);
+
+/// A COMPLETED custom-emoji shortcode token `:code:` (NIP-30 codes are
+/// `[a-zA-Z0-9_+-]+`). Resolve-on-input swaps a token whose `code` is a known
+/// custom emoji to a single sentinel char (the picker's literal insert + typed
+/// input both flow through here).
+final RegExp _rxShortcodeToken = RegExp(r':([a-zA-Z0-9_+\-]+):');
+
+/// A [TextEditingController] that renders custom (image) emoji INLINE in the
+/// composer while the user types (02-F-02-E), replicating the PWA's
+/// `_maybeRenderTypedEmoji` (ui-context.js:1034) on a Flutter [TextField].
+///
+/// THE TECHNIQUE (sentinel char + WidgetSpan): a `WidgetSpan` occupies exactly
+/// ONE character slot in caret/selection math, but a typed `:smile:` is 7 chars.
+/// So each rendered emoji is kept as exactly ONE Private-Use-Area code point in
+/// [text] (allocated per DISTINCT shortcode via [_codeToSentinel]); [buildTextSpan]
+/// paints that char as the emoji image. Because emoji == 1 char, caret / selection
+/// / backspace all stay correct automatically (backspace deletes the whole emoji).
+///
+/// WIRE-SAFETY (non-negotiable): a sentinel must NEVER reach the relay or any
+/// service. [expand] maps every sentinel back to its `:shortcode:`; the composer
+/// routes every wire-bound draft read through it (see `_draftText`).
+class EmojiSentinelController extends TextEditingController {
+  EmojiSentinelController({super.text});
+
+  /// shortcode → image url (the live NIP-30 `codeToUrl`). Set from the composer's
+  /// `build`; drives both which `:code:` resolve and what image a sentinel paints.
+  Map<String, String> _codeToUrl = const {};
+  set codeToUrl(Map<String, String> value) {
+    if (identical(_codeToUrl, value)) return;
+    _codeToUrl = value;
+    // The picker/autocomplete already re-resolve on insert; repaint so a sentinel
+    // whose url only just arrived over relays gets its image (and so a code that
+    // became known can resolve on the next input pass). Cheap: no text mutation.
+    notifyListeners();
+  }
+
+  /// sentinel char → shortcode and the inverse. One sentinel per DISTINCT
+  /// shortcode present in the draft, reused across occurrences.
+  final Map<String, String> _sentinelToCode = {};
+  final Map<String, String> _codeToSentinel = {};
+  int _nextSentinel = _kSentinelBase;
+
+  /// Allocates (or reuses) the sentinel char for [code]. Returns null only if the
+  /// PUA space is exhausted (≈6400 distinct codes — never in practice), in which
+  /// case the caller leaves the literal `:code:` text alone.
+  String? _sentinelFor(String code) {
+    final existing = _codeToSentinel[code];
+    if (existing != null) return existing;
+    if (_nextSentinel > _kSentinelEnd) return null;
+    final ch = String.fromCharCode(_nextSentinel++);
+    _codeToSentinel[code] = ch;
+    _sentinelToCode[ch] = code;
+    return ch;
+  }
+
+  /// Maps every sentinel char in [input] back to its literal `:shortcode:`. The
+  /// wire-safety primitive: the composer expands the draft through this before it
+  /// reaches the relay / translate / history. Non-sentinel text passes verbatim.
+  String expand(String input) {
+    if (input.isEmpty || _sentinelToCode.isEmpty) return input;
+    return input.replaceAllMapped(_rxSentinel, (m) {
+      final code = _sentinelToCode[m[0]];
+      return code != null ? ':$code:' : m[0]!;
+    });
+  }
+
+  /// The pure resolve transform (extracted so it is unit-testable without a
+  /// widget pump): given a [value], replace each COMPLETED `:code:` whose `code`
+  /// is in [_codeToUrl] with its single sentinel char and return the rewritten
+  /// value with the selection shifted by the cumulative length delta (so the
+  /// caret stays put relative to the surrounding text). Returns null when nothing
+  /// changed (no known token present).
+  TextEditingValue? resolveValue(TextEditingValue value) {
+    final src = value.text;
+    if (src.isEmpty || !src.contains(':')) return null;
+    final sb = StringBuffer();
+    var last = 0;
+    var changed = false;
+    // Track the selection endpoints as we rewrite, decrementing each by the chars
+    // removed BEFORE it (a `:code:` of length N collapses to 1 → −(N−1)).
+    var base = value.selection.baseOffset;
+    var extent = value.selection.extentOffset;
+    for (final m in _rxShortcodeToken.allMatches(src)) {
+      final code = m.group(1)!;
+      if (!_codeToUrl.containsKey(code)) continue; // unknown → stays literal
+      final ch = _sentinelFor(code);
+      if (ch == null) continue; // PUA exhausted → leave literal
+      sb.write(src.substring(last, m.start));
+      sb.write(ch);
+      last = m.end;
+      changed = true;
+      final delta = (m.end - m.start) - 1; // chars removed for this token
+      base = _shiftOffset(base, m.start, m.end, delta);
+      extent = _shiftOffset(extent, m.start, m.end, delta);
+    }
+    if (!changed) return null;
+    sb.write(src.substring(last));
+    final out = sb.toString();
+    final maxOffset = out.length;
+    return TextEditingValue(
+      text: out,
+      selection: TextSelection(
+        baseOffset: base.clamp(-1, maxOffset),
+        extentOffset: extent.clamp(-1, maxOffset),
+      ),
+      composing: TextRange.empty,
+    );
+  }
+
+  /// Shifts a single caret [offset] for a `[start,end)` run that collapsed by
+  /// [delta] chars. After the run → move left by delta; inside → clamp to the run
+  /// start + 1 (just past the inserted sentinel); before → unchanged. A negative
+  /// offset (no selection) is passed through.
+  static int _shiftOffset(int offset, int start, int end, int delta) {
+    if (offset < 0) return offset;
+    if (offset >= end) return offset - delta;
+    if (offset > start) return start + 1;
+    return offset;
+  }
+
+  /// Runs [resolveValue] against the live [value] and applies it in place. Called
+  /// from the composer's `_onInputChanged` after every edit so a just-completed
+  /// known `:code:` becomes its sentinel/image immediately (mirrors the PWA's
+  /// `_maybeRenderTypedEmoji` firing when the closing `:` completes a token).
+  void resolveInput() {
+    final next = resolveValue(value);
+    if (next != null) value = next;
+  }
+
+  @override
+  void clear() {
+    _resetSentinels();
+    super.clear();
+  }
+
+  @override
+  set value(TextEditingValue newValue) {
+    // When the draft empties (cleared / sent / recalled to the live slot), drop
+    // the sentinel allocations so a fresh draft starts from U+E000 and stale
+    // mappings can't leak. (`clear()` also resets, but text can empty via a
+    // direct value/`text=` assignment too.)
+    if (newValue.text.isEmpty && _sentinelToCode.isNotEmpty) {
+      _resetSentinels();
+    }
+    super.value = newValue;
+  }
+
+  void _resetSentinels() {
+    _sentinelToCode.clear();
+    _codeToSentinel.clear();
+    _nextSentinel = _kSentinelBase;
+  }
+
+  /// Paints the editing text: each sentinel char becomes the custom-emoji image
+  /// (the SAME construction [InlineEmojiText] / the message `CustomEmojiNode` use
+  /// — `InlineNetworkImage(url: proxiedMedia(url, emoji:true), …)` so the composer
+  /// emoji is pixel-identical to the rendered-message one), every other run is a
+  /// normal [TextSpan] using the passed [style].
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final src = text;
+    // Fast path: no sentinel → defer to the framework's default (also keeps
+    // composing-region underlines intact while typing plain text).
+    if (_sentinelToCode.isEmpty || !_rxSentinel.hasMatch(src)) {
+      return super.buildTextSpan(
+          context: context, style: style, withComposing: withComposing);
+    }
+    final baseStyle = style ?? const TextStyle();
+    // ~1.3× the font size, square — matches the spec for the typed-emoji glyph.
+    final side = (baseStyle.fontSize ?? 14) * 1.3;
+    final children = <InlineSpan>[];
+    final buf = StringBuffer();
+
+    void flushText() {
+      if (buf.isEmpty) return;
+      children.add(TextSpan(text: buf.toString(), style: baseStyle));
+      buf.clear();
+    }
+
+    for (final rune in src.runes) {
+      final isSentinel = rune >= _kSentinelBase && rune <= _kSentinelEnd;
+      final code =
+          isSentinel ? _sentinelToCode[String.fromCharCode(rune)] : null;
+      final url = code == null ? null : _codeToUrl[code];
+      if (code == null || url == null) {
+        // Plain char — OR a sentinel whose mapping/url is somehow gone: render the
+        // literal `:code:` (never a bare PUA glyph) so nothing visually leaks.
+        buf.write(code != null ? ':$code:' : String.fromCharCode(rune));
+        continue;
+      }
+      flushText();
+      children.add(WidgetSpan(
+        alignment: PlaceholderAlignment.middle,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 1),
+          child: InlineNetworkImage(
+            url: proxiedMedia(url, emoji: true),
+            width: side,
+            height: side,
+            fit: BoxFit.contain,
+            // Same disk-cache + SVG handling + literal-fallback as the rendered
+            // message emoji (message_content.dart `CustomEmojiNode`).
+            errorChild: Text(':$code:', style: baseStyle),
+          ),
+        ),
+      ));
+    }
+    flushText();
+    return TextSpan(style: baseStyle, children: children);
   }
 }
