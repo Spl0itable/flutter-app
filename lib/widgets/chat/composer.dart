@@ -276,13 +276,20 @@ class _ComposerState extends ConsumerState<Composer> {
       // `/pm @nym` → open/create the thread (target resolved by the dispatcher).
       openPm: (pubkey, nym) => controller.startPM(pubkey, nym: nym),
       // `/zap @nym` → resolve the LN address, then the zap modal (`cmdZap` →
-      // showZapModal), mirroring the context-menu zap path.
+      // showZapModal, zaps.js:1934). The PWA always does a FRESH kind-0 fetch
+      // first (`fetchLightningAddressForUser`, zaps.js:1955) after posting a
+      // "Checking…" note, so a target whose profile hasn't been ingested yet
+      // still gets zapped instead of a spurious "cannot receive zaps" — exactly
+      // like the quick-zap path (zap_badge.dart `_quickZap`). Resolve via the
+      // controller (nostr_controller.dart `resolveLightningAddressForZap`),
+      // NOT the cache alone (F07-Z18).
       openZap: (pubkey, nym) async {
-        final lnAddr =
-            ref.read(usersProvider)[pubkey]?.profile?.lightningAddress;
+        final baseNym = stripPubkeySuffix(nym);
+        _onSystemMessage('Checking if @$baseNym can receive zaps...');
+        final lnAddr = await controller.resolveLightningAddressForZap(pubkey);
         if (lnAddr == null || lnAddr.isEmpty) {
           _onSystemMessage(
-              '@${stripPubkeySuffix(nym)} cannot receive zaps (no lightning address set)');
+              '@$baseNym cannot receive zaps (no lightning address set)');
           return;
         }
         if (!mounted) return;
@@ -739,6 +746,22 @@ class _ComposerState extends ConsumerState<Composer> {
       return KeyEventResult.ignored;
     }
     if (!_overlayActive) {
+      // Hardware Enter SENDS (PWA: `Enter && !shiftKey → preventDefault();
+      // sendMessage()`, ui-context.js:1007-1009). Shift+Enter inserts a newline
+      // (ui-context.js:1010-1014), as does a bare Enter once the draft has grown
+      // into the multi-line `.composer-popout` box — there the field is an
+      // explicit long-form editor, so we let Enter fall through to the
+      // TextField's `textInputAction.newline`. The field is otherwise
+      // `textInputAction.newline` with NO `onSubmitted`, so without this a
+      // hardware Enter would only ever insert a newline (never send).
+      final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+          event.logicalKey == LogicalKeyboardKey.numpadEnter;
+      if (isEnter &&
+          !_popout &&
+          !HardwareKeyboard.instance.isShiftPressed) {
+        _send();
+        return KeyEventResult.handled;
+      }
       if (event.logicalKey == LogicalKeyboardKey.escape) {
         if (_pendingEdit != null) {
           _cancelEdit();
@@ -878,8 +901,8 @@ class _ComposerState extends ConsumerState<Composer> {
   /// identities can do this in the PWA (`if (this.nostrLoginMethod)`); ephemeral
   /// geohash keys are already pseudonymous, so the affordance is gated off for
   /// them (see [_anonEligible]). Quote/edit are handled exactly like a normal
-  /// send. Routed through the real controller method (CROSS_FILE_NEEDS: the
-  /// controller must expose `sendCurrentPseudonymous`).
+  /// send. Routed through the controller's [NostrController.sendCurrentPseudonymous]
+  /// (nostr_controller.dart) — the shared-core ephemeral-key publish.
   void _sendAnon() {
     final typed = _controller.text;
     // Edit-in-progress isn't a pseudonymous flow in the PWA (the long-press still
@@ -892,16 +915,9 @@ class _ComposerState extends ConsumerState<Composer> {
     if (typed.trim().isEmpty && _pendingQuote == null) return;
     final controller = ref.read(nostrControllerProvider);
     final content = _composeOutgoing(typed);
-    // Real ephemeral-key publish lives in the controller (shared core). Dispatch
-    // dynamically so the build stays green until the typed method lands; if it's
-    // genuinely absent we surface the real "unavailable" state rather than
-    // silently publishing under the user's real key (a privacy regression).
-    try {
-      (controller as dynamic).sendCurrentPseudonymous(content);
-    } on NoSuchMethodError {
-      _onSystemMessage('Anonymous send is not available yet.');
-      return;
-    }
+    // Publish the draft under a FRESH ephemeral keypair (unlinkable to the
+    // durable nym), mirroring the normal send's fire-and-forget dispatch.
+    controller.sendCurrentPseudonymous(content);
     _pushSentHistory(typed);
     _controller.clear();
     _popout = false;
@@ -1448,6 +1464,18 @@ class _ComposerState extends ConsumerState<Composer> {
       borderRadius: radius,
       borderSide: BorderSide(color: _popout ? c.primaryA(0.30) : c.glassBorder),
     );
+    // INLINE-EMOJI-WHILE-TYPING (02-F-02-E): the PWA's input is a `contenteditable`
+    // div, so a just-completed `:shortcode:` is swapped to its custom-emoji <img>
+    // live in the field (`_maybeRenderTypedEmoji`, ui-context.js:1034). Flutter's
+    // `TextField`/`EditableText` cannot render inline `WidgetSpan` images while
+    // keeping a working cursor + selection (the framework lays out the editing
+    // value as plain text glyphs only — there is no public hook to substitute a
+    // span at a code point without breaking caret math). This is a framework
+    // limitation, NOT a styling choice: we deliberately keep the literal `:code:`
+    // text in the draft here. The shortcode IS resolved to its image everywhere it
+    // is *rendered* (sent messages, the quote-reply preview chip via
+    // [InlineEmojiText], reactions, etc.) — only the in-progress editable draft
+    // shows the literal token, exactly as the user typed it.
     final field = TextField(
       controller: _controller,
       focusNode: _focus,
@@ -1621,15 +1649,25 @@ class _ComposerState extends ConsumerState<Composer> {
                 width: 230,
                 constraints: const BoxConstraints(maxHeight: 320),
                 decoration: BoxDecoration(
-                  color: c.bgSecondary,
-                  border: Border.all(color: c.glassBorder),
+                  // `.translate-input-dropdown` bg `--bg-secondary` / border
+                  // `--glass-border` / shadow rgba(0,0,0,0.4); `body.light-mode
+                  // .translate-input-dropdown` flips to white@0.98 / black@0.12 /
+                  // shadow rgba(0,0,0,0.12) (styles-themes-responsive.css:1278-
+                  // 1282) — M4.
+                  color:
+                      c.isLight ? Colors.white.withValues(alpha: 0.98) : c.bgSecondary,
+                  border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.12)
+                          : c.glassBorder),
                   borderRadius: NymRadius.rmd,
-                  // `.translate-input-dropdown`: 0 8px 24px rgba(0,0,0,0.4).
-                  boxShadow: const [
+                  boxShadow: [
                     BoxShadow(
-                        color: Color(0x66000000),
+                        color: c.isLight
+                            ? Colors.black.withValues(alpha: 0.12)
+                            : const Color(0x66000000),
                         blurRadius: 24,
-                        offset: Offset(0, 8)),
+                        offset: const Offset(0, 8)),
                   ],
                 ),
                 clipBehavior: Clip.antiAlias,

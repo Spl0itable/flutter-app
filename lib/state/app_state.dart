@@ -197,6 +197,7 @@ class AppState {
     Set<String>? hiddenChannels,
     Set<String>? blockedChannels,
     Map<String, int>? channelLastActivity,
+    Map<String, List<int>>? geohashD1Activity,
     Set<String>? friends,
     Set<String>? blockedUsers,
     Set<String>? blockedKeywords,
@@ -210,6 +211,7 @@ class AppState {
         hiddenChannels = hiddenChannels ?? <String>{},
         blockedChannels = blockedChannels ?? <String>{},
         channelLastActivity = channelLastActivity ?? <String, int>{},
+        geohashD1Activity = geohashD1Activity ?? <String, List<int>>{},
         friends = friends ?? <String>{},
         blockedUsers = blockedUsers ?? <String>{},
         blockedKeywords = blockedKeywords ?? <String>{},
@@ -261,6 +263,15 @@ class AppState {
 
   /// channel storage key (`#<key>`) → last-activity ms (`nym_channel_activity`).
   final Map<String, int> channelLastActivity;
+
+  /// geohash channel key (bare, lowercased) → 24 hourly D1 activity buckets
+  /// (`buckets[0]` = this hour … `buckets[23]` = 23h ago). The faithful native
+  /// equivalent of the PWA's `_geohashD1Activity` (channels.js:128-174): the
+  /// per-hour message counts D1 reports for a geohash, kept so the globe heatmap
+  /// can climb the palette by the true `Σ max(local[i], d1[i])` per bucket
+  /// instead of a flat presence floor (C05-3). Populated by [applyChannelActivity]
+  /// for geohash discovery passes; read by `buildGeohashChannels`.
+  final Map<String, List<int>> geohashD1Activity;
 
   /// Friended pubkeys (`nym_friends`). users.js `this.friends` (isFriend).
   final Set<String> friends;
@@ -448,6 +459,7 @@ class AppState {
         hiddenChannels: hiddenChannels,
         blockedChannels: blockedChannels,
         channelLastActivity: channelLastActivity,
+        geohashD1Activity: geohashD1Activity,
         friends: friends,
         blockedUsers: blockedUsers,
         blockedKeywords: blockedKeywords,
@@ -969,20 +981,54 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Group ids the user left; their messages/controls are ignored.
   final Set<String> _leftGroups = <String>{};
 
+  /// group id → leave timestamp (UNIX seconds). A left group is only resurrected
+  /// by a re-invite/add-member/unban whose `created_at` is STRICTLY NEWER than
+  /// this (F04-H4); stale relay backlog older than the leave can't undo it.
+  /// Mirrors the PWA's `leftGroupTimes` (`nym_left_group_times`, groups.js:544,
+  /// 719, 1815).
+  final Map<String, int> _leftGroupTimes = <String, int>{};
+
   int _nextLocalSeq() => _localSeq++;
   int _nextIngestSeq() => _ingestSeq++;
 
   Set<String> get closedPMs => _closedPMs;
 
+  /// The recorded leave timestamp (UNIX seconds) for [groupId], or 0 if the user
+  /// hasn't left it. Exposed so the controller's inbound group-control path can
+  /// gate a re-invite/add-member/unban on `created_at > leaveTime` (F04-H4,
+  /// groups.js:719-722). Read-only view of [_leftGroupTimes].
+  int leftGroupTime(String groupId) => _leftGroupTimes[groupId] ?? 0;
+
+  /// Whether [groupId] is currently marked as left (its messages/controls are
+  /// dropped). Lets the controller decide whether a `group-add-member` must
+  /// re-create a fully-removed group (F04-H3 trustBootstrap).
+  bool isLeftGroup(String groupId) => _leftGroups.contains(groupId);
+
   /// Clears the "left" mark for [groupId] so a fresh invite / add-member can
   /// resurrect a group the user previously left (F04-H3). Mirrors the PWA's
-  /// `leftGroups.delete(groupId)` in the `group-invite` / `group-add-member`
-  /// handlers (groups.js:798-804, 879-884): without this, `upsertGroup` /
-  /// `ingestGroupMessage` permanently drop everything for a left group, so an
-  /// invited-back user can never rejoin. Pure set mutation (no `state` rebuild —
-  /// the caller's `upsertGroup`/ingest publishes the new state).
-  void clearLeftGroup(String groupId) {
+  /// `leftGroups.delete(groupId)` + `leftGroupTimes.delete(groupId)` in the
+  /// `group-invite` / `group-add-member` handlers (groups.js:798-804, 879-884):
+  /// without this, `upsertGroup` / `ingestGroupMessage` permanently drop
+  /// everything for a left group, so an invited-back user can never rejoin.
+  ///
+  /// [createdAtSec] gates the clear on the resurrecting event's `created_at`
+  /// (F04-H4): when provided, the mark is only cleared if the event is STRICTLY
+  /// NEWER than the recorded leave time (the PWA's `msgTs <= leftAt` drop guard,
+  /// groups.js:722) — so stale backlog older than the leave can't resurrect the
+  /// group. Returns true when the group was cleared (or was never left), so the
+  /// caller knows the resurrection may proceed; false when the gate rejected it.
+  ///
+  /// Pure map mutation (no `state` rebuild — the caller's `upsertGroup`/ingest
+  /// publishes the new state).
+  bool clearLeftGroup(String groupId, {int? createdAtSec}) {
+    if (!_leftGroups.contains(groupId)) return true;
+    if (createdAtSec != null &&
+        createdAtSec <= (_leftGroupTimes[groupId] ?? 0)) {
+      return false;
+    }
     _leftGroups.remove(groupId);
+    _leftGroupTimes.remove(groupId);
+    return true;
   }
 
   /// Switches this store to a live, identity-backed empty state. Called by the
@@ -994,6 +1040,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _closedPMs.clear();
     _closedPMTimes.clear();
     _leftGroups.clear();
+    _leftGroupTimes.clear();
     _reactors.clear();
     _reactionLastAction.clear();
     _channelMessageReaders.clear();
@@ -1032,6 +1079,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _closedPMs.clear();
     _closedPMTimes.clear();
     _leftGroups.clear();
+    _leftGroupTimes.clear();
     _reactors.clear();
     _reactionLastAction.clear();
     _channelMessageReaders.clear();
@@ -1692,9 +1740,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       selfPubkey: state.selfPubkey,
     );
     if (result == GroupControlResult.applied) {
-      // If we were removed, drop the group locally.
+      // If we were removed, drop the group locally + stamp the leave time so a
+      // re-invite/add-member must be NEWER than this to resurrect it (F04-H4;
+      // PWA `leftGroupTimes.set(groupId, …)`, groups.js:1815). `ts` is the
+      // control event's `created_at` (seconds) — the explicit `leaveGroup` path
+      // passes `now`, an inbound kick passes the kicker's send-time.
       if (type == 'group-remove-member' && !g.members.contains(state.selfPubkey)) {
         _leftGroups.add(groupId);
+        _leftGroupTimes[groupId] = ts;
         state.groups.removeWhere((x) => x.id == groupId);
         state.messages.remove(GroupLogic.groupStorageKey(groupId));
       }
@@ -2362,6 +2415,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (activity.isEmpty && last.isEmpty) return;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     var changed = false;
+
+    // 0) Faithful D1 heat (C05-3): for a geohash pass, stash the per-hour buckets
+    //    D1 reported (the native `_geohashD1Activity`, channels.js:128-174) so the
+    //    globe can climb the palette by the true `Σ max(local[i], d1[i])` instead
+    //    of a flat floor. Keyed by the bare lowercased geohash (the same key
+    //    `buildGeohashChannels` reads). Skipped for NAMED-channel passes (the
+    //    globe only heats geohashes). A blank/blocked key is dropped; an
+    //    all-zero bucket array is pruned so stale empties don't linger.
+    if (geohash) {
+      activity.forEach((rawKey, buckets) {
+        final key = rawKey.toLowerCase();
+        if (key.isEmpty || state.blockedChannels.contains(key)) return;
+        final hasActivity = buckets.any((b) => b > 0);
+        if (hasActivity) {
+          state.geohashD1Activity[key] = List<int>.of(buckets);
+        } else {
+          state.geohashD1Activity.remove(key);
+        }
+      });
+    }
 
     // 2) Last-activity: raise channelLastActivity[#key] to the newest D1 ts.
     last.forEach((rawKey, tsSec) {
@@ -3223,6 +3296,23 @@ class NotificationHistoryNotifier
     }
     state = state.copyWith(entries: List.of(state.entries), unread: 0);
     _persist(); // N3: persist the viewed flags.
+  }
+
+  /// Removes the history entry carrying [eventId] and re-derives the badge — the
+  /// PWA's `_retractMissedCallNotification` (calls.js:282, removes the entry
+  /// whose `eventId === 'missed-call-'+callId`). Used by the cross-device
+  /// seen-call merge (F06-A3): a call answered on another device retracts the
+  /// phantom "Missed call" surfaced here. No-op when no entry matches.
+  void removeByEventId(String eventId) {
+    if (eventId.isEmpty) return;
+    final kept =
+        state.entries.where((e) => e.eventId != eventId).toList();
+    if (kept.length == state.entries.length) return;
+    state = NotificationHistoryState(
+      entries: kept,
+      unread: _countUnread(kept),
+    );
+    _persist();
   }
 
   /// Clears the history entirely.

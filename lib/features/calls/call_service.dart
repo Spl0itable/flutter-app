@@ -19,6 +19,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -30,6 +31,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../emoji/custom_emoji.dart';
+import '../notifications/notification_sounds.dart';
 import 'call_signaling.dart';
 import 'call_state.dart';
 
@@ -156,6 +158,16 @@ class CallService {
   /// Live floating reactions (self + incoming); each is dropped after ~3.2s.
   final List<CallFlyReaction> _flyReactions = [];
 
+  /// Incoming-call ringtone loop (calls.js `_ringInterval` / `_ringCtx`). A
+  /// 480 Hz beep replayed every 2 s while a call rings; `null` when silent. The
+  /// WAV is synthesized once and reused (synthesis is deterministic). Held on
+  /// the service (not the modal) so it stops in every exit path even if the
+  /// overlay never mounted, mirroring calls.js where `_startRingtone` /
+  /// `_stopRingtone` are owned by the call module.
+  Timer? _ringInterval;
+  AudioPlayer? _ringPlayer;
+  Uint8List? _ringWav;
+
   /// In-chat / toast system-message sink. Routed by [call_providers] to
   /// `appStateProvider.addSystemMessage` (the centered `.system-message` pill);
   /// mirrors calls.js `displaySystemMessage`. P2P has the same sink shape.
@@ -279,6 +291,8 @@ class CallService {
     final inc = _incoming;
     if (inc == null) return;
     inc.timeout?.cancel();
+    // Silence the ringtone the moment we accept (calls.js:384 `_stopRingtone`).
+    _stopRingtone();
     // Remember we answered so a stale re-delivery (or another device's sync)
     // doesn't re-ring or record a missed call (calls.js:386).
     _markCallSeen(inc.callId, 'answered');
@@ -321,6 +335,8 @@ class CallService {
     final inc = _incoming;
     if (inc == null) return;
     inc.timeout?.cancel();
+    // Stop the ringtone on decline (calls.js:429 `_stopRingtone`).
+    _stopRingtone();
     // Remember the decline so a re-delivery / cross-device sync doesn't re-ring
     // it (calls.js:431).
     _markCallSeen(inc.callId, 'declined');
@@ -809,6 +825,67 @@ class CallService {
   }
 
   // ---------------------------------------------------------------------------
+  // Incoming-call ringtone (calls.js `_startRingtone` / `_stopRingtone`)
+  // ---------------------------------------------------------------------------
+  //
+  // The PWA loops a 480 Hz beep (gain 0.07, 0.4 s) every 2 s while an incoming
+  // call rings (calls.js:897-920). We synthesize the same tone with the shared
+  // [renderSoundWav] path and replay it on a 2 s [Timer.periodic] through an
+  // audioplayers instance — the native equivalent of the Web Audio oscillator.
+  // Best-effort throughout: a failed render/playback must never break ringing
+  // (the PWA wraps `_startRingtone` in try/catch and ignores errors).
+
+  /// Begin looping the incoming-call ringtone (calls.js `_startRingtone`). Plays
+  /// the beep immediately, then every 2 s until [_stopRingtone]. Idempotent: a
+  /// second call while already ringing is a no-op. Silent on web (audioplayers
+  /// has no byte-source playback there, matching [AudioPlayersTonePlayer]).
+  void _startRingtone() {
+    if (kIsWeb) return;
+    if (_ringInterval != null) return; // already ringing
+    _playRingBeep();
+    _ringInterval =
+        Timer.periodic(const Duration(seconds: 2), (_) => _playRingBeep());
+  }
+
+  /// Stop the ringtone loop and release the player (calls.js `_stopRingtone`:
+  /// `clearInterval` + `ctx.close()`). Safe to call when not ringing.
+  void _stopRingtone() {
+    _ringInterval?.cancel();
+    _ringInterval = null;
+    final player = _ringPlayer;
+    _ringPlayer = null;
+    if (player != null) {
+      // stop() then dispose() — fire-and-forget; never throw from teardown.
+      unawaited(() async {
+        try {
+          await player.stop();
+        } catch (_) {}
+        try {
+          await player.dispose();
+        } catch (_) {}
+      }());
+    }
+  }
+
+  /// Render-once + play one beep through the (lazily created) ring player.
+  void _playRingBeep() {
+    try {
+      final wav = _ringWav ??= renderSoundWav(kIncomingCallRingtone);
+      final player = _ringPlayer ??=
+          (AudioPlayer()..setReleaseMode(ReleaseMode.stop));
+      // Restart from the top each beep so the 2 s cadence is crisp.
+      unawaited(() async {
+        try {
+          await player.stop();
+          await player.play(BytesSource(wav, mimeType: 'audio/wav'));
+        } catch (_) {}
+      }());
+    } catch (_) {
+      // Synthesis/playback unavailable — ring silently rather than crash.
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Seen-calls persistence (calls.js `_getSeenCalls` … `_markCallSeen`)
   // ---------------------------------------------------------------------------
   //
@@ -1036,9 +1113,15 @@ class CallService {
       members: members,
     );
     _incoming = inc;
+    // Loop the ringtone while this call rings (calls.js:367 `_startRingtone`).
+    // Only reached on a fresh ring — the stale-missed / busy / pref-gated
+    // branches above all return before here, so no silent call ever rings.
+    _startRingtone();
     inc.timeout = Timer(kCallRingTimeout, () {
       if (_incoming == inc) {
         _incoming = null;
+        // The ring is over — stop the tone (calls.js:371 `_stopRingtone`).
+        _stopRingtone();
         // calls.js: surfaces "Missed call from X" + records it to history.
         _markCallSeen(inc.callId, 'missed'); // calls.js:374
         _system('Missed call from ${inc.nym}');
@@ -1090,6 +1173,8 @@ class CallService {
     if (inc != null && inc.callId == data['callId'] && sender == inc.from) {
       inc.timeout?.cancel();
       _incoming = null;
+      // The caller withdrew — stop ringing (calls.js:471 `_stopRingtone`).
+      _stopRingtone();
       // calls.js `_onCallCancel`: a cancelled ring is a missed call.
       _markCallSeen(inc.callId, 'missed'); // calls.js:473
       _system('Missed call from ${inc.nym}');
@@ -1488,6 +1573,10 @@ class CallService {
     }
     _active = null;
     _flyReactions.clear();
+    // Unconditional safety net: every teardown path silences the ring, exactly
+    // like calls.js:653 `_stopRingtone()` at the tail of `_endCall`. Covers the
+    // media-failure answer path, outgoing-ring timeout, and remote hangup/reject.
+    _stopRingtone();
     if (_localRendererReady) _localRenderer.srcObject = null;
     _publishIdle();
   }

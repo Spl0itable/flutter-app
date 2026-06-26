@@ -102,37 +102,55 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
         titleSpacing: 0,
         title: Row(
           children: [
-            CircleAvatar(
-              radius: 16,
-              backgroundColor: c.purple.withValues(alpha: 0.2),
-              child: Text('🤖', style: const TextStyle(fontSize: 16)),
+            // Canonical Nymbot avatar = the seeded brand PNG (identicon fallback),
+            // matching the NORMAL Nymbot everywhere (sidebar PM / message bubble at
+            // bot_chat_screen.dart:858). Pulled from `usersProvider[nymbotPubkey]`
+            // like the bubble (PWA `getAvatarUrl`, users.js:378-388).
+            NymAvatar(
+              seed: NostrController.nymbotPubkey,
+              size: 32,
+              imageUrl: ref
+                  .watch(usersProvider)[NostrController.nymbotPubkey]
+                  ?.profile
+                  ?.picture,
             ),
             const SizedBox(width: 10),
             Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Canonical header name = base nym + dim `#suffix`
-                // (PWA `displayNym`, pms.js:2607; suffix dims the base color to
-                // 0.7 / 0.9em / weight 100 — message_row.dart:307-316).
-                Text.rich(
-                  TextSpan(children: [
-                    const TextSpan(text: 'Nymbot'),
-                    TextSpan(
-                      text:
-                          '#${getPubkeySuffix(NostrController.nymbotPubkey)}',
-                      style: TextStyle(
-                        color: c.textBright.withValues(alpha: 0.7),
-                        fontSize: 16 * 0.9,
-                        fontWeight: FontWeight.w100,
+                // Canonical header name = base nym + dim `#suffix` + blue
+                // verified ✓ (PWA `displayNym`, pms.js:2607; verified badge
+                // `title="Nymchat Bot"`, pms.js:2601). Suffix dims the base color
+                // to 0.7 / 0.9em / weight 100 — message_row.dart:307-316.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text.rich(
+                        TextSpan(children: [
+                          const TextSpan(text: 'Nymbot'),
+                          TextSpan(
+                            text:
+                                '#${getPubkeySuffix(NostrController.nymbotPubkey)}',
+                            style: TextStyle(
+                              color: c.textBright.withValues(alpha: 0.7),
+                              fontSize: 16 * 0.9,
+                              fontWeight: FontWeight.w100,
+                            ),
+                          ),
+                        ]),
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: c.textBright,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.2),
                       ),
                     ),
-                  ]),
-                  style: TextStyle(
-                      color: c.textBright,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.2),
+                    const SizedBox(width: 4),
+                    const VerifiedBadge(size: 16),
+                  ],
                 ),
                 Text(
                   state.isPro
@@ -187,7 +205,15 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       return ListView(
         controller: _scroll,
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
-        children: [_BotWelcomeBubble(colors: c)],
+        children: [
+          _BotWelcomeBubble(
+            colors: c,
+            botPicture: ref
+                .watch(usersProvider)[NostrController.nymbotPubkey]
+                ?.profile
+                ?.picture,
+          ),
+        ],
       );
     }
     return ListView.builder(
@@ -932,13 +958,19 @@ class _MessageBubble extends ConsumerWidget {
 // Rich welcome bubble (empty-state) — PWA `_botWelcomeHtml`
 // =============================================================================
 
-/// The premium-bot intro, rendered as a non-`fromUser` bubble with the bot
-/// avatar (🤖), name, and verified ✓ badge. Copy ported verbatim from the PWA
+/// The premium-bot intro, rendered as a non-`fromUser` bubble with the canonical
+/// Nymbot avatar (seeded brand PNG via [NymAvatar]), name, and verified ✓ badge.
+/// Copy ported verbatim from the PWA
 /// `_botWelcomeHtml` (pms.js:1707-1728); `**bold**` and `` `code` `` markers are
 /// rendered inline (code spans as monospace pills).
 class _BotWelcomeBubble extends StatelessWidget {
-  const _BotWelcomeBubble({required this.colors});
+  const _BotWelcomeBubble({required this.colors, this.botPicture});
   final NymColors colors;
+
+  /// The seeded NORMAL Nymbot avatar URL (`usersProvider[nymbotPubkey].profile
+  /// .picture`), passed down from the `ConsumerState` parent so the welcome
+  /// bubble shows the same brand PNG as every other Nymbot surface.
+  final String? botPicture;
 
   /// One line of the welcome copy. A leading `• ` marks a bullet row.
   static const List<String> _lines = [
@@ -981,10 +1013,14 @@ class _BotWelcomeBubble extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CircleAvatar(
-                    radius: 16,
-                    backgroundColor: c.purple.withValues(alpha: 0.2),
-                    child: const Text('🤖', style: TextStyle(fontSize: 16)),
+                  // Canonical Nymbot avatar = the seeded brand PNG (identicon
+                  // fallback), matching the NORMAL Nymbot + the premium message
+                  // bubble (bot_chat_screen.dart:858). PWA `getAvatarUrl`
+                  // (users.js:378-388).
+                  NymAvatar(
+                    seed: NostrController.nymbotPubkey,
+                    size: 32,
+                    imageUrl: botPicture,
                   ),
                   const SizedBox(width: 6),
                   // Canonical name = base nym + dim `#suffix`, letter-spacing 0.2

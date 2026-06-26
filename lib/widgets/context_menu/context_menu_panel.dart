@@ -868,9 +868,21 @@ class ContextMenuPanel extends ConsumerWidget {
   }
 
   Future<void> _zap(BuildContext context, WidgetRef ref) async {
-    final lnAddr = _lightningAddressFor(ref, target.pubkey);
+    // Fresh LN-address resolve (cache-first, then kind-0 fetch) so a target
+    // whose profile hasn't been ingested yet can still be zapped — consistent
+    // with the quick-zap (+) button (zap_badge.dart:209). PWA: cmdZap awaits
+    // fetchLightningAddressForUser (zaps.js:1955/2015) before deciding.
+    final lnAddr =
+        await ref.read(nostrControllerProvider).resolveLightningAddressForZap(
+              target.pubkey,
+            );
     if (lnAddr == null || lnAddr.isEmpty) {
-      // No lightning address — mirror the PWA's "cannot receive zaps" notice.
+      // No lightning address — mirror the PWA's "cannot receive zaps" notice
+      // (zaps.js:1960/2021); a bare return left the user with zero feedback.
+      ref.read(appStateProvider.notifier).addSystemMessage(
+            '@${stripPubkeySuffix(target.nym)} cannot receive zaps '
+            '(no lightning address set)',
+          );
       return;
     }
     if (!context.mounted) return;
@@ -885,11 +897,6 @@ class ContextMenuPanel extends ConsumerWidget {
       messageId: target.messageId,
       originalKind: kind,
     );
-  }
-
-  String? _lightningAddressFor(WidgetRef ref, String pubkey) {
-    final user = ref.read(usersProvider)[pubkey];
-    return user?.profile?.lightningAddress;
   }
 }
 

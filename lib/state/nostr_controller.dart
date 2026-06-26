@@ -1763,13 +1763,16 @@ class NostrController {
     GiftWrapUnwrapped u,
     AppStateNotifier appState,
   ) {
+    final inviteTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
       // A fresh invite resurrects a group we previously left (F04-H3): clear the
       // "left" mark FIRST so `upsertGroup` (which bails on a left group) accepts
       // it. Mirrors the PWA `leftGroups.delete(groupId)` at the top of the
-      // `group-invite` handler (groups.js:798-804).
-      appState.clearLeftGroup(groupId);
+      // `group-invite` handler (groups.js:798-804). The clear is gated on
+      // `created_at > leaveTime` (F04-H4, groups.js:719-722): a stale invite
+      // older than our leave is rejected and the group stays gone.
+      if (!appState.clearLeftGroup(groupId, createdAtSec: inviteTs)) return;
       if (appState.groupById(groupId) != null) return;
       final members = tags
           .where((t) => t.length > 1 && t[0] == 'p')
@@ -1777,11 +1780,27 @@ class NostrController {
           .toList();
       final owner = _tagValue(tags, 'owner') ?? senderPubkey;
       final name = _tagValue(tags, 'subject') ?? '';
+      // Restore the bootstrap metadata the invite carries (groups.js:805-873
+      // pre-creates the entry with createdBy/avatar/banner/description) so a
+      // re-created group isn't a bare shell (F04-H3 trustBootstrap). Each tag is
+      // only adopted when present, byte-matching the PWA's optional pushes.
+      final avatar = _tagValue(tags, 'avatar');
+      final banner = _tagValue(tags, 'banner');
+      final description = _tagValue(tags, 'description');
+      final mods = tags
+          .where((t) => t.length > 1 && t[0] == 'mod')
+          .map((t) => t[1])
+          .toList();
       appState.upsertGroup(Group(
         id: groupId,
         name: name,
         members: members,
+        mods: mods,
         createdBy: owner,
+        avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+        banner: (banner != null && banner.isNotEmpty) ? banner : null,
+        description:
+            (description != null && description.isNotEmpty) ? description : null,
         allowMemberInvites: _tagValue(tags, 'allow_invites') != '0',
         inviteEnabled: _tagValue(tags, 'invite_enabled') == '1',
         inviteEpoch: int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0,
@@ -1854,7 +1873,56 @@ class NostrController {
       final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
       final addsSelf = self.isNotEmpty &&
           tags.any((t) => t.length > 1 && t[0] == 'p' && t[1] == self);
-      if (addsSelf) appState.clearLeftGroup(groupId);
+      if (addsSelf) {
+        // Gate on `created_at > leaveTime` (F04-H4): a stale re-add older than
+        // our leave is rejected and the group stays gone (groups.js:719-722).
+        if (!appState.clearLeftGroup(groupId, createdAtSec: inviteTs)) return;
+        // F04-H3 (FULL): if the group was FULLY removed locally (self-kick did
+        // `state.groups.removeWhere`), `applyGroupControl` would bail with
+        // `groupById == null` and the add-member would never land. Re-create the
+        // entry from the add-member's trusted bootstrap tags — but only when the
+        // claimed owner IS the sender (`senderIsClaimedOwner`, groups.js:900-904)
+        // so a non-owner can't conjure a group into the sidebar. Mirrors the
+        // PWA's `trustBootstrap` create (groups.js:912-934).
+        if (appState.groupById(groupId) == null) {
+          final claimedOwner = _tagValue(tags, 'owner');
+          if (claimedOwner != null && claimedOwner == senderPubkey) {
+            final members = tags
+                .where((t) => t.length > 1 && t[0] == 'p')
+                .map((t) => t[1])
+                .toList();
+            final name = _tagValue(tags, 'subject') ?? '';
+            final avatar = _tagValue(tags, 'avatar');
+            final banner = _tagValue(tags, 'banner');
+            final description = _tagValue(tags, 'description');
+            final mods = tags
+                .where((t) => t.length > 1 && t[0] == 'mod')
+                .map((t) => t[1])
+                .toList();
+            final allowInv = _tagValue(tags, 'allow_invites');
+            final inviteEnabledTag = _tagValue(tags, 'invite_enabled');
+            final inviteEpochTag = _tagValue(tags, 'invite_epoch');
+            appState.upsertGroup(Group(
+              id: groupId,
+              name: name,
+              members: members,
+              mods: mods,
+              createdBy: claimedOwner,
+              avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
+              banner: (banner != null && banner.isNotEmpty) ? banner : null,
+              description: (description != null && description.isNotEmpty)
+                  ? description
+                  : null,
+              allowMemberInvites: allowInv != null ? allowInv != '0' : true,
+              inviteEnabled: inviteEnabledTag == '1',
+              inviteEpoch: int.tryParse(inviteEpochTag ?? '') ?? 0,
+              lastMessageTime: inviteTs > 0
+                  ? inviteTs * 1000
+                  : DateTime.now().millisecondsSinceEpoch,
+            ));
+          }
+        }
+      }
     }
 
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
@@ -2295,9 +2363,18 @@ class NostrController {
   /// Gift-wraps and sends a kind-25053 call-signaling rumor to [to]. [payload]
   /// is the SDP/ICE body the calls layer wants delivered (carried as the rumor
   /// content, JSON-encoded). A self-copy is NOT sent (signaling is 1:1).
+  ///
+  /// [groupId] (optional) makes a GROUP call-signal ride the group conversation
+  /// key (F06-A9): when set and the group's ephemeral keys are known, the gift
+  /// wrap to [to] is encrypted to that peer's group ephemeral pubkey instead of
+  /// their durable key — mirroring the PWA threading `_callSignalGroupId(callId)`
+  /// into `_sendGiftWrapsAsync` (calls.js:149-162). A 1:1 call passes no groupId
+  /// (the default) and wraps to the durable key as before. Falls back to the
+  /// durable wrap if the group/keys are unavailable.
   Future<bool> sendCallSignal({
     required String to,
     required Map<String, dynamic> payload,
+    String? groupId,
   }) async {
     final service = _service;
     final identity = _identity;
@@ -2318,7 +2395,23 @@ class NostrController {
       ],
       content: jsonEncode(content),
     );
-    return service.publishGiftWrappedRumor(rumor: rumor, recipients: [to]);
+    // Group call-signal: encrypt the wrap to the peer's group ephemeral pubkey
+    // (the same `encryptTo` the group message path uses) so it rides the group
+    // key. No-op fallback to the durable key when the group or its keys are
+    // unknown (e.g. we left the group mid-call).
+    String Function(String)? encryptTo;
+    if (groupId != null && groupId.isNotEmpty && _groups != null) {
+      final group = _ref.read(appStateProvider.notifier).groupById(groupId);
+      if (group != null) {
+        final ek = _groups!.keysFor(group.id);
+        encryptTo = (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey);
+      }
+    }
+    return service.publishGiftWrappedRumor(
+      rumor: rumor,
+      recipients: [to],
+      encryptTo: encryptTo,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -5602,24 +5695,93 @@ class NostrController {
     p2p.start();
     final offer = p2p.shareFile(bytes: bytes, name: name, type: type);
 
+    final appState = _ref.read(appStateProvider.notifier);
     final state = _ref.read(appStateProvider);
     final view = state.view;
     final content =
         'Sharing file through Nymchat: ${offer.name} (${formatFileSize(offer.size)})';
 
-    // Local echo as a file-offer message (displayMessage isFileOffer path,
-    // p2p.js:158-173: own send sets isFileOffer:true + fileOffer so the sender
-    // sees the same card peers do).
-    final echo = _ref
-        .read(appStateProvider.notifier)
-        .sendLocal(content, fileOffer: offer.toJson());
-
-    if (identity == null || service == null) return;
-    if (view.kind != ViewKind.channel) {
-      // PM/group offers gift-wrap the message with the offer tag; not yet wired
-      // for the native PM path. TODO(verify): carry ['offer', …] on the PM rumor.
+    // PM / group offers gift-wrap the SAME message a normal send would, with the
+    // `['offer', JSON]` tag threaded onto the rumor so the peer/members pick up a
+    // download card (`publishFileOffer` → `sendPM`/`sendGroupMessage` with
+    // `{fileOffer}`, p2p.js:128-135). The local echo carries the shared
+    // nymMessageId so the relay echo dedupes (same guarantee as a plain send).
+    if (view.kind == ViewKind.pm) {
+      if (identity == null || service == null) {
+        appState.sendLocal(content, fileOffer: offer.toJson());
+        return;
+      }
+      final nymMessageId = PmLogic.generateSharedEventId();
+      appState.sendLocal(
+        content,
+        fileOffer: offer.toJson(),
+        nymMessageId: nymMessageId,
+      );
+      final base = PmLogic.buildPmRumor(
+        selfPubkey: identity.pubkey,
+        recipientPubkey: view.id,
+        content: content,
+        nymMessageId: nymMessageId,
+      );
+      // buildPmRumor has no extra-tag seam (unlike the group builder), so append
+      // the offer tag to the rumor we just built before wrapping.
+      final rumor = UnsignedEvent(
+        pubkey: base.pubkey,
+        createdAt: base.createdAt,
+        kind: base.kind,
+        tags: [...base.tags, fileOfferTag(offer)],
+        content: base.content,
+      );
+      try {
+        await service.publishPM(
+          rumor: rumor,
+          recipientPubkey: view.id,
+          settings: _msgSettings,
+        );
+      } catch (_) {
+        // PM send paths don't expose the echo id here; leave the optimistic
+        // bubble in its sent state (mirrors a normal PM send with no receipt).
+      }
       return;
     }
+
+    if (view.kind == ViewKind.group) {
+      final group = appState.groupById(view.id);
+      if (identity == null || service == null || group == null) {
+        appState.sendLocal(content, fileOffer: offer.toJson());
+        return;
+      }
+      final ek = _groups!.keysFor(group.id);
+      final next = ek.rotateSelf();
+      _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      final nymMessageId = GroupLogic.generateGroupId();
+      appState.sendLocal(
+        content,
+        fileOffer: offer.toJson(),
+        nymMessageId: nymMessageId,
+      );
+      final rumor = GroupLogic.buildGroupMessageRumor(
+        group: group,
+        selfPubkey: identity.pubkey,
+        content: content,
+        nymMessageId: nymMessageId,
+        ephemeralPk: next.pk,
+        // Thread the file-offer tag the same way the PWA does (groups.js:1707).
+        extraTags: [fileOfferTag(offer)],
+      );
+      await service.publishGroupMessage(
+        rumor: rumor,
+        recipients: group.members,
+        encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+        settings: _msgSettings,
+      );
+      return;
+    }
+
+    // Channel branch: local echo + re-publish the channel message with the offer
+    // tag (displayMessage isFileOffer path, p2p.js:158-173).
+    final echo = appState.sendLocal(content, fileOffer: offer.toJson());
+    if (identity == null || service == null) return;
     final isGeo = state.channels
         .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
     // Re-publish the channel message with the extra offer tag so peers can pick

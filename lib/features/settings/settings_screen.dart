@@ -622,6 +622,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
+  /// Swipe-action `<select>` change (09-F-LOW-5): stage the new action into the
+  /// draft, then — mirroring the PWA's `handleSwipeActionChange`
+  /// (app.js:3316-3324) — auto-open the emoji picker the moment a swipe action
+  /// is switched TO "react" when (a) the previous action wasn't already "react"
+  /// and (b) no swipe-react emoji has ever been persisted. The PWA gates on the
+  /// raw `localStorage.getItem('nym_swipe_react_emoji')` being absent, so we
+  /// check the raw KV key (NOT the draft's `'❤️'` default, which is always
+  /// present) — a user who deliberately picked an emoji is never re-prompted.
+  void _onSwipeActionChanged(
+    SettingsController ctrl, {
+    required String prev,
+    required String next,
+    required Settings Function(Settings draft) apply,
+  }) {
+    _mutate(apply);
+    final hasPersistedEmoji =
+        (ref.read(keyValueStoreProvider).getString(StorageKeys.swipeReactEmoji) ??
+                '')
+            .isNotEmpty;
+    if (next == 'react' && prev != 'react' && !hasPersistedEmoji) {
+      _openSwipeReactPicker(ctrl);
+    }
+  }
+
   /// Notification-sound change: stage the choice into the draft (Save-gated,
   /// 09-M1 — the PWA only commits the sound on Save), then play it as an audible
   /// preview (the PWA's `soundSelect.onchange` → `nym.playSound(value)`,
@@ -1558,7 +1582,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             child: FormSelect<String>(
               value: s.swipeLeftAction,
               items: swipeActions,
-              onChanged: (v) => _mutate((d) => d.copyWith(swipeLeftAction: v)),
+              onChanged: (v) => _onSwipeActionChanged(
+                ctrl,
+                prev: s.swipeLeftAction,
+                next: v,
+                apply: (d) => d.copyWith(swipeLeftAction: v),
+              ),
             ),
           ),
           FormGroup(
@@ -1567,8 +1596,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             child: FormSelect<String>(
               value: s.swipeRightAction,
               items: swipeRightActions,
-              onChanged: (v) =>
-                  _mutate((d) => d.copyWith(swipeRightAction: v)),
+              onChanged: (v) => _onSwipeActionChanged(
+                ctrl,
+                prev: s.swipeRightAction,
+                next: v,
+                apply: (d) => d.copyWith(swipeRightAction: v),
+              ),
             ),
           ),
           // The Quick-React-emoji group only shows when a swipe action is set
