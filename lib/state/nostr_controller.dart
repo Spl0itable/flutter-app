@@ -1234,7 +1234,7 @@ class NostrController {
   /// Notifies + records history when someone zaps OUR message (zaps.js
   /// `_notifyZapToOurMessage`, lines 1347-1421), F07-Z15. Clones the reaction
   /// path ([_maybeNotifyReaction]) with the zap body `⚡ zapped N sats to:
-  /// "<preview>"` (or `…to your message`). [messageId] is the zapped message
+  /// "&lt;preview&gt;"` (or `…to your message`). [messageId] is the zapped message
   /// (`e` tag), [zapperPubkey] the zapper. Fires only when WE are the recipient
   /// and the zapper isn't us (and isn't blocked / notifications are enabled). The
   /// caller already verified `recipient == self` and counted the zap; this raises

@@ -1287,7 +1287,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   /// `renderMessagesWithVirtualScroll` (columns.js:507-514) whose empty path is
   /// `_showMessageSkeleton(container, () => _appendEmptyNote(container, 'No
   /// recent messages'))` (messages.js:3066-3070) — i.e. the GENERIC bare string
-  /// in BOTH modes. The channel-specific "No recent messages in #<name>" is a
+  /// in BOTH modes. The channel-specific "No recent messages in #&lt;name&gt;" is a
   /// single-view-only string (the `loadChannelFromRelays` path, messages.js:2840)
   /// and is NOT used by columns (08-H1).
   String _emptyNoteText() => 'No recent messages';
