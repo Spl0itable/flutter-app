@@ -262,10 +262,6 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     itemScrollController: _itemScrollController,
                     itemPositionsListener: _positionsListener,
                     reverse: true,
-                    // Swipe-down on the messages dismisses the soft keyboard
-                    // (01-B3): the browser does this natively on the PWA.
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
                     itemCount: units.length,
                     itemBuilder: (context, revIndex) {

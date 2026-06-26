@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:nym_bar/features/notifications/notifications_service.dart';
+import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/models/user.dart';
 import 'package:nym_bar/services/nostr/nostr_service.dart';

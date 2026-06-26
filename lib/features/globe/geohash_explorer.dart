@@ -150,9 +150,6 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   /// selection's Location row (mirrors re-selecting in the PWA).
   int _geocodeToken = 0;
 
-  // Drag state.
-  GeoView? _dragStartView;
-
   // GL-H1 — pinch-zoom baseline. `ScaleUpdateDetails.scale` is cumulative since
   // the gesture started; the PWA anchors zoom to the gesture-start spread
   // (`pinch.zoom * newDist/pinch.dist`, geohash-globe.js:973-990). To reproduce
@@ -702,7 +699,6 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
           behavior: HitTestBehavior.opaque,
           onTapUp: (d) => _onTapUp(d, size),
           onScaleStart: (d) {
-            _dragStartView = _view;
             _lastScale = 1.0; // GL-H1: reset the cumulative-scale baseline.
             setState(() => _dragging = true);
           },
@@ -727,7 +723,6 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
             _setView(v, size);
           },
           onScaleEnd: (_) {
-            _dragStartView = null;
             _lastScale = 1.0;
             setState(() => _dragging = false);
           },

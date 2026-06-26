@@ -974,6 +974,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   Set<String> get closedPMs => _closedPMs;
 
+  /// Clears the "left" mark for [groupId] so a fresh invite / add-member can
+  /// resurrect a group the user previously left (F04-H3). Mirrors the PWA's
+  /// `leftGroups.delete(groupId)` in the `group-invite` / `group-add-member`
+  /// handlers (groups.js:798-804, 879-884): without this, `upsertGroup` /
+  /// `ingestGroupMessage` permanently drop everything for a left group, so an
+  /// invited-back user can never rejoin. Pure set mutation (no `state` rebuild —
+  /// the caller's `upsertGroup`/ingest publishes the new state).
+  void clearLeftGroup(String groupId) {
+    _leftGroups.remove(groupId);
+  }
+
   /// Switches this store to a live, identity-backed empty state. Called by the
   /// NostrController once an identity boots.
   void goLive(String pubkey, String nym) {
@@ -2952,6 +2963,46 @@ class NotificationEntry {
   /// type. Preferred by the panel over the type-derived label when present.
   final String? contextLabel;
   bool viewed;
+
+  /// Serializes for the persisted history (N3). Mirrors the PWA's stored
+  /// notification objects (`nym_notification_history`, notifications.js:228) —
+  /// `timestamp` is the PWA field name so a value written by either client
+  /// round-trips. Null fields are omitted to keep the blob compact.
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'title': title,
+        'body': body,
+        'timestamp': ts,
+        if (route != null) 'route': route,
+        if (eventId != null) 'eventId': eventId,
+        if (senderPubkey != null) 'senderPubkey': senderPubkey,
+        if (contextLabel != null) 'contextLabel': contextLabel,
+        if (viewed) 'viewed': true,
+      };
+
+  /// Rebuilds an entry from persisted JSON (N3). Returns null when the record
+  /// lacks the minimal fields (title/body/timestamp), so a corrupt row is
+  /// skipped rather than throwing.
+  static NotificationEntry? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final title = raw['title'];
+    final body = raw['body'];
+    final ts = raw['timestamp'];
+    if (title is! String || body is! String || ts is! num) return null;
+    return NotificationEntry(
+      type: raw['type'] is String ? raw['type'] as String : 'message',
+      title: title,
+      body: body,
+      ts: ts.toInt(),
+      route: raw['route'] is String ? raw['route'] as String : null,
+      eventId: raw['eventId'] is String ? raw['eventId'] as String : null,
+      senderPubkey:
+          raw['senderPubkey'] is String ? raw['senderPubkey'] as String : null,
+      contextLabel:
+          raw['contextLabel'] is String ? raw['contextLabel'] as String : null,
+      viewed: raw['viewed'] == true,
+    );
+  }
 }
 
 class NotificationHistoryState {
@@ -2972,10 +3023,78 @@ class NotificationHistoryState {
 
 class NotificationHistoryNotifier
     extends StateNotifier<NotificationHistoryState> {
-  NotificationHistoryNotifier() : super(const NotificationHistoryState());
+  /// [ref] is optional so unit tests can construct the notifier without a
+  /// provider container; when null, persistence/hydration are skipped (the
+  /// store stays in-memory, matching the pre-N3 behavior the tests assert).
+  NotificationHistoryNotifier([this._ref])
+      : super(const NotificationHistoryState()) {
+    if (_ref != null) _hydrate();
+  }
+
+  final Ref? _ref;
+  SharedPreferences? _prefs;
+
+  /// PWA localStorage key for the persisted bell history
+  /// (`_loadNotificationHistory`/`_saveNotificationHistory`,
+  /// notifications.js:218/231). Kept as a literal here (not a typed Settings
+  /// field) so the cross-device sync key matches the PWA byte-for-byte.
+  static const String _historyKey = 'nym_notification_history';
 
   static const int _maxAgeMs = 24 * 60 * 60 * 1000; // 24h
   static const int _cap = 100;
+
+  /// Hydrates the bell history from SharedPreferences at boot so it survives a
+  /// restart (N3). Mirrors the PWA's `_loadNotificationHistory`: JSON-decode the
+  /// stored array, drop anything older than 24h, and adopt it (newest-first,
+  /// capped). Best-effort — a missing/corrupt blob just yields an empty history.
+  /// Re-derives the unread badge from the hydrated entries.
+  Future<void> _hydrate() async {
+    final ref = _ref;
+    if (ref == null) return;
+    try {
+      final prefs = await ref.read(emojiPrefsProvider.future);
+      _prefs = prefs;
+      final raw = prefs.getString(_historyKey);
+      if (raw == null || raw.isEmpty) return;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final entries = <NotificationEntry>[];
+      for (final item in decoded) {
+        final e = NotificationEntry.fromJson(item);
+        if (e == null) continue;
+        if (now - e.ts >= _maxAgeMs) continue; // 24h window
+        entries.add(e);
+      }
+      if (entries.isEmpty || !mounted) return;
+      entries.sort((a, b) => b.ts.compareTo(a.ts)); // newest first
+      if (entries.length > _cap) entries.removeRange(_cap, entries.length);
+      state = NotificationHistoryState(
+        entries: entries,
+        unread: _countUnread(entries),
+      );
+    } catch (_) {
+      // Best-effort; an unavailable/corrupt store just yields an empty history.
+    }
+  }
+
+  /// Persists the current 24h history slice to SharedPreferences (N3). Mirrors
+  /// the PWA's `_saveNotificationHistory` (notifications.js:231): re-encode the
+  /// entries that are still within the 24h window. No-op in tests (no prefs).
+  void _persist() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final recent = state.entries
+          .where((e) => now - e.ts < _maxAgeMs)
+          .map((e) => e.toJson())
+          .toList();
+      prefs.setString(_historyKey, jsonEncode(recent));
+    } catch (_) {
+      // Quota/serialization failures are non-fatal; live state still works.
+    }
+  }
 
   /// Blocked-sender pubkeys, excluded from the badge count. The PWA's
   /// `_doUpdateNotificationBadge` drops `blockedUsers.has(pubkey)` entries at
@@ -3062,6 +3181,7 @@ class NotificationHistoryNotifier
     if (kept.length > _cap) kept.removeRange(_cap, kept.length);
     final unread = _countUnread(kept);
     state = NotificationHistoryState(entries: kept, unread: unread);
+    _persist(); // N3: survive a restart.
   }
 
   /// Marks the notifications for a single conversation viewed and re-derives the
@@ -3093,6 +3213,7 @@ class NotificationHistoryNotifier
     if (!changed) return;
     final entries = List.of(state.entries);
     state = state.copyWith(entries: entries, unread: _countUnread(entries));
+    _persist(); // N3: persist the viewed flags.
   }
 
   /// Marks every entry viewed and zeroes the unread count (modal opened).
@@ -3101,10 +3222,14 @@ class NotificationHistoryNotifier
       e.viewed = true;
     }
     state = state.copyWith(entries: List.of(state.entries), unread: 0);
+    _persist(); // N3: persist the viewed flags.
   }
 
   /// Clears the history entirely.
-  void clear() => state = const NotificationHistoryState();
+  void clear() {
+    state = const NotificationHistoryState();
+    _persist(); // N3: clear the stored blob too.
+  }
 }
 
 /// The notification history store. The shell reads `.unread` for the bell badge;
@@ -3112,7 +3237,7 @@ class NotificationHistoryNotifier
 /// `ref.read(notificationHistoryProvider.notifier).record(...)`.
 final notificationHistoryProvider = StateNotifierProvider<
     NotificationHistoryNotifier, NotificationHistoryState>(
-  (ref) => NotificationHistoryNotifier(),
+  (ref) => NotificationHistoryNotifier(ref),
 );
 
 // =============================================================================

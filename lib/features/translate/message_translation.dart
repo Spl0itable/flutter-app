@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/settings_provider.dart';
+import 'translate_language_prompt.dart';
 import 'translate_languages.dart';
 import 'translate_service.dart';
 
@@ -33,7 +34,15 @@ class MessageTranslation extends ConsumerStatefulWidget {
 }
 
 class _MessageTranslationState extends ConsumerState<MessageTranslation> {
-  late Future<TranslationResult> _future;
+  /// Null until a target language is resolved (either it was already set, or
+  /// the user picked one via the prompt). Stays null — with [_cancelled] set —
+  /// when the user dismisses the "Select Your Language" picker.
+  Future<TranslationResult>? _future;
+
+  /// True once the user cancels the language prompt; the block renders nothing,
+  /// mirroring translate.js:200 (`if (!targetLang) return;`).
+  bool _cancelled = false;
+
   late final TranslateService _service = widget.service ?? TranslateService();
 
   String get _target =>
@@ -43,13 +52,41 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
   @override
   void initState() {
     super.initState();
+    final target = _target;
+    if (target.isEmpty) {
+      // No translateLanguage set: open the picker first, persist the choice,
+      // then translate into it — mirrors translate.js:197-201 + :165-171.
+      _promptThenTranslate();
+    } else {
+      _start(target);
+    }
+  }
+
+  void _start(String target) {
     final plain = TranslateService.stripQuotes(widget.content);
-    _future = _service.translate(plain, _target.isEmpty ? 'en' : _target);
+    _future = _service.translate(plain, target);
+  }
+
+  Future<void> _promptThenTranslate() async {
+    final code = await promptTranslateLanguage(context);
+    if (!mounted) return;
+    if (code == null || code.isEmpty) {
+      // User cancelled — render nothing (translate.js:200 `return`).
+      setState(() => _cancelled = true);
+      return;
+    }
+    // Persist the choice (the picker widget leaves persistence to the caller).
+    ref.read(settingsProvider.notifier).setTranslateLanguage(code);
+    setState(() => _start(code));
   }
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // Nothing to show until a target language is resolved: while the picker is
+    // open (_future still null) or if the user cancelled it (translate.js:200).
+    final future = _future;
+    if (future == null || _cancelled) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(top: 6),
@@ -63,7 +100,7 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
         ),
       ),
       child: FutureBuilder<TranslationResult>(
-        future: _future,
+        future: future,
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             // `.translation-loading`: STATIC italic dim@0.6 — the PWA has NO

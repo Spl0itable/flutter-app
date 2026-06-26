@@ -110,6 +110,10 @@ class NostrController {
   /// Throttle: pubkey/groupId-scoped last typing-start send time (ms).
   final Map<String, int> _typingThrottle = {};
 
+  /// Minimum gap between typing-start broadcasts (PWA `_typingSendInterval`,
+  /// app.js:741), C03-D4.
+  static const int _typingSendIntervalMs = 3000;
+
   /// Reaction toggle rate-limit tracker: `messageId:emoji` → timestamps within
   /// the 30s window + a cooldown-until ms (reactions.js
   /// `_checkReactionRateLimit`: 3 toggles / 30s, then 60s cooldown).
@@ -273,10 +277,12 @@ class NostrController {
         onGiftWrap: _onGiftWrap,
       ));
 
-      // Broadcast presence on connect, then re-assert on a timer
-      // (nostr-core.js: presence on connect + on a 60s cadence).
+      // Broadcast presence on connect. The PWA's presence is purely
+      // event-driven (`recordOwnActivity` fires on send/react only — there is
+      // NO `setInterval` heartbeat), so a connected-but-idle user decays to
+      // offline for peers after the 5-min window (C03-D7). Re-broadcasts come
+      // from the send/react call sites below, not a timer.
       recordOwnActivity();
-      _startPresenceTimer();
 
       // Seed the sidebar with the well-known common geohash channels so the
       // channel list isn't empty before the user joins anything (PWA
@@ -520,7 +526,6 @@ class NostrController {
     // service. (Mirrors `cmdQuit` + the page reload dropping all in-memory NYM
     // state.)
     _flushTimer?.cancel();
-    _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
     _vouchPublishTimer?.cancel();
     _vouchPublishTimer = null;
@@ -749,9 +754,16 @@ class NostrController {
       _ingestUserEmojiList(event);
       return;
     }
+    // Public channel typing (kind 24420) — a peer is typing in a geohash
+    // channel. Ephemeral; routed here from the active channel's typing/receipt
+    // sub (C03-D6).
+    if (event.kind == EventKind.channelTyping) {
+      _onChannelTypingEvent(event, appState);
+      return;
+    }
     // Public channel read receipt (kind 24421) — someone saw one of our channel
     // messages. Ephemeral; routed here from the active channel's typing/receipt
-    // sub. Channel typing (24420) inbound is handled elsewhere.
+    // sub.
     if (event.kind == EventKind.channelReceipt) {
       _onChannelReadReceipt(event);
       return;
@@ -1206,6 +1218,138 @@ class NostrController {
     );
   }
 
+  /// Abbreviates a sats count for the zap notification body, a 1:1 port of the
+  /// PWA's `abbreviateNumber` (users.js:2069-2073) used by `_notifyZapToOurMessage`
+  /// — kept local so the state layer doesn't import the widget that also exports
+  /// it. `<1000` verbatim, `1.2k`/`12k`, `1.2M`.
+  static String _abbreviateSats(int n) {
+    if (n < 1000) return '$n';
+    if (n < 1000000) {
+      final v = n / 1000;
+      return '${v.toStringAsFixed(n < 10000 ? 1 : 0)}k';
+    }
+    return '${(n / 1000000).toStringAsFixed(1)}M';
+  }
+
+  /// Notifies + records history when someone zaps OUR message (zaps.js
+  /// `_notifyZapToOurMessage`, lines 1347-1421), F07-Z15. Clones the reaction
+  /// path ([_maybeNotifyReaction]) with the zap body `⚡ zapped N sats to:
+  /// "<preview>"` (or `…to your message`). [messageId] is the zapped message
+  /// (`e` tag), [zapperPubkey] the zapper. Fires only when WE are the recipient
+  /// and the zapper isn't us (and isn't blocked / notifications are enabled). The
+  /// caller already verified `recipient == self` and counted the zap; this raises
+  /// the alert the PWA fires alongside the badge. [route] opens the zapper's PM.
+  void _maybeNotifyZapToMessage({
+    required String messageId,
+    required int amountSats,
+    required String zapperPubkey,
+    required int tsSec,
+    String? eventId,
+  }) {
+    if (messageId.isEmpty || amountSats <= 0) return;
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty || zapperPubkey == self) return;
+    if (!_notificationsEnabled) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(zapperPubkey)) return;
+    if (_notifyFriendsOnly && !appState.isFriend(zapperPubkey)) return;
+
+    // Preview of the zapped message (first non-quoted line, ≤80 chars) —
+    // mirrors `_notifyZapToOurMessage`'s `rawContent`/message-store lookup.
+    String? preview;
+    for (final list in appState.messages.values) {
+      for (final m in list) {
+        if (m.id == messageId || m.nymMessageId == messageId) {
+          preview = m.content
+              .split('\n')
+              .where((l) => !l.startsWith('>'))
+              .join(' ')
+              .trim();
+          break;
+        }
+      }
+      if (preview != null) break;
+    }
+    if (preview != null && preview.length > 80) {
+      preview = '${preview.substring(0, 80)}…';
+    }
+    final sats = _abbreviateSats(amountSats);
+    final body = (preview != null && preview.isNotEmpty)
+        ? '⚡ zapped $sats sats to: "$preview"'
+        : '⚡ zapped $sats sats to your message';
+
+    // PWA zap notifications route as `type: 'reaction'` to the zapper's PM and
+    // are silent (history-only) when historical (>10s, zaps.js:1419).
+    _dispatchNotification(
+      title: _nymDisplayFor(zapperPubkey),
+      body: body,
+      senderPubkey: zapperPubkey,
+      isFriend: appState.isFriend(zapperPubkey),
+      isMention: false,
+      historyType: 'reaction',
+      route: zapperPubkey,
+      eventId: eventId,
+      tsMs: tsSec * 1000,
+      silent: _isHistorical(tsSec),
+    );
+  }
+
+  /// Inbound PROFILE-zap receipt ids we've already handled, so a re-delivered
+  /// receipt can't double-notify (zaps.js `_profileZapReceipts`, line 1301).
+  final Set<String> _profileZapReceipts = <String>{};
+
+  /// Handles an inbound PROFILE zap (a kind-9735 receipt with NO `['e']` tag,
+  /// `['p'] == self`) — records nothing to a message badge but notifies the
+  /// recipient "⚡ zapped N sats to your profile" (zaps.js
+  /// `_handleIncomingProfileZap`, lines 1300-1345), F07-Z16. Deduped by event id;
+  /// skips our own zap + blocked senders. Verified iff the receipt author is our
+  /// LNURL provider; an unverified zap from a non-provider author appends
+  /// "(unverified)" exactly like the PWA. No-ops without an amount.
+  void _maybeNotifyProfileZap(NostrEvent event) {
+    if (!_profileZapReceipts.add(event.id)) return; // already handled
+    if (_profileZapReceipts.length > 2000) {
+      _profileZapReceipts
+        ..clear()
+        ..add(event.id);
+    }
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(event.pubkey)) return;
+    final amount = ZapLogic.parseAmountFromBolt11(event.tagValue('bolt11'));
+    if (amount == null || amount <= 0) return;
+    final zapper = event.pubkey;
+    if (zapper == self) return;
+    if (!_notificationsEnabled) return;
+    if (_notifyFriendsOnly && !appState.isFriend(zapper)) return;
+
+    // Verified iff the receipt author IS our LNURL provider (zaps.js:1322-1324).
+    _getZapProviderPubkey(self).then((providerPubkey) {
+      // PWA: a provider is configured but this receipt isn't from it → drop.
+      if (providerPubkey != null &&
+          event.pubkey.toLowerCase() != providerPubkey) {
+        return;
+      }
+      final verified = providerPubkey != null &&
+          event.pubkey.toLowerCase() == providerPubkey;
+      final sats = _abbreviateSats(amount);
+      final body =
+          '⚡ zapped $sats sats to your profile${verified ? '' : ' (unverified)'}';
+      _dispatchNotification(
+        title: _nymDisplayFor(zapper),
+        body: body,
+        senderPubkey: zapper,
+        isFriend: appState.isFriend(zapper),
+        isMention: false,
+        historyType: 'reaction',
+        route: zapper,
+        eventId: event.id,
+        tsMs: event.createdAt * 1000,
+        silent: _isHistorical(event.createdAt),
+      );
+    }).catchError((_) {});
+  }
+
   void _ingestPresence(NostrEvent e) {
     // nym-presence ingestion (users.js `handlePresenceEvent`). Skip our own
     // presence and stale (older than last-seen) events.
@@ -1427,7 +1571,7 @@ class NostrController {
       case EventKind.reaction: // 7 — gift-wrapped reaction
         _onPrivateReaction(rumor, appState);
       case EventKind.zapReceipt: // 9735 — gift-wrapped private zap announcement
-        _onPrivateZap(rumor, appState);
+        _onPrivateZap(rumor, appState, u.wrapId);
       case EventKind.callSignaling: // 25053 — call signaling transport
         if (u.senderVerified) _callSignalHandler?.call(rumor);
       case EventKind.friendPresence: // 25054 — friends-only private presence
@@ -1621,6 +1765,11 @@ class NostrController {
   ) {
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
+      // A fresh invite resurrects a group we previously left (F04-H3): clear the
+      // "left" mark FIRST so `upsertGroup` (which bails on a left group) accepts
+      // it. Mirrors the PWA `leftGroups.delete(groupId)` at the top of the
+      // `group-invite` handler (groups.js:798-804).
+      appState.clearLeftGroup(groupId);
       if (appState.groupById(groupId) != null) return;
       final members = tags
           .where((t) => t.length > 1 && t[0] == 'p')
@@ -1659,6 +1808,16 @@ class NostrController {
           contextLabel: 'in ${name.isNotEmpty ? name : 'a group'}',
         );
       }
+      // Render the invite's content as the first in-chat bubble (F04-M2): the
+      // PWA "falls through to display the invite message inline" after creating
+      // the group (groups.js:874), so the new group opens with the "You've been
+      // added to group …" message instead of empty. `_mapGroupMessage` returns
+      // null for an empty/own-copy rumor, so a content-less invite stays empty.
+      final inviteMsg =
+          _mapGroupMessage(rumor, u, _identity?.pubkey ?? '', groupId);
+      if (inviteMsg != null && inviteMsg.content.isNotEmpty) {
+        appState.ingestGroupMessage(inviteMsg);
+      }
       return;
     }
 
@@ -1685,6 +1844,17 @@ class NostrController {
       if (group.banned.contains(senderPubkey)) return;
       unawaited(addGroupMembers(groupId, [senderPubkey]));
       return;
+    }
+
+    // A `group-add-member` that re-adds US clears the "left" mark so the group
+    // can resurrect (F04-H3): mirrors the PWA `leftGroups.delete(groupId)` at the
+    // top of the `group-add-member` handler (groups.js:879-884). Runs before
+    // `applyGroupControl` so a still-known-but-left group accepts the re-add.
+    if (type == GroupControlType.addMember) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      final addsSelf = self.isNotEmpty &&
+          tags.any((t) => t.length > 1 && t[0] == 'p' && t[1] == self);
+      if (addsSelf) appState.clearLeftGroup(groupId);
     }
 
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
@@ -1781,10 +1951,9 @@ class NostrController {
       default:
         return;
     }
-    // Promote title/body to non-null for the `required String` params (mirrors
-    // the `line == null` guard in [_emitGroupControlSystemLine]); every reachable
-    // case above assigns both, but the switch's static type stays nullable.
-    if (title == null || body == null) return;
+    // Every non-returning case above assigns both title + body, and `default`
+    // returns — so the analyzer promotes them to non-null here for the
+    // `required String` notification params.
 
     // Historical (>10s) → record to history only, no toast (PWA `isHistorical`).
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -1942,7 +2111,8 @@ class NostrController {
   /// Routes a gift-wrapped private zap announcement (kind 9735 rumor, sent to
   /// PM/group members). Accrues sats to the zapped message's aggregate. The
   /// rumor carries an `['e', msgId]`, `['p', recipient]`, `['bolt11', …]`.
-  void _onPrivateZap(Map<String, dynamic> rumor, AppStateNotifier appState) {
+  void _onPrivateZap(
+      Map<String, dynamic> rumor, AppStateNotifier appState, String wrapId) {
     final tags = _tags(rumor);
     final messageId = _tagValue(tags, 'e');
     final bolt11 = _tagValue(tags, 'bolt11');
@@ -1956,7 +2126,7 @@ class NostrController {
     // Deduped by bolt11 so our own self-record (verified) and this announcement
     // of the SAME payment can't double-count: whichever lands first wins the
     // count, and the verified self-record upgrades it out of `unverified`.
-    appState.recordMessageZap(
+    final counted = appState.recordMessageZap(
       messageId: messageId,
       zapperPubkey: zapper,
       amountSats: amount,
@@ -1966,6 +2136,24 @@ class NostrController {
     // Resolve the zapper's avatar (the zappers sheet / badge), like the PWA
     // resolves zap-list authors (`ensureListProfiles`, zaps.js:223).
     if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+    // Notify the recipient when THEIR PM/group message was zapped (Z15): only on
+    // a freshly-counted zap and when the gift-wrap targets us (`['p'] == self`)
+    // from someone other than us. Mirrors pms.js:1102-1104 /
+    // groups.js:handleGroupZap which call `_notifyZapToOurMessage` after
+    // `_recordMessageZap`. The gift-wrap `p` is the recipient.
+    if (counted && zapper.isNotEmpty) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      final pTag = _tagValue(tags, 'p');
+      if (self.isNotEmpty && pTag == self && zapper != self) {
+        _maybeNotifyZapToMessage(
+          messageId: messageId,
+          amountSats: amount,
+          zapperPubkey: zapper,
+          tsSec: (rumor['created_at'] as num?)?.toInt() ?? 0,
+          eventId: wrapId, // wrap id = the PWA's `event.id` dedup key
+        );
+      }
+    }
   }
 
   /// Event ids of kind-9735 receipts WE published ourselves (channel announce,
@@ -1990,10 +2178,22 @@ class NostrController {
     if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
 
     final info = ZapLogic.parseReceipt(event);
-    if (info == null) return; // no `e` tag / unparseable bolt11 → not a msg zap
+    if (info == null) {
+      // No `['e']` tag → not a message zap. A PROFILE zap (`['p'] == self`, no
+      // `e`) still notifies the recipient (zaps.js:1217-1220 → Z16); everything
+      // else (unparseable bolt11, someone else's profile) is dropped.
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      if (event.tagValue('e') == null &&
+          self.isNotEmpty &&
+          event.tagValue('p') == self) {
+        _maybeNotifyProfileZap(event);
+      }
+      return;
+    }
     final messageId = info.messageId;
     final amount = info.amountSats;
     final recipientPubkey = info.recipientPubkey;
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
 
     // Resolve the recipient's LNURL provider pubkey, then decide verified:
     // VERIFIED ⇔ the receipt author IS that provider (zaps.js:1259-1260).
@@ -2007,7 +2207,7 @@ class NostrController {
       // peer-published-receipt cases).
       final zapper = info.zapperPubkey;
       if (_ref.read(appStateProvider).blockedUsers.contains(zapper)) return;
-      appState.recordMessageZap(
+      final counted = appState.recordMessageZap(
         messageId: messageId,
         zapperPubkey: zapper,
         amountSats: amount,
@@ -2015,6 +2215,23 @@ class NostrController {
         verified: verified,
       );
       if (zapper.isNotEmpty) _maybeBackfillProfiles(zapper);
+      // Notify the recipient when THEIR message was zapped (Z15): only on a
+      // freshly-counted zap, when we're the recipient, the zapper isn't us, and
+      // the zap is verified OR the recipient has no provider pubkey (matching
+      // zaps.js:1279-1283 `if (verified || !providerPubkey)`).
+      if (counted &&
+          self.isNotEmpty &&
+          recipientPubkey == self &&
+          zapper != self &&
+          (verified || providerPubkey == null)) {
+        _maybeNotifyZapToMessage(
+          messageId: messageId,
+          amountSats: amount,
+          zapperPubkey: zapper,
+          tsSec: event.createdAt,
+          eventId: event.id,
+        );
+      }
     }).catchError((_) {});
   }
 
@@ -2574,6 +2791,10 @@ class NostrController {
       return;
     }
     removeChannel(key);
+    // PWA `removeChannel` posts a "Left channel #X" confirmation
+    // (channels.js:1623). `key` is already the bare geohash/name, matching the
+    // PWA's `'#' + (geohash || channel)` since it never carries a leading '#'.
+    _emitSystemMessage('Left channel #$key');
   }
 
   /// `/who` — lists current-channel users active within 300s (cmdWho).
@@ -3635,10 +3856,6 @@ class NostrController {
   /// broadcasts to ≤1/60s (nostr-core.js `_lastPresenceBroadcast`).
   int _lastPresenceBroadcast = 0;
 
-  /// Periodic presence re-assertion timer (nostr-core.js broadcasts presence on
-  /// a timer + on activity). Cancelled on dispose.
-  Timer? _presenceTimer;
-
   static const int _presenceBroadcastThrottleMs = 60000;
 
   /// The status-visibility mode from `nym_show_status`
@@ -3708,9 +3925,10 @@ class NostrController {
   }
 
   /// Records local activity so our own status stays "online" and other clients
-  /// see us as recently active. Called on connect, on every send, and on the
-  /// presence timer. Throttles relay broadcasts to ≤1/60s; skipped while away or
-  /// when status is disabled (nostr-core.js `recordOwnActivity`).
+  /// see us as recently active. Called on connect and on every send/react — the
+  /// PWA's presence is purely event-driven, with NO periodic heartbeat (C03-D7).
+  /// Throttles relay broadcasts to ≤1/60s; skipped while away or when status is
+  /// disabled (nostr-core.js `recordOwnActivity`).
   void recordOwnActivity() {
     final identity = _identity;
     if (identity == null) return;
@@ -3737,16 +3955,7 @@ class NostrController {
     unawaited(publishPresence('online'));
   }
 
-  /// Starts the periodic presence re-assertion timer (idempotent).
-  void _startPresenceTimer() {
-    _presenceTimer?.cancel();
-    _presenceTimer = Timer.periodic(
-      const Duration(milliseconds: _presenceBroadcastThrottleMs),
-      (_) => recordOwnActivity(),
-    );
-  }
-
-  /// Signals typing in the current PM/group view (throttled ~1/s).
+  /// Signals typing in the current PM/group view (throttled ~3/s — C03-D4).
   Future<void> sendTypingStart() async {
     final service = _service;
     final identity = _identity;
@@ -3766,7 +3975,9 @@ class NostrController {
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - (_typingThrottle[key] ?? 0) < 1000) return;
+    // PWA `_typingSendInterval = 3000` (app.js:741) — re-broadcast typing-start
+    // at most once per 3s, not 1s (C03-D4).
+    if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
     _typingThrottle[key] = now;
 
     if (view.kind == ViewKind.channel) {
@@ -3944,6 +4155,41 @@ class NostrController {
   /// a channel read receipt is sent).
   static final RegExp _channelMessageIdRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
   bool _isChannelMessageId(String id) => _channelMessageIdRe.hasMatch(id);
+
+  /// Routes an inbound public channel typing indicator (kind 24420): a peer is
+  /// typing in a geohash channel. Mirrors the PWA's `handleChannelTypingEvent`
+  /// (nostr-core.js:1542-1578): skips our own + scope-disallowed + stale (>5s,
+  /// `_typingExpireMs`) signals + blocked senders, parses the `['typing',
+  /// status]` / `['g'|'d', geo]` tags, and feeds the per-channel typing store
+  /// keyed by the active channel's storageKey (`#<geohash>`) with a 5s TTL —
+  /// status `'stop'` clears the indicator immediately. Without this the public
+  /// channel typing indicator never appeared (C03-D6).
+  void _onChannelTypingEvent(NostrEvent event, AppStateNotifier appState) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (event.pubkey == self) return;
+    // Scope gate (PWA `isTypingIndicatorAllowedFor('channel')`): channel typing
+    // only shows when the typing-indicator scope is 'everywhere'.
+    final scope = _ref.read(settingsProvider).typingIndicatorsScope;
+    if (!_indicatorScopeAllows(scope, 'channel')) return;
+    // Stale-drop at 5s (`_typingExpireMs`), matching the receive-side TTL.
+    final ageMs = DateTime.now().millisecondsSinceEpoch - event.createdAt * 1000;
+    if (ageMs > 5000) return;
+    if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
+
+    final status = event.tagValue('typing');
+    final geohash = event.tagValue('g') ?? event.tagValue('d');
+    if (status == null || geohash == null || geohash.isEmpty) return;
+
+    // The typing store keys on the active view's storageKey; a geohash channel
+    // view is `ChatView.channel(geohash)` → storageKey `'#<geohash>'`
+    // (app_state.dart:94). `setTyping` removes the entry on `typing: false`,
+    // mirroring the PWA's `status === 'stop'` branch.
+    appState.setTyping(
+      storageKey: '#${geohash.toLowerCase()}',
+      pubkey: event.pubkey,
+      typing: status == 'start',
+    );
+  }
 
   /// Routes an inbound public channel read receipt (kind 24421): someone saw a
   /// channel message. Mirrors the PWA's `handleChannelReadReceipt`: skips our
@@ -5060,6 +5306,18 @@ class NostrController {
     str('acceptCalls', c.setAcceptCalls);
     boolean('groupChatPMOnlyMode', c.setGroupChatPMOnlyMode);
     str('translateLanguage', c.setTranslateLanguage);
+    // Default landing channel rides the sync as a `{type,geohash}` OBJECT (PWA
+    // `pinnedLandingChannel`, settings.js:116), not a string — re-encode it to
+    // the JSON the KV store + `setPinnedLandingChannel` expect. SETTINGS-SYNC
+    // seam (inbound apply).
+    final landing = p['pinnedLandingChannel'];
+    if (landing is Map &&
+        landing['geohash'] is String &&
+        (landing['geohash'] as String).isNotEmpty) {
+      try {
+        c.setPinnedLandingChannel(jsonEncode(landing));
+      } catch (_) {}
+    }
     boolean('gesturesEnabled', c.setGesturesEnabled);
     str('swipeLeftAction', c.setSwipeLeftAction);
     str('swipeRightAction', c.setSwipeRightAction);
@@ -5154,7 +5412,14 @@ class NostrController {
 
   Future<void> _flushSettingsSync(StorageSync sync) async {
     try {
-      await sync.settingsSet(_ref.read(settingsProvider));
+      // The default landing channel is KV-only (not a typed Settings field), so
+      // thread it in explicitly so it rides the `channels` section like the PWA
+      // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.
+      await sync.settingsSet(
+        _ref.read(settingsProvider),
+        pinnedLandingChannelJson:
+            _ref.read(settingsProvider.notifier).pinnedLandingChannelJson,
+      );
     } catch (_) {
       // Best-effort.
     }
@@ -5684,7 +5949,6 @@ class NostrController {
 
   Future<void> dispose() async {
     _flushTimer?.cancel();
-    _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
     if (_p2pSub != null) {

@@ -1631,9 +1631,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         color = c.textDim;
         break;
       case DeliveryStatus.failed:
-        glyph = '!';
-        color = c.danger;
-        break;
+        // `.delivery-status.failed { color:#f44336; cursor:pointer; font-weight:
+        // bold }` (styles-chat.css:685-689); the PWA renders the `!` as a
+        // clickable retry affordance (`<span … nm-pointer title="Failed to send
+        // - click to retry" data-retry-event-id>`, messages.js:842) wired to
+        // `manualRetryDM(message.id)` (ui-context.js:851-855). Tap drops the
+        // failed bubble and re-sends a fresh copy — see [_retryFailedPm].
+        return MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _retryFailedPm,
+            child: Tooltip(
+              message: 'Failed to send - click to retry',
+              child: Text(
+                '!',
+                style: TextStyle(
+                  color: c.danger,
+                  fontSize: 11,
+                  height: 1,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+        );
       case DeliveryStatus.sending:
         return const SizedBox.shrink();
     }
@@ -1641,6 +1663,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       glyph,
       style: TextStyle(color: color, fontSize: 11, height: 1),
     );
+  }
+
+  /// Manually re-sends a failed PM (PWA `manualRetryDM`, pms.js:179-196): drop
+  /// the failed bubble, ensure the PM thread with the original recipient is the
+  /// active view, then send a fresh copy of its content. The recipient is the
+  /// message's stored peer (`conversationPubkey`, populated for own PMs at
+  /// app_state.dart:2481), falling back to the active PM view's peer (the PWA's
+  /// `msg.conversationPubkey || this.currentPM`).
+  void _retryFailedPm() {
+    final content = message.content;
+    if (content.trim().isEmpty) return;
+    final view = ref.read(currentViewProvider);
+    final peer = message.conversationPubkey ??
+        (view.kind == ViewKind.pm ? view.id : null);
+    if (peer == null || peer.isEmpty) return;
+    final appState = ref.read(appStateProvider.notifier);
+    final controller = ref.read(nostrControllerProvider);
+    // Remove the failed bubble before re-sending so the retry produces a single
+    // fresh optimistic echo (mirrors the PWA splice + re-`sendPM`).
+    appState.removeMessage(message.id);
+    // Make the recipient's PM thread the active view, then send — `sendCurrent`
+    // publishes to whatever view is current (nostr_controller.dart:2113), and
+    // `startPM` opens/switches to it (nostr_controller.dart:2720).
+    controller.startPM(peer);
+    controller.sendCurrent(content);
   }
 }
 
@@ -2566,17 +2613,26 @@ class _SwipeToActState extends State<_SwipeToAct>
   static const double _edgeZone = 50; // EDGE_ZONE
   static const double _followCap = 100; // max |translateX|
 
-  late final AnimationController _settle = AnimationController(
-    vsync: this,
-    // `transition: transform 0.25s ease-out` on release (messages.js:2253).
-    duration: const Duration(milliseconds: 250),
-  );
+  // Created in initState (NOT a lazy `late final = …`): a row that is never
+  // swiped would otherwise first touch `_settle` in dispose(), lazily creating
+  // a ticker during teardown and throwing. (Caught by `flutter test`.)
+  late final AnimationController _settle;
 
   double _dx = 0;
   bool _active = false; // a horizontal-dominant drag has been claimed
   bool _abandoned = false; // started in the left edge zone (defer to drawer)
   bool _thresholdFired = false; // one-shot threshold haptic latch
   double _startX = 0; // global x where the drag began (for EDGE_ZONE)
+
+  @override
+  void initState() {
+    super.initState();
+    _settle = AnimationController(
+      vsync: this,
+      // `transition: transform 0.25s ease-out` on release (messages.js:2253).
+      duration: const Duration(milliseconds: 250),
+    );
+  }
 
   @override
   void dispose() {
