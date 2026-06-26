@@ -744,4 +744,93 @@ void main() {
       expect(n.state.entries.first.title, 'new');
     });
   });
+
+  // N26 — cross-device notification read-state (the seen-keys wrap). A
+  // notification read/dismissed on one device must not re-alert on another.
+  group('NotificationHistoryNotifier cross-device seen-keys (N26)', () {
+    test('mergeSeenNotifications retro-marks a matching entry viewed', () {
+      final n = NotificationHistoryNotifier();
+      n.record(
+          type: 'pm',
+          title: 'a',
+          body: 'x',
+          eventId: 'evt-seen',
+          senderPubkey: other);
+      expect(n.state.unread, 1);
+      // A sibling device reports it read: merging its seen-key clears the badge.
+      final changed = n.mergeSeenNotifications(
+          {'e:evt-seen': DateTime.now().millisecondsSinceEpoch});
+      expect(changed, isTrue);
+      expect(n.state.entries.single.viewed, isTrue);
+      expect(n.state.unread, 0);
+    });
+
+    test('a notification already seen elsewhere lands pre-viewed (no badge bump)',
+        () {
+      final n = NotificationHistoryNotifier();
+      // The seen-key syncs in BEFORE the event itself replays here.
+      n.mergeSeenNotifications(
+          {'e:evt-future': DateTime.now().millisecondsSinceEpoch});
+      n.record(
+          type: 'pm',
+          title: 'a',
+          body: 'x',
+          eventId: 'evt-future',
+          senderPubkey: other);
+      expect(n.state.entries.single.viewed, isTrue);
+      expect(n.state.unread, 0);
+    });
+
+    test('viewing here exports seen-keys that silence the same event elsewhere',
+        () {
+      final deviceA = NotificationHistoryNotifier();
+      deviceA.record(
+          type: 'pm',
+          title: 'a',
+          body: 'x',
+          eventId: 'evt-rt',
+          senderPubkey: other);
+      deviceA.markAllViewed();
+      final synced = deviceA.seenNotificationsForSync();
+      expect(synced.containsKey('e:evt-rt'), isTrue);
+
+      // Device B merges the synced keys, then the same event replays there.
+      final deviceB = NotificationHistoryNotifier();
+      deviceB.mergeSeenNotifications(synced);
+      deviceB.record(
+          type: 'pm',
+          title: 'a',
+          body: 'x',
+          eventId: 'evt-rt',
+          senderPubkey: other);
+      expect(deviceB.state.entries.single.viewed, isTrue);
+      expect(deviceB.state.unread, 0);
+    });
+
+    test('an expired incoming seen-key is ignored (48h TTL)', () {
+      final n = NotificationHistoryNotifier();
+      n.record(
+          type: 'pm',
+          title: 'a',
+          body: 'x',
+          eventId: 'evt-old',
+          senderPubkey: other);
+      final old = DateTime.now()
+          .subtract(const Duration(hours: 49))
+          .millisecondsSinceEpoch;
+      final changed = n.mergeSeenNotifications({'e:evt-old': old});
+      expect(changed, isFalse); // expired → not adopted
+      expect(n.state.entries.single.viewed, isFalse);
+      expect(n.state.unread, 1);
+    });
+
+    test('fallback seen-key (no eventId) uses sender+minute+body prefix', () {
+      final n = NotificationHistoryNotifier();
+      n.record(
+          type: 'pm', title: 'a', body: 'hello world', senderPubkey: other);
+      n.markAllViewed();
+      final synced = n.seenNotificationsForSync();
+      expect(synced.keys.any((k) => k.startsWith('f:$other:')), isTrue);
+    });
+  });
 }

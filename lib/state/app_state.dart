@@ -3116,6 +3116,24 @@ class NotificationHistoryNotifier
   static const int _maxAgeMs = 24 * 60 * 60 * 1000; // 24h
   static const int _cap = 100;
 
+  // --- Cross-device notification read-state (N26, notifications.js:236-301) ---
+  /// Stable "seen" keys (key → first-seen ms) so a notification dismissed/read
+  /// on one device is silenced on another. Synced via the `nymchat-notifications`
+  /// wrap (settings.js:537). The PWA's `seenNotificationKeys`.
+  Map<String, int> _seenKeys = <String, int>{};
+
+  /// PWA localStorage key for the persisted seen-keys map — kept literal so the
+  /// cross-device key matches byte-for-byte (`nym_notification_seen`).
+  static const String _seenKeysStoreKey = 'nym_notification_seen';
+  static const int _seenKeysTtlMs = 48 * 60 * 60 * 1000; // 48h
+  static const int _maxSeenKeys = 500;
+
+  /// Fired when the seen-keys map actually GROWS (a notification was viewed/
+  /// dismissed here), so the controller can republish the read-state wrap — the
+  /// native equivalent of the PWA's `_debouncedNostrSettingsSave` on
+  /// `_rememberNotificationSeen`. Never fired by an inbound merge (idempotent).
+  void Function()? onSeenChanged;
+
   /// Hydrates the bell history from SharedPreferences at boot so it survives a
   /// restart (N3). Mirrors the PWA's `_loadNotificationHistory`: JSON-decode the
   /// stored array, drop anything older than 24h, and adopt it (newest-first,
@@ -3127,6 +3145,12 @@ class NotificationHistoryNotifier
     try {
       final prefs = await ref.read(emojiPrefsProvider.future);
       _prefs = prefs;
+      // N26: hydrate the cross-device seen-keys map (independent of the bell
+      // history, so it loads even when the history blob is empty).
+      final seenRaw = prefs.getString(_seenKeysStoreKey);
+      if (seenRaw != null && seenRaw.isNotEmpty) {
+        _seenKeys = _decodeSeenKeys(seenRaw);
+      }
       final raw = prefs.getString(_historyKey);
       if (raw == null || raw.isEmpty) return;
       final decoded = jsonDecode(raw);
@@ -3247,6 +3271,11 @@ class NotificationHistoryNotifier
       senderPubkey: senderPubkey,
       contextLabel: contextLabel,
     );
+    // N26: silence a notification already seen/dismissed on another device (its
+    // key is in the synced seen-map) by landing it pre-viewed — it stays in the
+    // bell history but doesn't bump the unread badge (PWA showNotification,
+    // notifications.js:53-54).
+    if (_isSeen(entry)) entry.viewed = true;
     final kept = [
       entry,
       ...state.entries.where((e) => now - e.ts < _maxAgeMs),
@@ -3275,6 +3304,7 @@ class NotificationHistoryNotifier
   void markConversationSeen(String route, {int? tsSec}) {
     if (route.isEmpty) return;
     var changed = false;
+    var seenGrew = false;
     final cutoffMs = tsSec != null ? tsSec * 1000 : null;
     for (final e in state.entries) {
       if (e.viewed) continue;
@@ -3282,20 +3312,153 @@ class NotificationHistoryNotifier
       if (cutoffMs != null && e.ts > cutoffMs) continue;
       e.viewed = true;
       changed = true;
+      if (_rememberSeen(e)) seenGrew = true; // N26: silence on other devices.
     }
     if (!changed) return;
     final entries = List.of(state.entries);
     state = state.copyWith(entries: entries, unread: _countUnread(entries));
     _persist(); // N3: persist the viewed flags.
+    if (seenGrew) {
+      _persistSeenKeys();
+      onSeenChanged?.call();
+    }
   }
 
-  /// Marks every entry viewed and zeroes the unread count (modal opened).
+  /// Marks every entry viewed and zeroes the unread count (modal opened). Each
+  /// newly-viewed entry's key is remembered (N26) so reading the bell here
+  /// silences the same notifications on our other devices.
   void markAllViewed() {
+    var seenGrew = false;
     for (final e in state.entries) {
-      e.viewed = true;
+      if (!e.viewed) {
+        e.viewed = true;
+        if (_rememberSeen(e)) seenGrew = true;
+      }
     }
     state = state.copyWith(entries: List.of(state.entries), unread: 0);
     _persist(); // N3: persist the viewed flags.
+    if (seenGrew) {
+      _persistSeenKeys();
+      onSeenChanged?.call();
+    }
+  }
+
+  // --- Cross-device notification read-state (N26) -------------------------
+
+  /// Stable per-notification key for the cross-device seen map (PWA
+  /// `_notificationSeenKey`, notifications.js:238-248): the event id when known
+  /// (`e:<id>`), else a sender+minute+body-prefix fallback. The body is clipped
+  /// to 40 chars so the key matches across the full local copy and the
+  /// 240-char-truncated synced copy. Null when nothing identifying.
+  String? _seenKey(NotificationEntry n) {
+    final evId = n.eventId ?? '';
+    if (evId.isNotEmpty) return 'e:$evId';
+    final pk = n.senderPubkey ?? '';
+    if (pk.isEmpty && n.ts == 0) return null;
+    final body = n.body;
+    final prefix = body.length > 40 ? body.substring(0, 40) : body;
+    return 'f:$pk:${n.ts ~/ 60000}:$prefix';
+  }
+
+  /// Has [n] already been seen (here or synced from another device)? PWA
+  /// `_isNotificationSeen` (notifications.js:287).
+  bool _isSeen(NotificationEntry n) {
+    final k = _seenKey(n);
+    return k != null && _seenKeys.containsKey(k);
+  }
+
+  /// Records [n]'s key as seen (PWA `_rememberNotificationSeen`,
+  /// notifications.js:293). Returns true only when a NEW key was added so the
+  /// caller can decide whether to persist + republish.
+  bool _rememberSeen(NotificationEntry n) {
+    final k = _seenKey(n);
+    if (k == null || _seenKeys.containsKey(k)) return false;
+    _seenKeys[k] = n.ts != 0 ? n.ts : DateTime.now().millisecondsSinceEpoch;
+    return true;
+  }
+
+  /// TTL-prune (48h) then cap (500 newest) the seen-keys map (PWA
+  /// `_pruneSeenNotificationKeys`, notifications.js:264).
+  void _pruneSeenKeys() {
+    final cutoff = DateTime.now().millisecondsSinceEpoch - _seenKeysTtlMs;
+    _seenKeys.removeWhere((_, ts) => ts <= cutoff);
+    if (_seenKeys.length > _maxSeenKeys) {
+      final ordered = _seenKeys.entries.toList()
+        ..sort((a, b) => b.value - a.value);
+      _seenKeys = {
+        for (final e in ordered.take(_maxSeenKeys)) e.key: e.value,
+      };
+    }
+  }
+
+  void _persistSeenKeys() {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    _pruneSeenKeys();
+    try {
+      prefs.setString(_seenKeysStoreKey, jsonEncode(_seenKeys));
+    } catch (_) {}
+  }
+
+  Map<String, int> _decodeSeenKeys(String raw) {
+    final out = <String, int>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        final cutoff = DateTime.now().millisecondsSinceEpoch - _seenKeysTtlMs;
+        decoded.forEach((k, v) {
+          if (k is String && v is num && v.toInt() > cutoff) {
+            out[k] = v.toInt();
+          }
+        });
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  /// The pruned seen-keys map for the outbound `nymchat-notifications` wrap (PWA
+  /// `seenNotifications`, settings.js:537). N26 outbound surface.
+  Map<String, dynamic> seenNotificationsForSync() {
+    _pruneSeenKeys();
+    return Map<String, dynamic>.from(_seenKeys);
+  }
+
+  /// Merges a seen-keys map synced from another device (PWA, app.js:5760-5786):
+  /// adopt each not-yet-expired key we don't already hold, then retroactively
+  /// mark any matching local entry viewed so the badge clears. Idempotent — a
+  /// re-merge of the same keys is a no-op and never republishes. Returns true if
+  /// anything changed.
+  bool mergeSeenNotifications(dynamic incoming) {
+    if (incoming is! Map) return false;
+    final cutoff = DateTime.now().millisecondsSinceEpoch - _seenKeysTtlMs;
+    var added = false;
+    incoming.forEach((k, v) {
+      if (k is! String || v is! num) return;
+      final ts = v.toInt();
+      if (ts <= cutoff) return;
+      if (!_seenKeys.containsKey(k)) {
+        _seenKeys[k] = ts;
+        added = true;
+      }
+    });
+    if (!added) return false;
+    _persistSeenKeys();
+    // Retroactively mark matching local entries viewed (app.js:5772-5786).
+    var retro = false;
+    for (final e in state.entries) {
+      if (e.viewed) continue;
+      final key = _seenKey(e);
+      if (key != null && _seenKeys.containsKey(key)) {
+        e.viewed = true;
+        retro = true;
+      }
+    }
+    if (retro) {
+      final entries = List.of(state.entries);
+      state = state.copyWith(entries: entries, unread: _countUnread(entries));
+      _persist();
+    }
+    return true;
   }
 
   /// Removes the history entry carrying [eventId] and re-derives the badge — the
@@ -3315,8 +3478,12 @@ class NotificationHistoryNotifier
     _persist();
   }
 
-  /// Clears the history entirely.
+  /// Clears the history entirely. Also wipes the cross-device seen-keys map
+  /// (N26) so a panic / clear-data leaves no read-state behind, matching the PWA
+  /// (`nym_notification_seen` is in the clear-data list, settings_helpers.dart).
   void clear() {
+    _seenKeys = <String, int>{};
+    _prefs?.remove(_seenKeysStoreKey);
     state = const NotificationHistoryState();
     _persist(); // N3: clear the stored blob too.
   }

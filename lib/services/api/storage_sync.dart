@@ -313,6 +313,27 @@ class StorageSync {
     return sent;
   }
 
+  /// Publishes the cross-device notification read-state wrap — the PWA's
+  /// `nymchat-notifications` category (settings.js:559). N26 scopes this to the
+  /// seen-keys map (`seenNotifications`, the read-state); the bell history blob
+  /// itself stays device-local (its cross-device sync is out of N26's scope).
+  /// No-op (and no network call) when [seenNotifications] is empty or unchanged
+  /// since the last publish (content-hash dedup in [_setSettingsCategory]).
+  /// Returns whether the category was actually sent.
+  Future<bool> notificationsWrapSet(
+      Map<String, dynamic> seenNotifications) async {
+    if (seenNotifications.isEmpty) return false;
+    const category = 'nymchat-notifications';
+    final payload = <String, dynamic>{
+      'v': 2,
+      'seenNotifications': seenNotifications,
+    };
+    return _setSettingsCategory(
+      category,
+      jsonEncode(_withCat(payload, category)),
+    );
+  }
+
   /// Embeds the real category into the (to-be-encrypted) blob as `__cat`
   /// (settings.js:720) so the cleartext D1 column can stay opaque.
   Map<String, dynamic> _withCat(Map<String, dynamic> payload, String category) {
@@ -397,6 +418,13 @@ class StorageSync {
     }
     if (decoded.isEmpty) return null;
 
+    // N26: pull the cross-device notification read-state wrap (a separate
+    // category from the settings sections) so the caller can merge its seen-keys.
+    Map<String, dynamic>? notificationsPayload;
+    for (final d in decoded) {
+      if (d.category == 'nymchat-notifications') notificationsPayload = d.payload;
+    }
+
     bool isCore(String c) =>
         c == 'nymchat-settings' || c.startsWith('nymchat-settings-');
 
@@ -409,7 +437,17 @@ class StorageSync {
     final toApply = sections.isNotEmpty
         ? sections
         : core.where((d) => d.category == 'nymchat-settings').toList();
-    if (toApply.isEmpty) return null;
+    if (toApply.isEmpty) {
+      // No settings sections to apply — but a notifications wrap alone is still
+      // worth returning so the caller can merge the seen-keys (N26).
+      return notificationsPayload == null
+          ? null
+          : SettingsLoadResult(
+              payload: const {},
+              newestTs: 0,
+              notificationsPayload: notificationsPayload,
+            );
+    }
 
     final merged = <String, dynamic>{};
     var newestTs = 0;
@@ -417,7 +455,11 @@ class StorageSync {
       merged.addAll(d.payload);
       if (d.updatedAt > newestTs) newestTs = d.updatedAt;
     }
-    return SettingsLoadResult(payload: merged, newestTs: newestTs);
+    return SettingsLoadResult(
+      payload: merged,
+      newestTs: newestTs,
+      notificationsPayload: notificationsPayload,
+    );
   }
 
   /// Fetches inbound settings-transfer offers: the per-section encrypted
@@ -1128,9 +1170,19 @@ class _DecodedCategory {
 /// applies [payload] only when [newestTs] is newer than the stored
 /// `nym_last_settings_sync_ts`.
 class SettingsLoadResult {
-  const SettingsLoadResult({required this.payload, required this.newestTs});
+  const SettingsLoadResult({
+    required this.payload,
+    required this.newestTs,
+    this.notificationsPayload,
+  });
   final Map<String, dynamic> payload;
   final int newestTs;
+
+  /// The decrypted `nymchat-notifications` wrap payload (N26), when present —
+  /// carries `seenNotifications` (the cross-device notification read-state map).
+  /// Surfaced separately from the settings [payload] because the caller merges
+  /// it additively (idempotently) regardless of the settings ts gate.
+  final Map<String, dynamic>? notificationsPayload;
 }
 
 /// An inbound settings-transfer offer (one synced settings section another

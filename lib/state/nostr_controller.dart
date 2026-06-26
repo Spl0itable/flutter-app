@@ -5073,6 +5073,12 @@ class NostrController {
     api.activateApiSocket();
     _storageSync = sync;
 
+    // N26: republish the notification read-state wrap whenever the seen-keys map
+    // grows here (a notification read/dismissed), the native equivalent of the
+    // PWA's debounced settings save on `_rememberNotificationSeen`. Routed
+    // through the same 5s-debounced `syncSettings` as every other synced change.
+    _ref.read(notificationHistoryProvider.notifier).onSeenChanged = syncSettings;
+
     // The other-users shop-status fetcher (cosmetics for OTHER pubkeys) must
     // never query our own pubkey — our own record loads via shop-get below.
     _ref.read(otherUsersShopProvider.notifier).selfPubkey =
@@ -5327,6 +5333,19 @@ class NostrController {
     try {
       final result = await sync.settingsGet();
       if (result == null) return;
+      // N26 inbound: merge the cross-device notification read-state additively
+      // (idempotent) BEFORE the settings ts gate — a notification read on another
+      // device clears its badge here even if no settings section changed
+      // (app.js:5760, `seenNotifications` → `_mergeSeenNotifications`).
+      final notif = result.notificationsPayload;
+      if (notif != null) {
+        final seen = notif['seenNotifications'];
+        if (seen is Map) {
+          _ref
+              .read(notificationHistoryProvider.notifier)
+              .mergeSeenNotifications(seen);
+        }
+      }
       final kv = _ref.read(keyValueStoreProvider);
       final lastTs = int.tryParse(
               kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
@@ -5532,6 +5551,14 @@ class NostrController {
         // declined/missed on this device reflects on our others (calls.js
         // `_seenCallsForSync`, settings.js:152). F06-A3 outbound seam.
         seenCalls: _ref.read(callServiceProvider).seenCallsForSync(),
+      );
+      // N26 outbound: publish the cross-device notification read-state wrap (the
+      // `nymchat-notifications` category) so a notification read/dismissed here
+      // is silenced on our other devices (settings.js:559). No-op when unchanged.
+      await sync.notificationsWrapSet(
+        _ref
+            .read(notificationHistoryProvider.notifier)
+            .seenNotificationsForSync(),
       );
     } catch (_) {
       // Best-effort.
