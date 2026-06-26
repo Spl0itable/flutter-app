@@ -467,7 +467,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// on-change; re-sending their (unchanged) draft value here is idempotent and
   /// keeps the persisted state == draft.
   Future<void> _onSave() async {
-    final kv = ref.read(keyValueStoreProvider);
     final ctrl = ref.read(settingsProvider.notifier);
     final d = _draft;
 
@@ -527,8 +526,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ref.read(nostrControllerProvider).clearPmGroupCache();
     }
 
-    // Commit the landing channel (F8 — not write-on-change).
-    writeLandingChannel(kv, _landing);
+    // Commit the landing channel (F8 — not write-on-change). Routed through the
+    // synced setter (settings_provider.dart:274) rather than a bare KV write so
+    // a Save fires the cross-device `settings-set` publish like every other
+    // Save-gated control — the PWA syncs `pinnedLandingChannel` on Save
+    // (settings.js:21,116; `nostrSettingsSave()`, app.js:3995). The serialized
+    // value is byte-identical to the old `writeLandingChannel` write.
+    ctrl.setPinnedLandingChannel(_landing.toJsonString());
 
     if (!mounted) return;
     _systemMessage('Settings saved');

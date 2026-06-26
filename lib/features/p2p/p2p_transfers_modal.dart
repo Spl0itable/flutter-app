@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
 import 'p2p_models.dart';
 import 'p2p_service.dart';
 
@@ -12,10 +14,26 @@ import 'p2p_service.dart';
 /// Rendered as a centered `.modal` (showDialog), matching the PWA. Shared modal
 /// chrome applies: 22px UPPERCASE primary header + bottom rule, 32px circular
 /// glass close chip, translucent `.icon-btn` Close action.
-class P2PTransfersModal extends StatelessWidget {
+class P2PTransfersModal extends ConsumerWidget {
   const P2PTransfersModal({super.key, required this.service});
 
   final P2PService service;
+
+  /// The geohash of the channel the user is *currently viewing*, or null when
+  /// the active view is a named channel / PM / group. The PWA's `stopSeeding`
+  /// reads `this.currentGeohash` at stop-time and, when set, appends the channel
+  /// wire tag so other channel viewers learn the file is gone (p2p.js:828). We
+  /// resolve it the same way the share / typing paths do: a channel is a geohash
+  /// when its key matches a `channels` entry flagged `isGeohash`
+  /// (nostr_controller.dart:5552-5554).
+  static String? _currentGeohash(WidgetRef ref) {
+    final state = ref.read(appStateProvider);
+    final view = state.view;
+    if (view.kind != ViewKind.channel) return null;
+    final isGeo = state.channels
+        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
+    return isGeo ? view.id : null;
+  }
 
   /// Opens the transfers modal as a centered dialog (PWA `.modal`).
   static Future<void> open(BuildContext context, P2PService service) {
@@ -37,7 +55,7 @@ class P2PTransfersModal extends StatelessWidget {
       open(context, service);
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     return Center(
       child: Material(
@@ -132,8 +150,10 @@ class P2PTransfersModal extends StatelessWidget {
                                       for (final entry in seeding.entries)
                                         _SeedingRow(
                                           offer: entry.value,
-                                          onStop: () =>
-                                              service.stopSeeding(entry.key),
+                                          onStop: () => service.stopSeeding(
+                                            entry.key,
+                                            geohash: _currentGeohash(ref),
+                                          ),
                                         ),
                                       for (final t in transfers)
                                         _TransferRow(
