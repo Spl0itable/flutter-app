@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
@@ -19,6 +20,7 @@ import '../../features/reactions/reaction_burst.dart';
 import '../../features/reactions/reactors_modal.dart';
 import '../../features/translate/message_translation.dart';
 import '../../features/zaps/zap_badge.dart';
+import '../../features/zaps/zap_modal.dart';
 import '../../models/message.dart';
 import '../../models/settings.dart';
 import '../../state/app_state.dart';
@@ -26,6 +28,7 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
+import 'bitchat_user_color.dart';
 import 'crypto_verified_badge.dart';
 import '../context_menu/context_menu_actions.dart';
 import '../context_menu/context_menu_panel.dart';
@@ -346,7 +349,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // author nym to white@0.8 as well as blanking the body.
     final color = _cosmetics.isRedacted
         ? Colors.white.withValues(alpha: 0.8)
-        : (self ? c.primary : c.secondary);
+        : (self ? c.primary : (_bitchatColor(c) ?? c.secondary));
     return TextStyle(
       color: color,
       fontSize: size,
@@ -354,6 +357,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       // `.message-author { letter-spacing: 0.2px }` (styles-chat.css:697).
       letterSpacing: 0.2,
     );
+  }
+
+  /// The per-user "bitchat-user" color for a NON-self author, or null when it
+  /// doesn't apply. The PWA only assigns the deterministic 1-of-1000 hue when
+  /// `settings.theme === 'bitchat'` and the author isn't self (`getUserColorClass`,
+  /// `users.js:11-18`); in every other theme `.message-author` keeps `--secondary`.
+  /// The same class is applied to the author span AND `.message-content`
+  /// (`messages.js:937-938`), so the body uses this too. (C06-1/2.)
+  Color? _bitchatColor(NymColors c) {
+    if (message.isOwn) return null;
+    if (settings.theme != NymThemeKey.bitchat) return null;
+    return bitchatUserColor(message.pubkey, isLight: c.isLight);
   }
 
   /// The message body: a P2P file-offer card when this is an offer, a redacted
@@ -566,7 +581,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        _nymBadges(context, flairSize: fontSize + 2),
+                        // `.flair-badge { font-size: 20px }` applies in the main
+                        // chat including `/me` lines (only call surfaces scale it
+                        // down) — match the IRC/bubble author lines at 20px.
+                        _nymBadges(context, flairSize: 20),
                       ],
                     ),
                   ),
@@ -709,7 +727,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _bodyContent(context, c.text, fontSize, deco: deco),
+              _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
+                  deco: deco),
               // Reactions row renders only when reactions OR zaps exist (the PWA
               // `updateMessageReactions` early-returns on an empty reaction set,
               // removing the row entirely unless zaps remain). The zap badge sits
@@ -845,7 +864,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             )
           : body,
     );
-    return GestureDetector(
+    return _SwipeToAct(
+      settings: settings,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      // Desktop double-click → quote-reply (setupDoubleClickToReply).
+      onDoubleTap: _quoteReply,
       onLongPress: () => _onMessageLongPress(context),
       // Desktop right-click → context menu (PWA `contextmenu` handler).
       onSecondaryTap: () => _openContextMenu(context),
@@ -888,7 +911,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        _bodyContent(context, c.text, fontSize, deco: deco),
+        _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
+            deco: deco),
         // `.bubble-time-inner { display:block; width:fit-content; margin-left:
         // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
         // below the body, pinned to the bottom-right INSIDE the bubble.
@@ -929,7 +953,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Re-render the relative time on a cadence (cheap; matches the PWA timer).
     _ensureRelativeTimer();
 
-    final bubble = GestureDetector(
+    final bubble = _SwipeToAct(
+      settings: settings,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      // Desktop double-click → quote-reply (setupDoubleClickToReply).
+      onDoubleTap: _quoteReply,
       onLongPress: () => _onMessageLongPress(context),
       // Desktop right-click → context menu (PWA `contextmenu` handler).
       onSecondaryTap: () => _openContextMenu(context),
@@ -1283,12 +1311,17 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
     // Burst on add (not on removal), mirroring `_burstOnBadge` after sendReaction.
     if (ok && !wasReacted && context.mounted) {
+      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
+      HapticFeedback.selectionClick();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, r.emoji);
     }
   }
 
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
+    // Long-press on a reaction badge buzzes before the reactors modal opens
+    // (`nymHapticTap`, reactions.js:526).
+    HapticFeedback.selectionClick();
     // The real reactor map (`reactorsFor` → pubkey → nym), each row carrying its
     // avatar picture so the modal loads faces (mirrors `showReactorsModal`).
     final app = ref.read(appStateProvider);
@@ -1319,6 +1352,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   void _onMessageLongPress(BuildContext context) {
+    // The PWA buzzes as the quick-react popup is built (`nymHapticTap`,
+    // ui-context.js:1279); a raw GestureDetector.onLongPress is otherwise silent.
+    HapticFeedback.selectionClick();
     final rect = _globalRectOfContext(context);
     // Quick-react row = recents-first, padded with the six defaults
     // (`_messageQuickReactDefaults`), deduped (ctx-menu F7).
@@ -1357,9 +1393,96 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       kind: inferOriginalKind(message, view: view),
     );
     if (ok && !already && context.mounted) {
+      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
+      HapticFeedback.selectionClick();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, emoji);
     }
+  }
+
+  /// Runs the committed swipe action (`_getSwipeActionConfig(action).run`,
+  /// messages.js:2031-2126). Mirrors the long-press quick-context dispatch
+  /// (`buildQuickContextItems`) so swipe and menu share identical engine paths:
+  /// `quote` → composer mailbox, `translate` → inline render, `copy` → clipboard
+  /// + system confirm, `react` → the configured swipe emoji, `zap` → zap modal,
+  /// `slap`/`hug` → the rate-limited `/me` command, `none` → no-op.
+  void _dispatchSwipeAction(BuildContext context, String action) {
+    final controller = ref.read(nostrControllerProvider);
+    final baseNym = _baseNym(message.author);
+    final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
+    switch (action) {
+      case 'quote':
+        if (message.content.isEmpty) return;
+        ref
+            .read(pendingComposerActionProvider.notifier)
+            .requestQuote(fullNym: fullNym, content: message.content);
+        return;
+      case 'translate':
+        if (message.content.isEmpty) return;
+        setState(() => _showTranslation = true);
+        return;
+      case 'copy':
+        if (message.content.isEmpty) return;
+        Clipboard.setData(ClipboardData(text: message.content));
+        ref
+            .read(appStateProvider.notifier)
+            .addSystemMessage('Message copied to clipboard');
+        return;
+      case 'react':
+        _quickReact(context, settings.swipeReactEmoji);
+        return;
+      case 'zap':
+        if (message.isOwn || message.pubkey.isEmpty) return;
+        _zapMessage(context, baseNym);
+        return;
+      case 'slap':
+        if (message.isOwn || message.pubkey.isEmpty) return;
+        controller.sendCurrent(
+            '/me slaps @$fullNym around a bit with a large trout 🐟');
+        return;
+      case 'hug':
+        if (message.isOwn || message.pubkey.isEmpty) return;
+        controller.sendCurrent('/me gives @$fullNym a warm hug 🫂');
+        return;
+      case 'none':
+      default:
+        return;
+    }
+  }
+
+  /// Opens the zap modal for this message's author (the swipe `zap` action and a
+  /// 1:1 mirror of `quick_context_items._zap`): resolves the author's lightning
+  /// address from `usersProvider`, or emits a system message when none is set.
+  Future<void> _zapMessage(BuildContext context, String baseNym) async {
+    final lnAddr =
+        ref.read(usersProvider)[message.pubkey]?.profile?.lightningAddress;
+    if (lnAddr == null || lnAddr.isEmpty) {
+      ref.read(appStateProvider.notifier).addSystemMessage(
+          '@$baseNym cannot receive zaps (no lightning address set)');
+      return;
+    }
+    if (!context.mounted) return;
+    await ZapModal.show(
+      context,
+      recipientPubkey: message.pubkey,
+      recipientNym: baseNym,
+      lightningAddress: lnAddr,
+      messageId: message.id,
+      originalKind:
+          inferOriginalKind(message, view: ref.read(currentViewProvider)),
+    );
+  }
+
+  /// The quote-reply dispatch shared by double-tap-to-reply (desktop,
+  /// `setupDoubleClickToReply`, messages.js:2280-2307) and the swipe `quote`
+  /// action — sets the composer quote preview to this message.
+  void _quoteReply() {
+    if (message.content.isEmpty) return;
+    final baseNym = _baseNym(message.author);
+    final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
+    ref
+        .read(pendingComposerActionProvider.notifier)
+        .requestQuote(fullNym: fullNym, content: message.content);
   }
 
   void _openContextMenu(BuildContext context) {
@@ -2397,6 +2520,229 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
           child: avatar,
         );
       },
+    );
+  }
+}
+
+/// Swipe-to-act wrapper around a message row (`setupSwipeToReply`,
+/// messages.js:2129-2278). A dominantly-horizontal drag follows the finger (the
+/// content slides up to 100px), reveals a directional action icon, fires a
+/// threshold haptic once, and on release past the threshold runs the configured
+/// action; a short swipe springs back. Also hosts double-tap-to-reply
+/// (`setupDoubleClickToReply`, messages.js:2280-2307).
+///
+/// Mirrors the PWA constants: SWIPE_START 16px, EDGE_ZONE 50px (a right-swipe
+/// starting near the left screen edge is abandoned so the drawer-open gesture
+/// wins), follow cap 100px, threshold clamped 30-120. Armed only on touch
+/// platforms with `gesturesEnabled` (desktop keeps right-click + double-tap; the
+/// PWA likewise only attaches the touch handlers on touch devices).
+class _SwipeToAct extends StatefulWidget {
+  const _SwipeToAct({
+    required this.settings,
+    required this.onAction,
+    required this.onDoubleTap,
+    required this.onLongPress,
+    required this.onSecondaryTap,
+    required this.child,
+  });
+
+  final Settings settings;
+
+  /// Runs the committed action string ('quote'/'translate'/'copy'/'react'/
+  /// 'zap'/'slap'/'hug'/'none').
+  final ValueChanged<String> onAction;
+  final VoidCallback onDoubleTap;
+  final VoidCallback onLongPress;
+  final VoidCallback onSecondaryTap;
+  final Widget child;
+
+  @override
+  State<_SwipeToAct> createState() => _SwipeToActState();
+}
+
+class _SwipeToActState extends State<_SwipeToAct>
+    with SingleTickerProviderStateMixin {
+  static const double _swipeStart = 16; // SWIPE_START_THRESHOLD
+  static const double _edgeZone = 50; // EDGE_ZONE
+  static const double _followCap = 100; // max |translateX|
+
+  late final AnimationController _settle = AnimationController(
+    vsync: this,
+    // `transition: transform 0.25s ease-out` on release (messages.js:2253).
+    duration: const Duration(milliseconds: 250),
+  );
+
+  double _dx = 0;
+  bool _active = false; // a horizontal-dominant drag has been claimed
+  bool _abandoned = false; // started in the left edge zone (defer to drawer)
+  bool _thresholdFired = false; // one-shot threshold haptic latch
+  double _startX = 0; // global x where the drag began (for EDGE_ZONE)
+
+  @override
+  void dispose() {
+    _settle.dispose();
+    super.dispose();
+  }
+
+  /// `threshold = clamp(parseInt(swipeThreshold||60), 30, 120)` (messages.js:2147).
+  double get _threshold =>
+      widget.settings.swipeThreshold.clamp(30, 120).toDouble();
+
+  bool get _enabled {
+    if (!widget.settings.gesturesEnabled) return false;
+    final p = Theme.of(context).platform;
+    return p == TargetPlatform.android || p == TargetPlatform.iOS;
+  }
+
+  void _onStart(DragStartDetails d) {
+    _active = false;
+    _abandoned = false;
+    _thresholdFired = false;
+    _startX = d.globalPosition.dx;
+    _settle.stop();
+    _dx = 0;
+  }
+
+  void _onUpdate(DragUpdateDetails d) {
+    if (_abandoned) return;
+    final next = _dx + d.delta.dx;
+    // Claim the gesture once travel passes the start threshold. A RIGHT swipe
+    // (next > 0) that began within EDGE_ZONE of the left edge is abandoned so
+    // the sidebar-open edge-swipe wins (messages.js:2198-2201).
+    if (!_active && next.abs() > _swipeStart) {
+      if (next > 0 && _startX < _edgeZone) {
+        _abandoned = true;
+        return;
+      }
+      _active = true;
+    }
+    if (!_active) {
+      _dx = next;
+      return;
+    }
+    // Follow the finger, capped at ±100px (messages.js:2212-2219).
+    final double capped = next.clamp(-_followCap, _followCap).toDouble();
+    final pastNow = capped.abs() >= _threshold;
+    final wasPast = _dx.abs() >= _threshold;
+    if (pastNow && !_thresholdFired) {
+      // One-shot threshold haptic (messages.js:2239-2241).
+      HapticFeedback.selectionClick();
+      _thresholdFired = true;
+    }
+    setState(() => _dx = capped);
+    // Keep the latch honest if the user retreats back under the threshold.
+    if (!pastNow && wasPast) _thresholdFired = false;
+  }
+
+  void _onEnd(DragEndDetails d) {
+    final committed = _active && !_abandoned && _dx.abs() >= _threshold;
+    if (committed) {
+      // dx < 0 (swipe LEFT) → swipeLeftAction; dx > 0 (swipe RIGHT) → right.
+      final action = _dx < 0
+          ? widget.settings.swipeLeftAction
+          : widget.settings.swipeRightAction;
+      widget.onAction(action);
+    }
+    _springBack();
+  }
+
+  void _onCancel() => _springBack();
+
+  void _springBack() {
+    _active = false;
+    _abandoned = false;
+    _thresholdFired = false;
+    final from = _dx;
+    if (from == 0) {
+      setState(() {});
+      return;
+    }
+    final anim =
+        CurvedAnimation(parent: _settle, curve: Curves.easeOut);
+    void tick() => setState(() => _dx = from * (1 - anim.value));
+    anim.addListener(tick);
+    _settle.forward(from: 0).whenCompleteOrCancel(() {
+      anim.removeListener(tick);
+      if (mounted) setState(() => _dx = 0);
+    });
+  }
+
+  /// The action that WOULD fire for the current drag direction — drives the
+  /// revealed indicator icon.
+  String get _pendingAction => _dx < 0
+      ? widget.settings.swipeLeftAction
+      : widget.settings.swipeRightAction;
+
+  String? _actionSvg(String action) {
+    switch (action) {
+      case 'quote':
+        return ctxActionSvg(CtxAction.quote);
+      case 'translate':
+        return ctxActionSvg(CtxAction.translate);
+      case 'copy':
+        return ctxActionSvg(CtxAction.copyMessage);
+      case 'react':
+        return null; // emoji glyph, rendered as text below
+      case 'zap':
+        return ctxActionSvg(CtxAction.zap);
+      case 'slap':
+        return ctxActionSvg(CtxAction.slap);
+      case 'hug':
+        return ctxActionSvg(CtxAction.hug);
+      default:
+        return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final gestures = GestureDetector(
+      onDoubleTap: widget.onDoubleTap,
+      onLongPress: widget.onLongPress,
+      onSecondaryTap: widget.onSecondaryTap,
+      onHorizontalDragStart: _enabled ? _onStart : null,
+      onHorizontalDragUpdate: _enabled ? _onUpdate : null,
+      onHorizontalDragEnd: _enabled ? _onEnd : null,
+      onHorizontalDragCancel: _enabled ? _onCancel : null,
+      child: Transform.translate(
+        offset: Offset(_dx, 0),
+        child: widget.child,
+      ),
+    );
+    if (_dx == 0) return gestures;
+    final c = context.nym;
+    final action = _pendingAction;
+    if (action == 'none') return gestures;
+    final past = _dx.abs() >= _threshold;
+    final color = past ? c.primary : c.textDim;
+    final svg = _actionSvg(action);
+    final indicator = action == 'react'
+        ? Text(widget.settings.swipeReactEmoji,
+            style: const TextStyle(fontSize: 20))
+        : (svg != null
+            ? NymSvgIcon(svg, size: 22, color: color)
+            : const SizedBox.shrink());
+    // The icon trails into view from the edge the content is leaving: a LEFT
+    // swipe (dx<0) reveals it on the right; a RIGHT swipe (dx>0) on the left.
+    final onRight = _dx < 0;
+    return Stack(
+      children: [
+        // Vertically centered against the row via top:0/bottom:0 + Center.
+        Positioned(
+          top: 0,
+          bottom: 0,
+          left: onRight ? null : 12,
+          right: onRight ? 12 : null,
+          child: Center(
+            child: AnimatedOpacity(
+              opacity: past ? 1 : 0.5,
+              duration: const Duration(milliseconds: 120),
+              child: indicator,
+            ),
+          ),
+        ),
+        gestures,
+      ],
     );
   }
 }

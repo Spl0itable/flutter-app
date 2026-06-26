@@ -75,7 +75,13 @@ class _ReportModalState extends State<ReportModal> {
     final c = context.nym;
     return Center(
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 500),
+        // `.modal-content { max-height: 90vh; overflow-y:auto }`
+        // (styles-components.css:25-26) — cap height so the inner
+        // SingleChildScrollView scrolls instead of overflowing on short screens.
+        constraints: BoxConstraints(
+          maxWidth: 500,
+          maxHeight: MediaQuery.of(context).size.height * 0.9,
+        ),
         width: MediaQuery.of(context).size.width * 0.9,
         margin: const EdgeInsets.all(16),
         padding: const EdgeInsets.all(32),
@@ -94,13 +100,20 @@ class _ReportModalState extends State<ReportModal> {
             BoxShadow(color: Colors.white.withValues(alpha: 0.05), spreadRadius: 1),
           ],
         ),
-        child: Stack(
-          children: [
-            SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+        // `showDialog` does not insert a Material, so the bare `Text` widgets
+        // here would paint Flutter's debug double yellow underline and the
+        // InkWell/Checkbox/DropdownButton would fail `debugCheckHasMaterial`. A
+        // transparent Material supplies the ink/text-style ancestor without
+        // painting over the Container's own decoration (cf. zap_modal.dart:327).
+        child: Material(
+          type: MaterialType.transparency,
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   // `.modal-header` — 22px primary UPPERCASE ls1.5 w700, 1px
                   // glass bottom rule, padding-bottom 14, margin-bottom 24.
                   Container(
@@ -112,7 +125,9 @@ class _ReportModalState extends State<ReportModal> {
                     child: Text('REPORT USER/CONTENT',
                         style: TextStyle(
                             color: c.primary,
-                            fontSize: 22,
+                            // `.modal-header h2` overrides the 22px parent to
+                            // 20px (styles-features.css:1914-1918).
+                            fontSize: 20,
                             fontWeight: FontWeight.w700,
                             letterSpacing: 1.5)),
                   ),
@@ -252,6 +267,7 @@ class _ReportModalState extends State<ReportModal> {
               child: _closeButton(c),
             ),
           ],
+          ),
         ),
       ),
     );
@@ -308,7 +324,9 @@ class _ReportModalState extends State<ReportModal> {
         child: Text(
           'CANCEL',
           style: TextStyle(
-            color: c.text,
+            // `body.light-mode .icon-btn` recolors the label to --primary
+            // (styles-themes-responsive.css:595-599); --text in dark.
+            color: c.isLight ? c.primary : c.text,
             fontSize: 12,
             fontWeight: FontWeight.w500,
             letterSpacing: 0.8,

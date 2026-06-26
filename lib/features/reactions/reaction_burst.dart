@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../messages/format/message_content.dart';
+
 /// A one-shot reaction "burst" overlay played when the user adds a reaction
 /// (reactions.js `_playReactionBurst`, styles-features.css `.reaction-burst` /
 /// `.reaction-spark`, keyframes `reactionBurst` (0.85s) / `reactionSpark`
@@ -80,19 +82,26 @@ class _BurstWidgetState extends State<_BurstWidget>
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: AnimatedBuilder(
-        animation: _c,
-        builder: (context, _) {
-          // Burst keyframes span 0.85s of the 0.9s window.
-          final burstT = (_c.value * 900 / 850).clamp(0.0, 1.0);
-          return Stack(
-            children: [
-              ..._buildSparks(),
-              _buildEmoji(burstT),
-            ],
-          );
-        },
+    // The burst is inserted into the root Overlay, which is NOT under a
+    // Material (app.dart). Without a Material/DefaultTextStyle ancestor the
+    // glyph would draw Flutter's debug double yellow underline. A transparent
+    // Material supplies the ancestor without painting (cf. zap_modal.dart:327).
+    return Material(
+      type: MaterialType.transparency,
+      child: IgnorePointer(
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (context, _) {
+            // Burst keyframes span 0.85s of the 0.9s window.
+            final burstT = (_c.value * 900 / 850).clamp(0.0, 1.0);
+            return Stack(
+              children: [
+                ..._buildSparks(),
+                _buildEmoji(burstT),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -127,11 +136,18 @@ class _BurstWidgetState extends State<_BurstWidget>
         opacity: opacity.clamp(0.0, 1.0),
         child: Transform.scale(
           scale: scale,
-          child: Text(
-            widget.emoji,
+          // `renderReactionEmoji` (emoji.js:342) renders a custom `:code:`
+          // reaction as its `<img>`, not literal text; mirror that with
+          // InlineEmojiText (unicode falls through to a styled Text fast-path).
+          // `decoration: none` also belt-and-suspenders kills the yellow
+          // underline on the text fast-path.
+          child: InlineEmojiText(
+            text: widget.emoji,
+            emojiSize: glyph,
             style: const TextStyle(
               fontSize: glyph,
               height: 1,
+              decoration: TextDecoration.none,
               shadows: [
                 Shadow(color: Color(0x73FFC864), blurRadius: 12),
               ],

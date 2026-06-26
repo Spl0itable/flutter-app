@@ -214,6 +214,29 @@ class SpamFilter {
     return score;
   }
 
+  /// True when [nym] looks like a randomized spam-bot nickname. 1:1 port of
+  /// `isGibberishNym(nym)` (nostr-core.js:943-950): off unless BOTH the spam
+  /// filter and its aggressive mode are on, requires a string of length >= 8
+  /// (after trim), then defers to the same [_looksLikeRandomToken] detector the
+  /// content scorer uses. [enabled] / [aggressive] mirror `spamFilterEnabled` /
+  /// `spamFilterAggressive` (both default `true`, the PWA defaults).
+  ///
+  /// Callers (channel ingest drop, sidebar Nyms list/count) feed the BARE
+  /// stripped nym and gate it on `!isOwn && !isFriend`, matching nostr-core.js:
+  /// 363-367 and users.js:1375-1377.
+  static bool isGibberishNym(
+    Object? nym, {
+    bool enabled = true,
+    bool aggressive = true,
+  }) {
+    if (enabled == false) return false;
+    if (aggressive == false) return false;
+    if (nym is! String) return false;
+    final n = nym.trim();
+    if (n.isEmpty || n.length < 8) return false;
+    return _looksLikeRandomToken(n);
+  }
+
   /// 1:1 port of `_looksLikeRandomToken(token)` (nostr-core.js:746-772).
   static bool _looksLikeRandomToken(String token) {
     if (token.isEmpty || token.length < 8) return false;

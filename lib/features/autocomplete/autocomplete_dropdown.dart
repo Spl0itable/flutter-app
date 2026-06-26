@@ -11,6 +11,8 @@ import '../../models/user.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/context_menu/profile_badges.dart';
 import '../emoji/custom_emoji.dart';
+import '../messages/format/message_content.dart' show proxiedMedia;
+import '../messages/inline_network_image.dart';
 import '../shop/cosmetics.dart';
 import '../shop/shop_widgets.dart';
 import 'autocomplete_queries.dart';
@@ -79,7 +81,7 @@ class AutocompleteView {
 
 enum AutocompleteKind { mention, channel, emoji, kaomoji }
 
-class AutocompleteDropdown extends StatelessWidget {
+class AutocompleteDropdown extends StatefulWidget {
   const AutocompleteDropdown({
     super.key,
     required this.view,
@@ -112,6 +114,47 @@ class AutocompleteDropdown extends StatelessWidget {
   final UserCosmetics Function(String pubkey)? cosmeticsFor;
 
   @override
+  State<AutocompleteDropdown> createState() => _AutocompleteDropdownState();
+}
+
+class _AutocompleteDropdownState extends State<AutocompleteDropdown> {
+  final ScrollController _scroll = ScrollController();
+  // Key on the currently-selected row so keyboard nav can scroll it into view
+  // (PWA: `items[idx].scrollIntoView({block:'nearest'})`, autocomplete.js:163/
+  // 239/500/669). Re-created each build; the post-frame ensureVisible reads it.
+  final GlobalKey _selectedKey = GlobalKey();
+
+  @override
+  void didUpdateWidget(AutocompleteDropdown old) {
+    super.didUpdateWidget(old);
+    if (old.selectedIndex != widget.selectedIndex) _scrollSelectedIntoView();
+  }
+
+  void _scrollSelectedIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _selectedKey.currentContext;
+      if (ctx == null || !_scroll.hasClients) return;
+      // `block:'nearest'` — only scroll enough to reveal the row; alignment 0.5
+      // keeps a wrapped top↔bottom selection comfortably visible.
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  AutocompleteView get view => widget.view;
+  int get selectedIndex => widget.selectedIndex;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
     // The kaomoji palette (`.command-palette.kaomoji-autocomplete`) is taller and
@@ -123,20 +166,37 @@ class AutocompleteDropdown extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: isKaomoji ? const EdgeInsets.all(6) : null,
       decoration: BoxDecoration(
-        // `.autocomplete-dropdown`: bg-tertiary, glass border, top-rounded.
-        color: c.bgTertiary,
+        // `.autocomplete-dropdown`: bg-tertiary, glass border, top-rounded. The
+        // kaomoji palette is a `.command-palette`, whose fill flips to white@0.92
+        // in light mode (themes-responsive.css:1155-1158) — bg-tertiary (#f0f0ed)
+        // does not, so use the command-palette fill there.
+        color: isKaomoji
+            ? (c.isLight ? const Color(0xEBFFFFFF) : const Color(0xE6141423))
+            : c.bgTertiary,
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
-        boxShadow: const [
-          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5) dark; light mode overrides to
+        // 0 8px 32px rgba(0,0,0,0.12) (themes-responsive.css:1149-1153).
+        boxShadow: [
+          BoxShadow(
+            color: c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+            blurRadius: 32,
+            offset: const Offset(0, 8),
+          ),
         ],
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: _rows(c),
+      // Clip the scrolling rows to the dropdown's rounded top so the first row's
+      // selected highlight can't poke past the 16px corner (styles-components.css
+      // rows have no inset margin).
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        child: SingleChildScrollView(
+          controller: _scroll,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: _rows(c),
+          ),
         ),
       ),
     );
@@ -176,6 +236,8 @@ class AutocompleteDropdown extends StatelessWidget {
   Widget _selectable(NymColors c,
       {required bool selected, required VoidCallback onTap, required Widget child}) {
     return Material(
+      // Key the selected row so `_scrollSelectedIntoView` can ensureVisible it.
+      key: selected ? _selectedKey : null,
       type: MaterialType.transparency,
       child: InkWell(
         onTap: onTap,
@@ -228,8 +290,8 @@ class AutocompleteDropdown extends StatelessWidget {
   }
 
   Widget _mentionRow(NymColors c, MentionResult m, bool selected) {
-    final badges = badgesFor?.call(m.pubkey);
-    final cosmetics = cosmeticsFor?.call(m.pubkey);
+    final badges = widget.badgesFor?.call(m.pubkey);
+    final cosmetics = widget.cosmeticsFor?.call(m.pubkey);
     // FLAIR ONLY. The dropdown row's `<strong>` is built from flair
     // (`getFlairForUser`) + verified + friend — it NEVER reads
     // `getUserShopItems().supporter` (autocomplete.js:404-438). The supporter
@@ -240,7 +302,7 @@ class AutocompleteDropdown extends StatelessWidget {
     return _selectable(
       c,
       selected: selected,
-      onTap: () => onSelectMention(m),
+      onTap: () => widget.onSelectMention(m),
       child: Row(
         children: [
           _mentionAvatar(c, m),
@@ -295,7 +357,7 @@ class AutocompleteDropdown extends StatelessWidget {
     return _selectable(
       c,
       selected: selected,
-      onTap: () => onSelectChannel(ch),
+      onTap: () => widget.onSelectChannel(ch),
       // Flat `.channel-ac-item` row (gap 8). The name + location + count are all
       // tight `Expanded` (weighted) so they ellipsize within their share and the
       // row can never overflow at a tight width; the count is right-aligned so it
@@ -371,11 +433,17 @@ class AutocompleteDropdown extends StatelessWidget {
 
   Widget _emojiRow(NymColors c, EmojiResult e, bool selected) {
     final glyph = e.isCustom
-        ? Image.network(
-            proxiedEmojiUrl(e.customUrl!, null),
+        // SVG-safe + IP-safe: route through the media proxy and the SVG-aware
+        // renderer (raw `Image.network` can't decode SVG — a large share of
+        // NIP-30 packs — and `proxiedEmojiUrl(url, null)` leaks the user's IP to
+        // the emoji host). Mirrors the picker grid (emoji_picker.dart:402-413).
+        ? InlineNetworkImage(
+            url: proxiedMedia(e.customUrl!, emoji: true),
             width: 23,
             height: 23,
-            errorBuilder: (_, __, ___) => const SizedBox(width: 23, height: 23),
+            memoryOnly: true,
+            placeholder: const SizedBox(width: 23, height: 23),
+            errorChild: const SizedBox(width: 23, height: 23),
           )
         : Text(e.emoji, style: const TextStyle(fontSize: 23));
     // `name` may already be a `:shortcode:` token (custom-emoji recents) — strip
@@ -386,7 +454,7 @@ class AutocompleteDropdown extends StatelessWidget {
     return _selectable(
       c,
       selected: selected,
-      onTap: () => onSelectEmoji(e),
+      onTap: () => widget.onSelectEmoji(e),
       child: Row(
         children: [
           SizedBox(width: 23, height: 23, child: Center(child: glyph)),
@@ -408,7 +476,7 @@ class AutocompleteDropdown extends StatelessWidget {
     return _selectable(
       c,
       selected: selected,
-      onTap: () => onSelectKaomoji(k),
+      onTap: () => widget.onSelectKaomoji(k),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Text(k, style: TextStyle(color: c.text, fontSize: 14)),

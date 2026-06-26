@@ -66,8 +66,17 @@ class User {
   int? shopEdition;
 
   /// Effective status given the active threshold (docs/specs/03 §2.5).
-  UserStatus effectiveStatus({int? nowMs}) {
+  ///
+  /// [isVerifiedBot] mirrors the PWA's verified-bot always-online override
+  /// (`getEffectiveUserStatus`, users.js:1112: `verifiedBotPubkeys.has(pubkey)
+  /// -> 'online'`). It sits AFTER the `hidden` short-circuit and BEFORE the
+  /// away/recency checks, exactly as in the PWA (statusHidden at :1111 wins over
+  /// the bot override at :1112). Callers pass
+  /// `kVerifiedBotPubkeys.contains(pubkey)` so every call site inherits the
+  /// override without its own special-case.
+  UserStatus effectiveStatus({int? nowMs, bool isVerifiedBot = false}) {
     if (status == UserStatus.hidden) return UserStatus.hidden;
+    if (isVerifiedBot) return UserStatus.online;
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     if (awayMessage != null && awayMessage!.isNotEmpty) return UserStatus.away;
     if (status == UserStatus.away) return UserStatus.away;
