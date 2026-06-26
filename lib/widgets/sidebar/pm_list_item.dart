@@ -11,6 +11,14 @@ import '../common/nym_avatar.dart';
 import '../context_menu/profile_badges.dart';
 import 'pm_context_menu.dart';
 
+/// Global-coordinate centre of [c]'s render box — the anchor for a long-press
+/// context menu (`InkWell.onLongPress` carries no pointer position).
+Offset _rowCenter(BuildContext c) {
+  final box = c.findRenderObject() as RenderBox?;
+  if (box == null || !box.hasSize) return Offset.zero;
+  return box.localToGlobal(box.size.center(Offset.zero));
+}
+
 /// A single PM thread row (`.pm-item`, pms.js `createPMConversation`). Same box
 /// metrics as `.channel-item` with a 26px PM avatar (`margin-right:4px`), the
 /// `.pm-name` (`{nym}<span class="nym-suffix">#suffix</span>{flair} {verified}
@@ -54,14 +62,18 @@ class PMListItem extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) =>
-              showPmContextMenu(context, ref, pubkey, d.globalPosition),
-          onSecondaryTapDown: (d) =>
-              showPmContextMenu(context, ref, pubkey, d.globalPosition),
-          child: InkWell(
+        // Tap, long-press and secondary-tap share ONE InkWell recognizer set so
+        // the long-press reliably wins the gesture arena inside the scrollable
+        // sidebar (the previous GestureDetector-around-InkWell split swallowed
+        // the long-press, so PM rows opened no context menu). InkWell.onLongPress
+        // also fires Feedback.forLongPress (the PWA's `nymHapticTap`).
+        child: Builder(
+          builder: (rowContext) => InkWell(
             onTap: onTap,
+            onLongPress: () => showPmContextMenu(
+                rowContext, ref, pubkey, _rowCenter(rowContext)),
+            onSecondaryTapDown: (d) =>
+                showPmContextMenu(rowContext, ref, pubkey, d.globalPosition),
             borderRadius: NymRadius.rxs,
             // `.pm-item.active` shares `.channel-item.active`: primary fill/
             // border/glow + a 3px primary accent bar (NOT purple).
