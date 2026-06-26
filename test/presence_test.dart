@@ -1,6 +1,8 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:nym_bar/features/notifications/notifications_service.dart';
+import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/models/user.dart';
 import 'package:nym_bar/services/nostr/nostr_service.dart';
 import 'package:nym_bar/state/app_state.dart';
@@ -180,6 +182,208 @@ void main() {
           notifier.state.users[other]!
               .effectiveStatus(nowMs: now + kActiveThresholdMs + 1),
           UserStatus.offline);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // W2-A: channel-membership root cause, presence-vs-activity, unread predicate,
+  // notification-badge clear-on-read, and gibberish-nym filtering.
+  // ---------------------------------------------------------------------------
+
+  NostrEvent geoMsg(String sender, String geohash,
+          {String content = 'gm', int createdAt = 2000}) =>
+      NostrEvent(
+        id: 'g_${sender}_${geohash}_$createdAt',
+        pubkey: sender,
+        createdAt: createdAt,
+        kind: 20000,
+        tags: [
+          ['n', 'peer'],
+          ['g', geohash],
+        ],
+        content: content,
+      );
+
+  NostrEvent namedMsg(String sender, String channel,
+          {int createdAt = 2000}) =>
+      NostrEvent(
+        id: 'n_${sender}_${channel}_$createdAt',
+        pubkey: sender,
+        createdAt: createdAt,
+        kind: 23333,
+        tags: [
+          ['n', 'peer'],
+          ['d', channel],
+        ],
+        content: 'gm',
+      );
+
+  group('CC-1: user.channels membership (geohash root cause)', () {
+    test('geohash channel records the BARE lowercase geohash (no #)', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(geoMsg('peerpk', '9q8y'));
+      final chans = n.state.users['peerpk']!.channels;
+      // PWA channelKey = geohash || channel, lowercased (users.js:1262).
+      expect(chans, contains('9q8y'));
+      expect(chans, isNot(contains('#9q8y')));
+    });
+
+    test('uppercase geohash is lowercased to match view.id.toLowerCase()', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(geoMsg('peerpk', '9Q8Y'));
+      expect(n.state.users['peerpk']!.channels, contains('9q8y'));
+    });
+
+    test('named channel records the bare lowercased channel name', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestEvent(namedMsg('peerpk', 'Bitcoin'));
+      final chans = n.state.users['peerpk']!.channels;
+      expect(chans, contains('bitcoin'));
+      expect(chans, isNot(contains('#bitcoin')));
+    });
+  });
+
+  group('C01-4: presence is not activity (lastSeen stamping)', () {
+    test('stampLastSeen:false leaves lastSeen untouched (bare presence)', () {
+      final n = AppStateNotifier();
+      const ts = 1700000000000;
+      n.setUserPresence(
+        pubkey: other,
+        status: UserStatus.online,
+        lastSeenMs: ts,
+        stampLastSeen: false,
+      );
+      final u = n.state.users[other]!;
+      expect(u.status, UserStatus.online); // status still applied
+      expect(u.lastSeen, 0); // never stamped → stale → resolves offline
+      expect(u.effectiveStatus(nowMs: ts), UserStatus.offline);
+    });
+
+    test('default (stampLastSeen:true) stamps lastSeen (friend/own activity)',
+        () {
+      final n = AppStateNotifier();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      n.setUserPresence(
+          pubkey: other, status: UserStatus.online, lastSeenMs: now);
+      expect(n.state.users[other]!.lastSeen, now);
+      expect(n.state.users[other]!.effectiveStatus(nowMs: now),
+          UserStatus.online);
+    });
+  });
+
+  group('C02-5: unread predicate counts keyword/spam the PWA still counts', () {
+    test('countsTowardUnread keeps a keyword-hidden message that '
+        'isMessageFiltered drops', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.addBlockedKeyword('spamword');
+      final m = Message(
+        id: 'k1',
+        author: 'peer#beef',
+        pubkey: other,
+        content: 'this has spamword in it',
+        createdAt: 2000,
+      );
+      // List-visibility filter hides it (keyword on content)...
+      expect(n.state.isMessageFiltered(m), isTrue);
+      // ...but the unread badge still counts it (PWA _recomputeUnreadCount does
+      // not exclude keyword/heuristic-spam — channels.js:1709-1728).
+      expect(n.state.countsTowardUnread(m), isTrue);
+    });
+
+    test('countsTowardUnread excludes own / blocked / system rows', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.blockUser(other);
+      final blocked = Message(
+          id: 'b1',
+          author: 'peer#beef',
+          pubkey: other,
+          content: 'hi',
+          createdAt: 2000);
+      final own = Message(
+          id: 'o1',
+          author: 'me#0001',
+          pubkey: 'selfpk',
+          content: 'hi',
+          createdAt: 2000,
+          isOwn: true);
+      expect(n.state.countsTowardUnread(blocked), isFalse);
+      expect(n.state.countsTowardUnread(own), isFalse);
+    });
+  });
+
+  group('C02-4: notification badge clear-on-read + blocked filter', () {
+    test('markConversationSeen flips matching-route entries and re-counts', () {
+      final notifier = NotificationHistoryNotifier();
+      notifier.record(
+          type: 'pm', title: 'a', body: 'b', route: 'peerA', eventId: 'e1');
+      notifier.record(
+          type: 'pm', title: 'c', body: 'd', route: 'peerB', eventId: 'e2');
+      expect(notifier.state.unread, 2);
+
+      notifier.markConversationSeen('peerA');
+      expect(notifier.state.unread, 1);
+      expect(
+          notifier.state.entries.firstWhere((e) => e.route == 'peerA').viewed,
+          isTrue);
+      expect(
+          notifier.state.entries.firstWhere((e) => e.route == 'peerB').viewed,
+          isFalse);
+    });
+
+    test('setBlocked drops a blocked sender from the badge count', () {
+      final notifier = NotificationHistoryNotifier();
+      notifier.record(
+          type: 'pm',
+          title: 'a',
+          body: 'b',
+          route: 'peerA',
+          eventId: 'e1',
+          senderPubkey: other);
+      expect(notifier.state.unread, 1);
+      notifier.setBlocked({other});
+      expect(notifier.state.unread, 0);
+    });
+  });
+
+  group('CC-13: gibberish nyms excluded from usersProvider (Nyms source)', () {
+    test('a randomized spam-bot nym is filtered; a real nym is kept', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(appStateProvider.notifier)
+        ..goLive('selfpk', 'me#0001');
+      // Interior-caps gibberish handle. setUserPresence appends a #suffix
+      // (getNymFromPubkey), so the stored nym is `aAbBcCdDeE#beef`; the provider
+      // strips the suffix before the gibberish check (the PWA stores the bare
+      // handle and checks it directly — nostr-core.js:943).
+      notifier.setUserPresence(
+          pubkey: other,
+          status: UserStatus.online,
+          nym: 'aAbBcCdDeE',
+          lastSeenMs: 1);
+      const human =
+          '22222222222222222222222222222222222222222222222222222222cafebabe';
+      notifier.setUserPresence(
+          pubkey: human,
+          status: UserStatus.online,
+          nym: 'swift-fox',
+          lastSeenMs: 1);
+
+      final users = container.read(usersProvider);
+      expect(users.containsKey(other), isFalse, reason: 'gibberish dropped');
+      expect(users.containsKey(human), isTrue, reason: 'real nym kept');
+    });
+
+    test('self is never filtered even if its nym looks gibberish', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final notifier = container.read(appStateProvider.notifier)
+        ..goLive(other, 'aAbBcCdDeE'); // self with a gibberish-looking nym
+      notifier.setUserPresence(
+          pubkey: other,
+          status: UserStatus.online,
+          nym: 'aAbBcCdDeE',
+          lastSeenMs: 1);
+      expect(container.read(usersProvider).containsKey(other), isTrue);
     });
   });
 

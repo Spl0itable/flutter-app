@@ -396,6 +396,33 @@ class AppState {
     return false;
   }
 
+  /// True when [m] should increment a conversation's unread badge — the PWA's
+  /// `_recomputeUnreadCount` per-message filter (channels.js:1709-1728):
+  /// `!isOwn && !_spamGated && created_at > lastRead && !blockedUsers.has(pk)`.
+  ///
+  /// This is DELIBERATELY narrower than [isMessageFiltered]: the unread count
+  /// excludes ONLY own / blocked-user / web-of-trust-gated messages. It does
+  /// NOT exclude blocked-keyword or heuristic-spam hits — the PWA still counts
+  /// those toward unread (it hides them from the list but keeps the badge),
+  /// whereas [isMessageFiltered] (the list-visibility filter) drops them. Using
+  /// [isMessageFiltered] for unread therefore UNDER-counts vs the PWA whenever a
+  /// keyword or the heuristic filter is configured. (The `created_at > lastRead`
+  /// term has no native analogue yet — there is no per-channel `channelLastRead`
+  /// read-state — so the incremental model approximates it via the open-view
+  /// reset; see C02-5/C02-6.)
+  bool countsTowardUnread(Message m) {
+    if (m.isSystemRow) return false;
+    if (m.isOwn) return false;
+    if (blockedUsers.contains(m.pubkey)) return false;
+    if (nymVouchSpamGateEnabled &&
+        isSpamGated(m,
+            verifiedDeveloper: kVerifiedDeveloperPubkey,
+            verifiedBots: kVerifiedBotPubkeys)) {
+      return false;
+    }
+    return true;
+  }
+
   AppState copyWith({
     String? selfPubkey,
     String? selfNym,
@@ -1154,7 +1181,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
     );
     u.nym = m.author;
     u.lastSeen = m.timestamp;
-    if (m.channel != null) u.channels.add(m.channel!);
+    // Channel membership for the header "N online nyms" count, /who, and
+    // @-mention bucketing. The PWA stores the BARE key `channelKey =
+    // geohash || channel`, lowercased (users.js:1262,1287,1298). `m.channel`
+    // is NULL for geohash channels (event_mapper.dart:37-38), so adding only
+    // `m.channel` left membership empty for every geo channel — breaking all
+    // three consumers, which look up the bare-lowercase key
+    // (`view.id.toLowerCase()`). Use geohash when present, else the named `d`.
+    final memberKey = ((m.geohash?.isNotEmpty ?? false) ? m.geohash! : m.channel)
+        ?.toLowerCase();
+    if (memberKey != null && memberKey.isNotEmpty) u.channels.add(memberKey);
 
     // Track last activity for the channel sort (`channelLastActivity`).
     state.channelLastActivity[key] = m.timestamp;
@@ -1176,10 +1212,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       ));
     }
 
-    // Bump unread when the message isn't for the active view, isn't ours, and
-    // isn't from a blocked user / keyword-filtered (the PWA's unread recompute
-    // skips `blockedUsers` — channels.js `_recomputeUnreadCount`).
-    if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
+    // Bump unread when the message isn't for the active view and counts toward
+    // the badge — the PWA's `_recomputeUnreadCount` predicate (own / blocked /
+    // WoT-gated excluded, but keyword + heuristic-spam STILL counted; see
+    // [AppState.countsTowardUnread], channels.js `_recomputeUnreadCount`).
+    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
 
@@ -1501,7 +1538,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.lastSeen = m.timestamp;
     }
 
-    if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
+    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
       state.unreadCounts[peer] = (state.unreadCounts[peer] ?? 0) + 1;
     }
     state = state.copyWith();
@@ -1534,10 +1571,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       u.lastSeen = m.timestamp;
     }
-    if (key != state.view.storageKey && !m.isOwn && !state.isMessageFiltered(m)) {
+    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
       // Key the unread count by the group's storage key (== `key`), NOT the bare
       // gid — the sidebar group row reads `unread[groupStorageKey(id)]`, so a
-      // bare-gid write never surfaced as a badge.
+      // bare-gid write never surfaced as a badge. Predicate mirrors the PWA's
+      // `_recomputeUnreadCount` (keyword/heuristic-spam still count; see
+      // [AppState.countsTowardUnread]).
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
     state = state.copyWith();
@@ -1663,7 +1702,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Marks [pubkey] as typing (or not) within [storageKey]. [expiresAtMs] is
-  /// when the indicator auto-clears (typically now + ~4s).
+  /// when the indicator auto-clears. Defaults to now + 5s to match the PWA's
+  /// `_typingExpireMs = 5000` (app.js:742) — the received-typing TTL (C03-D5).
   void setTyping({
     required String storageKey,
     required String pubkey,
@@ -1673,7 +1713,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final k = '$storageKey|$pubkey';
     if (typing) {
       state.typing[k] =
-          expiresAtMs ?? DateTime.now().millisecondsSinceEpoch + 4000;
+          expiresAtMs ?? DateTime.now().millisecondsSinceEpoch + 5000;
     } else {
       state.typing.remove(k);
     }
@@ -1697,6 +1737,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String? nym,
     String? awayMessage,
     int? lastSeenMs,
+    bool stampLastSeen = true,
     String? avatarUrl,
     bool hasAvatarTag = false,
     bool shopUpdate = false,
@@ -1715,7 +1756,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
     u.awayMessage = (awayMessage != null && awayMessage.isNotEmpty)
         ? awayMessage
         : (status == UserStatus.away ? u.awayMessage : null);
-    if (lastSeenMs != null) u.lastSeen = lastSeenMs;
+    // Presence (a bare nym-presence broadcast) is NOT activity: the PWA's
+    // `handlePresenceEvent` updates status/away/avatar but never touches
+    // `user.lastSeen` (users.js:1246-1255), so a replayed/older-but-<5min
+    // presence must NOT mark a user online. Only message ingestion and
+    // friend-presence / own-activity stamp `lastSeen`. Callers on the public
+    // nym-presence path pass `stampLastSeen: false`; the friend-presence and
+    // own-activity callers leave the default `true` (they DO mark activity in
+    // the PWA — users.js:1149,1155 friend; recordOwnActivity).
+    if (stampLastSeen && lastSeenMs != null) u.lastSeen = lastSeenMs;
 
     // Avatar: an `avatar-update` tag sets (or clears, when empty) the picture
     // (users.js avatar branch). profile.picture is the canonical avatar source.
@@ -2486,7 +2535,15 @@ final groupsProvider = Provider<List<Group>>((ref) {
 /// `if (blockedUsers.has(pubkey)) return;` and the nym keyword guard).
 final usersProvider = Provider<Map<String, User>>((ref) {
   final s = ref.watch(appStateProvider);
-  if (s.blockedUsers.isEmpty && s.blockedKeywords.isEmpty) return s.users;
+  // Gibberish-nym filtering is active whenever the spam filter's aggressive mode
+  // is on (the PWA's `isGibberishNym` short-circuits false unless BOTH
+  // spamFilterEnabled && spamFilterAggressive — nostr-core.js:944-945). It runs
+  // even with empty block sets, so the no-block fast-path is only valid when it
+  // cannot fire.
+  final gibberishActive = appSpamFilterEnabled && appSpamFilterAggressive;
+  if (s.blockedUsers.isEmpty && s.blockedKeywords.isEmpty && !gibberishActive) {
+    return s.users;
+  }
   final out = <String, User>{};
   s.users.forEach((pubkey, user) {
     if (pubkey == s.selfPubkey) {
@@ -2495,6 +2552,21 @@ final usersProvider = Provider<Map<String, User>>((ref) {
     }
     if (s.blockedUsers.contains(pubkey)) return;
     if (s.blockedKeywords.isNotEmpty && s.hasBlockedKeyword('', user.nym)) {
+      return;
+    }
+    // Drop randomized spam-bot nicknames from the Nyms source — the PWA excludes
+    // `isGibberishNym(user.nym)` for non-self non-friend users in
+    // `_doUpdateUserList` (users.js:1375-1377). The PWA's stored `user.nym` is
+    // the BARE base nym (presence strips the suffix, users.js:1153; messages use
+    // the raw `n` tag), so `_looksLikeRandomToken` sees an alphanumeric handle.
+    // Flutter always stores the suffixed `base#suffix` form (getNymFromPubkey),
+    // and the `#` makes `_looksLikeRandomToken` reject it outright — so we strip
+    // the suffix first to recover the same base the PWA tests.
+    if (gibberishActive &&
+        !s.isFriend(pubkey) &&
+        SpamFilter.isGibberishNym(stripPubkeySuffix(user.nym),
+            enabled: appSpamFilterEnabled,
+            aggressive: appSpamFilterAggressive)) {
       return;
     }
     out[pubkey] = user;
@@ -2783,6 +2855,39 @@ class NotificationHistoryNotifier
   static const int _maxAgeMs = 24 * 60 * 60 * 1000; // 24h
   static const int _cap = 100;
 
+  /// Blocked-sender pubkeys, excluded from the badge count. The PWA's
+  /// `_doUpdateNotificationBadge` drops `blockedUsers.has(pubkey)` entries at
+  /// count time (notifications.js:404-426). Defaults to empty (no change to the
+  /// count) until the controller feeds the live block list via [setBlocked].
+  Set<String> _blocked = const {};
+
+  /// Updates the blocked-sender set used by the badge recompute and re-derives
+  /// the unread count. Call when the block list changes (CROSS-FILE: wire from
+  /// the controller's block/unblock path so a blocked sender's notifications
+  /// stop counting immediately, mirroring the PWA's count-time exclusion).
+  void setBlocked(Set<String> blocked) {
+    _blocked = blocked;
+    final unread = _countUnread(state.entries);
+    if (unread != state.unread) {
+      state = state.copyWith(unread: unread);
+    }
+  }
+
+  /// Unread badge count over [entries] — the PWA's `_doUpdateNotificationBadge`
+  /// predicate restricted to the terms the native store can evaluate: `!viewed`
+  /// AND sender not blocked (notifications.js:404-426). The 24h window is
+  /// already enforced by [record]'s trimming; the `lastRead` / per-conversation
+  /// `_notificationAlreadySeen` gates are handled by flipping `viewed` on read
+  /// (see [markConversationSeen]).
+  int _countUnread(List<NotificationEntry> entries) {
+    if (_blocked.isEmpty) {
+      return entries.where((e) => !e.viewed).length;
+    }
+    return entries
+        .where((e) => !e.viewed && !_blocked.contains(e.senderPubkey))
+        .length;
+  }
+
   /// Records a notification, trimming entries older than 24h and capping the
   /// list. Increments the unread count. Mirrors `showNotification`'s history
   /// push + `_updateNotificationBadge` (`notifications.js:5-114`).
@@ -2833,8 +2938,39 @@ class NotificationHistoryNotifier
       ...state.entries.where((e) => now - e.ts < _maxAgeMs),
     ];
     if (kept.length > _cap) kept.removeRange(_cap, kept.length);
-    final unread = kept.where((e) => !e.viewed).length;
+    final unread = _countUnread(kept);
     state = NotificationHistoryState(entries: kept, unread: unread);
+  }
+
+  /// Marks the notifications for a single conversation viewed and re-derives the
+  /// badge — the PWA's `_markConversationNotificationsSeen` (notifications.js:
+  /// 345-355), invoked from `_markChannelRead` so that READING the source
+  /// conversation clears its bell badge WITHOUT opening the bell modal
+  /// (channels.js:1738-1739). [route] is the conversation key the notification
+  /// was recorded with (a channel key, PM pubkey, or group id — the same value
+  /// passed as `record(route: …)`); entries whose [NotificationEntry.route]
+  /// matches are flipped to `viewed`. [tsSec] optionally bounds the flip to
+  /// entries at/under that timestamp (mirroring the PWA's per-conversation
+  /// `_notificationAlreadySeen` high-water mark); when null, all matching
+  /// entries are marked seen.
+  ///
+  /// CROSS-FILE: call this from the controller's view-open handler
+  /// (`_onViewOpened`) for each `ViewKind`, the way the PWA calls
+  /// `_markConversationNotificationsSeen` on channel/PM/group read.
+  void markConversationSeen(String route, {int? tsSec}) {
+    if (route.isEmpty) return;
+    var changed = false;
+    final cutoffMs = tsSec != null ? tsSec * 1000 : null;
+    for (final e in state.entries) {
+      if (e.viewed) continue;
+      if (e.route != route) continue;
+      if (cutoffMs != null && e.ts > cutoffMs) continue;
+      e.viewed = true;
+      changed = true;
+    }
+    if (!changed) return;
+    final entries = List.of(state.entries);
+    state = state.copyWith(entries: entries, unread: _countUnread(entries));
   }
 
   /// Marks every entry viewed and zeroes the unread count (modal opened).
