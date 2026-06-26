@@ -247,7 +247,12 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     // below the newest message, above the composer (`.typing-indicator`).
     // ScrollablePositionedList (vs a plain ListView) is what lets the quote tap
     // land on an OFF-SCREEN, lazily-built message via `scrollTo(index:…)`.
-    return ColoredBox(
+    // Swipe/drag-scroll the messages to dismiss the soft keyboard (01-B3): the
+    // ScrollablePositionedList has no `keyboardDismissBehavior`, so unfocus on an
+    // active user-drag while the keyboard is up (chat_pane handles tap-out).
+    return NotificationListener<ScrollUpdateNotification>(
+      onNotification: _dismissKeyboardOnDrag,
+      child: ColoredBox(
       color: containerColor,
       child: Column(
         children: [
@@ -293,7 +298,19 @@ class _MessagesListState extends ConsumerState<MessagesList> {
           const TypingIndicatorRow(),
         ],
       ),
+      ),
     );
+  }
+
+  /// Swipe/drag-scroll the messages dismisses the soft keyboard (01-B3): unfocus
+  /// on an active user drag while the keyboard is open (the PWA dismisses on
+  /// scroll). Returns false so the scroll notification keeps bubbling.
+  bool _dismissKeyboardOnDrag(ScrollUpdateNotification n) {
+    if (n.dragDetails != null &&
+        MediaQuery.of(context).viewInsets.bottom > 0) {
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
+    return false;
   }
 
   /// Whether [cur] bubble-groups onto [prev]: same author within the 5-minute
