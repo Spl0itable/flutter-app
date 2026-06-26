@@ -7,14 +7,10 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.nym.bar</string>
 	</array>
-	<!-- Universal Links: mirror the Android manifest's intent-filter hosts so
-	     https://… deep links open the app natively on iOS too. -->
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:app.nymchat.app</string>
-		<string>applinks:app.nym.bar</string>
-		<string>applinks:web.nymchat.app</string>
-		<string>applinks:nymchat.app</string>
-	</array>
+	<!-- NOTE: com.apple.developer.associated-domains (Universal Links) was
+	     removed because Dreamflow's automatic App Store provisioning profile
+	     does not include the Associated Domains capability. To re-enable
+	     Universal Links, the capability must first be added to the App ID in
+	     the Apple Developer portal and a matching provisioning profile used. -->
 </dict>
 </plist>
