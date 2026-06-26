@@ -103,6 +103,12 @@ flutter:
     - assets/text/
     - assets/data/
     - assets/fonts/
+    # Explicit font files (Dreamflow's deploy step expects exact asset entries)
+    - assets/fonts/Roboto-Regular.ttf
+    - assets/fonts/Roboto-Medium.ttf
+    - assets/fonts/Roboto-Bold.ttf
+    - assets/fonts/NotoColorEmoji.ttf
+    - assets/fonts/NotoSansSymbols-Regular.ttf
 
   # Bundled fonts so text, emoji, and symbol glyphs all render correctly on ANY
   # device — including de-Googled / minimal Android builds whose system font set
