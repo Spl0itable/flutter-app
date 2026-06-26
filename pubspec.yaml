@@ -1,7 +1,7 @@
 name: nym_bar
 description: "Experience the future of decentralized communication with Nymchat, a sleek and secure shell app that wraps around our powerful PWA, delivering instant notifications and seamless external browsing for an uncompromised user experience."
 publish_to: "none"
-version: 1.0.1+118
+version: 1.0.2+119
 
 environment:
   sdk: ^3.6.0
@@ -102,27 +102,14 @@ flutter:
     - assets/images/
     - assets/text/
     - assets/data/
-    - assets/fonts/
-    # Explicit font files (Dreamflow's deploy step expects exact asset entries)
-    - assets/fonts/Roboto-Regular.ttf
-    - assets/fonts/Roboto-Medium.ttf
-    - assets/fonts/Roboto-Bold.ttf
-    - assets/fonts/NotoColorEmoji.ttf
-    - assets/fonts/NotoSansSymbols-Regular.ttf
 
-  # Bundled fonts so text, emoji, and symbol glyphs all render correctly on ANY
-  # device — including de-Googled / minimal Android builds whose system font set
-  # Flutter can't reach. This mirrors the PWA's `--font-sans` chain (a real sans
-  # for Latin + system emoji/symbol fonts for the rest):
-  #   - Roboto      : the primary UI sans. Bundling it (vs. naming the unresolved
-  #                   system 'Roboto') guarantees correct line metrics — a null /
-  #                   unresolved primary lets Flutter promote the emoji fallback
-  #                   to primary, inflating every line and degrading Latin glyphs.
-  #   - Noto Color Emoji : color glyphs for unicode emoji (😀 🔥 ❤ 🇺 …).
-  #   - Noto Sans Symbols: enclosed / circled letters + misc symbols that the
-  #                   emoji font lacks (e.g. 🅣 🅐 Ⓐ, common in stylised nyms).
-  # Roboto is the `fontFamily`; the two Noto fonts are the `fontFamilyFallback`
-  # chain (emoji first, symbols second) on the base text theme + message renderer.
+  # Bundled Roboto for the primary UI sans — guarantees correct line metrics on
+  # any device (including de-Googled / minimal Android builds whose system font
+  # set Flutter can't reach). Emoji and symbol glyphs are rendered by the OS's
+  # native fallback (Apple Color Emoji on iOS, Noto Color Emoji on Android),
+  # which Flutter resolves automatically — bundling NotoColorEmoji.ttf is too
+  # large for App Store builds (~24MB) and unnecessary on platforms with a
+  # native color-emoji font.
   fonts:
     - family: Roboto
       fonts:
@@ -131,12 +118,6 @@ flutter:
           weight: 500
         - asset: assets/fonts/Roboto-Bold.ttf
           weight: 700
-    - family: "Noto Color Emoji"
-      fonts:
-        - asset: assets/fonts/NotoColorEmoji.ttf
-    - family: "Noto Sans Symbols"
-      fonts:
-        - asset: assets/fonts/NotoSansSymbols-Regular.ttf
 
 flutter_launcher_icons:
   android: true
