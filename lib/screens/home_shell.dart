@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../core/theme/nym_colors.dart';
 import '../core/theme/nym_metrics.dart';
@@ -10,6 +11,8 @@ import '../features/calls/call_providers.dart';
 import '../features/calls/incoming_call.dart';
 import '../features/nymbot/bot_credits_modal.dart';
 import '../features/onboarding/tutorial_overlay.dart';
+import '../services/location/geolocation.dart';
+import '../state/app_state.dart';
 import '../state/nostr_controller.dart';
 import '../state/settings_provider.dart';
 import '../widgets/context_menu/interaction_hooks.dart';
@@ -63,7 +66,24 @@ class HomeShellState extends ConsumerState<HomeShell>
     // Constructing the CallService registers the inbound call-signal handler.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(callServiceProvider);
+      _maybeBootProximityLocation();
     });
+  }
+
+  /// Boot-time GPS fetch (the PWA's app.js:6855 startup branch): if proximity
+  /// sort was already enabled in a prior session AND location permission is
+  /// still granted, fetch the fix so the Haversine channel sort engages without
+  /// the user re-opening Settings. Best-effort + silent; a denial/timeout simply
+  /// leaves `userLocation` null (proximity then falls back to activity order).
+  Future<void> _maybeBootProximityLocation() async {
+    if (!ref.read(settingsProvider).sortByProximity) return;
+    if (ref.read(userLocationProvider) != null) return; // already located
+    final status = await Permission.locationWhenInUse.status;
+    if (!status.isGranted) return;
+    final loc = await fetchCurrentUserLocation();
+    if (loc != null && mounted) {
+      ref.read(userLocationProvider.notifier).state = loc;
+    }
   }
 
   void _startCall(String peer, {required bool video}) {

@@ -61,6 +61,11 @@ dependencies:
   # 15.5 deployment floor that broke the CocoaPods install).
   qr_flutter: ^4.1.0
 
+  # Geolocation — the GPS source for proximity channel sort (the PWA's
+  # `navigator.geolocation.getCurrentPosition`, app.js:3917). permission_handler
+  # already gates the grant; geolocator fetches the actual coordinates.
+  geolocator: ^13.0.0
+
   # Auth / biometrics
   local_auth: ^2.3.0
 
