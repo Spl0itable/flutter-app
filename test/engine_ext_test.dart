@@ -11,6 +11,7 @@ import 'package:nym_bar/features/polls/poll_logic.dart';
 import 'package:nym_bar/features/zaps/zap_logic.dart';
 import 'package:nym_bar/models/channel.dart';
 import 'package:nym_bar/models/nostr_event.dart';
+import 'package:nym_bar/models/user.dart';
 import 'package:nym_bar/state/app_state.dart';
 
 /// Pure engine-extension tests (no sockets): reactions, polls, channel sort,
@@ -525,6 +526,50 @@ void main() {
       n.ingestEvent(ev);
       final msg = n.state.messages['#9q8y']!.single;
       expect(msg.isFileOffer, isFalse);
+    });
+  });
+
+  // Production initial / reset state — the PWA shows an EMPTY shell, never the
+  // demo seed (satoshi/neo/#bitcoin/#dev/flutter-rewrite). Guards the swap of
+  // the AppStateNotifier constructor + reset() to AppState.empty().
+  group('production initial state (no demo seed)', () {
+    void expectEmptyShell(AppState s) {
+      // Only the default channel, no fake users/PMs/groups/messages/reactions.
+      expect(s.channels.map((c) => c.key).toList(), [kDefaultChannel]);
+      expect(s.view, const ChatView.channel(kDefaultChannel));
+      expect(s.users, isEmpty);
+      expect(s.pmConversations, isEmpty);
+      expect(s.groups, isEmpty);
+      expect(s.messages, isEmpty);
+      expect(s.reactions, isEmpty);
+      expect(s.unreadCounts, isEmpty);
+      // Logged-out: no identity.
+      expect(s.selfPubkey, isEmpty);
+      expect(s.selfNym, isEmpty);
+    }
+
+    test('default AppStateNotifier() is the empty logged-out shell', () {
+      final n = AppStateNotifier();
+      expectEmptyShell(n.state);
+      // None of the seed authors/channels are present.
+      expect(n.state.users.values.any((u) => u.nym.startsWith('satoshi')),
+          isFalse);
+      expect(n.state.channels.any((c) => c.key == 'bitcoin'), isFalse);
+    });
+
+    test('reset() returns to the empty shell, not the demo seed', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      // Mutate the live store, then reset.
+      n.setUserPresence(pubkey: 'a' * 64, status: UserStatus.online);
+      n.reset();
+      expectEmptyShell(n.state);
+    });
+
+    test('AppState.empty() matches AppState.live with no identity', () {
+      final e = AppState.empty();
+      expectEmptyShell(e);
+      expect(e.selfPubkey, '');
+      expect(e.selfNym, '');
     });
   });
 }

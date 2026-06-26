@@ -8,6 +8,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../services/storage/key_value_store.dart';
 import '../../services/storage/secure_store.dart';
+import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart' show keyValueStoreProvider;
 import 'modal_chrome.dart';
 import 'nip46_service.dart';
@@ -69,6 +70,9 @@ class _NostrLoginModalState extends ConsumerState<NostrLoginModal> {
 
   Nip46Service? _nip46;
   String _remoteStatus = 'Waiting for remote signer...';
+
+  /// Guards the async nsec adopt so a double-tap can't re-enter login.
+  bool _loggingIn = false;
 
   @override
   void dispose() {
@@ -260,7 +264,19 @@ class _NostrLoginModalState extends ConsumerState<NostrLoginModal> {
           ModalChrome.iconButton(
               c, 'Cancel', () => Navigator.of(context).pop()),
           const SizedBox(width: 10),
-          ModalChrome.sendButton(c, 'Login', _loginWithNsec),
+          ModalChrome.sendButton(
+            c,
+            'Login',
+            _loggingIn ? null : () => _loginWithNsec(),
+            child: _loggingIn
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: c.primary),
+                  )
+                : null,
+          ),
         ],
       ),
     );
@@ -329,8 +345,14 @@ class _NostrLoginModalState extends ConsumerState<NostrLoginModal> {
     }();
   }
 
-  /// Validate the pasted nsec via [decodeNsec] and return it to the caller.
-  void _loginWithNsec() {
+  /// Validate the pasted nsec via [decodeNsec], then ADOPT it as the running
+  /// identity (persist method+nsec, re-boot under the new pubkey, re-subscribe
+  /// relays) via [NostrController.loginWithNsec] — the native analogue of the
+  /// PWA's `nostrLoginWithNsec` → `applyNostrLogin` (app.js:5036-5074 / 5487).
+  /// Pops with the nsec so the setup caller advances the gate; the controller's
+  /// boot-epoch bump also remounts the gate onto the shell.
+  Future<void> _loginWithNsec() async {
+    if (_loggingIn) return;
     final input = _nsecController.text.trim();
     if (input.isEmpty) {
       setState(() => _error = 'Please enter your nsec.');
@@ -346,6 +368,24 @@ class _NostrLoginModalState extends ConsumerState<NostrLoginModal> {
       setState(() => _error = 'Invalid nsec key. Please check and try again.');
       return;
     }
+    setState(() {
+      _loggingIn = true;
+      _error = null;
+    });
+    try {
+      // Persist + adopt the imported account at runtime (no app restart needed).
+      await ref.read(nostrControllerProvider).loginWithNsec(input);
+    } catch (_) {
+      // Defensive: validation above already rejects bad keys, but never strand
+      // the user on a half-login — surface the same error and let them retry.
+      if (!mounted) return;
+      setState(() {
+        _loggingIn = false;
+        _error = 'Invalid nsec key. Please check and try again.';
+      });
+      return;
+    }
+    if (!mounted) return;
     Navigator.of(context).pop(input);
   }
 }

@@ -169,15 +169,14 @@ class MessageZaps {
   }
 }
 
-/// In-memory UI state for the shell. This is intentionally a self-contained
-/// placeholder store seeded with SAMPLE data so the shell renders like the PWA
-/// before any networking exists.
+/// In-memory UI state for the shell. The production initial state is an EMPTY
+/// shell ([AppState.empty] — only #nymchat, no identity), matching the PWA's
+/// first paint; the controller swaps to a live, relay-backed store once an
+/// identity boots ([AppStateNotifier.goLive] → [AppState.live]).
 ///
-/// !!! PLACEHOLDER SEED DATA !!!
-/// Everything below (channels, users, PMs, groups, messages, reactions) is
-/// hard-coded demo content. The real Nostr / relay layer (channels.js,
-/// messages.js, pms.js, groups.js — see docs/specs/03) will replace this store
-/// wholesale; the providers exposed here are the seam to plug it into.
+/// [AppState.seed] / [_seedAppState] below build a hard-coded SAMPLE store
+/// (channels, users, PMs, groups, messages, reactions) — TEST/DEMO ONLY; no
+/// production code path uses them as the initial or reset state.
 class AppState {
   AppState({
     required this.selfPubkey,
@@ -430,8 +429,16 @@ class AppState {
         trustedPubkeys: trustedPubkeys,
       );
 
-  /// Builds the seeded demo store (used until a live identity boots).
+  /// Builds the seeded demo store. TEST/DEMO ONLY — never used as the
+  /// production initial or reset state (the PWA shows an empty shell, not fake
+  /// channels/users/PMs). Production uses [AppState.empty] / [AppState.live].
   factory AppState.seed() => _seedAppState();
+
+  /// The production logged-out initial state: an empty live shell (only
+  /// #nymchat, no identity). The PWA's first paint before/without a login is an
+  /// empty shell, never demo data; the controller swaps to [AppState.live] once
+  /// an identity boots ([AppStateNotifier.goLive]).
+  factory AppState.empty() => AppState.live('', '');
 
   /// An empty live store for a freshly-booted identity (only #nymchat).
   factory AppState.live(String pubkey, String nym) => AppState(
@@ -449,7 +456,8 @@ class AppState {
 }
 
 // ---------------------------------------------------------------------------
-// SAMPLE / SEED DATA  — replace with relay-backed data later.
+// SAMPLE / SEED DATA  — TEST/DEMO ONLY (see [AppState.seed]); NOT used by any
+// production initial/reset/runtime state.
 // ---------------------------------------------------------------------------
 
 // Sample pubkeys (64-hex). The last 4 hex chars form the display suffix
@@ -885,7 +893,9 @@ AppState _seedAppState() {
 /// Holds the in-memory [AppState]. Supports switching views and a local-echo
 /// send (append a self [Message] to the current view).
 class AppStateNotifier extends StateNotifier<AppState> {
-  AppStateNotifier() : super(AppState.seed());
+  // Production initial state is the empty logged-out shell (PWA parity), NOT the
+  // demo seed — the controller swaps to the live store on boot ([goLive]).
+  AppStateNotifier() : super(AppState.empty());
 
   /// Fired whenever a conversation is opened via [switchView] (channel, PM, or
   /// group). The controller wires this to its D1 history backfill so opening a
@@ -938,11 +948,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state.nymchatPubkeys.addAll(kTrustRootPubkeys);
   }
 
-  /// Resets the store to its pre-login state on sign-out (app.js `signOut` →
-  /// reload). Clears every session-scoped dedup/private map (so a new identity
-  /// can't inherit the old one's seen ids / closed PMs / reactor state) and
-  /// returns the visible store to the seed. Mirrors [goLive] but without a live
-  /// identity; the boot gate then shows the setup modal.
+  /// Resets the store to its pre-login state on sign-out / panic (app.js
+  /// `signOut` → reload). Clears every session-scoped dedup/private map (so a new
+  /// identity can't inherit the old one's seen ids / closed PMs / reactor state)
+  /// and returns the visible store to the EMPTY logged-out shell (PWA parity —
+  /// never the demo seed). Mirrors [goLive] but without a live identity; the boot
+  /// gate then shows the setup modal.
   void reset() {
     _seenIds.clear();
     _seenNymMessageIds.clear();
@@ -954,7 +965,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _channelMessageReaders.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
-    state = AppState.seed();
+    state = AppState.empty();
   }
 
   void setIdentity(String pubkey, String nym) {

@@ -285,8 +285,19 @@ class NostrController {
       // [_onConnectionChanged]). Best-effort; never blocks boot.
       unawaited(_discoverChannelActivity());
     } catch (e, st) {
-      // Stay on seed/offline data if boot fails (e.g. no secure storage).
+      // Boot failed (e.g. no secure storage). Never strand the user on demo
+      // data: if we never reached `goLive` (so the store is still the empty
+      // logged-out shell, AppState.empty), force it explicitly so a partial
+      // boot can't leave stale/seed content, and surface the error. A boot that
+      // already went live (identity != null) and only failed a later
+      // best-effort step keeps its live store.
       debugPrint('NostrController.init failed: $e\n$st');
+      if (_identity == null) {
+        try {
+          _ref.read(appStateProvider.notifier).reset();
+        } catch (_) {}
+      }
+      _emitSystemMessage('Connection failed — working offline.');
     }
   }
 
@@ -459,10 +470,23 @@ class NostrController {
   /// After this returns the controller is back in its pre-boot state ([_started]
   /// is reset), so a fresh identity created through the setup flow can [init]
   /// again on the same provider instance.
-  Future<void> signOut() async {
-    // 1) Tear down the live session: cancel timers, close subs, flush + close the
-    //    cache, and stop the relay service. (Mirrors `cmdQuit` + the page reload
-    //    dropping all in-memory NYM state.)
+  /// Tears down the live session: cancel timers, close subs, flush + close the
+  /// cache, stop the relay service, drop the in-memory identity / signer /
+  /// service / storage-sync handles + session-scoped maps, and unbind the
+  /// settings/view callbacks that captured the old signer/sync. Shared by
+  /// [signOut] (followed by clearing persisted login + resetting the store) and
+  /// [loginWithNsec] (followed by re-booting as the imported account). Does NOT
+  /// touch persisted KV/secrets, [AppState], or `_started` — the caller decides
+  /// those. Idempotent and safe to call before [init].
+  ///
+  /// [flush] writes any dirty cache rows before closing (the default — sign-out /
+  /// login want a clean commit). The PANIC path passes `flush:false` so no
+  /// just-wiped data is re-persisted mid-wipe (panic.js stops persistence:
+  /// `_cacheDisabled = true`), matching the PWA's "destroy, don't save" intent.
+  Future<void> _teardownLiveSession({bool flush = true}) async {
+    // Cancel timers, close subs, flush + close the cache, and stop the relay
+    // service. (Mirrors `cmdQuit` + the page reload dropping all in-memory NYM
+    // state.)
     _flushTimer?.cancel();
     _presenceTimer?.cancel();
     _settingsSyncTimer?.cancel();
@@ -484,9 +508,11 @@ class NostrController {
       _service?.pool.closeSubscription(_p2pSub!);
       _p2pSub = null;
     }
-    try {
-      await _flush();
-    } catch (_) {}
+    if (flush) {
+      try {
+        await _flush();
+      } catch (_) {}
+    }
     try {
       await _cache?.close();
     } catch (_) {}
@@ -501,8 +527,8 @@ class NostrController {
     // explicitly on identity teardown to be safe).
     Nip98Auth.clearAuthCache();
 
-    // 2) Drop in-memory identity + signer + group/service/storage-sync handles
-    //    (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
+    // Drop in-memory identity + signer + group/service/storage-sync handles
+    // (panic.js: `this.privkey = null; this.pubkey = null; … _vaultMem = null`).
     _identity = null;
     _signer = null;
     _service = null;
@@ -514,12 +540,89 @@ class NostrController {
     _sentChannelReadReceipts.clear();
     _reactionToggleTracker.clear();
 
-    // 3) Stop syncing settings on change (the binding captured the old signer).
+    // Stop syncing settings on change (the binding captured the old signer).
     _ref.read(settingsProvider.notifier).onSyncedChange = null;
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
+  }
 
-    // 4) Remove the persisted login + auto-ephemeral + per-identity caches the
+  /// Switches the running session to a freshly-imported nsec account WITHOUT an
+  /// app restart — the native analogue of the PWA's `nostrLoginWithNsec` →
+  /// `applyNostrLogin` (app.js:5036-5074 / 5487-5612), whose key step is
+  /// `resubscribeAllRelays()` so the new pubkey's gift-wraps/PMs/zaps flow in.
+  ///
+  /// [IdentityService.loginWithNsec] persists `nostr_login_method='nsec'` + the
+  /// nsec (so a later [boot]/relaunch restores the same account) and returns the
+  /// durable identity; it throws [FormatException] on an invalid key (the modal
+  /// validates first, but we stay defensive). We then tear down the live
+  /// ephemeral session and re-run [init], which boots the now-persisted nsec
+  /// identity, rebuilds the relay service + subscriptions under the new pubkey,
+  /// and `goLive`s the store — the "re-run the boot→goLive path" that makes the
+  /// next state the real account. Finally we bump [bootEpochProvider] so the
+  /// boot gate (now seeing a saved login) lands on the shell.
+  Future<void> loginWithNsec(String nsec) async {
+    final kv = _ref.read(keyValueStoreProvider);
+    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    // Persist method + nsec + pubkey (throws on an invalid key — propagated so
+    // the modal can show its existing error and NOT complete).
+    await identityService.loginWithNsec(nsec);
+
+    // Re-boot as the persisted nsec account: tear down the ephemeral session,
+    // allow a fresh boot on this provider instance, then `init()` restores the
+    // saved login and re-subscribes under the new pubkey.
+    await _teardownLiveSession();
+    _started = false;
+    await init();
+
+    // Remount the boot gate so it re-checks (now has a saved login) and tears
+    // down the setup modal / shows the shell, mirroring the PWA's post-login
+    // `nostrLoginBypassSetup` → `initializeNym` transition out of setup.
+    _ref.read(bootEpochProvider.notifier).state++;
+  }
+
+  /// Resets the RUNNING session to a logged-out, first-run state after an
+  /// emergency wipe ([PanicWipe] has already shredded the on-disk stores). The
+  /// in-memory half of the PWA's `panicWipe` (panic.js:54-144): it nulls
+  /// `privkey/pubkey/_vaultMem` and reloads to a pristine first run.
+  ///
+  /// Drops the in-memory identity / signer / vault handles + the relay service
+  /// WITHOUT flushing (panic stops persistence so wiped data is never
+  /// re-written, `flush:false`), resets [AppState] to the empty logged-out shell,
+  /// allows a fresh boot ([_started] = false), and bumps [bootEpochProvider] so
+  /// `app.dart` remounts a fresh [BootGate] — which (no saved login + no
+  /// auto-ephemeral after the wipe) lands on the setup screen. The end state:
+  /// no identity, no data, setup shown. The boot-epoch bump's `popUntil(first)`
+  /// also tears down the panic overlay route, so the caller need not pop it.
+  Future<void> resetAfterPanic() async {
+    // In-memory teardown only — DO NOT flush (the stores were just wiped; a
+    // flush would re-persist the still-live AppState into the reset cache DB).
+    await _teardownLiveSession(flush: false);
+
+    // Allow a fresh identity to boot again on this provider instance.
+    _started = false;
+
+    // Reset the visible store + identity-scoped UI state to the empty shell.
+    _ref.read(appStateProvider.notifier).reset();
+    try {
+      _ref.read(notificationHistoryProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(pendingSettingsTransfersProvider.notifier).clear();
+    } catch (_) {}
+    try {
+      _ref.read(liveCustomEmojiProvider.notifier).clearAll();
+    } catch (_) {}
+
+    // Drive the UI back to a pristine first-run gate (the PWA reloads the page).
+    _ref.read(bootEpochProvider.notifier).state++;
+  }
+
+  Future<void> signOut() async {
+    // 1) Tear down the live session (timers, subs, cache flush+close, relay
+    //    service, in-memory identity/signer/handles, unbind callbacks).
+    await _teardownLiveSession();
+
+    // 2) Remove the persisted login + auto-ephemeral + per-identity caches the
     //    PWA's `signOut()` clears (app.js:6743-6761).
     final kv = _ref.read(keyValueStoreProvider);
     for (final k in const [
@@ -554,7 +657,7 @@ class NostrController {
       } catch (_) {}
     }
 
-    // 5) Reset the in-memory store + identity-scoped UI state.
+    // 3) Reset the in-memory store + identity-scoped UI state.
     _ref.read(appStateProvider.notifier).reset();
     try {
       _ref.read(notificationHistoryProvider.notifier).clear();
@@ -566,10 +669,10 @@ class NostrController {
       _ref.read(liveCustomEmojiProvider.notifier).clearAll();
     } catch (_) {}
 
-    // 6) Allow a fresh identity to boot again on this provider instance.
+    // 4) Allow a fresh identity to boot again on this provider instance.
     _started = false;
 
-    // 7) Drive the UI back to a pristine first-run gate. The PWA reloads the
+    // 5) Drive the UI back to a pristine first-run gate. The PWA reloads the
     //    page here; we bump the boot generation so `app.dart` remounts a fresh
     //    BootGate (which re-checks setup-needed — now true — and tears down the
     //    signed-out HomeShell + any modals stacked above it).

@@ -225,7 +225,13 @@ class _SetupModalState extends ConsumerState<SetupModal> {
   Future<void> _login() async {
     final result = await NostrLoginModal.open(context);
     if (!mounted) return;
-    // A non-null result means a login method was chosen + persisted.
+    // A non-null result means a login method was chosen, PERSISTED, and adopted:
+    //  * nsec — the modal awaited `NostrController.loginWithNsec`, which
+    //    persists the key, re-boots under the new pubkey, and bumps the boot
+    //    epoch (remounting the gate onto the shell). `onComplete()` here is
+    //    idempotent with that remount.
+    //  * NIP-46 — `finishNostrConnect` persisted the session; `onComplete()`
+    //    advances the gate so the shell shows (restored fully on next boot).
     if (result != null) widget.onComplete();
   }
 

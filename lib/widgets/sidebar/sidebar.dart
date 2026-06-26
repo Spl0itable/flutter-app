@@ -678,10 +678,15 @@ class _SidebarState extends ConsumerState<Sidebar> {
       context,
       wipe: PanicWipe.production(),
       onComplete: () {
-        // Pop the overlay; a real app restart-to-first-run would re-bootstrap
-        // the identity here.
-        final nav = Navigator.of(context, rootNavigator: true);
-        if (nav.canPop()) nav.pop();
+        // The disk stores are wiped (PanicWipe). Now reset the RUNNING session:
+        // drop the in-memory identity/keys/vault, reset AppState to the empty
+        // logged-out shell, and drive the app back to first-run setup — the
+        // in-memory half of the PWA's `panicWipe` (panic.js nulls
+        // privkey/pubkey/_vaultMem then reloads to a pristine first run). The
+        // boot-epoch bump inside `resetAfterPanic` remounts the BootGate (now
+        // setup-needed) and its `popUntil(first)` also tears down this overlay,
+        // so no manual pop is required.
+        unawaited(ref.read(nostrControllerProvider).resetAfterPanic());
       },
     );
   }
@@ -1262,12 +1267,21 @@ class _GroupListItem extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) => _leaveMenu(context, ref, d.globalPosition),
-          onSecondaryTapDown: (d) => _leaveMenu(context, ref, d.globalPosition),
-          child: InkWell(
+        // Single InkWell recognizer set so the long-press fires reliably inside
+        // the scrollable sidebar (see ChannelListItem/PMListItem) + a free
+        // Feedback.forLongPress haptic.
+        child: Builder(
+          builder: (rowContext) => InkWell(
             onTap: onTap,
+            onLongPress: () {
+              final box = rowContext.findRenderObject() as RenderBox?;
+              final pos = (box != null && box.hasSize)
+                  ? box.localToGlobal(box.size.center(Offset.zero))
+                  : Offset.zero;
+              _leaveMenu(rowContext, ref, pos);
+            },
+            onSecondaryTapDown: (d) =>
+                _leaveMenu(rowContext, ref, d.globalPosition),
             borderRadius: NymRadius.rxs,
             child: Stack(
               children: [
