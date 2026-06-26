@@ -19,6 +19,7 @@ import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/relays/relay_stats_modal.dart';
 import '../../features/settings/about_screen.dart';
+import '../../features/settings/settings_helpers.dart' show geohashLocationLabel;
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
@@ -247,7 +248,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
         .toList()
       ..sort((a, b) {
         int rank(User u) {
-          switch (u.effectiveStatus()) {
+          // CC-2: verified bots rank as online (always-online override,
+          // users.js:1112) so they sort to the top of the nyms list.
+          switch (u.effectiveStatus(
+              isVerifiedBot: kVerifiedBotPubkeys.contains(u.pubkey))) {
             case UserStatus.online:
               return 0;
             case UserStatus.away:
@@ -266,10 +270,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
     // recency.
     final controller = ref.read(nostrControllerProvider);
     final nymActiveCount = onlineUsers.where((u) {
-      final st = u.effectiveStatus();
+      // CC-2: verified bots count as online regardless of recency
+      // (`getEffectiveUserStatus`, users.js:1112) — fold the override into the
+      // status read so the count matches the PWA's `activeCount`.
+      final st = u.effectiveStatus(
+          isVerifiedBot: kVerifiedBotPubkeys.contains(u.pubkey));
       if (st == UserStatus.hidden) return false;
-      if (st == UserStatus.online || st == UserStatus.away) return true;
-      return controller.isVerifiedBot(u.pubkey);
+      return st == UserStatus.online || st == UserStatus.away;
     }).length;
 
     // Apply the live search term + the collapse-to-20 cap, returning the capped
@@ -356,6 +363,27 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 _ViewMoreButton(
                   more: 0,
                   onTap: () => setState(() => _channelExpanded = false),
+                ),
+              // `.search-create-prompt` (channels.js:463-518): while a non-empty
+              // search term matches no existing channel, offer a tappable "Join
+              // channel / Join geohash" row to discover-by-typing. Tap joins via
+              // `switchChannel` (adds to the registry + persists, like the PWA's
+              // `addChannel → switchChannel → saveUserChannels`) and clears the
+              // box. (07-F07-2 / F05-1.)
+              if (term.trim().isNotEmpty &&
+                  !channels.any((ch) => ch.key == term.trim()))
+                _SearchCreatePrompt(
+                  term: term.trim(),
+                  onTap: () {
+                    final t = term.trim();
+                    final geo = isValidGeohash(t) ? t : '';
+                    controller.switchChannel(t, geohash: geo);
+                    setState(() {
+                      _channelTerm = '';
+                      _channelSearch = false;
+                    });
+                    widget.onItemSelected?.call();
+                  },
                 ),
             ],
           );
@@ -506,7 +534,14 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 UserListItem(
                   user: u,
                   textSize: textSize,
-                  onTap: () => select(ChatView.pm(u.pubkey)),
+                  // A plain tap on a nyms-list row opens the profile context
+                  // menu (`showContextMenu(..., profileOnly=true)`,
+                  // users.js:1502-1517) — it does NOT start a PM directly; the
+                  // PM is reachable from inside the profile panel's "Message"
+                  // action. (07-F07-1.) The panel slides in from the right and
+                  // ignores the anchor, so any offset works.
+                  onTap: () =>
+                      showUserContextMenu(context, ref, u, Offset.zero),
                 ),
               // The view-more control only exists for an unsearched list of >20
               // (`_updateUserListViewMoreButton`, users.js:1683).
@@ -1568,6 +1603,83 @@ class _ViewMoreButton extends StatelessWidget {
               fontSize: 11,
               letterSpacing: 1,
               fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.search-create-prompt` (channels.js:463-518, styles-components.css:551-568):
+/// the "Join channel / Join geohash" discover-by-typing row shown under the
+/// channel search when the term matches no existing channel. flex space-between,
+/// radius xs, padding 10, bg `--bg-tertiary`, 1px `--border`, 12px
+/// `--text-bright`; hover → bg `primary@0.1` + `--primary` border. (07-F07-2.)
+class _SearchCreatePrompt extends StatefulWidget {
+  const _SearchCreatePrompt({required this.term, required this.onTap});
+  final String term;
+  final VoidCallback onTap;
+
+  @override
+  State<_SearchCreatePrompt> createState() => _SearchCreatePromptState();
+}
+
+class _SearchCreatePromptState extends State<_SearchCreatePrompt> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final isGeo = isValidGeohash(widget.term);
+    // geohash → `Join geohash channel "term" (location)`; else `Join channel
+    // "term"`. The location suffix mirrors the PWA's resolved geohash label.
+    final label = isGeo
+        ? 'Join geohash channel "${widget.term}"'
+        : 'Join channel "${widget.term}"';
+    final loc = isGeo ? geohashLocationLabel(widget.term) : '';
+    return Padding(
+      // `margin-top: 5` + the section's 10px horizontal gutter.
+      padding: const EdgeInsets.fromLTRB(10, 5, 10, 0),
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: NymRadius.rxs,
+          child: Container(
+            width: double.infinity,
+            // `padding: 10`.
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              borderRadius: NymRadius.rxs,
+              // hover: bg primary@0.1; rest: --bg-tertiary.
+              color: _hover ? c.primaryA(0.1) : c.bgTertiary,
+              border: Border.all(color: _hover ? c.primary : c.border),
+            ),
+            child: Row(
+              // `justify-content: space-between`.
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                // 12px, --text-bright.
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: c.textBright, fontSize: 12),
+                  ),
+                ),
+                if (loc.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    loc,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: c.textDim, fontSize: 12),
+                  ),
+                ],
+              ],
             ),
           ),
         ),

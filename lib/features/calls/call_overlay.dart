@@ -870,12 +870,27 @@ class _ChatRow extends ConsumerWidget {
   void _openQuickReact(BuildContext context, Rect anchor) {
     final recents = ProviderScope.containerOf(context)
         .read(recentEmojisProvider);
+    // A non-self chat row's quick-react popup exposes a "User options" affordance
+    // (PWA `_showCallChatQuickReact` 3-dot `data-qr="menu"`, calls.js:1526,1566)
+    // that opens the shared user context menu. Rendered as the inline
+    // quick-context-menu card below the pill (the native popup has no in-pill
+    // ⋮ slot; `showQuickReactPopup.contextItems` is the supported channel).
+    final contextItems = (!msg.isSelf && msg.pubkey.isNotEmpty)
+        ? [
+            QuickContextItem(
+              label: 'User options',
+              svg: NymIcons.info,
+              onTap: () => showCallUserMenu(context, msg.pubkey),
+            ),
+          ]
+        : const <QuickContextItem>[];
     showQuickReactPopup(
       context,
       anchorRect: anchor,
       emojis: quickReactEmojis(recents),
       onReact: (e) => onReact(msg.mid, e),
       onMore: () => onMorePicker(msg.mid),
+      contextItems: contextItems,
     );
   }
 

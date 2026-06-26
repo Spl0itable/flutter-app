@@ -60,11 +60,18 @@ class MentionResult {
 /// [currentChannelKey] is the active channel key (geohash or name). [priority]
 /// is the PM-peer / group-member set that should be treated as "in channel"
 /// (`_mentionPriorityPubkeys`).
+///
+/// [verifiedBots] is the verified-bot pubkey set (the host passes
+/// `kVerifiedBotPubkeys`); members are forced `online` for ordering via
+/// `effectiveStatus(isVerifiedBot:)`, matching the PWA's verified-bot
+/// always-online override in `getEffectiveUserStatus` (users.js:1112). Empty by
+/// default so the pure query layer needs no state-layer import (CC-2).
 List<MentionResult> queryMentions({
   required Map<String, User> users,
   required String search,
   required String currentChannelKey,
   Set<String> blocked = const {},
+  Set<String> verifiedBots = const {},
   Set<String>? priority,
   int? nowMs,
 }) {
@@ -85,7 +92,8 @@ List<MentionResult> queryMentions({
     final searchable = '$baseNym#$suffix';
     if (!searchable.toLowerCase().contains(needle)) return;
 
-    final status = user.effectiveStatus(nowMs: now);
+    final status = user.effectiveStatus(
+        nowMs: now, isVerifiedBot: verifiedBots.contains(pubkey));
     final entry = MentionResult(
       pubkey: pubkey,
       nym: user.nym,

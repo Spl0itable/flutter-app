@@ -65,6 +65,21 @@ List<GeoFeature> decodeAdmin1FeaturesIsolate(String jsonString) =>
 List<CityPoint> decodeCitiesIsolate(String jsonString) =>
     decodeCitiesGeoJson(jsonString);
 
+/// Session-scoped globe view preferences (GL-L1/GL-L2). The PWA keeps the last
+/// Heat / Day-Night / Geohash-grid toggle states and the active-window selection
+/// on the in-memory app instance (`_heatmapPreference` / `_daynightPreference` /
+/// `_geohashGridPreference`, geohash-globe.js:349-351; `_geohashActiveWindowHours`,
+/// :238-243), so reopening the explorer within a session restores them. Flutter
+/// pushes a brand-new [GeohashExplorer] each time (sidebar.dart:602), so without a
+/// session holder every open would reset all four. This provider is the holder:
+/// read in `initState` to seed the widget fields and written from the toggle /
+/// window callbacks. No disk persistence — the PWA's preferences aren't persisted
+/// either (a fresh app launch starts from these defaults: all toggles off, 24h).
+final globePrefsProvider =
+    StateProvider<({bool heat, bool daynight, bool grid, int windowHours})>(
+  (ref) => (heat: false, daynight: false, grid: false, windowHours: 24),
+);
+
 /// The `#geohashExplorerModal` screen — a self-contained equirectangular world
 /// map for browsing geohash channels. Pan via drag, zoom via scroll/pinch, an
 /// active-window selector, controls (zoom, reset, heat, day/night, grid), a
@@ -138,6 +153,15 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   // Drag state.
   GeoView? _dragStartView;
 
+  // GL-H1 — pinch-zoom baseline. `ScaleUpdateDetails.scale` is cumulative since
+  // the gesture started; the PWA anchors zoom to the gesture-start spread
+  // (`pinch.zoom * newDist/pinch.dist`, geohash-globe.js:973-990). To reproduce
+  // that without exponential runaway we convert the cumulative scale into a
+  // per-frame incremental factor (`scale / _lastScale`) applied to the current
+  // view. `_lastScale` tracks the previous frame's cumulative scale and is reset
+  // to 1.0 on each `onScaleStart`.
+  double _lastScale = 1.0;
+
   // --- Heatmap precompute (F1) ---------------------------------------------
   // The PWA's `drawHeatmap` accumulates blobs into a half-res buffer then
   // remaps per-pixel alpha through the palette; that can't run inside paint, so
@@ -161,6 +185,14 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   @override
   void initState() {
     super.initState();
+    // GL-L1/GL-L2 — restore the last session's toggle/window preferences so a
+    // re-open of the explorer keeps Heat/Day-Night/Grid + the active window the
+    // user last chose (mirrors the PWA's instance-held preferences).
+    final prefs = ref.read(globePrefsProvider);
+    _heatmap = prefs.heat;
+    _daynight = prefs.daynight;
+    _grid = prefs.grid;
+    _activeWindowHours = prefs.windowHours;
     _loadFeatures();
     // GL3 — quietly pull recent-activity counts from D1 on open so the globe
     // reflects real activity (especially the default 24h view) for channels we
@@ -273,7 +305,21 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
   void _setActiveWindow(int hours) {
     if (hours == _activeWindowHours) return;
     setState(() => _activeWindowHours = hours);
+    _savePrefs();
     _ticker.value++;
+  }
+
+  /// GL-L1/GL-L2 — snapshot the current toggle/window preferences into the
+  /// session [globePrefsProvider] so a later re-open of the explorer restores
+  /// them (the PWA writes these on every toggle/window change, geohash-globe.js
+  /// :1090/1096/1102 and channels.js:329-343).
+  void _savePrefs() {
+    ref.read(globePrefsProvider.notifier).state = (
+      heat: _heatmap,
+      daynight: _daynight,
+      grid: _grid,
+      windowHours: _activeWindowHours,
+    );
   }
 
   /// The user's location for the map marker / distance row, but only when the
@@ -449,6 +495,11 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
       _locationInfo = 'Loading location...';
       _activeWindowHours = 24;
     });
+    // GL-L1/GL-L2 — Reset View clears the session preferences too (the PWA's
+    // reset nulls `_heatmapPreference`/etc. and forces the window back to 24,
+    // geohash-globe.js:1062/1067/1072/1218-1220), so a later re-open starts from
+    // the home state rather than restoring the pre-reset toggles.
+    _savePrefs();
   }
 
   void _join(String geohash) {
@@ -652,25 +703,32 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
           onTapUp: (d) => _onTapUp(d, size),
           onScaleStart: (d) {
             _dragStartView = _view;
+            _lastScale = 1.0; // GL-H1: reset the cumulative-scale baseline.
             setState(() => _dragging = true);
           },
           onScaleUpdate: (d) {
-            final start = _dragStartView ?? _view;
-            // Pan: translate the focal-point delta into degrees.
-            final s = start.scale(size);
-            var v = start.copyWith(
-              cx: start.cx - d.focalPointDelta.dx / s,
-              cy: start.cy + d.focalPointDelta.dy / s,
+            // Pan: translate the incremental focal-point delta into degrees,
+            // applied to the *current* view (PWA pans by per-frame deltas).
+            final s = _view.scale(size);
+            var v = _view.copyWith(
+              cx: _view.cx - d.focalPointDelta.dx / s,
+              cy: _view.cy + d.focalPointDelta.dy / s,
             );
-            // Pinch zoom around the focal point.
+            // GL-H1 — pinch zoom around the focal point using the per-frame
+            // INCREMENTAL factor (cumulative `d.scale` / last cumulative), not
+            // the cumulative scale itself. This matches the PWA's linear
+            // finger-spread→zoom mapping (geohash-globe.js:973-990) instead of
+            // compounding `zoomₙ = zoomₙ₋₁ × d.scaleₙ` and running away.
             if (d.scale != 1.0) {
-              v = v.zoomedAt(d.scale, d.localFocalPoint, size);
+              final factor = d.scale / _lastScale;
+              _lastScale = d.scale;
+              v = v.zoomedAt(factor, d.localFocalPoint, size);
             }
-            _dragStartView = v; // accumulate for incremental deltas
             _setView(v, size);
           },
           onScaleEnd: (_) {
             _dragStartView = null;
+            _lastScale = 1.0;
             setState(() => _dragging = false);
           },
           child: RepaintBoundary(
@@ -733,14 +791,24 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
         children: [
           _controlBtn('Heat',
               active: _heatmap,
-              onTap: () => setState(() => _heatmap = !_heatmap)),
+              onTap: () {
+                setState(() => _heatmap = !_heatmap);
+                _savePrefs();
+              }),
           const SizedBox(width: 10),
           _controlBtn('Day / Night',
               active: _daynight,
-              onTap: () => setState(() => _daynight = !_daynight)),
+              onTap: () {
+                setState(() => _daynight = !_daynight);
+                _savePrefs();
+              }),
           const SizedBox(width: 10),
           _controlBtn('Geohash',
-              active: _grid, onTap: () => setState(() => _grid = !_grid)),
+              active: _grid,
+              onTap: () {
+                setState(() => _grid = !_grid);
+                _savePrefs();
+              }),
         ],
       ),
     );

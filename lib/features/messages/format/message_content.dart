@@ -24,9 +24,11 @@ import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
 import '../../../widgets/chat/messages_list.dart' show messageListScrollerProvider;
 import '../../../widgets/common/app_dialog.dart';
+import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
+import '../../emoji/emoji_data.dart' show kEmojiShortcodeMap;
 import '../inline_network_image.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
@@ -68,6 +70,7 @@ class MessageContent extends ConsumerWidget {
     this.blurImages = false,
     this.glyphShadows,
     this.monospace = false,
+    this.enrichMentionAvatars = false,
   });
 
   final String content;
@@ -93,6 +96,13 @@ class MessageContent extends ConsumerWidget {
 
   /// Render the body in a monospace family (the CRT style). (`F13`.)
   final bool monospace;
+
+  /// Render a leading inline avatar on each `@mention` chip, resolved from
+  /// `usersProvider`. Mirrors the PWA's `_enrichActionMentions`
+  /// (messages.js:1369-1403), which decorates the mentions INSIDE a `/me`
+  /// action with the mentioned user's avatar. Off everywhere else (a plain
+  /// mention chip carries no avatar). (`F01-7`.)
+  final bool enrichMentionAvatars;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -270,6 +280,7 @@ class MessageContent extends ConsumerWidget {
           emojiOnly: emojiOnly,
           shadows: glyphShadows,
           monospace: monospace,
+          enrichMentionAvatars: enrichMentionAvatars,
           onChannelRef: onChannelRef,
           onMentionTap: onMentionTap,
         );
@@ -281,6 +292,7 @@ class MessageContent extends ConsumerWidget {
           color: c.primary,
           size: size * scale,
           weight: FontWeight.w700,
+          enrichMentionAvatars: enrichMentionAvatars,
           onChannelRef: onChannelRef,
           onMentionTap: onMentionTap,
         );
@@ -353,6 +365,7 @@ class _RichInline extends StatelessWidget {
     this.emojiOnly = false,
     this.shadows,
     this.monospace = false,
+    this.enrichMentionAvatars = false,
     this.onChannelRef,
     this.onMentionTap,
   });
@@ -370,6 +383,10 @@ class _RichInline extends StatelessWidget {
 
   /// Render glyphs in a monospace family (CRT).
   final bool monospace;
+
+  /// Render a leading inline avatar on each mention chip (`/me` action
+  /// enrichment, `_enrichActionMentions`). Off elsewhere. (`F01-7`.)
+  final bool enrichMentionAvatars;
 
   /// Switches the active channel when a `#ref` / `app.nym.bar/#…` link is tapped.
   final void Function(String name, bool isGeohash)? onChannelRef;
@@ -477,7 +494,12 @@ class _RichInline extends StatelessWidget {
       case MentionNode():
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
-          child: _MentionChip(node: node, size: size, onTap: onMentionTap),
+          child: _MentionChip(
+            node: node,
+            size: size,
+            onTap: onMentionTap,
+            withAvatar: enrichMentionAvatars,
+          ),
         );
       case ChannelRefNode(:final name, :final isGeohash):
         // `.channel-reference`: underlined, inherits BODY text color (no tint),
@@ -555,8 +577,13 @@ class _LinkTap extends TapGestureRecognizer {
   }
 }
 
-class _MentionChip extends StatelessWidget {
-  const _MentionChip({required this.node, required this.size, this.onTap});
+class _MentionChip extends ConsumerWidget {
+  const _MentionChip({
+    required this.node,
+    required this.size,
+    this.onTap,
+    this.withAvatar = false,
+  });
   final MentionNode node;
   final double size;
 
@@ -564,10 +591,16 @@ class _MentionChip extends StatelessWidget {
   /// (`.nm-mention { cursor:pointer }`, ui-context.js:859-870). Null → inert.
   final void Function(MentionNode node)? onTap;
 
+  /// Prepend the mentioned user's inline avatar (the `.action-mention` form the
+  /// PWA produces inside a `/me` action, `_enrichActionMentions`). When the
+  /// mention can't be resolved to a known user the avatar is dropped and the
+  /// chip renders plain — exactly like the PWA keeps the plain rendering.
+  final bool withAvatar;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    final chip = Text.rich(
+    final text = Text.rich(
       TextSpan(
         children: [
           TextSpan(
@@ -591,6 +624,31 @@ class _MentionChip extends StatelessWidget {
         ],
       ),
     );
+
+    Widget chip = text;
+    if (withAvatar) {
+      // Resolve the mention to a known user (same matcher the tap path uses) and
+      // pull its kind-0 avatar; NymAvatar falls back to the identicon when the
+      // profile carries no picture. Mirrors `getAvatarUrl(pubkey)` in
+      // `_enrichActionMentions` (messages.js:1395).
+      final users = ref.watch(usersProvider);
+      final raw =
+          node.suffix != null ? '${node.base}#${node.suffix}' : node.base;
+      final t = resolveTarget(raw, users);
+      if (t != null) {
+        final pic = users[t.pubkey]?.profile?.picture;
+        chip = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // `.avatar-message` inline avatar — sized to the mention text.
+            NymAvatar(seed: t.pubkey, size: size, imageUrl: pic),
+            const SizedBox(width: 3),
+            text,
+          ],
+        );
+      }
+    }
+
     if (onTap == null) return chip;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -720,6 +778,332 @@ class _GroupIcoPainter extends CustomPainter {
   bool shouldRepaint(covariant _GroupIcoPainter old) => old.color != color;
 }
 
+// ===========================================================================
+// Syntax highlighting — a 1:1 port of the PWA `NymHighlight`
+// (js/modules/syntax-highlight.js): a tiny built-in tokenizer for fenced code
+// blocks. Produces a flat list of `(text, class)` runs that `_CodeBox` paints
+// with the VS-Code-ish token colors from styles-chat.css:1158-1170
+// (`.hl-comment` #6a9955 italic, `.hl-string` #ce9178, `.hl-number` #b5cea8,
+// `.hl-keyword` #569cd6 600, `.hl-builtin` #4ec9b0, `.hl-function` #dcdcaa,
+// `.hl-key` #9cdcfe). When the language is unknown the highlighter returns a
+// single `none` run, so the body is plain monospace exactly as before.
+// ===========================================================================
+
+/// Token classes emitted by [_highlightCode], mirroring the PWA's `hl-*` spans.
+enum _HlClass { none, comment, string, number, keyword, builtin, function, key }
+
+/// One highlighted run: a slice of source [text] with its token [cls].
+class _HlTok {
+  const _HlTok(this.text, this.cls);
+  final String text;
+  final _HlClass cls;
+}
+
+/// Per-language keyword sets (`syntax-highlight.js` `KW`). `ts` extends `js`;
+/// `jsx`/`tsx` alias `js`/`ts`.
+const Map<String, List<String>> _kHlKeywords = {
+  'js': [
+    'async','await','break','case','catch','class','const','continue','debugger','default','delete','do','else','export','extends','finally','for','from','function','if','import','in','instanceof','let','new','null','of','return','static','super','switch','this','throw','true','false','try','typeof','undefined','var','void','while','with','yield',
+  ],
+  'py': [
+    'False','None','True','and','as','assert','async','await','break','class','continue','def','del','elif','else','except','finally','for','from','global','if','import','in','is','lambda','nonlocal','not','or','pass','raise','return','try','while','with','yield','match','case',
+  ],
+  'rs': [
+    'as','async','await','break','const','continue','crate','dyn','else','enum','extern','false','fn','for','if','impl','in','let','loop','match','mod','move','mut','pub','ref','return','self','Self','static','struct','super','trait','true','type','unsafe','use','where','while','yield','box',
+  ],
+  'go': [
+    'break','case','chan','const','continue','default','defer','else','fallthrough','for','func','go','goto','if','import','interface','map','package','range','return','select','struct','switch','type','var','true','false','nil','iota',
+  ],
+  'java': [
+    'abstract','assert','boolean','break','byte','case','catch','char','class','const','continue','default','do','double','else','enum','extends','final','finally','float','for','goto','if','implements','import','instanceof','int','interface','long','native','new','null','package','private','protected','public','return','short','static','strictfp','super','switch','synchronized','this','throw','throws','transient','try','void','volatile','while','true','false',
+  ],
+  'c': [
+    'auto','break','case','char','const','continue','default','do','double','else','enum','extern','float','for','goto','if','inline','int','long','register','restrict','return','short','signed','sizeof','static','struct','switch','typedef','union','unsigned','void','volatile','while','_Bool','_Complex','_Imaginary','bool','true','false','NULL','nullptr',
+  ],
+  'cpp': [
+    'alignas','alignof','and','asm','auto','bool','break','case','catch','char','class','co_await','co_return','co_yield','const','constexpr','const_cast','continue','decltype','default','delete','do','double','dynamic_cast','else','enum','explicit','export','extern','false','final','float','for','friend','goto','if','inline','int','long','mutable','namespace','new','noexcept','not','nullptr','operator','or','override','private','protected','public','register','reinterpret_cast','return','short','signed','sizeof','static','static_cast','struct','switch','template','this','thread_local','throw','true','try','typedef','typeid','typename','union','unsigned','using','virtual','void','volatile','while','xor',
+  ],
+  'sh': [
+    'if','then','else','elif','fi','for','in','do','done','while','until','case','esac','function','return','break','continue','exit','export','local','readonly','set','unset','source','alias','declare','typeset','true','false',
+  ],
+  'sql': [
+    'SELECT','FROM','WHERE','INSERT','UPDATE','DELETE','CREATE','DROP','ALTER','TABLE','INDEX','VIEW','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','AS','AND','OR','NOT','NULL','IS','IN','LIKE','BETWEEN','GROUP','BY','ORDER','HAVING','LIMIT','OFFSET','UNION','ALL','DISTINCT','INTO','VALUES','SET','PRIMARY','KEY','FOREIGN','REFERENCES','DEFAULT','UNIQUE','CHECK','CASE','WHEN','THEN','ELSE','END','WITH','RETURNING','BEGIN','COMMIT','ROLLBACK','TRANSACTION','IF','EXISTS','TRUE','FALSE',
+  ],
+  'ts': [
+    // KW.js ++ the TS-only additions (`syntax-highlight.js:16`).
+    'async','await','break','case','catch','class','const','continue','debugger','default','delete','do','else','export','extends','finally','for','from','function','if','import','in','instanceof','let','new','null','of','return','static','super','switch','this','throw','true','false','try','typeof','undefined','var','void','while','with','yield',
+    'any','as','boolean','declare','enum','interface','is','keyof','module','namespace','never','number','readonly','satisfies','string','symbol','type','unique','unknown','infer','public','private','protected','abstract','implements',
+  ],
+};
+
+/// Per-language builtin/identifier sets (`syntax-highlight.js` `BUILTINS`).
+const Map<String, List<String>> _kHlBuiltins = {
+  'js': [
+    'console','window','document','globalThis','Math','JSON','Object','Array','String','Number','Boolean','Date','Map','Set','Promise','RegExp','Symbol','BigInt','Error','fetch','setTimeout','setInterval','clearTimeout','clearInterval','queueMicrotask','structuredClone',
+  ],
+  'py': [
+    'print','len','range','int','str','float','bool','list','dict','tuple','set','frozenset','bytes','bytearray','open','input','type','isinstance','enumerate','zip','map','filter','sorted','sum','min','max','abs','round','any','all','self','cls','__init__','__name__','super',
+  ],
+  'rs': [
+    'Vec','String','Option','Result','Box','Rc','Arc','HashMap','HashSet','BTreeMap','Some','None','Ok','Err','println','print','format','vec','assert','assert_eq','assert_ne','panic','dbg','todo','unimplemented','unreachable','i8','i16','i32','i64','i128','u8','u16','u32','u64','u128','f32','f64','bool','char','str','isize','usize',
+  ],
+  'go': [
+    'append','cap','close','copy','delete','len','make','new','panic','print','println','recover','complex','imag','real','string','int','int8','int16','int32','int64','uint','uint8','uint16','uint32','uint64','uintptr','byte','rune','float32','float64','bool','error',
+  ],
+  'ts': [
+    'console','window','document','globalThis','Math','JSON','Object','Array','String','Number','Boolean','Date','Map','Set','Promise','RegExp','Symbol','BigInt','Error','fetch','Partial','Readonly','Record','Pick','Omit','Required','Exclude','Extract','ReturnType','Parameters',
+  ],
+  'sh': [
+    'echo','cat','grep','sed','awk','cd','ls','rm','cp','mv','mkdir','rmdir','touch','chmod','chown','find','xargs','curl','wget','tar','gzip','gunzip','zip','unzip','ps','kill','top','df','du','wc','sort','uniq','head','tail','tr','tee','printf','read','test','sleep','date','env','which',
+  ],
+  'c': [
+    'printf','scanf','fprintf','sprintf','snprintf','malloc','calloc','realloc','free','memcpy','memset','memcmp','strlen','strcpy','strncpy','strcmp','strncmp','strcat','strncat','strchr','strstr','fopen','fclose','fread','fwrite','fgets','fputs','exit','abort','assert','sizeof','NULL','stdin','stdout','stderr','std','cout','cin','cerr','endl','vector','string','map','unordered_map','set','unordered_set','pair','make_pair','shared_ptr','unique_ptr',
+  ],
+};
+
+/// Language aliases (`syntax-highlight.js` `LANG_ALIAS`).
+const Map<String, String> _kHlLangAlias = {
+  'javascript': 'js', 'node': 'js', 'nodejs': 'js',
+  'typescript': 'ts',
+  'python': 'py', 'python3': 'py',
+  'rust': 'rs',
+  'golang': 'go',
+  'bash': 'sh', 'shell': 'sh', 'zsh': 'sh', 'sh': 'sh',
+  'c++': 'cpp', 'cxx': 'cpp',
+  'objective-c': 'c', 'objc': 'c',
+  'html': 'xml', 'svg': 'xml', 'xhtml': 'xml',
+  'yml': 'yaml',
+};
+
+/// `normalizeLang` (`syntax-highlight.js:173-182`): resolve a fenced-code lang
+/// hint to a canonical lexer key, or null when there's no highlighter for it.
+String? _normalizeHlLang(String? lang) {
+  if (lang == null) return null;
+  final l = lang.toLowerCase().trim();
+  if (_kHlLangAlias.containsKey(l)) return _kHlLangAlias[l];
+  if (_kHlKeywords.containsKey(l) || _kHlBuiltins.containsKey(l)) return l;
+  if (l == 'json' || l == 'jsonc') return 'json';
+  if (l == 'xml' || l == 'html') return 'xml';
+  if (l == 'css' || l == 'scss' || l == 'less') return 'css';
+  return null;
+}
+
+/// `highlight` (`syntax-highlight.js:184-191`): tokenize [code] for [lang]. A
+/// null/unknown lang yields a single `none` run (plain monospace).
+List<_HlTok> _highlightCode(String code, String? lang) {
+  final l = _normalizeHlLang(lang);
+  if (l == null) return [_HlTok(code, _HlClass.none)];
+  if (l == 'json') return _highlightJsonLike(code);
+  if (l == 'xml') return _highlightXml(code);
+  if (l == 'css') return _highlightCss(code);
+  return _highlightGeneric(code, l);
+}
+
+final RegExp _rxHlNum = RegExp(r'^-?\d');
+
+/// `highlightJsonLike` (`syntax-highlight.js:52-68`).
+List<_HlTok> _highlightJsonLike(String src) {
+  final out = <_HlTok>[];
+  final re = RegExp(
+      r'"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\],:]|\s+|[^\s{}\[\],:"]+');
+  for (final m in re.allMatches(src)) {
+    final t = m[0]!;
+    if (t.startsWith('"')) {
+      // A string immediately followed by `:` is an object KEY (.hl-key).
+      final after = src.substring(m.end);
+      final isKey = RegExp(r'^\s*:').hasMatch(after);
+      out.add(_HlTok(t, isKey ? _HlClass.key : _HlClass.string));
+    } else if (t == 'true' || t == 'false' || t == 'null') {
+      out.add(_HlTok(t, _HlClass.keyword));
+    } else if (_rxHlNum.hasMatch(t)) {
+      out.add(_HlTok(t, _HlClass.number));
+    } else {
+      out.add(_HlTok(t, _HlClass.none));
+    }
+  }
+  return out;
+}
+
+/// `highlightXml` (`syntax-highlight.js:70-84`).
+List<_HlTok> _highlightXml(String src) {
+  final out = <_HlTok>[];
+  final re = RegExp(
+      '''<!--[\\s\\S]*?-->|</?[A-Za-z][\\w:-]*|/?>|"[^"]*"|'[^']*'|[A-Za-z_:][\\w:.-]*=|[^<"'>]+''');
+  for (final m in re.allMatches(src)) {
+    final t = m[0]!;
+    if (t.startsWith('<!--')) {
+      out.add(_HlTok(t, _HlClass.comment));
+    } else if (RegExp(r'^<\/?[A-Za-z]').hasMatch(t)) {
+      out.add(_HlTok(t, _HlClass.keyword));
+    } else if (t == '>' || t == '/>') {
+      out.add(_HlTok(t, _HlClass.keyword));
+    } else if (t.startsWith('"') || t.startsWith("'")) {
+      out.add(_HlTok(t, _HlClass.string));
+    } else if (t.endsWith('=')) {
+      out.add(_HlTok(t, _HlClass.builtin));
+    } else {
+      out.add(_HlTok(t, _HlClass.none));
+    }
+  }
+  return out;
+}
+
+/// `highlightCss` (`syntax-highlight.js:86-101`).
+List<_HlTok> _highlightCss(String src) {
+  final out = <_HlTok>[];
+  final re = RegExp(
+      r'''/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|--[\w-]+|@[\w-]+|#[0-9a-fA-F]{3,8}\b|-?\d+(?:\.\d+)?(?:px|em|rem|vh|vw|%|s|ms|deg|fr)?|[\w-]+\s*(?=:)|[{}();:,]|[\w-]+|\s+|.''');
+  for (final m in re.allMatches(src)) {
+    final t = m[0]!;
+    if (t.startsWith('/*')) {
+      out.add(_HlTok(t, _HlClass.comment));
+    } else if (t.startsWith('"') || t.startsWith("'")) {
+      out.add(_HlTok(t, _HlClass.string));
+    } else if (t.startsWith('@') || t.startsWith('--')) {
+      out.add(_HlTok(t, _HlClass.keyword));
+    } else if (RegExp(r'^#[0-9a-fA-F]{3,8}$').hasMatch(t)) {
+      out.add(_HlTok(t, _HlClass.number));
+    } else if (_rxHlNum.hasMatch(t)) {
+      out.add(_HlTok(t, _HlClass.number));
+    } else if (RegExp(r'\w').hasMatch(t) &&
+        RegExp(r':\s*$')
+            .hasMatch(src.substring(m.start, (m.start + t.length + 4).clamp(0, src.length)))) {
+      // A property name (`name:`). The PWA trims the trailing run then re-emits
+      // it; we keep the slice whole, tagging it builtin (a property token).
+      out.add(_HlTok(t, _HlClass.builtin));
+    } else {
+      out.add(_HlTok(t, _HlClass.none));
+    }
+  }
+  return out;
+}
+
+final RegExp _rxHlIdent = RegExp(r'[A-Za-z_$][\w$]*');
+final RegExp _rxHlIdentStart = RegExp(r'[A-Za-z_$]');
+final RegExp _rxHlNumber = RegExp(
+    r'(?:0x[0-9a-fA-F_]+|0b[01_]+|0o[0-7_]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[fFuUlLnN]*');
+final RegExp _rxHlCall = RegExp(r'^\s*\(');
+
+/// `highlightGeneric` (`syntax-highlight.js:103-171`): the main char-walk lexer
+/// (comments, strings, numbers, identifiers → keyword/builtin/function).
+List<_HlTok> _highlightGeneric(String src, String lang) {
+  final kws = (_kHlKeywords[lang] ?? const <String>[]).toSet();
+  final builtins = (_kHlBuiltins[lang] ?? const <String>[]).toSet();
+  final isShell = lang == 'sh';
+  final lineComment = (lang == 'py' || lang == 'sh' || lang == 'yaml' || lang == 'rb')
+      ? RegExp(r'^#.*')
+      : RegExp(r'^\/\/.*');
+  final RegExp? blockComment = (lang == 'py') ? null : RegExp(r'^\/\*[\s\S]*?\*\/');
+  final RegExp? pyDocstring =
+      (lang == 'py') ? RegExp(r'''^("""[\s\S]*?"""|\x27\x27\x27[\s\S]*?\x27\x27\x27)''') : null;
+
+  final out = <_HlTok>[];
+  var i = 0;
+  final n = src.length;
+
+  while (i < n) {
+    final rest = src.substring(i);
+
+    if (pyDocstring != null) {
+      final m = pyDocstring.matchAsPrefix(rest);
+      if (m != null) {
+        out.add(_HlTok(m[0]!, _HlClass.comment));
+        i += m[0]!.length;
+        continue;
+      }
+    }
+    if (blockComment != null) {
+      final m = blockComment.matchAsPrefix(rest);
+      if (m != null) {
+        out.add(_HlTok(m[0]!, _HlClass.comment));
+        i += m[0]!.length;
+        continue;
+      }
+    }
+    final lc = lineComment.matchAsPrefix(rest);
+    if (lc != null) {
+      out.add(_HlTok(lc[0]!, _HlClass.comment));
+      i += lc[0]!.length;
+      continue;
+    }
+
+    final ch = src[i];
+    if (ch == '"' || ch == "'" || ch == '`') {
+      var j = i + 1;
+      while (j < n) {
+        if (src[j] == '\\') {
+          j += 2;
+          continue;
+        }
+        if (src[j] == ch) {
+          j++;
+          break;
+        }
+        if (src[j] == '\n' && ch != '`') break;
+        j++;
+      }
+      out.add(_HlTok(src.substring(i, j.clamp(0, n)), _HlClass.string));
+      i = j > n ? n : j;
+      continue;
+    }
+
+    final numMatch = _rxHlNumber.matchAsPrefix(rest);
+    if (numMatch != null && (i == 0 || !_rxHlIdentStart.hasMatch(src[i - 1]))) {
+      out.add(_HlTok(numMatch[0]!, _HlClass.number));
+      i += numMatch[0]!.length;
+      continue;
+    }
+
+    final idMatch = _rxHlIdent.matchAsPrefix(rest);
+    if (idMatch != null) {
+      final id = idMatch[0]!;
+      if (kws.contains(id)) {
+        out.add(_HlTok(id, _HlClass.keyword));
+      } else if (builtins.contains(id)) {
+        out.add(_HlTok(id, _HlClass.builtin));
+      } else {
+        final after = _rxHlCall.matchAsPrefix(src.substring(i + id.length));
+        if (after != null && !isShell) {
+          out.add(_HlTok(id, _HlClass.function));
+        } else if (isShell && i == 0) {
+          out.add(_HlTok(id, _HlClass.function));
+        } else {
+          out.add(_HlTok(id, _HlClass.none));
+        }
+      }
+      i += id.length;
+      continue;
+    }
+
+    out.add(_HlTok(ch, _HlClass.none));
+    i++;
+  }
+  return out;
+}
+
+/// Maps an [_HlClass] to its VS-Code-ish token color (styles-chat.css:1158-1170).
+/// `none` falls back to the box's base bright text color.
+Color _hlColor(_HlClass cls, Color base) {
+  switch (cls) {
+    case _HlClass.comment:
+      return const Color(0xFF6A9955);
+    case _HlClass.string:
+      return const Color(0xFFCE9178);
+    case _HlClass.number:
+      return const Color(0xFFB5CEA8);
+    case _HlClass.keyword:
+      return const Color(0xFF569CD6);
+    case _HlClass.builtin:
+      return const Color(0xFF4EC9B0);
+    case _HlClass.function:
+      return const Color(0xFFDCDCAA);
+    case _HlClass.key:
+      return const Color(0xFF9CDCFE);
+    case _HlClass.none:
+      return base;
+  }
+}
+
 /// Monospace code box with an optional language label and a copy affordance.
 class _CodeBox extends StatelessWidget {
   const _CodeBox({required this.code, required this.lang, required this.size});
@@ -730,6 +1114,32 @@ class _CodeBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // Tokenize for syntax coloring (NymHighlight). An unknown/absent language
+    // yields a single `none` run, so the body is plain bright monospace exactly
+    // as before — only recognized languages get the VS-Code token colors.
+    final base = TextStyle(
+      color: c.textBright,
+      fontSize: size - 1,
+      fontFamily: 'monospace',
+      height: 1.4,
+    );
+    final tokens = _highlightCode(code, lang);
+    final codeSpan = TextSpan(
+      children: [
+        for (final tok in tokens)
+          TextSpan(
+            text: tok.text,
+            style: base.copyWith(
+              color: _hlColor(tok.cls, c.textBright),
+              // `.hl-comment { font-style: italic }`; `.hl-keyword { font-weight:600 }`.
+              fontStyle:
+                  tok.cls == _HlClass.comment ? FontStyle.italic : FontStyle.normal,
+              fontWeight:
+                  tok.cls == _HlClass.keyword ? FontWeight.w600 : FontWeight.normal,
+            ),
+          ),
+      ],
+    );
     // `pre` radius is `--radius-sm` (=12), wrapper `padding-top:22px`
     // (styles-chat.css:1097, 1141-1143). The lang label + Copy pill are
     // absolutely positioned (top-left / top-right), so we Stack them over the
@@ -747,15 +1157,7 @@ class _CodeBox extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(10, 22, 10, 10),
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
-              child: Text(
-                code,
-                style: TextStyle(
-                  color: c.textBright,
-                  fontSize: size - 1,
-                  fontFamily: 'monospace',
-                  height: 1.4,
-                ),
-              ),
+              child: Text.rich(codeSpan),
             ),
           ),
           // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`.
@@ -1519,9 +1921,9 @@ class InlineEmojiText extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final codeToUrl = ref.watch(liveCustomEmojiProvider).codeToUrl;
 
-    // Fast path: nothing to substitute → a single styled Text (keeps these
-    // surfaces find-by-text friendly and avoids a needless RichText).
-    if (codeToUrl.isEmpty || !_rxToken.hasMatch(text)) {
+    // Fast path: no `:shortcode:` token at all → a single styled Text (keeps
+    // these surfaces find-by-text friendly and avoids a needless RichText).
+    if (!_rxToken.hasMatch(text)) {
       return Text(text,
           style: style,
           maxLines: maxLines,
@@ -1533,26 +1935,42 @@ class InlineEmojiText extends ConsumerWidget {
     final spans = <InlineSpan>[];
     var last = 0;
     for (final m in _rxToken.allMatches(text)) {
-      final url = codeToUrl[m.group(1)];
-      if (url == null) continue; // unknown code → leave the literal `:code:`
+      final code = m.group(1)!;
+      // PWA resolution order (message-format.js:251-257): the built-in unicode
+      // `emojiMap` (lowercased key) is tried FIRST and substitutes the literal
+      // shortcode with its glyph; only then the NIP-30 custom-emoji image
+      // (looked up with the EXACT case). `kEmojiShortcodeMap` is the full PWA
+      // map (emoji_data.dart) — so common `:shortcodes:` (e.g. `:tada:`,
+      // `:rocket:`) render as the unicode emoji here too, not literal text.
+      final builtin = kEmojiShortcodeMap[code.toLowerCase()];
+      final url = builtin == null ? codeToUrl[code] : null;
+      if (builtin == null && url == null) {
+        continue; // unknown code → leave the literal `:code:` in trailing text
+      }
       if (m.start > last) {
         spans.add(TextSpan(text: text.substring(last, m.start), style: style));
       }
-      spans.add(WidgetSpan(
-        alignment: PlaceholderAlignment.middle,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 1),
-          child: InlineNetworkImage(
-            url: proxiedMedia(url, emoji: true),
-            width: side,
-            height: side,
-            fit: BoxFit.contain,
-            // Disk-cached (sparse: a reaction badge / a notification line shows
-            // one emoji). Only the picker grid uses memoryOnly.
-            errorChild: Text(':${m.group(1)}:', style: style),
+      if (builtin != null) {
+        // Built-in unicode glyph: plain text run (no colour-emoji fallback is
+        // forced — it renders via the platform emoji font like the PWA's glyph).
+        spans.add(TextSpan(text: builtin, style: style));
+      } else {
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 1),
+            child: InlineNetworkImage(
+              url: proxiedMedia(url!, emoji: true),
+              width: side,
+              height: side,
+              fit: BoxFit.contain,
+              // Disk-cached (sparse: a reaction badge / a notification line
+              // shows one emoji). Only the picker grid uses memoryOnly.
+              errorChild: Text(':$code:', style: style),
+            ),
           ),
-        ),
-      ));
+        ));
+      }
       last = m.end;
     }
     if (last < text.length) {

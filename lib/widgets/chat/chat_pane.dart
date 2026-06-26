@@ -88,9 +88,19 @@ class ChatPane extends ConsumerWidget {
           // `#messagesContainer` (single view) / `#columnsStrip` (columns mode)
           // — the deck replaces only the messages list, not the header/composer.
           Expanded(
-            child: KeyedSubtree(
-              key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
-              child: useColumns ? const ColumnsDeck() : const MessagesList(),
+            // Tap-outside dismisses the soft keyboard (01-B3): a translucent
+            // GestureDetector over the messages region drops focus when a tap
+            // isn't consumed by an interactive child (message rows / buttons
+            // still win the arena). Swipe-down dismissal lives in `MessagesList`
+            // (`keyboardDismissBehavior: onDrag`). On the web/browser PWA this is
+            // native browser behaviour; Flutter needs it wired explicitly.
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: () => FocusScope.of(context).unfocus(),
+              child: KeyedSubtree(
+                key: TutorialTargets.keyFor(TutorialTarget.messagesContainer),
+                child: useColumns ? const ColumnsDeck() : const MessagesList(),
+              ),
             ),
           ),
           // `.input-container` — tutorial spotlight target. Stays mounted in
@@ -989,7 +999,18 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
         final count = app.users.values.where((u) {
           if (u.pubkey == app.selfPubkey) return false;
           if (!u.channels.contains(key)) return false;
-          if (u.effectiveStatus() == UserStatus.hidden) return false;
+          // `statusHidden = getEffectiveUserStatus(pk) === 'hidden'`
+          // (users.js:1387) — computed with the verified-bot override (CC-2) so
+          // the hidden gate matches the PWA's single effective-status read.
+          // NOTE: `channelUserCount` does NOT carry the bot always-online
+          // bypass that `activeCount` does — it gates purely on `isRecent`
+          // (users.js:1387 has no `|| verifiedBotSet`), so the recency check
+          // below is intentionally left to stand for bots too.
+          if (u.effectiveStatus(
+                  isVerifiedBot: kVerifiedBotPubkeys.contains(u.pubkey)) ==
+              UserStatus.hidden) {
+            return false;
+          }
           return now - u.lastSeen < kActiveThresholdMs;
         }).length;
         return (svg: null, text: '${_abbreviateCount(count)} online nyms');

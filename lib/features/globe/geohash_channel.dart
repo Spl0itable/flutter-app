@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 
 import '../../models/channel.dart';
@@ -78,6 +80,10 @@ List<GeohashChannelPoint> buildGeohashChannels(
   void tallyFromList(String geohash, List<Message> list) {
     var n = 0;
     for (final m in list) {
+      // C05-4 — the PWA's bucketing skips spam-gated messages
+      // (`if (m._spamGated) continue;`, channels.js:88-89), so a geohash flooded
+      // only by un-vouched strangers stays cold. Mirror that exclusion.
+      if (m.spamGated) continue;
       if (m.timestamp >= cutoffMs) n++;
     }
     counts[geohash] = (counts[geohash] ?? 0) + n;
@@ -131,14 +137,27 @@ List<GeohashChannelPoint> buildGeohashChannels(
     final list = state.messages['#$gh'];
     if (list != null) tallyFromList(gh, list);
 
-    // GL1 — mix local + D1 (PWA `_combineGeohashActivity`, channels.js:113-125,
-    // `total += max(local[i], d1[i])`). The native store has no per-hour D1
-    // buckets, so D1 contributes a presence floor when its last-activity ms for
-    // this geohash falls inside the active window: `max(localCount, floor)`.
+    // GL1 / C05-3 — mix local + D1 (PWA `_combineGeohashActivity`,
+    // channels.js:113-125, `total += max(local[i], d1[i])`). The native store
+    // has no per-hour D1 buckets, so D1 contributes a windowed *magnitude* when
+    // available and otherwise a presence floor when its last-activity ms for this
+    // geohash falls inside the active window: `max(localCount, d1Weight)`.
+    //
+    // The store DOES keep a since-lastRead summed count for joined channels in
+    // `unreadCounts['#<gh>']` (raised from D1 buckets by `applyChannelActivity`,
+    // app_state.dart:2417-2418). Using it lets the heatmap CLIMB with real D1
+    // activity for those channels instead of flooring every D1-only geohash at 1.
+    // `unreadCounts` is a whole-channel-since-lastRead sum (it can over/undercount
+    // at the window edges, and is 0 for never-joined channels), so we floor at
+    // [kD1ActiveHeatFloor] — strictly better than the old flat 1. The fully
+    // faithful per-hour-bucket `max` needs a `_geohashD1Activity` store in
+    // AppState (DEFERRED — not owned here).
     final d1LastMs = state.channelLastActivity['#$gh'] ?? 0;
     if (d1LastMs >= cutoffMs) {
       final local = counts[gh] ?? 0;
-      if (kD1ActiveHeatFloor > local) counts[gh] = kD1ActiveHeatFloor;
+      final d1Sum = state.unreadCounts['#$gh'] ?? 0;
+      final d1Weight = math.max(kD1ActiveHeatFloor, d1Sum);
+      if (d1Weight > local) counts[gh] = d1Weight;
     }
   }
 

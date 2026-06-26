@@ -992,6 +992,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Seed the web-of-trust roots (app.js:1100-1101): the verified developer +
     // Nymbot anchor every transitive vouch chain.
     state.nymchatPubkeys.addAll(kTrustRootPubkeys);
+    // Seed the NORMAL Nymbot user + its official brand avatar (app.js:1103-1111:
+    // `this.users.set(verifiedBot.pubkey, {nym:'Nymbot', status:'online', …})` +
+    // `userAvatars.set(verifiedBot.pubkey, 'https://nymchat.app/images/nymbot-icon.png')`).
+    // `getAvatarUrl` then serves the PNG on EVERY Nymbot surface (sidebar PM row,
+    // channel bubble, premium PM bubble, header/welcome) — without this seed
+    // `users[kNymbotPubkey]` is null and each surface falls back to a different
+    // generated identicon / emoji (F10-1). One seed repairs them all at once.
+    state.users[kNymbotPubkey] = User(
+      pubkey: kNymbotPubkey,
+      nym: 'Nymbot',
+      status: UserStatus.online,
+      lastSeen: DateTime.now().millisecondsSinceEpoch,
+      profile: UserProfile(picture: 'https://nymchat.app/images/nymbot-icon.png'),
+    );
   }
 
   /// Resets the store to its pre-login state on sign-out / panic (app.js

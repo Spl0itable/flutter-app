@@ -61,6 +61,25 @@ const List<String> kCommonGeohashes = [
   'nymchat', '9q', 'w2', 'dr5r', '9q8y', 'u4pr', 'gcpv', 'f2m6', 'xn77', 'tjm5',
 ];
 
+/// A PM sent but not yet acknowledged by a delivery receipt, queued for
+/// automatic re-send (pms.js `trackPendingDM`/`retryPendingDMs`, lines 117-176).
+/// Keyed in [_pendingDms] by the stable `nymMessageId` (the `['x', …]` tag),
+/// NOT the optimistic bubble id — a re-publish rebuilds a fresh gift-wrap (new
+/// randomness, new wrap id), but the recipient dedups on `nymMessageId`, and the
+/// delivery receipt that clears the entry also references `nymMessageId`.
+class _PendingDm {
+  _PendingDm({
+    required this.rumor,
+    required this.recipientPubkey,
+    required this.lastAttemptMs,
+  });
+
+  final UnsignedEvent rumor;
+  final String recipientPubkey;
+  int attempts = 0;
+  int lastAttemptMs;
+}
+
 /// Ties identity + relay + crypto to the [AppState] store: boots an ephemeral
 /// identity, connects to relays, and routes inbound events into the store. Send
 /// requests from the composer flow through here.
@@ -355,6 +374,10 @@ class NostrController {
       if (view.kind == ViewKind.channel) {
         unawaited(_backfillChannelArchive(view.id));
       }
+      // Re-send any PM still waiting on a delivery receipt — a reconnect is the
+      // most likely moment a stuck DM finally lands (pms.js
+      // `retryPendingDMsOnReconnect`, F02 auto-retry).
+      _retryPendingDmsOnReconnect();
     }
   }
 
@@ -506,6 +529,9 @@ class NostrController {
     _trustPersistTimer?.cancel();
     _trustPersistTimer = null;
     _lastVouchPublishAt = 0;
+    _dmRetryTimer?.cancel();
+    _dmRetryTimer = null;
+    _pendingDms.clear();
     _profileBackfillTimer?.cancel();
     _profileBackfillTimer = null;
     _profileBackfillQueue.clear();
@@ -1636,7 +1662,38 @@ class NostrController {
       return;
     }
 
+    // Invite-link join approval (groups.js:506 `_handleGroupJoinRequest`, called
+    // at 790-792): when WE are the link sharer and receive a `group-join-request`,
+    // auto-admit the requester if invites are enabled, we can add members, the
+    // request's epoch matches our current invite epoch, and they aren't already a
+    // member/banned. Without this the joiner's request (joinGroupViaInvite,
+    // :2583, which sends `invite_epoch`) lands in the void — the whole invite-link
+    // join never completes (F04-H2). This must run BEFORE the generic
+    // `applyGroupControl` (join-request has no `applyControlEvent` case → ignored).
+    if (type == GroupControlType.joinRequest) {
+      final group = appState.groupById(groupId);
+      if (group == null) return;
+      if (!group.inviteEnabled) return;
+      final identity = _identity;
+      if (identity == null) return;
+      // Never act on our own request echoing back.
+      if (senderPubkey == identity.pubkey) return;
+      if (!GroupLogic.canAddMembers(group, identity.pubkey)) return;
+      final reqEpoch = int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0;
+      if (reqEpoch != group.inviteEpoch) return;
+      if (group.members.contains(senderPubkey)) return;
+      if (group.banned.contains(senderPubkey)) return;
+      unawaited(addGroupMembers(groupId, [senderPubkey]));
+      return;
+    }
+
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
+    // Resolve the group's display name BEFORE applying the control: a self-kick/
+    // ban makes `applyGroupControl` drop the group locally (app_state.dart:1671),
+    // after which `groupById` is null — but the "Removed from <group>"
+    // notification still needs the name (PWA `groupName`, groups.js:714 →
+    // `grp.name || groupName`).
+    final groupNameForNotif = appState.groupById(groupId)?.name;
     final result = appState.applyGroupControl(
       groupId: groupId,
       type: type,
@@ -1647,7 +1704,105 @@ class NostrController {
     );
     if (result == GroupControlResult.applied) {
       _emitGroupControlSystemLine(groupId, type, tags, senderPubkey);
+      _maybeNotifyGroupControl(
+        groupId: groupId,
+        groupName: groupNameForNotif,
+        type: type,
+        tags: tags,
+        senderPubkey: senderPubkey,
+        ts: ts,
+        eventId: u.wrapId,
+      );
     }
+  }
+
+  /// Dispatches the PWA's SELF-TARGETED group-control notification when an
+  /// inbound control event (kick/ban/promote/revoke/transfer/unban) is applied
+  /// AND it targets us (F04-H4 / CC-18). The in-chat system line for ALL members
+  /// is emitted separately by [_emitGroupControlSystemLine]; this is the
+  /// "you might not have the group open" alert the PWA also fires
+  /// (groups.js:736/1016/1078/1116/1156). Gated exactly like the PWA's
+  /// `_addNotificationToHistory`/`showNotification`: skip when WE are the actor,
+  /// when the sender is blocked, and when notifications are disabled. A
+  /// historical event (>10s old) records to history only (no toast) — mirrored
+  /// here via `silent: true`. Title/body strings are verbatim from the PWA.
+  void _maybeNotifyGroupControl({
+    required String groupId,
+    required String? groupName,
+    required String type,
+    required List<List<String>> tags,
+    required String senderPubkey,
+    required int ts,
+    String? eventId,
+  }) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    if (self.isEmpty) return;
+    // Never notify for our own action (PWA `if (isOwn) return`).
+    if (senderPubkey == self) return;
+    if (!_notificationsEnabled) return;
+    final appState = _ref.read(appStateProvider);
+    if (appState.blockedUsers.contains(senderPubkey)) return;
+
+    // PWA fallback chain: `grp.name || groupName` where `groupName = subjectTag
+    // ? subjectTag[1] : 'Group'` (groups.js:714).
+    final name = (groupName != null && groupName.isNotEmpty)
+        ? groupName
+        : (_tagValue(tags, 'subject') ?? 'Group');
+    final actor = _nymDisplayFor(senderPubkey);
+
+    String? title;
+    String? body;
+    switch (type) {
+      case GroupControlType.removeMember:
+        // Self-kick/ban only — the `kick` tag is the removed member.
+        if (_tagValue(tags, 'kick') != self) return;
+        final banned =
+            tags.any((t) => t.length > 1 && t[0] == 'ban' && t[1] == '1');
+        title = banned ? 'Banned from $name' : 'Removed from $name';
+        body = banned
+            ? '$actor banned you. You can be re-invited only by the group owner.'
+            : '$actor removed you from the group.';
+      case GroupControlType.promoteMod:
+        if (_tagValue(tags, 'mod') != self) return;
+        title = 'Promoted in $name';
+        body = '$actor made you a moderator.';
+      case GroupControlType.revokeMod:
+        if (_tagValue(tags, 'mod') != self) return;
+        title = 'Moderator removed in $name';
+        body = '$actor revoked your moderator role.';
+      case GroupControlType.transferOwner:
+        if (_tagValue(tags, 'owner') != self) return;
+        title = 'Owner of $name';
+        body = '$actor transferred group ownership to you.';
+      case GroupControlType.unban:
+        if (_tagValue(tags, 'unban') != self) return;
+        title = 'Unbanned from $name';
+        body = '$actor unbanned you from "$name". You may be re-invited.';
+      default:
+        return;
+    }
+    // Promote title/body to non-null for the `required String` params (mirrors
+    // the `line == null` guard in [_emitGroupControlSystemLine]); every reachable
+    // case above assigns both, but the switch's static type stays nullable.
+    if (title == null || body == null) return;
+
+    // Historical (>10s) → record to history only, no toast (PWA `isHistorical`).
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final silent = (nowSec - ts) > 10;
+
+    _dispatchNotification(
+      title: title,
+      body: body,
+      senderPubkey: senderPubkey,
+      isFriend: appState.isFriend(senderPubkey),
+      isMention: false,
+      isGroup: true,
+      historyType: 'group',
+      route: groupId,
+      eventId: eventId,
+      tsMs: ts > 0 ? ts * 1000 : null,
+      silent: silent,
+    );
   }
 
   /// Emits the PWA's in-chat system line for an applied inbound group control
@@ -1733,7 +1888,13 @@ class NostrController {
     }
     if (PmLogic.isReceipt(rumor)) {
       final info = PmLogic.parseReceipt(rumor);
-      if (info != null) appState.applyReceipt(info);
+      if (info != null) {
+        appState.applyReceipt(info);
+        // A delivery/read receipt acks the PM → drop it from the auto-retry
+        // queue (pms.js: `retryPendingDMs` removes any entry whose status left
+        // 'sent'). Keyed by `nymMessageId`, which the receipt's messageId is.
+        _pendingDms.remove(info.messageId);
+      }
     }
   }
 
@@ -2077,6 +2238,125 @@ class NostrController {
     return '${adj}_$noun';
   }
 
+  // --- PM auto-retry queue (pms.js trackPendingDM/retryPendingDMs) -----------
+  //
+  // A PM sent while the recipient is briefly offline gets no delivery receipt;
+  // the PWA re-publishes it on a 5s cadence up to 3 times, then stops (a missing
+  // receipt means "recipient offline", not a send failure — the bubble stays
+  // '✓ sent', NOT '!'). Also re-fired on relay reconnect. F02 auto-retry.
+
+  /// Re-send cadence + cap (app.js:589-590: `dmRetryCheckMs = 5000`,
+  /// `dmRetryMaxAttempts = 3`).
+  static const int _kDmRetryCheckMs = 5000;
+  static const int _kDmRetryMaxAttempts = 3;
+
+  /// Outstanding sent-but-unacked PMs keyed by `nymMessageId`.
+  final Map<String, _PendingDm> _pendingDms = <String, _PendingDm>{};
+  Timer? _dmRetryTimer;
+
+  /// Enqueues a freshly-sent PM for receipt-driven auto-retry and starts the
+  /// retry checker if idle (pms.js:116-130 `trackPendingDM`).
+  void _trackPendingDm({
+    required String nymMessageId,
+    required UnsignedEvent rumor,
+    required String recipientPubkey,
+  }) {
+    _pendingDms[nymMessageId] = _PendingDm(
+      rumor: rumor,
+      recipientPubkey: recipientPubkey,
+      lastAttemptMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _dmRetryTimer ??= Timer.periodic(
+      const Duration(milliseconds: _kDmRetryCheckMs),
+      (_) => _retryPendingDms(),
+    );
+  }
+
+  /// True once the PM with [nymMessageId] has a delivery status past `sent`
+  /// (delivered/read) — used to drop it from the retry queue.
+  bool _isDmAcked(String nymMessageId) {
+    final lists = _ref.read(appStateProvider).messages.values;
+    for (final list in lists) {
+      for (final m in list) {
+        if (m.isOwn && m.nymMessageId == nymMessageId) {
+          return m.deliveryStatus != DeliveryStatus.sent &&
+              m.deliveryStatus != DeliveryStatus.sending &&
+              m.deliveryStatus != DeliveryStatus.failed;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Periodic tick (pms.js:133-176 `retryPendingDMs`): drop acked/maxed entries,
+  /// re-publish the rest whose cooldown elapsed. Stops the timer when the queue
+  /// empties.
+  void _retryPendingDms() {
+    if (_pendingDms.isEmpty) {
+      _dmRetryTimer?.cancel();
+      _dmRetryTimer = null;
+      return;
+    }
+    final service = _service;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final done = <String>[];
+    _pendingDms.forEach((id, pending) {
+      // Delivered/read → stop retrying.
+      if (_isDmAcked(id)) {
+        done.add(id);
+        return;
+      }
+      if (now - pending.lastAttemptMs < _kDmRetryCheckMs) return;
+      // Cap reached: leave the bubble '✓ sent' (recipient offline, not a failure).
+      if (pending.attempts >= _kDmRetryMaxAttempts) {
+        done.add(id);
+        return;
+      }
+      pending.attempts++;
+      pending.lastAttemptMs = now;
+      if (service != null) {
+        unawaited(service.publishPM(
+          rumor: pending.rumor,
+          recipientPubkey: pending.recipientPubkey,
+          settings: _msgSettings,
+        ));
+      }
+    });
+    for (final id in done) {
+      _pendingDms.remove(id);
+    }
+    if (_pendingDms.isEmpty) {
+      _dmRetryTimer?.cancel();
+      _dmRetryTimer = null;
+    }
+  }
+
+  /// Re-send every still-unacked pending PM on a relay reconnect, bypassing the
+  /// per-tick cooldown/cap (pms.js:225-293 `retryPendingDMsOnReconnect`) — a
+  /// reconnect is the most likely moment a stuck DM can finally land.
+  void _retryPendingDmsOnReconnect() {
+    if (_pendingDms.isEmpty) return;
+    final service = _service;
+    if (service == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final done = <String>[];
+    _pendingDms.forEach((id, pending) {
+      if (_isDmAcked(id)) {
+        done.add(id);
+        return;
+      }
+      pending.lastAttemptMs = now;
+      unawaited(service.publishPM(
+        rumor: pending.rumor,
+        recipientPubkey: pending.recipientPubkey,
+        settings: _msgSettings,
+      ));
+    });
+    for (final id in done) {
+      _pendingDms.remove(id);
+    }
+  }
+
   /// Publishes [content] to the active conversation surface
   /// (`_sendToCurrentTarget`), WITHOUT command interception. Used both by the
   /// composer (after the `/` check) and by formatting/action commands whose
@@ -2153,6 +2433,14 @@ class NostrController {
           rumor: rumor,
           recipientPubkey: view.id,
           settings: _msgSettings,
+        );
+        // Queue for automatic re-send until a delivery receipt acks it
+        // (pms.js `trackPendingDM`). Cleared in [_onReceiptOrTyping] the moment
+        // a receipt for this `nymMessageId` lands, or dropped after the cap.
+        _trackPendingDm(
+          nymMessageId: nymMessageId,
+          rumor: rumor,
+          recipientPubkey: view.id,
         );
       } catch (_) {
         // Publish failed → flip the bubble to the failed "!" state (F02; the

@@ -172,6 +172,13 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// columns.js:77-78). One-shot so later rebuilds don't re-fire it.
   bool _syncedInitialView = false;
 
+  /// Re-entrancy guard for the external-view nav-sink (`_onExternalView`). Set
+  /// while the deck itself is driving `switchView` (via `_syncFocusedView`) so
+  /// the `ref.listen(view)` it triggers doesn't recurse back into the sink and
+  /// add/duplicate a column. Mirrors the PWA `_cvOpenConversation` guard against
+  /// `_cvFocusColumn` re-entry (columns.js:274-296 / 550-559).
+  bool _syncingFromDeck = false;
+
   /// Mobile carousel page controller (`_cvScrollToIndex` on `innerWidth<=768`).
   final PageController _pageController = PageController();
 
@@ -360,8 +367,89 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       if (!mounted) return;
       final notifier = ref.read(appStateProvider.notifier);
       if (ref.read(appStateProvider).view == view) return;
+      // Flag the deck-driven switch so the `ref.listen(view)` nav-sink
+      // (`_onExternalView`) doesn't treat it as outside navigation and recurse.
+      _syncingFromDeck = true;
       notifier.switchView(view);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _syncingFromDeck = false;
+      });
     });
+  }
+
+  /// Inverse of [_viewForDesc]: turn the shared [ChatView] into the matching
+  /// column descriptor so the nav-sink can find/repurpose/add a column. For a
+  /// channel it recovers the registered [ChannelEntry] (so a fresh column shows
+  /// the right name/geohash); falling back to a bare descriptor keyed off
+  /// `view.id` (geohash vs named) when the channel isn't in the registry yet.
+  _ColumnDesc _descForView(ChatView v) {
+    switch (v.kind) {
+      case ViewKind.channel:
+        final channels = ref.read(channelsProvider);
+        for (final ch in channels) {
+          if (ch.key == v.id.toLowerCase()) {
+            return _ColumnDesc.channel(ch.channel, ch.geohash);
+          }
+        }
+        return isValidGeohash(v.id)
+            ? _ColumnDesc.channel('', v.id)
+            : _ColumnDesc.channel(v.id, '');
+      case ViewKind.pm:
+        final nym = ref.read(appStateProvider).users[v.id]?.nym ?? '';
+        return _ColumnDesc.pm(v.id, nym: nym);
+      case ViewKind.group:
+        return _ColumnDesc.group(v.id);
+    }
+  }
+
+  /// The columns-mode navigation sink (`_cvOpenConversation`, columns.js:274-296,
+  /// reached because `switchChannel`/`openPM`/`openGroup` short-circuit on
+  /// `_cvActive`). When the shared view changes from OUTSIDE the deck (sidebar
+  /// tap, notification, deep-link, back/forward), drive the deck instead of
+  /// leaving the header/composer pointed at a conversation with no visible
+  /// column:
+  ///   1. an existing column for [v] → focus + scroll it into view;
+  ///   2. a channel [v] with a primary channel column present → repurpose that
+  ///      column in place (`_cvNavigateColumn`);
+  ///   3. otherwise → append a new column, focus + scroll to it (`cvAddColumn`).
+  void _onExternalView(ChatView v) {
+    // Ignore our own `_syncFocusedView`-driven switches, and anything before the
+    // deck has seeded its initial columns.
+    if (_syncingFromDeck || !_seeded) return;
+    final desc = _descForView(v);
+
+    // (1) Existing column → focus + scroll (handles the back/forward + re-tap
+    // cases). `_scrollToIndex` records focus, animates the mobile carousel and
+    // re-points the shared view (a no-op here since it already equals [v]).
+    final existing = _columns.indexWhere((d) => d == desc);
+    if (existing >= 0) {
+      _scrollToIndex(existing);
+      return;
+    }
+
+    // (2) Channel view + a primary channel column exists → navigate it in place
+    // rather than spawning a duplicate channel column (`_cvNavigateColumn`).
+    if (v.kind == ViewKind.channel) {
+      final primary =
+          _columns.indexWhere((d) => d.kind == _ColumnKind.channel);
+      if (primary >= 0) {
+        setState(() {
+          _columns[primary] = desc;
+          _focused = primary;
+        });
+        _saveLayout();
+        _scrollToIndex(primary);
+        return;
+      }
+    }
+
+    // (3) Otherwise add a new column, focus + scroll to it (`cvAddColumn`).
+    setState(() {
+      _columns.add(desc);
+      _focused = _columns.length - 1;
+    });
+    _saveLayout();
+    _scrollToIndex(_columns.length - 1);
   }
 
   /// Step the visible column one slot left/right (`_cvStepFocused`, mobile
@@ -660,6 +748,14 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final transparentColumns =
         ref.watch(settingsProvider.select((s) => s.columnsWallpaper));
     _seedIfNeeded(channels, pms, groups, pmOnly);
+
+    // Make the deck the navigation sink in columns mode: when the shared view
+    // changes from outside (sidebar/notification/deep-link/back-forward), focus,
+    // repurpose, or add the matching column (`_cvOpenConversation`, 08-B1).
+    ref.listen<ChatView>(
+      appStateProvider.select((s) => s.view),
+      (prev, next) => _onExternalView(next),
+    );
 
     if (_focused >= _columns.length) {
       _focused = _columns.isEmpty ? 0 : _columns.length - 1;
