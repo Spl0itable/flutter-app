@@ -361,6 +361,77 @@ void main() {
     });
   });
 
+  group('applyGroupControl message-store side effects (F04-B4)', () {
+    Message groupMsg(String gid, String id, String author) => Message(
+          id: id,
+          nymMessageId: id,
+          pubkey: author,
+          author: 'm#$author',
+          content: 'hi',
+          createdAt: 1000,
+          isGroup: true,
+          groupId: gid,
+          conversationKey: GroupLogic.groupStorageKey(gid),
+        );
+
+    test('inbound delete-message removes the target from the store', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'mod1', 'member', 'selfpk'],
+        createdBy: 'owner',
+        mods: ['mod1'],
+      );
+      n.upsertGroup(g);
+      n.ingestGroupMessage(groupMsg(g.id, 'msgX', 'member'));
+      final key = GroupLogic.groupStorageKey(g.id);
+      expect(n.state.messages[key]!.map((m) => m.id), contains('msgX'));
+
+      // A mod deletes the member's message → it's removed locally for everyone.
+      final r = n.applyGroupControl(
+        groupId: g.id,
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msgX'],
+          ['target_pubkey', 'member'],
+        ],
+        senderPubkey: 'mod1',
+        ts: 10,
+        eventId: 'del1',
+      );
+      expect(r, GroupControlResult.applied);
+      expect(n.state.messages[key]!.map((m) => m.id), isNot(contains('msgX')));
+    });
+
+    test('unauthorized delete (plain member) leaves the message intact', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'member', 'selfpk'],
+        createdBy: 'owner',
+      );
+      n.upsertGroup(g);
+      n.ingestGroupMessage(groupMsg(g.id, 'msgY', 'owner'));
+      final key = GroupLogic.groupStorageKey(g.id);
+
+      final r = n.applyGroupControl(
+        groupId: g.id,
+        type: GroupControlType.deleteMessage,
+        tags: const [
+          ['e', 'msgY'],
+          ['target_pubkey', 'owner'],
+        ],
+        senderPubkey: 'member', // not owner/mod
+        ts: 11,
+        eventId: 'del2',
+      );
+      expect(r, GroupControlResult.unauthorized);
+      expect(n.state.messages[key]!.map((m) => m.id), contains('msgY'));
+    });
+  });
+
   group('Ephemeral key rotation', () {
     test('sending twice advances current → prev and advertises new pk', () {
       final ek = GroupEphemeralKeys();
@@ -499,6 +570,32 @@ void main() {
       n.ingestPMMessage(pmFrom(peer, 'new ping', 1100));
       expect(n.state.messages['pm-$peer']!.single.content, 'new ping');
       expect(n.closedPMs.contains(peer), isFalse);
+    });
+
+    test('onClosedPmsChanged fires on close/re-open; hydrate restores (F02)', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      var fired = 0;
+      n.onClosedPmsChanged = () => fired++;
+      const peer = 'peerpk';
+
+      n.closePM(peer, nowSec: 1000);
+      expect(fired, 1, reason: 'close must notify for persistence');
+      expect(n.closedPMs.contains(peer), isTrue);
+      expect(n.closedPmTimes[peer], 1000);
+
+      // A strictly-newer inbound re-opens AND notifies again (so the re-open is
+      // persisted, not undone on relaunch).
+      n.ingestPMMessage(pmFrom(peer, 'newer', 1100));
+      expect(fired, 2);
+      expect(n.closedPMs.contains(peer), isFalse);
+
+      // Hydration restores a persisted closed set on a fresh store.
+      final n2 = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n2.hydrateClosedPMs({peer}, {peer: 2000});
+      expect(n2.closedPMs.contains(peer), isTrue);
+      // Backlog at/under the close time stays suppressed after hydration.
+      n2.ingestPMMessage(pmFrom(peer, 'old backlog', 1500));
+      expect(n2.state.messages.containsKey('pm-$peer'), isFalse);
     });
   });
 

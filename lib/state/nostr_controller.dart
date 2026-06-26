@@ -214,6 +214,15 @@ class NostrController {
 
       // Restore friends / blocked users / blocked keywords from KV.
       _hydrateSocialState(appState);
+      // Restore the user's closed-PM set so deleted conversations don't
+      // resurrect from the D1 backlog on relaunch (F02; pms.js `nym_closed_pms`
+      // / `nym_closed_pm_times`).
+      _hydrateClosedPMs(appState);
+      // Seed the notification badge's blocked-sender exclusion from the restored
+      // block list (C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
 
       // Mirror the persisted heuristic-spam-filter flags (PWA `spamFilterEnabled`
       // / `spamFilterAggressive`, default true) onto the AppState module globals
@@ -538,6 +547,7 @@ class NostrController {
     _presenceTimestamps.clear();
     _typingThrottle.clear();
     _sentChannelReadReceipts.clear();
+    _sentPmReadReceipts.clear();
     _reactionToggleTracker.clear();
 
     // Stop syncing settings on change (the binding captured the old signer).
@@ -686,9 +696,6 @@ class NostrController {
       dmTtlSeconds: s.dmTtlSeconds,
     );
   }
-
-  bool _readReceiptsAllowed() =>
-      _ref.read(settingsProvider).readReceiptsScope != 'disabled';
 
   // ---------------------------------------------------------------------------
   // Inbound routing
@@ -1201,7 +1208,13 @@ class NostrController {
           status: userStatusFromString(statusStr),
           nym: nym,
           awayMessage: away,
+          // A bare nym-presence broadcast is NOT activity: the PWA's
+          // `handlePresenceEvent` updates status/avatar but never touches
+          // `lastSeen` (users.js:1246-1255), so a replayed/older-but-<5min
+          // presence must NOT mark a user online (C01-4). Friend-presence and
+          // own-activity stay at the default `stampLastSeen: true`.
           lastSeenMs: e.createdAt * 1000,
+          stampLastSeen: false,
           avatarUrl: avatar,
           hasAvatarTag: avatar != null,
           shopUpdate: hasShopUpdate,
@@ -1459,6 +1472,19 @@ class NostrController {
       return;
     }
 
+    // Incoming group/PM EDIT: a rumor carrying `['edit', originalId]` rewrites
+    // the original bubble in place (pms.js:1177-1182 / groups.js:1219-1224
+    // `handleIncomingPMEdit`) — it must NOT be ingested as a new message (the
+    // user-reported duplicate). `applyLocalEdit` matches PM/group bubbles on the
+    // shared nymMessageId; out-of-order arrival is buffered. Applies to both the
+    // group and 1:1 PM branches below.
+    final editId = _tagValue(tags, 'edit');
+    if (editId != null && editId.isNotEmpty) {
+      final content = rumor['content'] as String? ?? '';
+      appState.applyEditOrDefer(editId, content);
+      return;
+    }
+
     // Group message.
     if (groupId != null) {
       if (!u.senderVerified) return;
@@ -1489,6 +1515,18 @@ class NostrController {
       senderVerified: u.senderVerified,
     );
     if (m == null) return;
+    // "Who can PM you" enforcement (pms.js:1247-1250): `disabled` drops every
+    // incoming PM; `friends` drops PMs from non-friends. Our own self-copy is
+    // always kept. Previously inert (F02) — the setting persisted/synced but no
+    // ingest path consulted it.
+    if (!m.isOwn) {
+      final scope = _ref.read(settingsProvider).acceptPMs;
+      if (scope == 'disabled') return;
+      if (scope == 'friends' &&
+          !_ref.read(appStateProvider).isFriend(m.pubkey)) {
+        return;
+      }
+    }
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
@@ -1500,6 +1538,13 @@ class NostrController {
         receiptType: 'delivered',
         recipientPubkey: m.pubkey,
       );
+      // If this PM is the active view, also send a READ receipt right away
+      // (PWA send-while-viewing, pms.js:1345-1356) so the peer's bubble advances
+      // to '✓✓ read'. Scope-gated + deduped inside sendReadReceipt.
+      final key = m.conversationKey ?? PmLogic.pmStorageKey(m.pubkey);
+      if (_isActiveView(key)) {
+        unawaited(sendReadReceipt(m.nymMessageId!, m.pubkey));
+      }
     }
   }
 
@@ -1592,7 +1637,7 @@ class NostrController {
     }
 
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
-    appState.applyGroupControl(
+    final result = appState.applyGroupControl(
       groupId: groupId,
       type: type,
       tags: tags,
@@ -1600,6 +1645,70 @@ class NostrController {
       ts: ts,
       eventId: u.wrapId,
     );
+    if (result == GroupControlResult.applied) {
+      _emitGroupControlSystemLine(groupId, type, tags, senderPubkey);
+    }
+  }
+
+  /// Emits the PWA's in-chat system line for an applied inbound group control
+  /// (groups.js: leave 777 / removed 1045 / added 961 / promoted 1074 /
+  /// revoked 1113 / transferred 1153 / deleted 1194), F04-H4. Routed to the
+  /// group's message flow so it shows when the group is opened, mirroring
+  /// `displaySystemMessage`. Skipped when WE were the removed member (the group
+  /// is dropped locally, so there's nowhere to show it — the PWA navigates away).
+  void _emitGroupControlSystemLine(
+    String groupId,
+    String type,
+    List<List<String>> tags,
+    String senderPubkey,
+  ) {
+    final appState = _ref.read(appStateProvider.notifier);
+    // For a removal, the group may already be gone (we were kicked) — bail so we
+    // don't recreate an orphan message list for a group we just left.
+    if (appState.groupById(groupId) == null) return;
+    final actor = _nymDisplayFor(senderPubkey);
+    String? line;
+    switch (type) {
+      case GroupControlType.leave:
+        line = '$actor left the group.';
+      case GroupControlType.removeMember:
+        final target = _tagValue(tags, 'kick');
+        if (target == null) break;
+        final banned = tags.any((t) => t.length > 1 && t[0] == 'ban' && t[1] == '1');
+        line = banned
+            ? '${_nymDisplayFor(target)} was banned by $actor.'
+            : '${_nymDisplayFor(target)} was removed by $actor.';
+      case GroupControlType.addMember:
+        final added = tags
+            .where((t) => t.length > 1 && t[0] == 'p')
+            .map((t) => _nymDisplayFor(t[1]))
+            .toList();
+        if (added.isEmpty) break;
+        line = '${added.join(', ')} was added by $actor.';
+      case GroupControlType.promoteMod:
+        final target = _tagValue(tags, 'mod');
+        if (target != null) line = '$actor made ${_nymDisplayFor(target)} a moderator.';
+      case GroupControlType.revokeMod:
+        final target = _tagValue(tags, 'mod');
+        if (target != null) {
+          line = '$actor removed ${_nymDisplayFor(target)} as a moderator.';
+        }
+      case GroupControlType.transferOwner:
+        final target = _tagValue(tags, 'owner');
+        if (target != null) {
+          line = '$actor transferred ownership to ${_nymDisplayFor(target)}.';
+        }
+      case GroupControlType.unban:
+        final target = _tagValue(tags, 'unban');
+        if (target != null) line = '${_nymDisplayFor(target)} was unbanned by $actor.';
+      case GroupControlType.deleteMessage:
+        final author = _tagValue(tags, 'target_pubkey');
+        line = author != null
+            ? '$actor deleted a message from ${_nymDisplayFor(author)}.'
+            : '$actor deleted a message.';
+    }
+    if (line == null || line.isEmpty) return;
+    appState.addSystemMessage(line, storageKey: GroupLogic.groupStorageKey(groupId));
   }
 
   void _onReceiptOrTyping(
@@ -1607,10 +1716,11 @@ class NostrController {
     if (PmLogic.isTyping(rumor)) {
       final info = PmLogic.parseTyping(rumor);
       if (info == null || info.pubkey == null) return;
-      // Stale typing indicators are dropped.
+      // Stale typing indicators are dropped. PWA drops at `_typingExpireMs/1000`
+      // = 5s (pms.js:924 / nostr-core.js:1547), C03-D5.
       final age = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
           ((rumor['created_at'] as num?)?.toInt() ?? 0);
-      if (age > 8) return;
+      if (age > 5) return;
       final storageKey = info.groupId != null
           ? GroupLogic.groupStorageKey(info.groupId!)
           : PmLogic.pmStorageKey(info.pubkey!);
@@ -2030,7 +2140,7 @@ class NostrController {
 
     if (view.kind == ViewKind.pm) {
       final nymMessageId = PmLogic.generateSharedEventId();
-      appState.sendLocal(trimmed, nymMessageId: nymMessageId);
+      final echo = appState.sendLocal(trimmed, nymMessageId: nymMessageId);
       if (service == null || identity == null) return;
       final rumor = PmLogic.buildPmRumor(
         selfPubkey: identity.pubkey,
@@ -2038,11 +2148,17 @@ class NostrController {
         content: trimmed,
         nymMessageId: nymMessageId,
       );
-      await service.publishPM(
-        rumor: rumor,
-        recipientPubkey: view.id,
-        settings: _msgSettings,
-      );
+      try {
+        await service.publishPM(
+          rumor: rumor,
+          recipientPubkey: view.id,
+          settings: _msgSettings,
+        );
+      } catch (_) {
+        // Publish failed → flip the bubble to the failed "!" state (F02; the
+        // channel branch already does this — PMs were silently left "✓ sent").
+        if (echo != null) appState.markOptimisticFailed(echo.id);
+      }
       return;
     }
 
@@ -2631,22 +2747,27 @@ class NostrController {
       kickFromGroup(groupId, targetPubkey, ban: true);
 
   /// Promotes [targetPubkey] to moderator (owner-only). Mirrors users.js
-  /// `promoteModerator` → `group-promote-mod`.
+  /// `promoteModerator` → `group-promote-mod`. The role pubkey rides the `mod`
+  /// tag (groups.js:2004) — the inbound handler reads `tagValue(tags,'mod')`
+  /// (group_logic), so the previous `['promote']` tag applied NOWHERE (F04-B1).
   Future<bool> promoteModerator(String groupId, String targetPubkey) =>
       _sendModRoleControl(
-          groupId, targetPubkey, GroupControlType.promoteMod, ['promote', targetPubkey]);
+          groupId, targetPubkey, GroupControlType.promoteMod, ['mod', targetPubkey]);
 
   /// Revokes [targetPubkey]'s moderator role (owner-only). users.js
-  /// `revokeModerator` → `group-revoke-mod`.
+  /// `revokeModerator` → `group-revoke-mod`. Same `mod` tag the inbound handler
+  /// reads (groups.js:2045); the old `['revoke']` tag was a no-op (F04-B2).
   Future<bool> revokeModerator(String groupId, String targetPubkey) =>
       _sendModRoleControl(
-          groupId, targetPubkey, GroupControlType.revokeMod, ['revoke', targetPubkey]);
+          groupId, targetPubkey, GroupControlType.revokeMod, ['mod', targetPubkey]);
 
   /// Transfers ownership to [targetPubkey] (owner-only). users.js
-  /// `transferOwner` → `group-transfer-owner`.
+  /// `transferOwner` → `group-transfer-owner`. New owner rides the `owner` tag
+  /// (groups.js:2086); the old `['new_owner']` tag matched nothing inbound, so
+  /// ownership transfer was fully non-functional (F04-B3).
   Future<bool> transferOwner(String groupId, String targetPubkey) =>
       _sendModRoleControl(groupId, targetPubkey, GroupControlType.transferOwner,
-          ['new_owner', targetPubkey]);
+          ['owner', targetPubkey]);
 
   Future<bool> _sendModRoleControl(
     String groupId,
@@ -2695,9 +2816,14 @@ class NostrController {
     final modSelf = GroupLogic.isMod(group, identity.pubkey);
     final targetIsOwner = GroupLogic.isOwner(group, authorPubkey);
     if (!(ownerSelf || (modSelf && !targetIsOwner))) return false;
+    // PWA `group-delete-message` carries `['e', targetId]` + `['target_pubkey',
+    // author]` (groups.js:2403-2405); the inbound handler (group_logic +
+    // app_state) reads exactly those. The previous `['delete']`/`['p']` tags
+    // matched nothing, so the delete only ever applied on the actor's own device
+    // (F04-B4).
     final extraTags = [
-      ['delete', messageId],
-      ['p', authorPubkey],
+      ['e', messageId],
+      ['target_pubkey', authorPubkey],
     ];
     final ok = await groups.sendControl(
       group: group,
@@ -3004,6 +3130,11 @@ class NostrController {
     final added = appState.blockUser(pubkey);
     if (added) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
+      // A blocked sender's notifications stop counting toward the bell badge
+      // immediately (PWA count-time exclusion, notifications.js:404-426; C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Blocked ${_nymDisplayFor(pubkey)}');
       // Blocking mid-call ends a 1:1 call / drops the peer from a group call and
       // hides their chat (calls.js `_onUserBlockedForCall`).
@@ -3019,6 +3150,11 @@ class NostrController {
     final removed = appState.unblockUser(pubkey);
     if (removed) {
       _persistSet(StorageKeys.blocked, _ref.read(appStateProvider).blockedUsers);
+      // Re-sync the badge's blocked-sender set so an unblocked user's
+      // notifications count again (C02-4).
+      _ref
+          .read(notificationHistoryProvider.notifier)
+          .setBlocked(_ref.read(appStateProvider).blockedUsers);
       _emitSystemMessage('Unblocked ${_nymDisplayFor(pubkey)}');
     }
     return removed;
@@ -3394,16 +3530,53 @@ class NostrController {
     }
   }
 
-  /// Sends a read receipt for [messageId] to [peerPubkey] (PM scope-gated).
+  /// PM message ids (nymMessageIds) we've already published a 'read' receipt
+  /// for, so opening / re-opening a PM never re-announces the same read (mirrors
+  /// [_sentChannelReadReceipts]); capped 2000 → trimmed to the most recent 1500.
+  final Set<String> _sentPmReadReceipts = <String>{};
+
+  /// Sends a read receipt for [messageId] to [peerPubkey], scope-gated to the
+  /// PM context (PWA `_indicatorScopeAllows(readReceiptsScope, 'pm')`, F02): a
+  /// scope of 'groups' / 'disabled' must NOT leak a PM read receipt. Deduped via
+  /// [_sentPmReadReceipts] so the same message is receipted at most once.
   Future<void> sendReadReceipt(String messageId, String peerPubkey) async {
-    if (!_readReceiptsAllowed()) return;
+    if (!_indicatorScopeAllows(
+        _ref.read(settingsProvider).readReceiptsScope, 'pm')) {
+      return;
+    }
+    if (messageId.isEmpty || peerPubkey.isEmpty) return;
     final service = _service;
     if (service == null) return;
+    if (!_sentPmReadReceipts.add(messageId)) return;
+    if (_sentPmReadReceipts.length > 2000) {
+      final keep = _sentPmReadReceipts
+          .toList()
+          .sublist(_sentPmReadReceipts.length - 1500);
+      _sentPmReadReceipts
+        ..clear()
+        ..addAll(keep);
+    }
     await service.publishReceipt(
       messageId: messageId,
       receiptType: 'read',
       recipientPubkey: peerPubkey,
     );
+  }
+
+  /// Receipts every loaded, non-own PM message in the open conversation with
+  /// [peerPubkey] as 'read' (PWA `openPM` send + send-while-viewing,
+  /// pms.js:3015-3019 / 1345-1356). Per-message dedup lives in [sendReadReceipt].
+  void markVisiblePmMessagesRead(String peerPubkey) {
+    if (peerPubkey.isEmpty) return;
+    final messages =
+        _ref.read(appStateProvider).messages[PmLogic.pmStorageKey(peerPubkey)];
+    if (messages == null || messages.isEmpty) return;
+    for (final m in messages) {
+      if (m.isOwn) continue;
+      final id = m.nymMessageId;
+      if (id == null || id.isEmpty) continue;
+      unawaited(sendReadReceipt(id, peerPubkey));
+    }
   }
 
   // --- Public channel read receipts (kind 24421) -----------------------------
@@ -3911,6 +4084,38 @@ class NostrController {
     );
   }
 
+  /// Persists the closed-PM set + close-times to KV (F02). Closed peers go to
+  /// `nym_closed_pms` as a JSON string array (reusing [_persistSet]); the
+  /// peer→close-time map goes to `nym_closed_pm_times` as a JSON object — so a
+  /// deleted conversation isn't re-opened by stale D1 backlog after a relaunch.
+  void _persistClosedPMs() {
+    final appState = _ref.read(appStateProvider.notifier);
+    _persistSet(StorageKeys.closedPms, appState.closedPMs);
+    _ref
+        .read(keyValueStoreProvider)
+        .setString(StorageKeys.closedPmTimes, jsonEncode(appState.closedPmTimes));
+  }
+
+  /// Hydrates the closed-PM set + close-times from KV at boot (F02), mirroring
+  /// the PWA constructor parsing `nym_closed_pms` / `nym_closed_pm_times`.
+  void _hydrateClosedPMs(AppStateNotifier appState) {
+    final closed = _readSet(StorageKeys.closedPms);
+    final times = <String, int>{};
+    final raw = _ref.read(keyValueStoreProvider).getString(StorageKeys.closedPmTimes);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            final t = v is num ? v.toInt() : int.tryParse('$v');
+            if (t != null) times['$k'] = t;
+          });
+        }
+      } catch (_) {}
+    }
+    appState.hydrateClosedPMs(closed, times);
+  }
+
   void _subscribeActiveChannelTyping() {
     final state = _ref.read(appStateProvider);
     if (state.view.kind != ViewKind.channel) return;
@@ -4254,6 +4459,10 @@ class NostrController {
     // per-open `channelRestoreFromD1` in `switchChannel`, plus the ephemeral
     // group inbox). Best-effort; gated/idempotent inside the handler.
     _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
+
+    // Persist the closed-PM set on every mutation so a deleted PM stays deleted
+    // across a relaunch (F02; pms.js `nym_closed_pms` / `nym_closed_pm_times`).
+    _ref.read(appStateProvider.notifier).onClosedPmsChanged = _persistClosedPMs;
   }
 
   /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
@@ -4284,6 +4493,15 @@ class NostrController {
   /// also restores all 1:1 PMs up front rather than per-conversation. All work
   /// is best-effort and never blocks the (already-committed) view switch.
   void _onViewOpened(ChatView view) {
+    // Reading a conversation clears ITS bell-badge entries WITHOUT opening the
+    // notifications modal (PWA `_markChannelRead` → `_markConversationNotifications
+    // Seen`, channels.js:1738-1739; C02-4). The notification `route` is the bare
+    // channel key / peer pubkey / group id — all `view.id` — and the open marks
+    // everything up to now seen.
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    _ref
+        .read(notificationHistoryProvider.notifier)
+        .markConversationSeen(view.id, tsSec: nowSec);
     switch (view.kind) {
       case ViewKind.channel:
         unawaited(_backfillChannelArchive(view.id));
@@ -4294,7 +4512,10 @@ class NostrController {
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
       case ViewKind.pm:
-        break;
+        // Send a read receipt to the peer for each of their loaded messages
+        // (PWA `openPM` → read-receipt send, pms.js:3015-3019; F02 blocker —
+        // `sendReadReceipt` previously had zero callers). Scope-gated + deduped.
+        markVisiblePmMessagesRead(view.id);
     }
   }
 

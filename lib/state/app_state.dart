@@ -931,6 +931,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// (e.g. before the controller boots, or in pure UI/state tests).
   void Function(ChatView view)? onViewOpened;
 
+  /// Fired whenever the closed-PM set ([_closedPMs] / [_closedPMTimes]) mutates
+  /// (close, re-open, or a strictly-newer inbound that re-opens a thread). The
+  /// controller wires this to KV persistence (`nym_closed_pms` /
+  /// `nym_closed_pm_times`) so a deleted PM stays deleted across a relaunch
+  /// instead of resurrecting from the D1 backlog (F02). Best-effort; may be null
+  /// before the controller boots, or in pure state tests.
+  void Function()? onClosedPmsChanged;
+
   int _localSeq = 1000000;
   int _ingestSeq = 1;
   final Set<String> _seenIds = <String>{};
@@ -938,6 +946,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// nymMessageIds already ingested (PM/group dedup, since wrap ids differ per
   /// recipient copy but share the `['x', …]` id).
   final Set<String> _seenNymMessageIds = <String>{};
+
+  /// Edits whose original message hasn't landed yet (out-of-order relay
+  /// delivery): originalId → new content. Mirrors the PWA's `editedMessages`
+  /// map (messages.js:447,1932-1962). When an edit-tagged event arrives before
+  /// the message it rewrites, [applyEditOrDefer] stores it here keyed by the
+  /// original id; [_consumePendingEdit] applies + clears it the moment a normal
+  /// message with a matching `id`/`nymMessageId` is ingested, so an edit can
+  /// never leak through as a brand-new bubble. Capped to avoid unbounded growth
+  /// when an original never arrives.
+  final Map<String, String> _pendingEdits = <String, String>{};
 
   /// PM peer pubkeys the user explicitly closed; older backlog for them is
   /// ignored (docs/specs/03 §3.3 `closedPMs`).
@@ -961,6 +979,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void goLive(String pubkey, String nym) {
     _seenIds.clear();
     _seenNymMessageIds.clear();
+    _pendingEdits.clear();
     _closedPMs.clear();
     _closedPMTimes.clear();
     _leftGroups.clear();
@@ -984,6 +1003,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void reset() {
     _seenIds.clear();
     _seenNymMessageIds.clear();
+    _pendingEdits.clear();
     _closedPMs.clear();
     _closedPMTimes.clear();
     _leftGroups.clear();
@@ -1164,6 +1184,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _ingestChannelMessage(NostrEvent e) {
     if (e.id.isNotEmpty && !_seenIds.add(e.id)) return;
+    // An incoming edit (the published/echoed edit event carries
+    // `['edit', originalId]`, buildChannelEditTags) rewrites the original in
+    // place — it must NOT be appended as a new message (the user-reported
+    // duplicate). The original channel message is keyed by its event id, which
+    // `applyLocalEdit` matches. Out-of-order arrival is buffered (PWA
+    // `editedMessages`, messages.js:447,1932-1962).
+    final editId = e.tagValue('edit');
+    if (editId != null && editId.isNotEmpty) {
+      applyEditOrDefer(editId, e.content);
+      return;
+    }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
     final key = EventMapper.channelKeyOf(e);
@@ -1226,6 +1257,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (m.isOwn && _channelMessageReaders.containsKey(m.id)) {
       _mirrorChannelReaders(m.id);
     }
+
+    // Apply a buffered out-of-order edit whose original is this message.
+    _consumePendingEdit(id: m.id);
 
     state = state.copyWith();
   }
@@ -1500,6 +1534,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (m.createdAt > closedAt) {
         _closedPMs.remove(peer);
         _closedPMTimes.remove(peer);
+        // Persist the re-open so it isn't undone on relaunch (F02).
+        onClosedPmsChanged?.call();
       } else {
         return;
       }
@@ -1541,6 +1577,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (key != state.view.storageKey && state.countsTowardUnread(m)) {
       state.unreadCounts[peer] = (state.unreadCounts[peer] ?? 0) + 1;
     }
+    // Apply a buffered out-of-order edit whose original is this PM (matches on
+    // id or the shared nymMessageId).
+    _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
   }
 
@@ -1579,6 +1618,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // [AppState.countsTowardUnread]).
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
+    // Apply a buffered out-of-order edit whose original is this group message.
+    _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
   }
 
@@ -1631,6 +1672,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
         _leftGroups.add(groupId);
         state.groups.removeWhere((x) => x.id == groupId);
         state.messages.remove(GroupLogic.groupStorageKey(groupId));
+      }
+      // Mod/owner delete-message: `applyControlEvent` only role-checks + mod-logs
+      // (it owns no message store); the actual removal happens here. The target
+      // message id is the `e` tag (groups.js:1172-1197 `_applyGroupMessageDeletion`).
+      // Mirrors the `removeMember` self-removal special-case above.
+      if (type == GroupControlType.deleteMessage) {
+        final targetId = GroupLogic.tagValue(tags, 'e');
+        if (targetId != null && targetId.isNotEmpty) {
+          removeMessage(targetId);
+        }
       }
       state = state.copyWith();
     }
@@ -1801,14 +1852,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
         nowSec ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
     state.pmConversations.removeWhere((c) => c.pubkey == peerPubkey);
     state.messages.remove(PmLogic.pmStorageKey(peerPubkey));
+    onClosedPmsChanged?.call();
     state = state.copyWith();
   }
 
   /// Opens (or creates) a PM conversation entry for [peerPubkey] without a
   /// message — used when starting a fresh thread from the UI.
   void ensurePMConversation(String peerPubkey, {String? nym}) {
-    _closedPMs.remove(peerPubkey);
+    final wasClosed = _closedPMs.remove(peerPubkey);
     _closedPMTimes.remove(peerPubkey);
+    if (wasClosed) onClosedPmsChanged?.call();
     final exists = state.pmConversations.any((c) => c.pubkey == peerPubkey);
     if (!exists) {
       state.pmConversations.add(PMConversation(
@@ -1819,6 +1872,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state = state.copyWith();
     }
   }
+
+  /// Restores the closed-PM set from persisted KV at boot (F02). [closed] is the
+  /// set of peer pubkeys the user deleted; [closedTimes] maps each to its close
+  /// timestamp (sec) so only a strictly-newer inbound re-opens it. Mirrors the
+  /// PWA constructor parsing `nym_closed_pms` / `nym_closed_pm_times`.
+  void hydrateClosedPMs(Set<String> closed, Map<String, int> closedTimes) {
+    if (closed.isEmpty && closedTimes.isEmpty) return;
+    _closedPMs.addAll(closed);
+    _closedPMTimes.addAll(closedTimes);
+  }
+
+  /// Snapshot of the closed-PM peer pubkeys → close timestamp (sec), for the
+  /// controller's KV persistence (paired with [closedPMs]).
+  Map<String, int> get closedPmTimes => Map.unmodifiable(_closedPMTimes);
 
   void switchView(ChatView view) {
     // Clear unread for the target on entry (mirrors marking-as-read).
@@ -1954,6 +2021,47 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     if (changed) state = state.copyWith();
     return changed;
+  }
+
+  /// Applies an incoming edit (an event carrying `['edit', originalId]`) to the
+  /// original message in place via [applyLocalEdit]. When the original hasn't
+  /// been ingested yet (out-of-order relay delivery), the edit is buffered in
+  /// [_pendingEdits] keyed by [originalId] and replayed the moment a normal
+  /// message with a matching `id`/`nymMessageId` lands (see [_consumePendingEdit]).
+  /// The caller must NOT also append the edit event as a new message — this is
+  /// what fixes the user-reported "edit shows as a duplicate" bug, mirroring the
+  /// PWA's `editedMessages` map (messages.js:447,1932-1962).
+  void applyEditOrDefer(String originalId, String newContent) {
+    if (originalId.isEmpty) return;
+    if (!applyLocalEdit(originalId, newContent)) {
+      // Original not seen yet — remember the edit until its message arrives.
+      _pendingEdits[originalId] = newContent;
+      // Bound the buffer; an original that never lands shouldn't grow it forever.
+      if (_pendingEdits.length > 2000) {
+        _pendingEdits.remove(_pendingEdits.keys.first);
+      }
+    }
+  }
+
+  /// If a buffered out-of-order edit exists for a just-ingested message
+  /// (matching on either [id] or [nymMessageId]), applies it in place and clears
+  /// the pending entry. Called from every message-ingest site after the message
+  /// is inserted. Returns true when an edit was applied.
+  bool _consumePendingEdit({String? id, String? nymMessageId}) {
+    if (_pendingEdits.isEmpty) return false;
+    String? hitKey;
+    String? content;
+    if (id != null && id.isNotEmpty && _pendingEdits.containsKey(id)) {
+      hitKey = id;
+    } else if (nymMessageId != null &&
+        nymMessageId.isNotEmpty &&
+        _pendingEdits.containsKey(nymMessageId)) {
+      hitKey = nymMessageId;
+    }
+    if (hitKey == null) return false;
+    content = _pendingEdits.remove(hitKey);
+    if (content == null) return false;
+    return applyLocalEdit(hitKey, content);
   }
 
   /// Removes a message locally (deletion request / mod delete). Mirrors
