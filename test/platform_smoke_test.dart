@@ -26,6 +26,7 @@ void main() {
       'android.permission.MODIFY_AUDIO_SETTINGS',
       'android.permission.POST_NOTIFICATIONS',
       'android.permission.VIBRATE',
+      'android.permission.ACCESS_FINE_LOCATION',
       'android.permission.USE_BIOMETRIC',
       'android.permission.WAKE_LOCK',
       'android.permission.FOREGROUND_SERVICE',
@@ -86,6 +87,7 @@ void main() {
     const requiredKeys = <String>[
       'NSCameraUsageDescription',
       'NSMicrophoneUsageDescription',
+      'NSLocationWhenInUseUsageDescription',
       'NSPhotoLibraryUsageDescription',
       'NSPhotoLibraryAddUsageDescription',
       'NSFaceIDUsageDescription',

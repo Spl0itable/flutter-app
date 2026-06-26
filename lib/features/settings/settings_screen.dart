@@ -18,6 +18,7 @@ import '../../models/channel.dart';
 import '../../models/settings.dart';
 import '../../services/api/storage_sync.dart';
 import '../notifications/notifications_service.dart';
+import '../../services/location/geolocation.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -799,9 +800,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         status = await Permission.locationWhenInUse.request();
       }
       if (status.isGranted) {
-        _systemMessage(
-            'Location access granted. Geohash channels sorted by proximity.');
-        return true;
+        // Permission granted — now fetch the actual GPS fix (the PWA's
+        // getCurrentPosition success callback, app.js:3920-3930) and store it so
+        // the Haversine proximity sort can engage. A failed/timed-out fix
+        // disables proximity, mirroring the PWA's error branch.
+        final loc = await fetchCurrentUserLocation();
+        if (loc != null) {
+          ref.read(userLocationProvider.notifier).state = loc;
+          _systemMessage(
+              'Location access granted. Geohash channels sorted by proximity.');
+          return true;
+        }
+        ref.read(userLocationProvider.notifier).state = null;
+        _systemMessage('Location unavailable. Proximity sorting disabled.');
+        return false;
       }
       ref.read(userLocationProvider.notifier).state = null;
       _systemMessage('Location access denied. Proximity sorting disabled.');
