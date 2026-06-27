@@ -16,6 +16,7 @@ import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
 import '../../models/nostr_event.dart';
 import '../api/api_client.dart';
+import '../api/api_config.dart';
 import '../relay/relay_message.dart';
 import '../relay/relay_pool.dart';
 import '../relay/relay_pool_proxy.dart';
@@ -406,13 +407,30 @@ class NostrService {
     _wireProxyFallback();
     pool.connectAll();
 
-    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 3600;
+    // REQ windows mirror the PWA's `_buildCriticalFilters` (relays.js:2485-2570).
+    // When the D1 archive is reachable (the API host is configured — always true
+    // in production), the relay-pool proxy has ALREADY archived history to D1, so
+    // we ask relays for ONLY new live events (`since = now`) and collapse history
+    // to `limit: 1`; the full backlog is restored from D1 by the controller's
+    // `backfillFromD1OnReconnect`. Without D1 we fall back to a 24h relay window.
+    // (This is the fix for "data should be pulled from D1, not re-REQ'd 1h from
+    // relays on every connect".)
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final d1Available = ApiConfig.apiHost.isNotEmpty;
+    final liveSince = d1Available ? nowSec : nowSec - 86400;
+    int lim(int n) => d1Available ? 1 : n;
     final self = identity.pubkey;
     final filters = [
-      NostrFilter(kinds: [EventKind.geoChannel, EventKind.namedChannel], since: since),
+      // Channels (20000/23333): real-time `since` only, no limit
+      // (relays.js:2497-2498).
+      NostrFilter(
+          kinds: [EventKind.geoChannel, EventKind.namedChannel],
+          since: liveSince),
+      // Channel reactions (kind 7, `#k:[20000,23333]`) (relays.js:2506).
       NostrFilter(
         kinds: [EventKind.reaction],
-        since: since,
+        since: liveSince,
+        limit: lim(100),
         tags: {
           'k': ['${EventKind.geoChannel}', '${EventKind.namedChannel}'],
         },
@@ -421,35 +439,41 @@ class NostrService {
       // recipient is always p-tagged, so this catches receipts for OUR authored
       // channel/profile messages — both the LNURL provider's (verified) receipt
       // and a peer's own-published kind-9735 (zaps.js `_publishOwnMessageZapEvent`).
-      // The PWA runs a broad `#p` zap-receipt REQ for this (zaps.js
-      // `listenForZapReceipt` / `_listenForBotCreditReceipt`). Routed through
-      // `_onEvent` → the public-zap-receipt path (`_onPublicZapReceipt`).
+      // Collapses to since=now/limit:1 under D1 (relays.js:2517); history from D1.
       NostrFilter(
         kinds: [EventKind.zapReceipt],
-        since: since,
+        since: liveSince,
+        limit: lim(200),
         tags: {
           'p': [self],
         },
       ),
       // Gift wraps addressed to us (PMs, group messages, receipts, typing).
+      // NIP-59 backdates created_at, so NO `since`; cap at limit:1 under D1
+      // (relays.js:2494) — the PM/group backlog is restored from D1.
       NostrFilter(
         kinds: [EventKind.giftWrap],
+        limit: d1Available ? 1 : 500,
         tags: {
           'p': [self],
         },
       ),
-      // Presence (nym-presence) — kept minimal.
+      // Presence (nym-presence): real-time only under D1 (relays.js:2528).
       NostrFilter(
         kinds: [EventKind.appData],
-        since: since,
+        since: d1Available ? nowSec : null,
+        limit: lim(100),
         tags: {
           't': [AppDataTopic.presence],
         },
       ),
-      // NIP-30 custom emoji: discover emoji packs (kind 30030) + the user's own
-      // emoji-pack list (kind 10030, our author only). Mirrors the PWA's REQ
-      // filters (relays.js:2546/2552) so custom emoji actually arrive.
-      NostrFilter(kinds: [EventKind.emojiPack], limit: 300),
+      // NIP-30 custom emoji packs (kind 30030): real-time + limit:1 under D1
+      // (history via the D1 emoji restore); else discover up to 300
+      // (relays.js:2546). Plus the user's own emoji-pack list (kind 10030).
+      NostrFilter(
+          kinds: [EventKind.emojiPack],
+          since: d1Available ? nowSec : null,
+          limit: d1Available ? 1 : 300),
       NostrFilter(
         kinds: [EventKind.userEmojiList],
         authors: [self],

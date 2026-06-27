@@ -369,21 +369,52 @@ class NostrController {
     final wasOffline = _ref.read(appStateProvider).connectedRelays == 0;
     _ref.read(appStateProvider.notifier).setConnectedRelays(count);
     if (count > 0 && wasOffline) {
-      // Reconnect edge → re-run the D1 activity discovery (PWA
-      // `backfillFromD1OnReconnect`, relays.js:2761) AND re-restore the open
-      // channel's archive. The latter is the retry that recovers a boot backfill
-      // which ran before the storage transport was reachable: `_backfillChannelArchive`
-      // forces past the freshness window, and re-ingest dedups by event id, so it
-      // is safe + idempotent.
-      unawaited(_discoverChannelActivity());
-      final view = _ref.read(appStateProvider).view;
-      if (view.kind == ViewKind.channel) {
-        unawaited(_backfillChannelArchive(view.id));
-      }
+      // Reconnect edge → re-run the FULL D1 backfill (PWA
+      // `backfillFromD1OnReconnect`, relays.js:2761/2764): PMs, group history,
+      // channel activity, and the joined-channel archives. Now that the relay
+      // REQ windows carry only NEW live events (`NostrService.start` collapses
+      // history to D1), this is what recovers everything that landed while we
+      // were disconnected — without it, the reconnect gap would silently drop
+      // messages.
+      unawaited(_backfillFromD1OnReconnect());
       // Re-send any PM still waiting on a delivery receipt — a reconnect is the
       // most likely moment a stuck DM finally lands (pms.js
       // `retryPendingDMsOnReconnect`, F02 auto-retry).
       _retryPendingDmsOnReconnect();
+    }
+  }
+
+  /// Last `_backfillFromD1OnReconnect` run (ms) — the PWA's 30s throttle so a
+  /// flapping connection can't hammer D1 (`_lastD1BackfillAt`, relays.js:2767).
+  int _lastD1BackfillAt = 0;
+
+  /// Re-pulls the full D1 backlog on a reconnect / app-resume — the native
+  /// `backfillFromD1OnReconnect` (relays.js:2764). Because the relay REQ windows
+  /// now carry ONLY new live events (D1 supplies all history, see
+  /// [NostrService.start]), a reconnect MUST re-restore PMs, group history, and
+  /// the joined-channel archives from D1 — otherwise messages that landed while
+  /// we were disconnected (older than the reconnect's `since=now` window) are
+  /// lost. 30s-throttled, best-effort, idempotent (every restore dedups by id).
+  Future<void> _backfillFromD1OnReconnect() async {
+    final sync = _storageSync;
+    if (sync == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastD1BackfillAt != 0 && now - _lastD1BackfillAt < 30000) return;
+    _lastD1BackfillAt = now;
+    // 1:1 PM backlog (previously boot-only) + group ephemeral history
+    // (previously group-open-only).
+    await _restorePmArchive(sync);
+    await _backfillGroupArchive();
+    // Channel-activity discovery + archive restore over {current ∪ joined}
+    // (relays.js:2791-2797), not just the single open view.
+    unawaited(_discoverChannelActivity());
+    final keys = <String>{
+      for (final c in _ref.read(appStateProvider).channels) c.key,
+    };
+    final view = _ref.read(appStateProvider).view;
+    if (view.kind == ViewKind.channel && view.id.isNotEmpty) keys.add(view.id);
+    for (final key in keys) {
+      await _backfillChannelArchive(key);
     }
   }
 
