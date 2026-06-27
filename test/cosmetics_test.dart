@@ -193,9 +193,25 @@ void main() {
     test('maps a known style id to a non-null decoration', () {
       final deco = messageStyleDecoration('style-satoshi');
       expect(deco, isNotNull);
-      expect(deco!.textColor, const Color(0xFFF7931A));
+      // satoshi's `.message-content` CONTAINER (bare body text) is white
+      // (styles-features.css:550) — only the inner `> *` children + the shop
+      // preview are the bold orange #f7931a (`:571`). So body = white, the
+      // preview/child colour = orange, and the body is NOT bold.
+      expect(deco!.textColor, const Color(0xFFFFFFFF));
+      expect(deco.previewColorFor(bubble: false), const Color(0xFFF7931A));
+      expect(deco.childColor, const Color(0xFFF7931A));
+      expect(deco.bold, isFalse);
       // satoshi paints a translucent content background.
       expect(deco.contentBackground, isNotNull);
+    });
+
+    test('satoshi light-mode body uses the dim container colour, not the child',
+        () {
+      final light = messageStyleDecoration('style-satoshi', isLight: true)!;
+      // body.light-mode container #7a5500 (themes:900) vs inner child #c47a15
+      // (themes:905).
+      expect(light.textColor, const Color(0xFF7A5500));
+      expect(light.previewColorFor(bubble: false), const Color(0xFFC47A15));
     });
 
     test('maps aurora to a gradient decoration', () {
@@ -295,10 +311,14 @@ void main() {
       }
     });
 
-    test('satoshi has NO glow on the message (preview-only) but bolds glyphs', () {
+    test('satoshi has NO glow on the message (preview-only) + body is not bold',
+        () {
       final deco = messageStyleDecoration('style-satoshi')!;
       expect(deco.textShadows, isNull, reason: 'no text-shadow on satoshi body');
-      expect(deco.bold, isTrue);
+      // `font-weight: bold` lives on the inner `> *` children
+      // (styles-features.css:572), NOT the `.message-content` container — so the
+      // bare body text is NORMAL weight.
+      expect(deco.bold, isFalse);
     });
 
     test('ghost glow has a 2px Y-offset and 16px blur', () {

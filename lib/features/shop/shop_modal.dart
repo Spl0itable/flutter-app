@@ -1137,6 +1137,10 @@ class _ActiveItemsPreview extends ConsumerWidget {
         styleId: active.style!,
         text: 'This is how your messages look.',
         bubble: bubble,
+        // The active-items block puts the text directly in `.message-content`
+        // (a bare body node, shop.js:964) — NOT wrapped in a `<span>` like the
+        // item-card demo — so satoshi shows its white/brown container body colour.
+        sampleIsChild: false,
       );
     } else if (supporter) {
       content = _SupporterContentLine(bubble: bubble);

@@ -222,6 +222,7 @@ class MessageStyleDecoration {
     this.contentBackground,
     this.backgroundGradient,
     this.bubbleTextColor,
+    this.childColor,
     this.borderAccent,
     this.monospace = false,
     this.bold = false,
@@ -257,6 +258,16 @@ class MessageStyleDecoration {
   /// keeps [textColor]. Null = same colour in both layouts.
   final Color? bubbleTextColor;
 
+  /// The `.message-content > *` INNER-element colour, when it differs from the
+  /// bare-body [textColor] (the container/child split). Only satoshi splits: the
+  /// `.message-content` container — and so the bare body text — is white
+  /// (`#FFFFFF` dark / `#7a5500` light, styles-features.css:550 / themes:900),
+  /// while the inner `> *` children (links/mentions/emoji) are the bold orange
+  /// `#f7931a`/`#c47a15` (`:571` / themes:905). The shop DEMO wraps its sample in
+  /// a `<span>` (a child), so previews use this colour; real plain message text
+  /// is bare nodes, so the body uses [textColor]. Null = children share [textColor].
+  final Color? childColor;
+
   final Color? borderAccent;
   final bool monospace;
 
@@ -281,8 +292,15 @@ class MessageStyleDecoration {
   }
 
   /// The body text colour for [bubble] layout (the bubble override when set).
+  /// This is the `.message-content` CONTAINER colour — what bare body text uses.
   Color textColorFor({required bool bubble}) =>
       bubble ? (bubbleTextColor ?? textColor) : textColor;
+
+  /// The colour for an INNER `> *` element (link/mention/emoji) and for the shop
+  /// DEMO sample (which the PWA wraps in a `<span>`, so it is a child). Falls back
+  /// to the body colour for every style except the satoshi container/child split.
+  Color previewColorFor({required bool bubble}) =>
+      childColor ?? textColorFor(bubble: bubble);
 }
 
 /// A soft radial-gradient wash painted UNDER a watermark's tiles (the
@@ -464,13 +482,28 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
   if (v == null) return null;
   final lightColor = isLight ? _styleLightColor[styleId] : null;
   final hasLightText = lightColor != null;
+  // The `.message-content` CONTAINER (bare body text) colour, for the styles
+  // whose body differs from their inner `> *` child colour. Only satoshi: the
+  // body is white (#FFFFFF dark / #7a5500 light) while the children stay the bold
+  // orange #f7931a/#c47a15. When set, the body uses this and [childColor] carries
+  // the orange for inner elements + the shop preview; otherwise body == inner.
+  final bodyColor =
+      isLight ? _styleLightBodyColor[styleId] : _styleBodyColor[styleId];
+  // The inner `> *` / preview colour: the light override when present, else the
+  // dark `styleVisuals` colour.
+  final innerColor = hasLightText ? lightColor : v.color;
   // satoshi is the one textured style with no `.message-content` text-shadow at
   // all (its glow is preview-only) — so it has neither a glyph-shadow nor a glow
   // layer here, and the single-glow [glow] fallback must NOT manufacture one.
   final hasMessageShadow = _styleGlyphShadows.containsKey(styleId) ||
       _styleGlowShadows.containsKey(styleId);
   return MessageStyleDecoration(
-    textColor: hasLightText ? lightColor : v.color,
+    // Body text uses the CONTAINER colour (white/brown for satoshi); every other
+    // style's container IS its inner colour, so this is just [innerColor].
+    textColor: bodyColor ?? innerColor,
+    // The inner `> *` element + shop-preview colour, set only when it differs
+    // from the body (the satoshi split). Null = children inherit [textColor].
+    childColor: bodyColor != null ? innerColor : null,
     // Light mode resets `text-shadow` to none — except glitch, whose light rule
     // leaves its red/cyan chromatic split (supplied via [glyphShadows]) intact.
     // Styles with no real message text-shadow (satoshi) drop the glow entirely.
@@ -491,7 +524,11 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // colour for both layouts (the bubble override is a dark-mode-only rule).
     bubbleTextColor: hasLightText ? null : _styleBubbleTextColor[styleId],
     monospace: v.monospace,
-    bold: _styleBold.contains(styleId),
+    // satoshi's `font-weight: bold` lives on the inner `> *` children
+    // (styles-features.css:572), NOT the `.message-content` container — so bare
+    // body text is NORMAL weight. When the style splits (bodyColor set), the bold
+    // belongs to the children, not the body, so drop it here.
+    bold: _styleBold.contains(styleId) && bodyColor == null,
     glyphShadows: _styleGlyphShadows[styleId],
     watermark: isLight
         ? (_styleLightWatermarks[styleId] ?? styleWatermarks[styleId])
@@ -579,9 +616,26 @@ const Map<String, Color> _styleBubbleTextColor = {
 /// satoshi (`styles-features.css:572`).
 const Set<String> _styleBold = {'style-satoshi'};
 
+/// Dark-mode `.message-content` CONTAINER body-text colour for styles whose bare
+/// body differs from their inner `> *` child colour. Only satoshi: the container
+/// is white (`color:#FFFFFF`, styles-features.css:550) while its inner spans are
+/// the bold orange `#f7931a` (`:571`). Real plain message text is bare nodes, so
+/// the body reads white; the orange is reserved for links/mentions/emoji and the
+/// shop preview (which wraps its sample in a `<span>`).
+const Map<String, Color> _styleBodyColor = {
+  'style-satoshi': Color(0xFFFFFFFF),
+};
+
+/// Light-mode `.message-content` CONTAINER body colour (the split styles). satoshi
+/// body is `#7a5500` (`body.light-mode .message.style-satoshi .message-content`,
+/// styles-themes-responsive.css:900); its inner children are `#c47a15` (`:905`).
+const Map<String, Color> _styleLightBodyColor = {
+  'style-satoshi': Color(0xFF7A5500),
+};
+
 /// Light-mode text colours (`body.light-mode .message.style-X .message-content`,
-/// styles-themes-responsive.css:810-1041). satoshi uses the colour of its inner
-/// text spans (`#c47a15`), not the dimmer `.message-content` colour.
+/// styles-themes-responsive.css:810-1041). For satoshi this is the INNER `> *`
+/// child colour (`#c47a15`); the body uses the dimmer container [_styleLightBodyColor].
 const Map<String, Color> _styleLightColor = {
   'style-matrix': Color(0xFF006600),
   'style-neon': Color(0xFF990099),
