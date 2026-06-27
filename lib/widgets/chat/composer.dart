@@ -1568,18 +1568,25 @@ class _ComposerState extends ConsumerState<Composer> {
 
     if (!_popout) {
       // `.message-input:focus`: a 3px primary@0.06 focus ring (spread, no blur)
-      // hugging the field's rounded-bottom shape.
-      if (!focused) return stack;
+      // hugging the field's rounded-bottom shape. ALWAYS render the DecoratedBox
+      // (toggling only the shadow) — conditionally returning `stack` vs
+      // `DecoratedBox(child: stack)` re-parents the TextField subtree the instant
+      // it focuses, which REMOUNTS the EditableText and drops the just-requested
+      // keyboard. That was the "first tap only highlights, tap again to actually
+      // open the keyboard (then the paste toolbar shows)" bug. A stable tree keeps
+      // the first tap focusing AND raising the keyboard.
       return DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: radius,
-          boxShadow: [
-            BoxShadow(
-              color: c.primaryA(0.06),
-              spreadRadius: 3,
-              blurRadius: 0,
-            ),
-          ],
+          boxShadow: focused
+              ? [
+                  BoxShadow(
+                    color: c.primaryA(0.06),
+                    spreadRadius: 3,
+                    blurRadius: 0,
+                  ),
+                ]
+              : const [],
         ),
         child: stack,
       );
