@@ -651,6 +651,18 @@ class ApiClient {
         // An authed request with no signable identity can't use the socket.
         if (authEvent == null) return null;
       }
+      // Don't block THIS request on the socket handshake — opening + auth can
+      // take several seconds, and at boot that made the first channel backfill
+      // (e.g. #nymchat) load ~5s late instead of instantly. If the socket isn't
+      // connected yet, kick the connection off in the BACKGROUND and serve this
+      // request over HTTP now; once it's up, subsequent requests ride the socket
+      // (which is why clicking away + back already loads instantly). The PWA
+      // likewise prefers HTTP when the socket isn't ready rather than stalling.
+      if (!socket.isOpen) {
+        unawaited(
+            socket.ensureConnected(authEvent: authEvent).catchError((_) {}));
+        return null; // → HTTP fallback now
+      }
       await socket.ensureConnected(authEvent: authEvent);
       // The socket is authenticated once; per-request bodies drop pubkey/auth
       // (the worker pins the socket's pubkey — shop.js comment at :273). Public

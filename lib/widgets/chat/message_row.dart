@@ -1008,10 +1008,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
     // The bubble interior = the body, THEN the `.bubble-time-inner` (the
     // timestamp sits at the BOTTOM-RIGHT, INSIDE the bubble background, below the
-    // content — followed by the crypto lock). The `.message-translation` is NOT
-    // here: the PWA inserts it as a sibling AFTER `.message-content`
-    // (`translate.js: contentEl.after(translationEl)`), so it renders as a
-    // full-width block BELOW the bubble — see [stack] below.
+    // content — followed by the crypto lock). The PM `.delivery-status` ticks are
+    // NOT here: the PWA emits them as a TOP-LEVEL sibling AFTER `.message-content`
+    // (`messages.js:940`, `flex-basis:100%; text-align:right`), so they render as
+    // a full-width right-aligned line BELOW the bubble — see [stack] below. The
+    // `.message-translation` is likewise a sibling after `.message-content`.
     final innerContent = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -1020,37 +1021,42 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             deco: deco, bubble: true),
         // `.bubble-time-inner { display:block; width:fit-content; margin-left:
         // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
-        // below the body, pinned to the bottom-right INSIDE the bubble.
+        // below the body, pinned to the bottom-RIGHT INSIDE the bubble. The Row
+        // shrink-wraps (`width:fit-content`); an [Align] supplies the
+        // `margin-left:auto` (right-edge pin) the bare Row's `mainAxisAlignment`
+        // can't, since a min-size Row in a `start`-aligned ≥180px Column would
+        // otherwise sit bottom-LEFT.
         const SizedBox(height: 4),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            if (message.isEdited)
-              Text(
-                '(edited) ',
-                style: TextStyle(
-                    color: c.textDim, fontSize: 10, fontStyle: FontStyle.italic),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              if (message.isEdited)
+                Text(
+                  '(edited) ',
+                  style: TextStyle(
+                      color: c.textDim,
+                      fontSize: 10,
+                      fontStyle: FontStyle.italic),
+                ),
+              // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
+              // Tapping it shows the full date+time popup (showTimestampPopup).
+              Tooltip(
+                message: formatFullTimestamp(
+                    message.dateTime, settings.timeFormat, settings.dateFormat),
+                triggerMode: TooltipTriggerMode.tap,
+                child: Text(
+                  formatRelativeTime(message.dateTime),
+                  style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
+                ),
               ),
-            // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-            // Tapping it shows the full date+time popup (showTimestampPopup).
-            Tooltip(
-              message: formatFullTimestamp(
-                  message.dateTime, settings.timeFormat, settings.dateFormat),
-              triggerMode: TooltipTriggerMode.tap,
-              child: Text(
-                formatRelativeTime(message.dateTime),
-                style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
-              ),
-            ),
-            // `.crypto-lock-bubble`: the verification lock follows the in-bubble
-            // time (PM/group only).
-            if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
-            if (self && message.isPM && !message.isGroup) ...[
-              const SizedBox(width: 4),
-              _ticksGlyph(context),
+              // `.crypto-lock-bubble`: the verification lock follows the in-bubble
+              // time (PM/group only).
+              if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
             ],
-          ],
+          ),
         ),
       ],
     );
@@ -1123,6 +1129,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             ),
           ),
         Align(alignment: sideAlign, child: bubble),
+        // PM sent/delivered/read receipt (`.delivery-status`). The PWA emits it as
+        // a TOP-LEVEL sibling AFTER `.message-content` (`messages.js:940`), and the
+        // base rule `flex-basis:100%; text-align:right; padding-right:4px`
+        // (styles-chat.css:665-671) wraps it onto its OWN full-width line BELOW the
+        // bubble, right-aligned — NOT inside the bubble next to the time. Identical
+        // placement to the IRC layout (which also appends it as a sibling).
+        if (self && message.isPM && !message.isGroup) _deliveryTicks(context),
         // `.message-translation`: a full-width left-primary-bordered block BELOW
         // the bubble (a sibling after `.message-content`, NOT inside it).
         if (_showTranslation)
@@ -1731,9 +1744,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return body;
   }
 
+  /// The full-width PM `.delivery-status` line below the message: right-aligned,
+  /// `margin-top:2px; padding-right:4px` (styles-chat.css:665-671). Shared by the
+  /// IRC and bubble layouts (both append it as a sibling after the content).
   Widget _deliveryTicks(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4),
+      padding: const EdgeInsets.only(top: 2, right: 4),
       child: Align(
         alignment: Alignment.centerRight,
         child: _ticksGlyph(context),
@@ -1785,7 +1801,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 '!',
                 style: TextStyle(
                   color: c.danger,
-                  fontSize: 11,
+                  fontSize: 10,
                   height: 1,
                   fontWeight: FontWeight.bold,
                 ),
@@ -1798,7 +1814,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
     return Text(
       glyph,
-      style: TextStyle(color: color, fontSize: 11, height: 1),
+      style: TextStyle(color: color, fontSize: 10, height: 1),
     );
   }
 
