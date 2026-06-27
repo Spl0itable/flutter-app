@@ -87,6 +87,24 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
   /// reflects the action immediately without a provider round-trip.
   late bool _hasUnread = _rows.any((r) => !r.viewed);
 
+  @override
+  void initState() {
+    super.initState();
+    // Fetch kind-0 for every distinct sender shown (the PWA's per-row
+    // `queueProfileFetch`, notifications.js:473-481). Senders restored from
+    // persisted history on boot never went through a message ingest, so without
+    // this their rows show identicons. `ensureProfiles` → `_maybeBackfillProfiles`
+    // self-guards (self / already-pictured / staleness), so passing every sender
+    // is safe.
+    final senders = <String>{
+      for (final e in widget.entries)
+        if ((e.senderPubkey ?? '').isNotEmpty) e.senderPubkey!,
+    };
+    if (senders.isNotEmpty) {
+      ref.read(nostrControllerProvider).ensureProfiles(senders);
+    }
+  }
+
   void _markAllRead() {
     ref.read(notificationHistoryProvider.notifier).markAllViewed();
     setState(() {

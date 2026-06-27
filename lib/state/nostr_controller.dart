@@ -300,6 +300,17 @@ class NostrController {
       _initStorageSync(identity, signer);
       unawaited(_bootStorageSync());
 
+      // PWA `applyNostrLogin` → `fetchProfileDirect(self)` (app.js:5531): restore
+      // our own profile so the sidebar header shows our real nym + avatar instead
+      // of the ephemeral derived nym. `resolveProfiles` reads the D1 database
+      // FIRST (`profile-get`, the source of truth) and only falls back to a relay
+      // kind-0 fetch if D1 holds no profile for us — so a brand-new account with
+      // no saved profile correctly stays on the derived nym. It has no self-guard
+      // (unlike `_maybeBackfillProfiles`), and `_ingestProfile` now updates
+      // `selfNym` for self, so this restores both the avatar and the header text.
+      // Covers `loginWithNsec` too (it re-runs `init`). Best-effort.
+      unawaited(resolveProfiles([identity.pubkey]));
+
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
       // not only on a later view switch (`_onViewOpened`). This MUST run after
@@ -1805,6 +1816,16 @@ class NostrController {
     GiftWrapUnwrapped u,
     AppStateNotifier appState,
   ) {
+    // Backfill kind-0 profiles for everyone this control event names — the
+    // sender plus all p-tagged members/targets/owner — so members who joined via
+    // invite/add-member (and never sent a message) still show their real avatar
+    // in the member list + group header instead of an identicon. The PWA fetches
+    // these in every groups.js control handler (e.g. :954/:991/:1448).
+    // `_maybeBackfillProfiles` self-guards (self / already-pictured / staleness).
+    _maybeBackfillProfiles(senderPubkey);
+    for (final t in tags) {
+      if (t.length > 1 && t[0] == 'p') _maybeBackfillProfiles(t[1]);
+    }
     final inviteTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
@@ -3077,6 +3098,11 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     appState.ensurePMConversation(peerPubkey, nym: nym);
     appState.switchView(ChatView.pm(peerPubkey));
+    // Resolve the peer's kind-0 so a brand-new PM (no prior events from them, e.g.
+    // started from the new-PM picker or a profile tap) still shows their real
+    // avatar/nym instead of an identicon (PWA `openUserPM` → `fetchProfileDirect`,
+    // pms.js:3115). Self-/picture-guarded inside `_maybeBackfillProfiles`.
+    ensureProfiles([peerPubkey]);
   }
 
   /// Creates a group with [memberPubkeys], registers it locally, and switches.

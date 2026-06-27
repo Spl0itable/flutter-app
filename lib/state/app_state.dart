@@ -1368,7 +1368,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) {
+      // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
+      // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
+      // app.js:5510). Without this, restoring our own profile on login fixes the
+      // avatar but leaves the header text as the ephemeral derived nym.
+      final selfNym =
+          (e.pubkey == state.selfPubkey && (p.name ?? '').isNotEmpty)
+              ? getNymFromPubkey(p.name!, e.pubkey)
+              : null;
+      state =
+          selfNym != null ? state.copyWith(selfNym: selfNym) : state.copyWith();
+    }
   }
 
   void _ingestReaction(NostrEvent e) {
