@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
 import '../../core/crypto/bitchat.dart' as bitchat;
+import '../../core/crypto/crypto_worker.dart';
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
@@ -16,6 +17,7 @@ import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
 import '../../models/nostr_event.dart';
 import '../api/api_client.dart';
+import '../api/api_config.dart';
 import '../relay/relay_message.dart';
 import '../relay/relay_pool.dart';
 import '../relay/relay_pool_proxy.dart';
@@ -237,6 +239,12 @@ class NostrService {
   /// PWA's single shared `verify-worker.js`. Stateless, so one instance is safe.
   static final IsolateVerifier _verifier = IsolateVerifier();
 
+  /// Process-wide off-thread gift-wrap worker (the PWA's `crypto-pool.js`
+  /// analog), shared so inbound unwrap bursts and outbound wrap fan-outs across
+  /// every service instance coalesce. Stateless aside from its in-flight batch,
+  /// so one instance is safe.
+  static final CryptoWorker _cryptoWorker = CryptoWorker.instance;
+
   /// The [EventVerifier] handed to every pool: verify each inbound event off
   /// the main thread (batched). Preserves the per-event keep/drop contract the
   /// relay layer relies on — see [IsolateVerifier].
@@ -406,13 +414,30 @@ class NostrService {
     _wireProxyFallback();
     pool.connectAll();
 
-    final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 3600;
+    // REQ windows mirror the PWA's `_buildCriticalFilters` (relays.js:2485-2570).
+    // When the D1 archive is reachable (the API host is configured — always true
+    // in production), the relay-pool proxy has ALREADY archived history to D1, so
+    // we ask relays for ONLY new live events (`since = now`) and collapse history
+    // to `limit: 1`; the full backlog is restored from D1 by the controller's
+    // `backfillFromD1OnReconnect`. Without D1 we fall back to a 24h relay window.
+    // (This is the fix for "data should be pulled from D1, not re-REQ'd 1h from
+    // relays on every connect".)
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final d1Available = ApiConfig.apiHost.isNotEmpty;
+    final liveSince = d1Available ? nowSec : nowSec - 86400;
+    int lim(int n) => d1Available ? 1 : n;
     final self = identity.pubkey;
     final filters = [
-      NostrFilter(kinds: [EventKind.geoChannel, EventKind.namedChannel], since: since),
+      // Channels (20000/23333): real-time `since` only, no limit
+      // (relays.js:2497-2498).
+      NostrFilter(
+          kinds: [EventKind.geoChannel, EventKind.namedChannel],
+          since: liveSince),
+      // Channel reactions (kind 7, `#k:[20000,23333]`) (relays.js:2506).
       NostrFilter(
         kinds: [EventKind.reaction],
-        since: since,
+        since: liveSince,
+        limit: lim(100),
         tags: {
           'k': ['${EventKind.geoChannel}', '${EventKind.namedChannel}'],
         },
@@ -421,35 +446,41 @@ class NostrService {
       // recipient is always p-tagged, so this catches receipts for OUR authored
       // channel/profile messages — both the LNURL provider's (verified) receipt
       // and a peer's own-published kind-9735 (zaps.js `_publishOwnMessageZapEvent`).
-      // The PWA runs a broad `#p` zap-receipt REQ for this (zaps.js
-      // `listenForZapReceipt` / `_listenForBotCreditReceipt`). Routed through
-      // `_onEvent` → the public-zap-receipt path (`_onPublicZapReceipt`).
+      // Collapses to since=now/limit:1 under D1 (relays.js:2517); history from D1.
       NostrFilter(
         kinds: [EventKind.zapReceipt],
-        since: since,
+        since: liveSince,
+        limit: lim(200),
         tags: {
           'p': [self],
         },
       ),
       // Gift wraps addressed to us (PMs, group messages, receipts, typing).
+      // NIP-59 backdates created_at, so NO `since`; cap at limit:1 under D1
+      // (relays.js:2494) — the PM/group backlog is restored from D1.
       NostrFilter(
         kinds: [EventKind.giftWrap],
+        limit: d1Available ? 1 : 500,
         tags: {
           'p': [self],
         },
       ),
-      // Presence (nym-presence) — kept minimal.
+      // Presence (nym-presence): real-time only under D1 (relays.js:2528).
       NostrFilter(
         kinds: [EventKind.appData],
-        since: since,
+        since: d1Available ? nowSec : null,
+        limit: lim(100),
         tags: {
           't': [AppDataTopic.presence],
         },
       ),
-      // NIP-30 custom emoji: discover emoji packs (kind 30030) + the user's own
-      // emoji-pack list (kind 10030, our author only). Mirrors the PWA's REQ
-      // filters (relays.js:2546/2552) so custom emoji actually arrive.
-      NostrFilter(kinds: [EventKind.emojiPack], limit: 300),
+      // NIP-30 custom emoji packs (kind 30030): real-time + limit:1 under D1
+      // (history via the D1 emoji restore); else discover up to 300
+      // (relays.js:2546). Plus the user's own emoji-pack list (kind 10030).
+      NostrFilter(
+          kinds: [EventKind.emojiPack],
+          since: d1Available ? nowSec : null,
+          limit: d1Available ? 1 : 300),
       NostrFilter(
         kinds: [EventKind.userEmojiList],
         authors: [self],
@@ -781,7 +812,13 @@ class NostrService {
     }
 
     if (candidates.isEmpty) return;
-    final res = await giftwrap.unwrapGiftWrap(wrap, candidates);
+    // Local-key unwrap: per-DM ECDH + ChaCha20 + triple jsonDecode, looped over
+    // candidate keys. Bursts to ~1000 wraps on PM backfill, so run it off the
+    // main isolate via the shared crypto worker (the PWA's `crypto-pool.js`
+    // analog). The worker runs the SAME [giftwrap.unwrapGiftWrap] inside an
+    // isolate, preserving per-candidate try/next + the null-on-undecryptable
+    // skip, and falls back to the inline path on web / on isolate failure.
+    final res = await _cryptoWorker.unwrap(wrap, candidates);
     if (res == null) return;
 
     _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
@@ -1198,6 +1235,42 @@ class NostrService {
   // Gift-wrapped publish paths (PM / group / receipt / typing) + presence.
   // ---------------------------------------------------------------------------
 
+  /// Builds the signed kind-1059 gift wrap of [rumor] for [recipientPubkey],
+  /// choosing the off-thread worker for a [LocalSigner] and the remote-capable
+  /// async path for a NIP-46 signer.
+  ///
+  /// For a [LocalSigner] the whole wrap (seal + ephemeral wrap) is pure local
+  /// crypto, so it runs on the shared [_cryptoWorker] isolate (the PWA's
+  /// `crypto-pool.js` analog) — the worker generates the ephemeral wrap key
+  /// inside the isolate and runs the SAME `nip59Wrap`, producing a wrap
+  /// indistinguishable from the synchronous path. For a NIP-46 remote signer
+  /// the **seal** must round-trip the network (`nip44_encrypt` + `sign_event`),
+  /// so that path stays on [giftwrap.nip59WrapAsync] as before.
+  Future<NostrEvent?> _buildWrap(
+    UnsignedEvent rumor,
+    String recipientPubkey, {
+    int? expiration,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    if (sig is LocalSigner) {
+      return _cryptoWorker.wrapOne(
+        rumor: rumor,
+        senderPrivkey: sig.privkey,
+        recipientPubkey: recipientPubkey,
+        expiration: expiration,
+      );
+    }
+    // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer still
+    // uses a fresh local ephemeral key.
+    return giftwrap.nip59WrapAsync(
+      rumor: rumor,
+      senderSigner: sig,
+      recipientPubkey: recipientPubkey,
+      expiration: expiration,
+    );
+  }
+
   /// Gift-wraps [rumor] to [recipientPubkey] (NIP-59) and publishes it. Returns
   /// the wrap event, or null if we can't sign.
   Future<NostrEvent?> _wrapAndPublish(
@@ -1205,18 +1278,8 @@ class NostrService {
     String recipientPubkey, {
     int? expiration,
   }) async {
-    final sig = signer;
-    if (sig == null) return null;
-    // Route through the async, signer-driven wrap so a NIP-46 remote signer
-    // seals via its `nip44_encrypt` + `sign_event` RPCs; the wrap layer always
-    // uses a fresh local ephemeral key. For a [LocalSigner] this is equivalent
-    // to the sync `nip59Wrap` (same seal author + conversation key).
-    final wrap = await giftwrap.nip59WrapAsync(
-      rumor: rumor,
-      senderSigner: sig,
-      recipientPubkey: recipientPubkey,
-      expiration: expiration,
-    );
+    final wrap = await _buildWrap(rumor, recipientPubkey, expiration: expiration);
+    if (wrap == null) return null;
     // Gift wraps (kind 1059) publish via DM_EVENT so the proxy gives them
     // priority to the default relays (relays.js `sendDMToRelays`). In direct
     // mode this is a plain publish (the PoolTransport default).
@@ -1252,9 +1315,31 @@ class NostrService {
     required String Function(String memberPubkey) encryptTo,
     MessagingSettings settings = const MessagingSettings(),
   }) async {
-    if (signer == null) return false;
+    final sig = signer;
+    if (sig == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final expiration = settings.expirationFor(nowSec);
+
+    // Group fan-out is the worst multiplier — one full wrap (ECDH + sign) per
+    // recipient, right on the send tap. For a local key, ship the WHOLE
+    // recipient list to the worker in a single isolate hop (loop runs inside the
+    // isolate, one ephemeral key per recipient), then publish each result. The
+    // remote (NIP-46) path can't batch (each seal is a network RPC), so it keeps
+    // the per-recipient loop.
+    if (sig is LocalSigner) {
+      final targets = [for (final pk in recipients) encryptTo(pk)];
+      final wraps = await _cryptoWorker.wrapMany(
+        rumor: rumor,
+        senderPrivkey: sig.privkey,
+        recipientPubkeys: targets,
+        expiration: expiration,
+      );
+      for (final wrap in wraps) {
+        if (wrap != null) await pool.publishDm(wrap);
+      }
+      return true;
+    }
+
     for (final pk in recipients) {
       await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
     }

@@ -216,20 +216,52 @@ class MessageStyleDecoration {
   const MessageStyleDecoration({
     required this.textColor,
     this.glow,
+    this.glowShadows,
     this.gradient,
+    this.gradientGlow,
     this.contentBackground,
+    this.backgroundGradient,
+    this.bubbleTextColor,
     this.borderAccent,
     this.monospace = false,
+    this.bold = false,
     this.glyphShadows,
     this.watermark,
   });
 
   final Color textColor;
   final Color? glow;
+
+  /// The full multi-layer CSS `text-shadow` stack (each layer with its own
+  /// colour + blur radius), e.g. neon's `0 0 10/20/30px #ff00ff` or vapor's
+  /// pink+cyan dual glow. When present this is the source of [textShadows];
+  /// [glow] is only a single-layer fallback for styles without an explicit stack.
+  final List<Shadow>? glowShadows;
+
   final List<Color>? gradient;
+
+  /// The blue `text-shadow 0 0 10px rgba(91,140,255,.3)` glow painted behind the
+  /// aurora gradient text (the ShaderMask branch is otherwise shadow-less).
+  final Shadow? gradientGlow;
+
   final Color? contentBackground;
+
+  /// A 135deg background gradient painted on the IRC row (`body:not(.chat-bubbles)
+  /// .message.X { background: linear-gradient(135deg,…) }`) — supporter's gold
+  /// `.08`→`.03` wash. The bubble layout uses the flat [contentBackground]
+  /// instead (the bubble override is a solid colour). Null = use [contentBackground].
+  final List<Color>? backgroundGradient;
+
+  /// A bubble-layout-only text colour override (`body.chat-bubbles .message.
+  /// style-X .message-content { color }`): fire→`#ff6600`, ice→`#00ccff`. IRC
+  /// keeps [textColor]. Null = same colour in both layouts.
+  final Color? bubbleTextColor;
+
   final Color? borderAccent;
   final bool monospace;
+
+  /// Bold the styled glyphs (`font-weight: bold`) — satoshi.
+  final bool bold;
 
   /// Explicit glyph shadows that override the default blurred [glow] — used for
   /// the glitch style's red/-2px + cyan/+2px chromatic split (`.style-glitch`).
@@ -240,18 +272,44 @@ class MessageStyleDecoration {
   final StyleWatermark? watermark;
 
   /// The glyph [Shadow]s reproducing the CSS `text-shadow` glow. Glitch supplies
-  /// its own [glyphShadows]; otherwise a single soft blurred glow.
+  /// its own [glyphShadows]; otherwise the full layered [glowShadows] stack, or a
+  /// single soft blurred glow as a last resort.
   List<Shadow>? get textShadows {
     if (glyphShadows != null) return glyphShadows;
+    if (glowShadows != null) return glowShadows;
     return glow != null ? [Shadow(color: glow!, blurRadius: 10)] : null;
   }
+
+  /// The body text colour for [bubble] layout (the bubble override when set).
+  Color textColorFor({required bool bubble}) =>
+      bubble ? (bubbleTextColor ?? textColor) : textColor;
+}
+
+/// A soft radial-gradient wash painted UNDER a watermark's tiles (the
+/// `radial-gradient(circle at {center}, {color}, transparent {radius})` half of
+/// a multi-layer `--style-pattern` — eclipse's warm orange glow behind the text).
+class RadialWash {
+  const RadialWash({
+    required this.color,
+    this.center = Alignment.center,
+    this.radius = 0.55,
+  });
+
+  /// The inner (centre) colour; fades to transparent at [radius].
+  final Color color;
+
+  /// The gradient centre (CSS `circle at 20% 50%` → `Alignment(-0.6, 0)`).
+  final Alignment center;
+
+  /// The transparent stop as a fraction of the box (`transparent 55%` → 0.55).
+  final double radius;
 }
 
 /// A repeating texture painted behind a styled message's content. Either a tiled
 /// inline SVG (`svg` + the tile [size]) or a programmatic scanline painter
 /// ([scanlines] = CRT/eclipse). Mirrors `--style-pattern`.
 class StyleWatermark {
-  const StyleWatermark.svg(this.svg, this.size)
+  const StyleWatermark.svg(this.svg, this.size, {this.radialWash})
       : scanline = null,
         scanlineGap = 0,
         scanlineThickness = 0;
@@ -264,13 +322,18 @@ class StyleWatermark {
     required this.scanlineThickness,
   })  : svg = null,
         size = Size.zero,
-        scanline = color;
+        scanline = color,
+        radialWash = null;
 
   final String? svg;
   final Size size;
   final Color? scanline;
   final double scanlineGap;
   final double scanlineThickness;
+
+  /// An optional soft radial-gradient wash painted BEHIND the tiled SVG (the
+  /// radial half of eclipse's `--style-pattern`), or null.
+  final RadialWash? radialWash;
 
   bool get isScanlines => scanline != null;
 }
@@ -283,13 +346,18 @@ class CosmeticAura {
   const CosmeticAura({
     required this.id,
     this.insetColor,
+    this.bubbleInsetColor,
     this.insetWidth = 1,
     this.glowColor,
     this.glowBlur = 0,
+    this.bubbleGlowBlur,
     this.borderAccent,
     this.gradient,
+    this.bubbleGradient,
+    this.bubblePaintsGradient = false,
     this.background,
     this.watermark,
+    this.edgeWatermark = false,
     this.prismRing = false,
     this.hologram = false,
     this.insetRing = false,
@@ -304,23 +372,50 @@ class CosmeticAura {
   /// CROSS-FILE NOTE on [CosmeticOverlayPainter] re: the redundant `Border.all`
   /// `message_row` should drop so the ring isn't drawn twice.
   final Color? insetColor;
+
+  /// The bubble-layout inset ring colour when it differs from the IRC [insetColor]
+  /// (`body.chat-bubbles .message.cosmetic-aura-gold .message-content` strokes a
+  /// `.55` ring vs the IRC `.35`). Null = use [insetColor] in both layouts.
+  final Color? bubbleInsetColor;
   final double insetWidth;
 
-  /// `box-shadow: 0 0 {glowBlur}px {glowColor}`.
+  /// `box-shadow: 0 0 {glowBlur}px {glowColor}` (IRC).
   final Color? glowColor;
   final double glowBlur;
+
+  /// The bubble-layout outer-glow blur when it differs from the IRC [glowBlur]
+  /// (gold: bubble 12px vs IRC 18px). Null = use [glowBlur] in both layouts.
+  final double? bubbleGlowBlur;
 
   /// `border-left: 3px solid …` (IRC).
   final Color? borderAccent;
 
-  /// 135deg background gradient behind the content.
+  /// 135deg background gradient. Painted on the IRC ROW for every aura that has
+  /// one (gold/neon/phoenix/cosmic). In the BUBBLE it is painted as the bubble
+  /// fill ONLY when [bubblePaintsGradient] is set (gold), because the PWA bubble
+  /// for neon/phoenix/cosmic is box-shadow-only (the gradient is IRC-only there).
   final List<Color>? gradient;
+
+  /// The bubble-fill gradient when it differs from the IRC [gradient] (gold's
+  /// bubble wash is `.16`→`.06` vs the IRC `.05`→`.02`). Only consulted when
+  /// [bubblePaintsGradient]; null = reuse [gradient].
+  final List<Color>? bubbleGradient;
+
+  /// True when the BUBBLE layout paints [gradient]/[bubbleGradient] as the bubble
+  /// fill. gold=true (PWA bubble gold has a gold wash); neon/phoenix/cosmic=false
+  /// (PWA bubble is box-shadow-only — the gradient is the IRC row's only).
+  final bool bubblePaintsGradient;
 
   /// A flat background fill (frost icy wash) when there's no gradient.
   final Color? background;
 
   /// A tiled SVG watermark (frost snowflakes / cosmic starfield).
   final StyleWatermark? watermark;
+
+  /// Tile [watermark] only along the four EDGES (a frosted border) rather than
+  /// across the whole content box — frost (`background-position: center top,
+  /// center bottom, left center, right center` + `repeat-x/repeat-y`, :1161).
+  final bool edgeWatermark;
 
   /// Render the conic prism ring border (rainbow). Painted via a sweep gradient.
   final bool prismRing;
@@ -340,6 +435,17 @@ class CosmeticAura {
   /// True when this aura should be painted by [CosmeticOverlayPainter] (it has a
   /// prism ring, holographic sheen, or a true inset ring to stroke).
   bool get hasOverlay => prismRing || hologram || insetRing;
+
+  /// The inset ring colour for [bubble] layout (the bubble override when set).
+  Color? insetColorFor({required bool bubble}) =>
+      bubble ? (bubbleInsetColor ?? insetColor) : insetColor;
+
+  /// The outer-glow blur for [bubble] layout (the bubble override when set).
+  double glowBlurFor({required bool bubble}) =>
+      bubble ? (bubbleGlowBlur ?? glowBlur) : glowBlur;
+
+  /// The bubble-fill gradient: [bubbleGradient] when given, else [gradient].
+  List<Color>? get bubbleFillGradient => bubbleGradient ?? gradient;
 }
 
 /// Maps a message-style id to its [MessageStyleDecoration], or null for an
@@ -358,22 +464,120 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
   if (v == null) return null;
   final lightColor = isLight ? _styleLightColor[styleId] : null;
   final hasLightText = lightColor != null;
+  // satoshi is the one textured style with no `.message-content` text-shadow at
+  // all (its glow is preview-only) — so it has neither a glyph-shadow nor a glow
+  // layer here, and the single-glow [glow] fallback must NOT manufacture one.
+  final hasMessageShadow = _styleGlyphShadows.containsKey(styleId) ||
+      _styleGlowShadows.containsKey(styleId);
   return MessageStyleDecoration(
     textColor: hasLightText ? lightColor : v.color,
     // Light mode resets `text-shadow` to none — except glitch, whose light rule
     // leaves its red/cyan chromatic split (supplied via [glyphShadows]) intact.
-    glow: hasLightText ? null : v.glow,
+    // Styles with no real message text-shadow (satoshi) drop the glow entirely.
+    glow: (hasLightText || !hasMessageShadow) ? null : v.glow,
+    // The full multi-layer CSS text-shadow stack (real per-layer blurs), dropped
+    // in light mode alongside the single-layer [glow].
+    glowShadows: hasLightText ? null : _styleGlowShadows[styleId],
     // Only aurora keeps a multi-stop gradient in light mode; every other gradient
     // style falls back to a solid [_styleLightColor].
     gradient: isLight ? _styleLightGradient[styleId] : v.gradient,
+    // The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`),
+    // kept in both modes; light only swaps the gradient stops.
+    gradientGlow: (v.gradient != null) ? _styleGradientGlow[styleId] : null,
     contentBackground:
         (isLight ? _styleLightContentBackground[styleId] : null) ??
             _styleContentBackground[styleId],
+    // Bubble-only colour overrides (fire/ice). Light mode uses the single light
+    // colour for both layouts (the bubble override is a dark-mode-only rule).
+    bubbleTextColor: hasLightText ? null : _styleBubbleTextColor[styleId],
     monospace: v.monospace,
+    bold: _styleBold.contains(styleId),
     glyphShadows: _styleGlyphShadows[styleId],
-    watermark: styleWatermarks[styleId],
+    watermark: isLight
+        ? (_styleLightWatermarks[styleId] ?? styleWatermarks[styleId])
+        : styleWatermarks[styleId],
   );
 }
+
+/// The full per-style CSS `text-shadow` stack, each layer carrying its real
+/// colour + blur radius (`.message.style-X .message-content { text-shadow }`,
+/// `styles-features.css`). This replaces the uniform 10px single-glow: most
+/// styles are 8px, fire 14px, neon a 10/20/30px triple, matrix a 10/20px double,
+/// eclipse 8+16px, vapor/royal dual-colour. Styles whose look is a chromatic
+/// split (glitch) supply [_styleGlyphShadows] instead and are absent here.
+const Map<String, List<Shadow>> _styleGlowShadows = {
+  // neon: 0 0 10px, 20px, 30px #ff00ff (triple) (:596-599).
+  'style-neon': [
+    Shadow(color: Color(0xFFFF00FF), blurRadius: 10),
+    Shadow(color: Color(0xFFFF00FF), blurRadius: 20),
+    Shadow(color: Color(0xFFFF00FF), blurRadius: 30),
+  ],
+  // matrix: 0 0 10px, 20px #00ff00 (double) (:590-593).
+  'style-matrix': [
+    Shadow(color: Color(0xFF00FF00), blurRadius: 10),
+    Shadow(color: Color(0xFF00FF00), blurRadius: 20),
+  ],
+  // ghost: 0 2px 16px rgba(255,255,255,.5) (Y-offset 2, blur 16) (:601-605).
+  'style-ghost': [
+    Shadow(color: Color(0x80FFFFFF), offset: Offset(0, 2), blurRadius: 16),
+  ],
+  // fire: 0 0 14px rgba(255,160,0,.8) (:607-610).
+  'style-fire': [Shadow(color: Color(0xCCFFA000), blurRadius: 14)],
+  // ice: 0 0 8px rgba(0,200,255,.5) (:613-616).
+  'style-ice': [Shadow(color: Color(0x8000C8FF), blurRadius: 8)],
+  // rainbow: 0 0 8px rgba(199,125,255,.35) (:619-622).
+  'style-rainbow': [Shadow(color: Color(0x59C77DFF), blurRadius: 8)],
+  // ocean: 0 0 8px rgba(56,189,248,.5) (:734).
+  'style-ocean': [Shadow(color: Color(0x8038BDF8), blurRadius: 8)],
+  // sakura: 0 0 8px rgba(255,126,182,.5) (:759).
+  'style-sakura': [Shadow(color: Color(0x80FF7EB6), blurRadius: 8)],
+  // galaxy: 0 0 8px rgba(192,132,252,.6) (:784).
+  'style-galaxy': [Shadow(color: Color(0x99C084FC), blurRadius: 8)],
+  // toxic: 0 0 8px rgba(132,255,59,.5) (:809).
+  'style-toxic': [Shadow(color: Color(0x8084FF3B), blurRadius: 8)],
+  // gold: 0 0 8px rgba(255,215,0,.5) (:838).
+  'style-gold': [Shadow(color: Color(0x80FFD700), blurRadius: 8)],
+  // vapor: 0 0 8px rgba(255,113,206,.5), 0 0 14px rgba(5,217,232,.3) (dual) (:867).
+  'style-vapor': [
+    Shadow(color: Color(0x80FF71CE), blurRadius: 8),
+    Shadow(color: Color(0x4D05D9E8), blurRadius: 14),
+  ],
+  // blood: 0 0 8px rgba(255,30,30,.6) (:892).
+  'style-blood': [Shadow(color: Color(0x99FF1E1E), blurRadius: 8)],
+  // royal: 0 0 8px rgba(196,163,255,.5), 0 0 12px rgba(212,175,55,.3) (dual) (:917).
+  'style-royal': [
+    Shadow(color: Color(0x80C4A3FF), blurRadius: 8),
+    Shadow(color: Color(0x4DD4AF37), blurRadius: 12),
+  ],
+  // circuit: 0 0 8px rgba(45,212,191,.5) (:942).
+  'style-circuit': [Shadow(color: Color(0x802DD4BF), blurRadius: 8)],
+  // eclipse: 0 0 8px rgba(255,170,90,.55), 0 0 16px rgba(255,120,60,.3) (dual) (:1252).
+  'style-eclipse': [
+    Shadow(color: Color(0x8CFFAA5A), blurRadius: 8),
+    Shadow(color: Color(0x4DFF783C), blurRadius: 16),
+  ],
+  // crt: 0 0 8px rgba(255,176,0,.85) (:1284).
+  'style-crt': [Shadow(color: Color(0xD9FFB000), blurRadius: 8)],
+  // satoshi: NO text-shadow on .message-content (glow is preview-only) — absent.
+};
+
+/// The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`,
+/// styles-features.css:644), kept behind the gradient-clipped text in both modes.
+const Map<String, Shadow> _styleGradientGlow = {
+  'style-aurora': Shadow(color: Color(0x4D5B8CFF), blurRadius: 10),
+};
+
+/// Bubble-layout-only text colour overrides (`body.chat-bubbles .message.
+/// style-X .message-content { color }`, styles-features.css:3665-3673). fire and
+/// ice paint a brighter glyph in bubbles than the IRC `#ffaa00`/`#00ccee`.
+const Map<String, Color> _styleBubbleTextColor = {
+  'style-fire': Color(0xFFFF6600),
+  'style-ice': Color(0xFF00CCFF),
+};
+
+/// Styles that bold their glyphs (`font-weight: bold` on the inner spans).
+/// satoshi (`styles-features.css:572`).
+const Set<String> _styleBold = {'style-satoshi'};
 
 /// Light-mode text colours (`body.light-mode .message.style-X .message-content`,
 /// styles-themes-responsive.css:810-1041). satoshi uses the colour of its inner
@@ -452,14 +656,20 @@ final Map<String, StyleWatermark> styleWatermarks = {
         "<text x='19' y='27'>01</text><text x='6' y='41'>11</text></g></svg>",
     const Size(36, 48),
   ),
-  // eclipse: dim star dots (styles-features.css:1257), 60×60. (The radial glow
-  // half of --style-pattern is folded into the glow/background instead.)
+  // eclipse: dim star dots (styles-features.css:1257), 60×60, PLUS the radial
+  // warm-orange wash half of --style-pattern (`radial-gradient(circle at 20% 50%,
+  // rgba(255,190,120,.14), transparent 55%)`, :1256) painted behind the text.
   'style-eclipse': StyleWatermark.svg(
     "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
         "<g fill='#ffd9a0' fill-opacity='0.12'><circle cx='14' cy='12' r='0.9'/>"
         "<circle cx='46' cy='30' r='0.7'/><circle cx='26' cy='48' r='0.8'/>"
         "</g></svg>",
     const Size(60, 60),
+    radialWash: const RadialWash(
+      color: Color(0x24FFBE78), // rgba(255,190,120,.14)
+      center: Alignment(-0.6, 0), // circle at 20% 50%
+      radius: 0.55, // transparent 55%
+    ),
   ),
   // crt: amber phosphor scanlines — 1px line every 3px (styles-features.css:1286).
   'style-crt': const StyleWatermark.scanlines(
@@ -600,6 +810,108 @@ final Map<String, StyleWatermark> styleWatermarks = {
   ),
 };
 
+/// Light-mode `--style-pattern` watermark swaps (`body.light-mode .message.
+/// style-X .message-content { --style-pattern }`, styles-themes-responsive.css:
+/// 810-1045). On a light surface the bright dark-mode SVG fills wash out (ghost
+/// is the worst — white ghosts → invisible), so the PWA swaps to a darker fill
+/// at a higher alpha. Styles absent here keep their dark-mode SVG in light too
+/// (greens/icy hues read OK). Tile sizes are unchanged from the dark variants.
+final Map<String, StyleWatermark> _styleLightWatermarks = {
+  // ghost → #223044 @ 0.1 (was #ffffff @ 0.08) (:833).
+  'style-ghost': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='52' height='52'>"
+        "<g fill='#223044' fill-opacity='0.1' fill-rule='evenodd'>"
+        "<path d='M13 7c-3.3 0-5.5 2.4-5.5 5.5V19l2.2-1.6L12 19l1-1 1 1 2.3-1.6L18.5 "
+        "19v-6.5C18.5 9.4 16.3 7 13 7z M10.5 11.5a0.85 0.85 0 1 0 1.7 0 0.85 0.85 "
+        "0 1 0 -1.7 0z M13.8 11.5a0.85 0.85 0 1 0 1.7 0 0.85 0.85 0 1 0 -1.7 0z'/>"
+        "<path d='M37 29c-2.6 0-4.5 1.9-4.5 4.5V38l1.8-1.3L36 38l.8-.8.8.8 1.7-1.3L41 "
+        "38v-4.5C41 30.9 39.1 29 37 29z M35.1 33a0.7 0.7 0 1 0 1.4 0 0.7 0.7 0 1 0 "
+        "-1.4 0z M37.7 33a0.7 0.7 0 1 0 1.4 0 0.7 0.7 0 1 0 -1.4 0z'/></g></svg>",
+    const Size(52, 52),
+  ),
+  // matrix → #006600 @ 0.2 (:1029).
+  'style-matrix': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='48'>"
+        "<g font-family='monospace' font-size='12' fill='#006600' "
+        "fill-opacity='0.2'><text x='3' y='13'>10</text>"
+        "<text x='19' y='27'>01</text><text x='6' y='41'>11</text></g></svg>",
+    const Size(36, 48),
+  ),
+  // ocean → #38a8d8 @ 0.3 (:1014).
+  'style-ocean': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='24'>"
+        "<g fill='none' stroke='#38a8d8' stroke-opacity='0.3' stroke-width='1.4'>"
+        "<path d='M0 12 Q6 6 12 12 T24 12 T36 12 T48 12'/>"
+        "<path d='M0 20 Q6 14 12 20 T24 20 T36 20 T48 20'/></g></svg>",
+    const Size(48, 24),
+  ),
+  // sakura → #c01f7a @ 0.24 (:1017).
+  'style-sakura': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='50' height='50'>"
+        "<g fill='#c01f7a' fill-opacity='0.24'>"
+        "<ellipse cx='12' cy='12' rx='3' ry='1.6' transform='rotate(30 12 12)'/>"
+        "<ellipse cx='36' cy='30' rx='3' ry='1.6' transform='rotate(-20 36 30)'/>"
+        "<ellipse cx='42' cy='8' rx='2.5' ry='1.3' transform='rotate(60 42 8)'/>"
+        "<ellipse cx='8' cy='40' rx='2.5' ry='1.3' transform='rotate(10 8 40)'/>"
+        "</g></svg>",
+    const Size(50, 50),
+  ),
+  // galaxy → #6a2fb0 @ 0.32 (:1020).
+  'style-galaxy': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
+        "<g fill='#6a2fb0' fill-opacity='0.32'><circle cx='10' cy='12' r='1.2'/>"
+        "<circle cx='40' cy='8' r='0.9'/><circle cx='52' cy='30' r='1.4'/>"
+        "<circle cx='24' cy='40' r='1'/><circle cx='8' cy='48' r='0.8'/>"
+        "<circle cx='34' cy='52' r='1.1'/></g>"
+        "<g stroke='#6a2fb0' stroke-opacity='0.3' stroke-width='1' "
+        "stroke-linecap='round'><path d='M30 22v5M27.5 24.5h5'/></g></svg>",
+    const Size(60, 60),
+  ),
+  // toxic → #3a7a00 (stroke .3 / fill .24) (:1035).
+  'style-toxic': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'>"
+        "<g fill='none' stroke='#3a7a00' stroke-opacity='0.3' stroke-width='1.2'>"
+        "<circle cx='12' cy='12' r='3'/><circle cx='36' cy='34' r='3'/></g>"
+        "<g fill='#3a7a00' fill-opacity='0.24'><circle cx='12' cy='12' r='1'/>"
+        "<circle cx='36' cy='34' r='1'/></g></svg>",
+    const Size(48, 48),
+  ),
+  // gold → #a07a00 @ 0.22 (:1032).
+  'style-gold': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='46' height='46'>"
+        "<g fill='#a07a00' fill-opacity='0.22'>"
+        "<path d='M12 4 13.2 10.8 20 12 13.2 13.2 12 20 10.8 13.2 4 12 10.8 10.8z'/>"
+        "<path d='M34 26 34.8 30.2 39 31 34.8 31.8 34 36 33.2 31.8 29 31 33.2 30.2z'/>"
+        "</g></svg>",
+    const Size(46, 46),
+  ),
+  // vapor → #b9b3c2 @ 0.35 (:1009).
+  'style-vapor': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>"
+        "<g fill='none' stroke='#b9b3c2' stroke-opacity='0.35' stroke-width='1'>"
+        "<path d='M0 0H24V24'/></g></svg>",
+    const Size(24, 24),
+  ),
+  // royal → #9a7b1a @ 0.32 (:1038).
+  'style-royal': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'>"
+        "<g fill='none' stroke='#9a7b1a' stroke-opacity='0.32' stroke-width='1'>"
+        "<path d='M16 4 22 12 16 20 10 12z'/>"
+        "<path d='M0 20 6 28 0 36M32 20 26 28 32 36'/></g></svg>",
+    const Size(32, 32),
+  ),
+  // circuit → #0a7d70 (stroke .34 / fill .42) (:1041).
+  'style-circuit': StyleWatermark.svg(
+    "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'>"
+        "<g fill='none' stroke='#0a7d70' stroke-opacity='0.34' stroke-width='1'>"
+        "<path d='M6 6h12v12M18 6h12M30 6v10h12M6 24v12h10M16 36h14v8M30 30h12'/></g>"
+        "<g fill='#0a7d70' fill-opacity='0.42'><circle cx='6' cy='6' r='1.5'/>"
+        "<circle cx='42' cy='16' r='1.5'/><circle cx='16' cy='36' r='1.5'/>"
+        "<circle cx='42' cy='30' r='1.5'/></g></svg>",
+    const Size(48, 48),
+  ),
+};
+
 /// Translucent `.message-content { background-color }` painted by the styles
 /// that have one (verbatim alpha from `css/styles-features.css`). Styles not
 /// listed paint no content background.
@@ -617,8 +929,13 @@ const Map<String, Color> _styleContentBackground = {
 /// bubble (`css/styles-features.css` lines 1084-1092).
 const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
   textColor: Color(0xFFFFD700),
-  glow: Color(0x40FFD700), // rgba(255,215,0,.25)
-  contentBackground: Color(0x14FFD700), // ~rgba(255,215,0,.08) bubble wash
+  // text-shadow 0 0 8px rgba(255,215,0,.25) (was a uniform 10px blur).
+  glowShadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+  glow: Color(0x40FFD700), // rgba(255,215,0,.25) — single-layer fallback
+  // body.chat-bubbles .message.supporter-style .message-content { bg rgba(255,215,0,.12) }
+  contentBackground: Color(0x1FFFD700), // rgba(255,215,0,.12) bubble wash
+  // body:not(.chat-bubbles) .message.supporter-style { bg gradient .08→.03 } (:1085)
+  backgroundGradient: [Color(0x14FFD700), Color(0x08FFD700)],
   borderAccent: Color(0xFFFFD700),
 );
 
@@ -629,7 +946,10 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
 const MessageStyleDecoration supporterStyleDecorationLight =
     MessageStyleDecoration(
   textColor: Color(0xFF8A6D00),
-  contentBackground: Color(0x14B48C00), // rgba(180,140,0,~.08) wash
+  contentBackground: Color(0x14B48C00), // rgba(180,140,0,~.08) bubble wash
+  // body.light-mode:not(.chat-bubbles) .message.supporter-style { bg gradient
+  // rgba(180,140,0,.06→.02) } (:935).
+  backgroundGradient: [Color(0x0FB48C00), Color(0x05B48C00)],
   borderAccent: Color(0xFFB8960A),
 );
 
@@ -640,10 +960,17 @@ const MessageStyleDecoration supporterStyleDecorationLight =
 
 /// Resolves the active special-cosmetic auras for [cosmetics] (in declared
 /// order, excluding the redacted privacy item which is handled separately).
-List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics) {
+///
+/// [isLight] selects the `body.light-mode .message.cosmetic-X` override: the
+/// bright dark rings/borders are too strong on a light surface, so the PWA (gold)
+/// — and, where the PWA has no explicit light rule, a derived readable tone —
+/// swaps to a darker, softer aura. Mirrors how the styles thread `isLight`.
+List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics,
+    {bool isLight = false}) {
+  final table = isLight ? _cosmeticAurasLight : _cosmeticAuras;
   final out = <CosmeticAura>[];
   for (final id in cosmetics.cosmetics) {
-    final aura = _cosmeticAuras[id];
+    final aura = table[id] ?? _cosmeticAuras[id];
     if (aura != null) out.add(aura);
   }
   return out;
@@ -667,20 +994,28 @@ const String _cosmicStarfieldSvg =
     "<circle cx='15' cy='50' r='0.6' fill-opacity='0.35'/></g></svg>";
 
 /// Cosmetic aura table (styles-features.css:1099-1211). Box-shadow inset/glow,
-/// border accents, gradients + watermarks captured verbatim.
+/// border accents, gradients + watermarks captured verbatim. Per-layout deltas
+/// (the bubble's stronger gold ring/smaller glow, and which auras paint their
+/// gradient as a bubble FILL vs only on the IRC row) are carried by the
+/// `bubble*` fields.
 final Map<String, CosmeticAura> _cosmeticAuras = {
-  // cosmetic-aura-gold (:1099-1103)
+  // cosmetic-aura-gold — IRC :1099-1103, bubble :3696-3702
   'cosmetic-aura-gold': const CosmeticAura(
     id: 'cosmetic-aura-gold',
-    insetColor: Color(0x59FFD700), // rgba(255,215,0,.35)
+    insetColor: Color(0x59FFD700), // IRC ring rgba(255,215,0,.35)
+    bubbleInsetColor: Color(0x8CFFD700), // bubble ring rgba(255,215,0,.55)
     insetWidth: 1,
     insetRing: true,
     glowColor: Color(0x2EFFD700), // rgba(255,215,0,.18)
-    glowBlur: 18,
+    glowBlur: 18, // IRC 18px
+    bubbleGlowBlur: 12, // bubble 0 0 12px
     borderAccent: Color(0xFFFFD700),
+    // IRC row bg gradient .05→.02; bubble fill gradient .16→.06.
     gradient: [Color(0x0DFFD700), Color(0x05FFD700)],
+    bubbleGradient: [Color(0x29FFD700), Color(0x0FFFD700)],
+    bubblePaintsGradient: true, // PWA bubble gold DOES paint a gold wash
   ),
-  // cosmetic-aura-neon (:1105-1113)
+  // cosmetic-aura-neon — IRC :1105-1109, bubble :1111-1113 (box-shadow only)
   'cosmetic-aura-neon': const CosmeticAura(
     id: 'cosmetic-aura-neon',
     insetColor: Color(0x8C00E5FF), // rgba(0,229,255,.55)
@@ -688,16 +1023,17 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     glowColor: Color(0x5200E5FF), // rgba(0,229,255,.32)
     glowBlur: 22,
     borderAccent: Color(0xFF00E5FF),
+    // IRC row bg gradient only; bubble paints NO fill (box-shadow only).
     gradient: [Color(0x0F00E5FF), Color(0x0500E5FF)],
   ),
-  // cosmetic-aura-rainbow (:1115-1139) — conic prism ring + soft glow
+  // cosmetic-aura-rainbow (:1115-1139) — conic prism ring + soft glow (both layouts)
   'cosmetic-aura-rainbow': const CosmeticAura(
     id: 'cosmetic-aura-rainbow',
     glowColor: Color(0x4D9664FF), // rgba(150,100,255,.3)
     glowBlur: 16,
     prismRing: true,
   ),
-  // cosmetic-frost (:1141-1167) — frosted inset + snowflake edges + icy wash
+  // cosmetic-frost (:1141-1167) — frosted inset + snowflake EDGES + icy wash
   'cosmetic-frost': CosmeticAura(
     id: 'cosmetic-frost',
     insetColor: const Color(0x8CE1F6FF), // rgba(225,246,255,.55)
@@ -706,8 +1042,9 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     glowBlur: 10,
     background: const Color(0x29BEE6FF), // rgba(190,230,255,.16)
     watermark: StyleWatermark.svg(_frostSnowflakeSvg, const Size(18, 18)),
+    edgeWatermark: true, // snowflakes tile along the 4 edges, not full-box
   ),
-  // cosmetic-aura-phoenix (:1169-1177)
+  // cosmetic-aura-phoenix — IRC :1169-1173, bubble :1175-1177 (box-shadow only)
   'cosmetic-aura-phoenix': const CosmeticAura(
     id: 'cosmetic-aura-phoenix',
     insetColor: Color(0x99FFA000), // rgba(255,160,0,.6)
@@ -715,9 +1052,11 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     glowColor: Color(0x66FF6E00), // rgba(255,110,0,.4)
     glowBlur: 26,
     borderAccent: Color(0xFFFF6A00),
+    // IRC row bg gradient only; bubble paints NO fill.
     gradient: [Color(0x12FF6A00), Color(0x08FF0000)],
   ),
-  // cosmetic-aura-cosmic (:1179-1195) — purple ring + starfield
+  // cosmetic-aura-cosmic — IRC :1179-1186 (gradient+starfield), bubble :1188-1195
+  // (starfield tile only; the gradient is IRC-only).
   'cosmetic-aura-cosmic': CosmeticAura(
     id: 'cosmetic-aura-cosmic',
     insetColor: const Color(0x99A082FF), // rgba(160,130,255,.6)
@@ -725,10 +1064,12 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
     glowColor: const Color(0x738C64FF), // rgba(140,100,255,.45)
     glowBlur: 26,
     borderAccent: const Color(0xFF7C5CFF),
+    // IRC row bg gradient; bubble gets only the starfield watermark, NO gradient.
     gradient: const [Color(0x29462D8C), Color(0x0F0F0C23)],
     watermark: StyleWatermark.svg(_cosmicStarfieldSvg, const Size(60, 60)),
   ),
   // cosmetic-bubble-hologram (:1197-1211) — white sheen over multi-gradient
+  // (both layouts via the overlay painter).
   'cosmetic-bubble-hologram': const CosmeticAura(
     id: 'cosmetic-bubble-hologram',
     insetColor: Color(0x80FFFFFF), // rgba(255,255,255,.5)
@@ -739,6 +1080,113 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   ),
 };
 
+/// Light-mode aura overrides. The PWA only ships an explicit light rule for GOLD
+/// (`body.light-mode … .cosmetic-aura-gold`, styles-themes-responsive.css:923-931);
+/// for the other auras (neon/rainbow/phoenix/cosmic/frost/hologram) there is no
+/// light override, so a bright dark ring would bleed onto the light surface —
+/// here we DERIVE a readable light tone (lower ring/glow alpha, the same hue) so
+/// the aura still reads without overpowering the bubble. Auras absent from this
+/// map fall back to the dark entry (see [resolveCosmeticAuras]).
+final Map<String, CosmeticAura> _cosmeticAurasLight = {
+  // gold — explicit PWA light values. IRC: inset .3, glow 12px .12, border
+  // #b8960a, bg .06→.02. Bubble: inset .5, glow 10px .15, fill .18→.06.
+  'cosmetic-aura-gold': const CosmeticAura(
+    id: 'cosmetic-aura-gold',
+    insetColor: Color(0x4DB48C00), // rgba(180,140,0,.3)
+    bubbleInsetColor: Color(0x80B48C00), // rgba(180,140,0,.5)
+    insetWidth: 1,
+    insetRing: true,
+    glowColor: Color(0x1FB48C00), // rgba(180,140,0,.12)
+    glowBlur: 12,
+    bubbleGlowBlur: 10,
+    borderAccent: Color(0xFFB8960A),
+    gradient: [Color(0x0FB48C00), Color(0x05B48C00)], // .06→.02
+    bubbleGradient: [Color(0x2EB48C00), Color(0x0FB48C00)], // .18→.06
+    bubblePaintsGradient: true,
+  ),
+  // neon — derived: softer cyan ring (.35) + dimmer glow, darker border so it
+  // reads on white. Bubble box-shadow-only (no fill), like dark.
+  'cosmetic-aura-neon': const CosmeticAura(
+    id: 'cosmetic-aura-neon',
+    insetColor: Color(0x59008CA8), // muted cyan ring ~.35
+    insetRing: true,
+    glowColor: Color(0x33008CA8),
+    glowBlur: 16,
+    borderAccent: Color(0xFF0095B3),
+    gradient: [Color(0x14008CA8), Color(0x08008CA8)],
+  ),
+  // rainbow — prism ring reads fine on light; just soften the purple glow.
+  'cosmetic-aura-rainbow': const CosmeticAura(
+    id: 'cosmetic-aura-rainbow',
+    glowColor: Color(0x335A2FB0), // softer purple
+    glowBlur: 14,
+    prismRing: true,
+  ),
+  // frost — derived: a darker icy ring/border + a lighter wash so frosted edges
+  // and the bg read on a light surface.
+  'cosmetic-frost': CosmeticAura(
+    id: 'cosmetic-frost',
+    insetColor: const Color(0x665B9FC8), // muted blue ring
+    insetRing: true,
+    glowColor: const Color(0x335B9FC8),
+    glowBlur: 10,
+    background: const Color(0x1F7FB8D8), // lighter icy wash
+    watermark: StyleWatermark.svg(_frostSnowflakeSvgLight, const Size(18, 18)),
+    edgeWatermark: true,
+  ),
+  // phoenix — derived: darker orange ring/border, dimmer glow.
+  'cosmetic-aura-phoenix': const CosmeticAura(
+    id: 'cosmetic-aura-phoenix',
+    insetColor: Color(0x80C25000), // muted orange ~.5
+    insetRing: true,
+    glowColor: Color(0x40C24700),
+    glowBlur: 22,
+    borderAccent: Color(0xFFC24700),
+    gradient: [Color(0x12C25000), Color(0x08B33000)],
+  ),
+  // cosmic — derived: darker purple ring/border, dimmer glow; keep the starfield.
+  'cosmetic-aura-cosmic': CosmeticAura(
+    id: 'cosmetic-aura-cosmic',
+    insetColor: const Color(0x805A3FB0), // muted purple ~.5
+    insetRing: true,
+    glowColor: const Color(0x405A3FB0),
+    glowBlur: 22,
+    borderAccent: const Color(0xFF5A3FB0),
+    gradient: const [Color(0x1F46308C), Color(0x0F2A2350)],
+    watermark: StyleWatermark.svg(_cosmicStarfieldSvgLight, const Size(60, 60)),
+  ),
+  // hologram — derived: a darker inset so the white-sheen iridescence stays
+  // visible over a light bubble; the sheen/gradient itself is unchanged.
+  'cosmetic-bubble-hologram': const CosmeticAura(
+    id: 'cosmetic-bubble-hologram',
+    insetColor: Color(0x66607090), // muted slate ring (was white .5)
+    insetRing: true,
+    glowColor: Color(0x668097C8),
+    glowBlur: 18,
+    hologram: true,
+  ),
+};
+
+/// Light-mode variants of the tiled aura SVGs (darker fills so the texture
+/// reads on a light surface — the PWA has no light rule for these auras, so the
+/// tone is derived).
+const String _frostSnowflakeSvgLight =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
+    "<g fill='none' stroke='#3f7fa8' stroke-opacity='0.5' stroke-width='1' "
+    "stroke-linecap='round'>"
+    "<path d='M9 2.5v13M2.5 9h13M4.4 4.4l9.2 9.2M13.6 4.4 4.4 13.6'/>"
+    "<path d='M9 4.5 7.5 6M9 4.5 10.5 6M9 13.5 7.5 12M9 13.5 10.5 12M4.5 9 6 "
+    "7.5M4.5 9 6 10.5M13.5 9 12 7.5M13.5 9 12 10.5'/></g></svg>";
+
+const String _cosmicStarfieldSvgLight =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
+    "<g fill='#5a3fb0'><circle cx='10' cy='12' r='1' fill-opacity='0.45'/>"
+    "<circle cx='44' cy='8' r='0.8' fill-opacity='0.4'/>"
+    "<circle cx='52' cy='34' r='1.2' fill-opacity='0.5'/>"
+    "<circle cx='22' cy='44' r='0.9' fill-opacity='0.4'/>"
+    "<circle cx='33' cy='22' r='0.7' fill-opacity='0.35'/>"
+    "<circle cx='15' cy='50' r='0.6' fill-opacity='0.3'/></g></svg>";
+
 // =============================================================================
 // Rendering widgets for the watermark / aura textures.
 // =============================================================================
@@ -748,9 +1196,17 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
 /// so wrap it in a `Positioned.fill` inside a `Stack` (z-index: -1 in the CSS),
 /// clipped to the bubble radius by the caller.
 class StyleWatermarkLayer extends StatelessWidget {
-  const StyleWatermarkLayer({super.key, required this.watermark});
+  const StyleWatermarkLayer({
+    super.key,
+    required this.watermark,
+    this.edgeOnly = false,
+  });
 
   final StyleWatermark watermark;
+
+  /// Tile only along the four edges (a frosted border) rather than across the
+  /// whole box — frost (`CosmeticAura.edgeWatermark`).
+  final bool edgeOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -762,11 +1218,31 @@ class StyleWatermarkLayer extends StatelessWidget {
         ),
       );
     }
-    // Tiled inline SVG. flutter_svg renders a single tile; we repeat it across
-    // the content box.
+    // The tiled SVG, optionally over a soft radial wash (eclipse's warm glow).
+    final tiles = edgeOnly
+        ? _EdgeTiledSvg(svg: watermark.svg!, tile: watermark.size)
+        : _TiledSvg(svg: watermark.svg!, tile: watermark.size);
+    final wash = watermark.radialWash;
     return IgnorePointer(
       child: ClipRect(
-        child: _TiledSvg(svg: watermark.svg!, tile: watermark.size),
+        child: wash == null
+            ? tiles
+            : Stack(
+                children: [
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: wash.center,
+                          radius: wash.radius,
+                          colors: [wash.color, wash.color.withValues(alpha: 0)],
+                        ),
+                      ),
+                    ),
+                  ),
+                  tiles,
+                ],
+              ),
       ),
     );
   }
@@ -830,6 +1306,57 @@ class _TiledSvg extends StatelessWidget {
   }
 }
 
+/// Tiles a small SVG only along the FOUR EDGES (a frosted border), mirroring the
+/// frost `--style-pattern`'s `background-position: center top, center bottom,
+/// left center, right center` + `repeat-x/repeat-y`: a horizontal strip across
+/// the top and bottom, a vertical strip down the left and right.
+class _EdgeTiledSvg extends StatelessWidget {
+  const _EdgeTiledSvg({required this.svg, required this.tile});
+  final String svg;
+  final Size tile;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
+        final h = constraints.maxHeight.isFinite ? constraints.maxHeight : 120.0;
+        final cols = (w / tile.width).ceil() + 1;
+        final rows = (h / tile.height).ceil() + 1;
+        // A fresh SvgPicture per cell (a widget can't appear twice in the tree).
+        Widget cell() => SizedBox(
+              width: tile.width,
+              height: tile.height,
+              child: SvgPicture.string(
+                svg,
+                width: tile.width,
+                height: tile.height,
+                fit: BoxFit.fill,
+              ),
+            );
+        Widget hStrip() => Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [for (var col = 0; col < cols; col++) cell()],
+            );
+        // Inner vertical strips skip the top/bottom row so the corners aren't
+        // double-stacked (the horizontal strips already cover them).
+        Widget vStrip() => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [for (var r = 0; r < rows - 2; r++) cell()],
+            );
+        return Stack(
+          children: [
+            Align(alignment: Alignment.topCenter, child: hStrip()),
+            Align(alignment: Alignment.bottomCenter, child: hStrip()),
+            Align(alignment: Alignment.centerLeft, child: vStrip()),
+            Align(alignment: Alignment.centerRight, child: vStrip()),
+          ],
+        );
+      },
+    );
+  }
+}
+
 /// Paints the parts of a `.message.cosmetic-X` box-shadow / overlay that a plain
 /// [BoxDecoration] can't express, as a `Positioned.fill` layer above the bubble
 /// content: the conic prism ring (rainbow), the holographic sheen (hologram),
@@ -858,10 +1385,15 @@ class CosmeticOverlayPainter extends CustomPainter {
   CosmeticOverlayPainter({
     required this.aura,
     required this.radius,
+    this.bubble = true,
   });
 
   final CosmeticAura aura;
   final BorderRadius radius;
+
+  /// Whether this overlay is painted in bubble layout (selects [CosmeticAura.
+  /// bubbleInsetColor]). The prism ring / hologram sheen are layout-agnostic.
+  final bool bubble;
 
   static const List<Color> _prism = [
     Color(0xFFFF2D2D),
@@ -919,7 +1451,7 @@ class CosmeticOverlayPainter extends CustomPainter {
     }
     // True inset ring (`box-shadow: inset 0 0 0 {w}px {c}`). Drawn last so it
     // sits crisply on top of the hologram sheen / prism ring.
-    final ringColor = aura.insetColor;
+    final ringColor = aura.insetColorFor(bubble: bubble);
     if (aura.insetRing && ringColor != null) {
       final w = aura.insetWidth;
       // A stroked rounded-rect deflated by half its width keeps the whole stroke
@@ -956,7 +1488,9 @@ class CosmeticOverlayPainter extends CustomPainter {
   bool shouldRepaint(CosmeticOverlayPainter old) =>
       old.aura.id != aura.id ||
       old.radius != radius ||
+      old.bubble != bubble ||
       old.aura.insetColor != aura.insetColor ||
+      old.aura.bubbleInsetColor != aura.bubbleInsetColor ||
       old.aura.insetWidth != aura.insetWidth ||
       old.aura.insetRing != aura.insetRing;
 }

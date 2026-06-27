@@ -79,7 +79,7 @@ class _LanguagePromptDialogState extends State<_LanguagePromptDialog> {
               autofocus: true,
               onChanged: (v) => setState(() => _query = v),
               style: TextStyle(color: c.text, fontSize: 13.5),
-              cursorColor: c.primary,
+              cursorColor: c.isLight ? Colors.black : Colors.white,
               decoration: InputDecoration(
                 isDense: true,
                 hintText: 'Search languages...',

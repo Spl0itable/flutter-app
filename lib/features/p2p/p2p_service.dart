@@ -53,14 +53,19 @@ class _P2PConnection {
 }
 
 /// Direct WebRTC data-channel file sharing — 1:1 port of `js/modules/p2p.js`
-/// §4.1. WebTorrent (§4.2) has no native Flutter port; the large-file path falls
-/// back to direct WebRTC chunks (see [shareFile]).
+/// §4.1. Every native share/fetch uses the direct WebRTC data-channel path.
 ///
-/// TODO(verify): no native WebTorrent. The PWA seeds large/torrent files over
-/// WebTorrent (`shareP2PFileTorrent` / `downloadTorrent`); here every share uses
-/// the direct WebRTC data-channel path. Magnet/`?download torrent` offers from
-/// the PWA are advertised but cannot be fetched natively — they surface as
-/// "torrent (unsupported)" in the modal.
+/// DESIGN BOUNDARY (deliberate, not a stub): the direct WebRTC path is the SAME
+/// transport the PWA uses by default and falls back to whenever WebTorrent is
+/// unavailable (p2p.js:909 "Falling back to direct P2P"), so native↔native and
+/// native↔(online PWA seeder) transfers all work. The PWA's OPTIONAL WebTorrent
+/// route for large/torrent files (`shareP2PFileTorrent`/`downloadTorrent`, magnet
+/// URIs) is intentionally not ported: WebTorrent is BitTorrent-over-WebRTC, so a
+/// native classic-BitTorrent client (e.g. libtorrent — TCP/uTP/DHT) cannot join
+/// its WebRTC swarms at all, and a from-scratch WebTorrent-over-`flutter_webrtc`
+/// client is out of scope. The only unreachable case is a magnet-only
+/// `?download torrent` offer from a browser peer whose seeder has since gone
+/// offline; it surfaces as "torrent (unsupported)" in the modal.
 class P2PService extends ChangeNotifier {
   P2PService(this._transport);
 
@@ -136,8 +141,8 @@ class P2PService extends ChangeNotifier {
   /// seeding. Returns the offer so the caller (controller) can announce it as a
   /// channel/PM message with a `['offer', JSON]` tag (`publishFileOffer`).
   ///
-  /// TODO(verify): large files (> a few MB) are still served over direct WebRTC
-  /// chunks rather than WebTorrent — see the class doc.
+  /// Large files use the same direct WebRTC chunk path as small ones; the PWA's
+  /// optional WebTorrent route for big files is a documented boundary (class doc).
   FileOffer shareFile({
     required Uint8List bytes,
     required String name,

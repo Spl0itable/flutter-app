@@ -271,7 +271,7 @@ class FormInput extends StatelessWidget {
       onSubmitted: onSubmitted,
       onChanged: onChanged,
       style: TextStyle(color: c.text, fontSize: 13),
-      cursorColor: c.primary,
+      cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
         isDense: true,
         hintText: hint,

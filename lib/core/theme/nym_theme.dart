@@ -220,7 +220,12 @@ ThemeData buildNymThemeData(NymColors c) {
     textTheme: textTheme,
     primaryTextTheme: primaryTextTheme,
     textSelectionTheme: TextSelectionThemeData(
-      cursorColor: c.primary,
+      // The caret matches the input TEXT color (white on dark / black on light),
+      // exactly like the PWA — which sets no `caret-color`, so the browser draws
+      // the caret in the input's `--text-bright` color (#fff dark / #000 light).
+      // Using the accent (`c.primary`) instead left the caret low-contrast on a
+      // light field ("no visible cursor"); the text color is always legible.
+      cursorColor: c.isLight ? Colors.black : Colors.white,
       selectionColor: c.primary.withValues(alpha: 0.3),
       selectionHandleColor: c.primary,
     ),

@@ -26,6 +26,7 @@ import '../../widgets/common/app_dialog.dart';
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
 import '../messages/format/message_content.dart' show InlineEmojiText;
+import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
 import 'settings_helpers.dart';
 import 'settings_widgets.dart';
@@ -299,11 +300,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.9,
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                child: Stack(
                   children: [
-                    _header(c),
-                    Flexible(
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _header(c),
+                        Flexible(
                       child: SingleChildScrollView(
                         // Sections are full-bleed; the search bar / no-results
                         // text carry the `.modal-content { padding: 32px }`
@@ -338,7 +341,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                       ),
                     ),
-                    _actions(c),
+                        _actions(c),
+                      ],
+                    ),
+                    // `.modal-close`: 32×32 glass ✕ chip, absolute top-right
+                    // (14,14) over the card — not inline in the title row.
+                    ModalChrome.closeChip(
+                        c, () => Navigator.of(context).maybePop()),
                   ],
                 ),
               ),
@@ -352,40 +361,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // --- Chrome ---------------------------------------------------------------
 
   Widget _header(NymColors c) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(32, 24, 18, 14),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'SETTINGS',
-              style: TextStyle(
-                color: c.primary,
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.5,
-              ),
-            ),
-          ),
-          InkWell(
-            onTap: () => Navigator.of(context).maybePop(),
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              width: 32,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                // `.modal-close`: bg white@.05, 1px glass border.
-                color: Colors.white.withValues(alpha: 0.05),
-                shape: BoxShape.circle,
-                border: Border.all(color: c.glassBorder),
-              ),
-              // `.modal-close` is a literal "✕" char in the PWA — styled text.
-              child: Text('✕',
-                  style: TextStyle(color: c.textDim, fontSize: 18, height: 1)),
-            ),
-          ),
-        ],
+    // `.modal-header`: a full-width title with a 1px glass bottom rule. The
+    // close ✕ is the separate absolute chip (build), not a Row child. Right
+    // padding (56) keeps the title clear of the floating chip.
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(32, 24, 56, 14),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: Text(
+        'SETTINGS',
+        style: TextStyle(
+          color: c.primary,
+          fontSize: 22,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.5,
+        ),
       ),
     );
   }

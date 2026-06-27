@@ -550,7 +550,15 @@ class ShopCatalog {
     ),
     'style-aurora': MessageStyleVisual(
       color: Color(0xFF5B8CFF),
-      gradient: [Color(0xFF00FFD5), Color(0xFF5B8CFF), Color(0xFFFF00EA)],
+      // linear-gradient(120deg,#00ffd5,#5b8cff,#ff00ea,#00ffd5) — the trailing
+      // #00ffd5 closes the cyan wrap (was a 3-stop that dropped it). The 120°
+      // diagonal + blue glow are applied in message_row's ShaderMask.
+      gradient: [
+        Color(0xFF00FFD5),
+        Color(0xFF5B8CFF),
+        Color(0xFFFF00EA),
+        Color(0xFF00FFD5),
+      ],
     ),
     'style-neon': MessageStyleVisual(
       color: Color(0xFFFF00FF),

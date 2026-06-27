@@ -300,6 +300,17 @@ class NostrController {
       _initStorageSync(identity, signer);
       unawaited(_bootStorageSync());
 
+      // PWA `applyNostrLogin` → `fetchProfileDirect(self)` (app.js:5531): restore
+      // our own profile so the sidebar header shows our real nym + avatar instead
+      // of the ephemeral derived nym. `resolveProfiles` reads the D1 database
+      // FIRST (`profile-get`, the source of truth) and only falls back to a relay
+      // kind-0 fetch if D1 holds no profile for us — so a brand-new account with
+      // no saved profile correctly stays on the derived nym. It has no self-guard
+      // (unlike `_maybeBackfillProfiles`), and `_ingestProfile` now updates
+      // `selfNym` for self, so this restores both the avatar and the header text.
+      // Covers `loginWithNsec` too (it re-runs `init`). Best-effort.
+      unawaited(resolveProfiles([identity.pubkey]));
+
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
       // not only on a later view switch (`_onViewOpened`). This MUST run after
@@ -369,21 +380,52 @@ class NostrController {
     final wasOffline = _ref.read(appStateProvider).connectedRelays == 0;
     _ref.read(appStateProvider.notifier).setConnectedRelays(count);
     if (count > 0 && wasOffline) {
-      // Reconnect edge → re-run the D1 activity discovery (PWA
-      // `backfillFromD1OnReconnect`, relays.js:2761) AND re-restore the open
-      // channel's archive. The latter is the retry that recovers a boot backfill
-      // which ran before the storage transport was reachable: `_backfillChannelArchive`
-      // forces past the freshness window, and re-ingest dedups by event id, so it
-      // is safe + idempotent.
-      unawaited(_discoverChannelActivity());
-      final view = _ref.read(appStateProvider).view;
-      if (view.kind == ViewKind.channel) {
-        unawaited(_backfillChannelArchive(view.id));
-      }
+      // Reconnect edge → re-run the FULL D1 backfill (PWA
+      // `backfillFromD1OnReconnect`, relays.js:2761/2764): PMs, group history,
+      // channel activity, and the joined-channel archives. Now that the relay
+      // REQ windows carry only NEW live events (`NostrService.start` collapses
+      // history to D1), this is what recovers everything that landed while we
+      // were disconnected — without it, the reconnect gap would silently drop
+      // messages.
+      unawaited(_backfillFromD1OnReconnect());
       // Re-send any PM still waiting on a delivery receipt — a reconnect is the
       // most likely moment a stuck DM finally lands (pms.js
       // `retryPendingDMsOnReconnect`, F02 auto-retry).
       _retryPendingDmsOnReconnect();
+    }
+  }
+
+  /// Last `_backfillFromD1OnReconnect` run (ms) — the PWA's 30s throttle so a
+  /// flapping connection can't hammer D1 (`_lastD1BackfillAt`, relays.js:2767).
+  int _lastD1BackfillAt = 0;
+
+  /// Re-pulls the full D1 backlog on a reconnect / app-resume — the native
+  /// `backfillFromD1OnReconnect` (relays.js:2764). Because the relay REQ windows
+  /// now carry ONLY new live events (D1 supplies all history, see
+  /// [NostrService.start]), a reconnect MUST re-restore PMs, group history, and
+  /// the joined-channel archives from D1 — otherwise messages that landed while
+  /// we were disconnected (older than the reconnect's `since=now` window) are
+  /// lost. 30s-throttled, best-effort, idempotent (every restore dedups by id).
+  Future<void> _backfillFromD1OnReconnect() async {
+    final sync = _storageSync;
+    if (sync == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastD1BackfillAt != 0 && now - _lastD1BackfillAt < 30000) return;
+    _lastD1BackfillAt = now;
+    // 1:1 PM backlog (previously boot-only) + group ephemeral history
+    // (previously group-open-only).
+    await _restorePmArchive(sync);
+    await _backfillGroupArchive();
+    // Channel-activity discovery + archive restore over {current ∪ joined}
+    // (relays.js:2791-2797), not just the single open view.
+    unawaited(_discoverChannelActivity());
+    final keys = <String>{
+      for (final c in _ref.read(appStateProvider).channels) c.key,
+    };
+    final view = _ref.read(appStateProvider).view;
+    if (view.kind == ViewKind.channel && view.id.isNotEmpty) keys.add(view.id);
+    for (final key in keys) {
+      await _backfillChannelArchive(key);
     }
   }
 
@@ -1121,6 +1163,17 @@ class NostrController {
     String? contextLabel,
     bool silent = false,
   }) {
+    // notifications.js `_addNotificationToHistory` (the silent/replayed path)
+    // drops events older than 24h (line 135) so a D1 backfill or reconnect
+    // replay doesn't resurface stale messages as fresh notifications (badge +
+    // modal). The loud `showNotification` path only ever sees live events
+    // (<10s old — see `_isHistorical`), so it carries no age gate; mirror that
+    // exact split here rather than gating both paths.
+    if (silent && tsMs != null) {
+      final cutoff24hMs =
+          DateTime.now().millisecondsSinceEpoch - 24 * 60 * 60 * 1000;
+      if (tsMs < cutoff24hMs) return;
+    }
     if (!silent) {
       unawaited(_ref.read(notificationsServiceProvider).notify(
             title: title,
@@ -1763,6 +1816,16 @@ class NostrController {
     GiftWrapUnwrapped u,
     AppStateNotifier appState,
   ) {
+    // Backfill kind-0 profiles for everyone this control event names — the
+    // sender plus all p-tagged members/targets/owner — so members who joined via
+    // invite/add-member (and never sent a message) still show their real avatar
+    // in the member list + group header instead of an identicon. The PWA fetches
+    // these in every groups.js control handler (e.g. :954/:991/:1448).
+    // `_maybeBackfillProfiles` self-guards (self / already-pictured / staleness).
+    _maybeBackfillProfiles(senderPubkey);
+    for (final t in tags) {
+      if (t.length > 1 && t[0] == 'p') _maybeBackfillProfiles(t[1]);
+    }
     final inviteTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
@@ -3035,6 +3098,11 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     appState.ensurePMConversation(peerPubkey, nym: nym);
     appState.switchView(ChatView.pm(peerPubkey));
+    // Resolve the peer's kind-0 so a brand-new PM (no prior events from them, e.g.
+    // started from the new-PM picker or a profile tap) still shows their real
+    // avatar/nym instead of an identicon (PWA `openUserPM` → `fetchProfileDirect`,
+    // pms.js:3115). Self-/picture-guarded inside `_maybeBackfillProfiles`.
+    ensureProfiles([peerPubkey]);
   }
 
   /// Creates a group with [memberPubkeys], registers it locally, and switches.

@@ -57,6 +57,10 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// knows whether opening/closing the drawer is meaningful.
   bool _narrow = false;
 
+  /// Accumulated rightward travel of an in-progress left-edge open-swipe
+  /// (`setupMobileGestures`, ui-context.js:5-32). Reset at each drag start/end.
+  double _edgeSwipeDx = 0;
+
   @override
   void initState() {
     super.initState();
@@ -222,6 +226,36 @@ class HomeShellState extends ConsumerState<HomeShell>
         Positioned.fill(
           child: _content(context, useColumns, compact: true),
         ),
+
+        // Left-edge swipe to open the drawer (`setupMobileGestures`,
+        // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
+        // a touch starting within 50px of the left edge that travels right past
+        // the swipe threshold toggles the sidebar. A 50px-wide strip mirrors the
+        // `clientX < 50` arming; only horizontal drags are claimed, so vertical
+        // scroll + message swipe (which itself defers left-edge swipes) are
+        // unaffected. Present only while closed.
+        if (!_drawerOpen && MediaQuery.of(context).size.width <= 768)
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 50,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragStart: (_) => _edgeSwipeDx = 0,
+              onHorizontalDragUpdate: (d) {
+                _edgeSwipeDx += d.delta.dx;
+                final threshold =
+                    ref.read(settingsProvider).swipeThreshold.toDouble();
+                if (_edgeSwipeDx > threshold && !_drawerOpen) {
+                  _edgeSwipeDx = 0;
+                  setState(() => _drawerOpen = true);
+                }
+              },
+              onHorizontalDragEnd: (_) => _edgeSwipeDx = 0,
+              onHorizontalDragCancel: () => _edgeSwipeDx = 0,
+            ),
+          ),
 
         // Dim backdrop (`.mobile-overlay`). With solid-ui (default ON) the alpha
         // is mode-dependent: dark 0.6, light 0.35
