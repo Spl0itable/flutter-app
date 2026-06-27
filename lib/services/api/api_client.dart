@@ -651,7 +651,18 @@ class ApiClient {
         // An authed request with no signable identity can't use the socket.
         if (authEvent == null) return null;
       }
-      await socket.ensureConnected(authEvent: authEvent);
+      // Don't stall a request for seconds on the socket handshake — at boot the
+      // first channel backfill (e.g. #nymchat) waited ~5s for the socket to open
+      // instead of loading over HTTP. Give the socket only a brief window to come
+      // up; if it doesn't, fall back to HTTP NOW while the connection keeps going
+      // in the background, so the next request rides the (by then) connected
+      // socket (which is why clicking away + back already loaded instantly). An
+      // already-open socket resolves instantly, so steady-state still rides it.
+      final connecting = socket.ensureConnected(authEvent: authEvent);
+      // Swallow a post-timeout connect failure so it isn't an unhandled async
+      // error (the await below stops listening once the timeout fires).
+      unawaited(connecting.catchError((_) {}));
+      await connecting.timeout(const Duration(milliseconds: 800));
       // The socket is authenticated once; per-request bodies drop pubkey/auth
       // (the worker pins the socket's pubkey — shop.js comment at :273). Public
       // reads never carried them. Strip them from the `extra` we frame.

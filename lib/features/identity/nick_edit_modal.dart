@@ -102,7 +102,11 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   void initState() {
     super.initState();
     final id = ref.read(nostrControllerProvider).identity;
-    final nym = id?.nym ?? '';
+    // Prefer the live `selfNym` (which `_ingestProfile` updates from the D1
+    // kind-0 profile on login) over the identity's derived/ephemeral nym, so the
+    // editor opens pre-filled with your REAL saved nickname, not "anon####".
+    final selfNym = ref.read(appStateProvider).selfNym;
+    final nym = selfNym.isNotEmpty ? selfNym : (id?.nym ?? '');
     // The nym is `name#suffix`; the input edits only the name part.
     final hash = nym.indexOf('#');
     _originalNick = hash >= 0 ? nym.substring(0, hash) : nym;

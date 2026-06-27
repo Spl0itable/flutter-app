@@ -228,36 +228,63 @@ class _WallpaperPainter extends CustomPainter {
     }
   }
 
-  // geometric: stacked diagonal bands at 30°/150°/60° over an 80×140 tile.
+  // geometric: a 1:1 port of `#wallpaperLayer.wallpaper-pattern-geometric`
+  // (styles-features.css:3250-3258) — FIVE stacked repeating `linear-gradient`s
+  // over an 80×140 tile, NOT a plain even-spaced crosshatch. Each gradient paints
+  // a pair of hard-edged diagonal stripes (CSS stops `c 12%, transparent 12.5%,
+  // transparent 87%, c 87.5%` → a band at each END of the gradient line); the
+  // four 30°/150° layers (two at offset 0,0 and two at 40,70) interleave into the
+  // argyle lattice, and a fainter 60° layer (`c 25% … c 75%`) overlays it.
+  // We reproduce each CSS gradient EXACTLY by tiling the same multi-stop
+  // `LinearGradient` per 80×140 cell, with begin/end at the cell corners for the
+  // CSS angle, so Flutter rasterises the identical stripes.
   void _paintGeometric(Canvas canvas, Size size) {
-    final band = Paint()..color = _tint(0.08);
-    final wide = Paint()..color = _tint(0.06);
     const tw = 80.0, th = 140.0;
-    void hatch(Paint paint, double degrees, double offX, double offY) {
+    final a08 = _tint(0.08);
+    final a06 = _tint(0.06);
+    const clear = Colors.transparent;
+
+    // One CSS gradient layer: angle (CSS deg), color, the 4 stop positions, and
+    // the tile-phase offset (`background-position`). Painted tiled over [size].
+    void layer(
+      double degrees,
+      Color color,
+      List<double> stops,
+      double offX,
+      double offY,
+    ) {
+      // CSS angle → screen direction (0deg = up): d = (sinθ, -cosθ). The 0%/100%
+      // ends sit at the cell corners furthest along ∓d / ±d.
       final rad = degrees * math.pi / 180;
-      final dir = Offset(math.cos(rad), math.sin(rad));
-      final norm = Offset(-dir.dy, dir.dx);
-      final diag = size.width + size.height;
-      final stroke = Paint()
-        ..color = paint.color
-        ..strokeWidth = 6
-        ..style = PaintingStyle.stroke;
-      final spacing = math.sqrt(tw * tw + th * th) / 4;
-      for (double t = -diag; t < diag; t += spacing) {
-        final base = norm * t + Offset(offX, offY);
-        canvas.drawLine(
-          base - dir * diag,
-          base + dir * diag,
-          stroke,
-        );
+      final dxSign = math.sin(rad) >= 0 ? 1.0 : -1.0;
+      final dySign = -math.cos(rad) >= 0 ? 1.0 : -1.0;
+      final gradient = LinearGradient(
+        begin: Alignment(-dxSign, -dySign),
+        end: Alignment(dxSign, dySign),
+        colors: [color, clear, clear, color],
+        stops: stops,
+      );
+      final paint = Paint();
+      // Tile cells across the canvas, phase-shifted by the CSS background-position.
+      for (double y = -th + (offY % th); y < size.height; y += th) {
+        for (double x = -tw + (offX % tw); x < size.width; x += tw) {
+          final cell = Rect.fromLTWH(x, y, tw, th);
+          paint.shader = gradient.createShader(cell);
+          canvas.save();
+          canvas.clipRect(cell);
+          canvas.drawRect(cell, paint);
+          canvas.restore();
+        }
       }
     }
 
-    hatch(band, 30, 0, 0);
-    hatch(band, 150, 0, 0);
-    hatch(band, 30, 40, 70);
-    hatch(band, 150, 40, 70);
-    hatch(wide, 60, 0, 0);
+    const s08 = [0.12, 0.125, 0.87, 0.875];
+    const s06 = [0.25, 0.255, 0.75, 0.75];
+    layer(30, a08, s08, 0, 0);
+    layer(150, a08, s08, 0, 0);
+    layer(30, a08, s08, 40, 70);
+    layer(150, a08, s08, 40, 70);
+    layer(60, a06, s06, 0, 0);
   }
 
   void _strokeShape(Canvas canvas, Path path, double alpha, double width) {

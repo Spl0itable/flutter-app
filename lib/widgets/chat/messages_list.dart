@@ -283,13 +283,18 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     },
                   ),
                 ),
-                // `.scroll-to-bottom-btn`: 40×40 FAB, bottom:90 (clears the
-                // composer — NOT the columns' 16), right:24, shown >150px from
-                // the bottom (`app.js:7120`, `styles-chat.css:9-43`).
+                // `.scroll-to-bottom-btn`: 40×40 FAB, right:24, shown >150px from
+                // the bottom (`app.js:7120`, `styles-chat.css:9-43`). The PWA's
+                // `bottom:90` is measured from a container that spans BEHIND the
+                // input, so it lands just above the composer. Here the button
+                // lives in the messages Stack, which already ENDS at the composer
+                // top, so it only needs a small inset to sit just above it (16,
+                // same as the columns view) — `bottom:90` floated it ~90px too
+                // high.
                 if (_showScrollButton)
                   Positioned(
                     right: 24,
-                    bottom: 90,
+                    bottom: 16,
                     child: _ScrollToBottomButton(onTap: _scrollToBottom),
                   ),
               ],
