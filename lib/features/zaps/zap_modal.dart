@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../features/identity/modal_chrome.dart';
 import '../../services/api/api_client.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -317,7 +318,7 @@ class _ZapModalState extends ConsumerState<ZapModal> {
         constraints: const BoxConstraints(maxWidth: 400),
         width: MediaQuery.of(context).size.width * 0.9,
         margin: const EdgeInsets.all(16),
-        padding: const EdgeInsets.all(32),
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: c.bgSecondary,
           border: Border.all(color: c.glassBorder),
@@ -341,13 +342,20 @@ class _ZapModalState extends ConsumerState<ZapModal> {
         // ancestor without painting over the Container's own decoration.
         child: Material(
           type: MaterialType.transparency,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _header(c),
-                const SizedBox(height: 24), // `.modal-header` margin-bottom
+          // `.modal-close` is a separate absolutely-positioned chip over the
+          // card, not an inline Row child — so the body and the chip are
+          // siblings in a Stack. The `.modal-content` 32px padding lives on the
+          // scroll content so the chip can sit at the card corner (14,14).
+          child: Stack(
+            children: [
+              SingleChildScrollView(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _header(c),
+                    const SizedBox(height: 24), // `.modal-header` margin-bottom
                 // `#zapRecipientInfo` (`.nm-h-75`) — centered, body-size, mb20.
                 Text(
                   widget.messageId != null
@@ -365,11 +373,15 @@ class _ZapModalState extends ConsumerState<ZapModal> {
                   const SizedBox(height: 8),
                   _status(c, checking: _checkingManual),
                 ],
-                if (_phase == _Phase.paid) _paidSection(c),
-                const SizedBox(height: 20),
-                _actions(c),
-              ],
-            ),
+                    if (_phase == _Phase.paid) _paidSection(c),
+                    const SizedBox(height: 20),
+                    _actions(c),
+                  ],
+                ),
+              ),
+              // `.modal-close`: 32×32 glass ✕ chip, absolute top-right (14,14).
+              ModalChrome.closeChip(c, () => Navigator.of(context).maybePop()),
+            ],
           ),
         ),
       ),
@@ -378,43 +390,22 @@ class _ZapModalState extends ConsumerState<ZapModal> {
 
   Widget _header(NymColors c) {
     // `.modal-header`: 22px, uppercase, --primary, ls1.5, with a hairline
-    // bottom border + 14px padding-bottom under the title row.
+    // bottom border + 14px padding-bottom under the title. The close ✕ is the
+    // separate absolute chip (build) — not an inline Row child here.
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.only(bottom: 14),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              'SEND LIGHTNING ZAP',
-              style: TextStyle(
-                color: c.primary,
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 1.5,
-              ),
-            ),
-          ),
-          InkWell(
-            onTap: () => Navigator.of(context).maybePop(),
-            borderRadius: const BorderRadius.all(Radius.circular(16)),
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withValues(alpha: 0.05),
-                border: Border.all(color: c.glassBorder),
-              ),
-              // `.modal-close` is a literal "✕" char in the PWA — styled text.
-              alignment: Alignment.center,
-              child: Text('✕',
-                  style: TextStyle(color: c.textDim, fontSize: 16, height: 1)),
-            ),
-          ),
-        ],
+      child: Text(
+        'SEND LIGHTNING ZAP',
+        style: TextStyle(
+          color: c.primary,
+          fontSize: 22,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.5,
+        ),
       ),
     );
   }

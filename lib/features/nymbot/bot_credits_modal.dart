@@ -7,6 +7,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../features/identity/modal_chrome.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
 
@@ -145,30 +146,56 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
   @override
   Widget build(BuildContext context) {
     final c = widget.colors;
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 20,
-        right: 20,
-        top: 18,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // PWA `zapRecipientInfo`: gift vs buy heading.
-            Text(
-              widget.isGift
-                  ? 'Gift Nymbot credits to @${widget.giftRecipientNym ?? 'user'}'
-                  : 'Buy Nymbot private message credits',
-              style: TextStyle(
-                  color: c.textBright,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 14),
-            if (_invoice == null) ...[
+    // The PWA presents this purchase through the zap modal chrome
+    // (`showBotCreditsModal` reuses `#zapModal`, zaps.js:530): a
+    // `.modal-header "Send Lightning Zap"` with a bottom rule + the absolute
+    // `.modal-close` ✕ chip, with `#zapRecipientInfo` carrying the buy/gift
+    // line. Mirror that here over the bottom sheet.
+    return Stack(
+      children: [
+        Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 18,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // `.modal-header`: 22px UPPERCASE primary ls1.5 w700 + rule.
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.only(bottom: 14),
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    border:
+                        Border(bottom: BorderSide(color: c.glassBorder)),
+                  ),
+                  child: Text(
+                    'SEND LIGHTNING ZAP',
+                    style: TextStyle(
+                      color: c.primary,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                ),
+                // PWA `zapRecipientInfo`: gift vs buy heading.
+                Text(
+                  widget.isGift
+                      ? 'Gift Nymbot credits to @${widget.giftRecipientNym ?? 'user'}'
+                      : 'Buy Nymbot private message credits',
+                  style: TextStyle(
+                      color: c.textBright,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 14),
+                if (_invoice == null) ...[
               _tierToggle(c),
               const SizedBox(height: 12),
               _amountGrid(c),
@@ -199,13 +226,17 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
                       : (widget.isGift ? 'Generate gift invoice' : 'Pay with Lightning')),
                 ),
               ),
-            ] else
-              _InvoiceView(invoice: _invoice!, colors: c, onBack: () {
-                setState(() => _invoice = null);
-              }),
-          ],
+                ] else
+                  _InvoiceView(invoice: _invoice!, colors: c, onBack: () {
+                    setState(() => _invoice = null);
+                  }),
+              ],
+            ),
+          ),
         ),
-      ),
+        // `.modal-close`: 32×32 glass ✕ chip, absolute top-right (14,14).
+        ModalChrome.closeChip(c, () => Navigator.of(context).maybePop()),
+      ],
     );
   }
 

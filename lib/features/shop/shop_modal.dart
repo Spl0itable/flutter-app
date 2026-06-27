@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/identity/modal_chrome.dart';
 import '../../services/api/api_client.dart';
 import '../../state/nostr_controller.dart';
 import 'shop_catalog.dart';
@@ -82,12 +83,19 @@ class _ShopModalState extends ConsumerState<ShopModal> {
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.9,
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                child: Stack(
                   children: [
-                    _header(c),
-                    _tabs(c),
-                    Flexible(child: _body(c)),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _header(c),
+                        _tabs(c),
+                        Flexible(child: _body(c)),
+                      ],
+                    ),
+                    // `.shop-close`: 32×32 glass ✕ chip, absolute top-right
+                    // (14,14), z-index 10 — the shared modal-close chrome.
+                    ModalChrome.closeChip(c, () => Navigator.of(context).pop()),
                   ],
                 ),
               ),
@@ -99,49 +107,41 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   }
 
   Widget _header(NymColors c) {
+    // `.shop-header` is a space-between flex Row: the title/subtitle block on
+    // the left and the `.shop-recovery` restore field on the right. The close
+    // ✕ is the separate absolute `.shop-close` chip (added in build), so the
+    // header reserves right padding (40) to clear it.
     return Container(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.fromLTRB(24, 24, 40, 24),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'FLAIR',
-                      style: TextStyle(
-                        color: c.primary,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Get addon packs to change the styling of your messages '
-                      'and nickname that others will see across all channels '
-                      '(only in the Nymchat app).',
-                      style: TextStyle(color: c.textDim, fontSize: 12),
-                    ),
-                  ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'FLAIR',
+                  style: TextStyle(
+                    color: c.primary,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              ),
-              IconButton(
-                // `.shop-close` is a literal "✕" char in the PWA — styled text.
-                icon: Text('✕',
-                    style: TextStyle(
-                        color: c.textDim, fontSize: 20, height: 1)),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-            ],
+                const SizedBox(height: 4),
+                Text(
+                  'Get addon packs to change the styling of your messages '
+                  'and nickname that others will see across all channels '
+                  '(only in the Nymchat app).',
+                  style: TextStyle(color: c.textDim, fontSize: 12),
+                ),
+              ],
+            ),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(width: 16),
           _recoveryRow(c),
         ],
       ),
@@ -150,8 +150,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
 
   Widget _recoveryRow(NymColors c) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(
+        SizedBox(
+          width: 180,
           child: TextField(
             controller: _recoveryController,
             style: TextStyle(color: c.text, fontSize: 13),

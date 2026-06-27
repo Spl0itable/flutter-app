@@ -7,6 +7,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../identity/modal_chrome.dart';
 import 'settings_widgets.dart';
 
 /// Absolute base for the PWA's relative `static/*.html` legal pages. The PWA
@@ -112,11 +113,13 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.9,
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                child: Stack(
                   children: [
-                    _header(c),
-                    Flexible(
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _header(c),
+                        Flexible(
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(28, 0, 28, 8),
                         child: Column(
@@ -191,7 +194,13 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                         ),
                       ),
                     ),
-                    _actions(c),
+                        _actions(c),
+                      ],
+                    ),
+                    // `.modal-close`: 32×32 glass ✕ chip, absolute top-right
+                    // (14,14) over the card — not inline in the title row.
+                    ModalChrome.closeChip(
+                        c, () => Navigator.of(context).maybePop()),
                   ],
                 ),
               ),
@@ -203,53 +212,37 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   }
 
   Widget _header(NymColors c) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(28, 24, 14, 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+    // `.modal-header "Nymchat <ver>"`: a full-width title (name + version) with
+    // a 1px glass bottom rule. The close ✕ is the separate absolute chip
+    // (build); right padding (56) keeps the title clear of the floating chip.
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(28, 24, 56, 14),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.end,
+        spacing: 8,
         children: [
-          Expanded(
-            child: Wrap(
-              crossAxisAlignment: WrapCrossAlignment.end,
-              spacing: 8,
-              children: [
-                Text(
-                  'NYMCHAT',
-                  style: TextStyle(
-                    color: c.primary,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
-                  child: Text(
-                    kAboutVersion,
-                    style: TextStyle(
-                      color: c.textDim,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
+          Text(
+            'NYMCHAT',
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.5,
             ),
           ),
-          InkWell(
-            onTap: () => Navigator.of(context).maybePop(),
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              width: 32,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: c.text.withValues(alpha: 0.05),
-                shape: BoxShape.circle,
+          Padding(
+            padding: const EdgeInsets.only(bottom: 3),
+            child: Text(
+              kAboutVersion,
+              style: TextStyle(
+                color: c.textDim,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
               ),
-              // `.modal-close` is a literal "✕" char in the PWA — styled text.
-              child: Text('✕',
-                  style: TextStyle(color: c.textDim, fontSize: 18, height: 1)),
             ),
           ),
         ],

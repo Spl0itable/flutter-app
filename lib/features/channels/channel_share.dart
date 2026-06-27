@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
+import '../../features/identity/modal_chrome.dart';
 import '../../models/channel.dart';
 
 /// The canonical web host for the PWA (`https://web.nymchat.app`). The PWA's
@@ -61,103 +61,87 @@ class _ShareChannelModalState extends State<ShareChannelModal> {
       insetPadding: const EdgeInsets.all(24),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 480),
-        child: Container(
-          decoration: BoxDecoration(
-            color: c.bgSecondary,
-            border: Border.all(color: c.glassBorder),
-            borderRadius: NymRadius.rmd,
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Header row with title + close.
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 12, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'Share Channel',
-                        style: TextStyle(
-                          color: c.textBright,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.3,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'Close',
-                      icon: Icon(Icons.close, size: 18, color: c.textDim),
-                      onPressed: () => Navigator.of(context).maybePop(),
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Channel URL',
-                      style: TextStyle(
-                        color: c.textDim,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    // `.share-url-container`: readonly input + COPY button.
-                    Row(
+        child: Stack(
+          children: [
+            // `.modal-content` card with the shared chrome: a title-only
+            // `.modal-header` (22px UPPERCASE primary ls1.5 + bottom rule) over
+            // the body. The close ✕ is a separate, absolutely-positioned glass
+            // chip (added below), not an inline Row child.
+            ModalChrome.box(
+              c,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ModalChrome.header(c, 'Share Channel'),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(32, 0, 32, 32),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 12, vertical: 11),
-                            decoration: BoxDecoration(
-                              color: c.glassBg,
-                              border: Border.all(color: c.glassBorder),
-                              borderRadius: const BorderRadius.only(
-                                topLeft: Radius.circular(8),
-                                bottomLeft: Radius.circular(8),
-                              ),
-                            ),
-                            child: Text(
-                              url,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(color: c.text, fontSize: 13),
-                            ),
+                        Text(
+                          'Channel URL',
+                          style: TextStyle(
+                            color: c.textDim,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            letterSpacing: 0.5,
                           ),
                         ),
-                        _CopyButton(
-                          copied: _copied,
-                          onTap: () async {
-                            await Clipboard.setData(ClipboardData(text: url));
-                            if (!mounted) return;
-                            setState(() => _copied = true);
-                            Future.delayed(const Duration(seconds: 2), () {
-                              if (mounted) setState(() => _copied = false);
-                            });
-                          },
+                        const SizedBox(height: 8),
+                        // `.share-url-container`: readonly input + COPY button.
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 11),
+                                decoration: BoxDecoration(
+                                  color: c.glassBg,
+                                  border: Border.all(color: c.glassBorder),
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(8),
+                                    bottomLeft: Radius.circular(8),
+                                  ),
+                                ),
+                                child: Text(
+                                  url,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style:
+                                      TextStyle(color: c.text, fontSize: 13),
+                                ),
+                              ),
+                            ),
+                            _CopyButton(
+                              copied: _copied,
+                              onTap: () async {
+                                await Clipboard.setData(
+                                    ClipboardData(text: url));
+                                if (!mounted) return;
+                                setState(() => _copied = true);
+                                Future.delayed(const Duration(seconds: 2), () {
+                                  if (mounted) setState(() => _copied = false);
+                                });
+                              },
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Share this URL to invite others to this channel',
+                          style: TextStyle(color: c.textDim, fontSize: 12),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Share this URL to invite others to this channel',
-                      style: TextStyle(color: c.textDim, fontSize: 12),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            // `.modal-close`: the 32×32 glass ✕ chip at top-right (14,14).
+            ModalChrome.closeChip(c, () => Navigator.of(context).maybePop()),
+          ],
         ),
       ),
     );
