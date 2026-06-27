@@ -309,13 +309,27 @@ class _ShopModalState extends ConsumerState<ShopModal> {
 
   /// A wrapping row of item cards (PWA `.shop-items` flex-wrap).
   Widget _cardWrap(NymColors c, ShopState state, List<ShopItem> items) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: [
-        for (final item in items)
-          SizedBox(width: _cardWidth, child: _card(c, state, item)),
-      ],
+    // PWA `.shop-items { grid-template-columns: repeat(auto-fill,
+    // minmax(200px,1fr)); gap: 20px }` (styles-features.css:116-121): as many
+    // >=200px columns as fit the width, each stretching to share the row equally
+    // — a fluid grid, not fixed 214px cards with a ragged right edge.
+    const gap = 20.0;
+    const minCard = 200.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final w = constraints.maxWidth;
+        final fit = ((w + gap) / (minCard + gap)).floor();
+        final cols = fit < 1 ? 1 : fit;
+        final cardW = (w - (cols - 1) * gap) / cols;
+        return Wrap(
+          spacing: gap,
+          runSpacing: gap,
+          children: [
+            for (final item in items)
+              SizedBox(width: cardW, child: _card(c, state, item)),
+          ],
+        );
+      },
     );
   }
 
@@ -711,7 +725,8 @@ class _ShopItemCard extends StatelessWidget {
     final c = context.nym;
     final legendary = item.isLegendary;
     final card = Container(
-      padding: const EdgeInsets.all(16),
+      // `.shop-item { padding: 18px }` (styles-features.css:123-132).
+      padding: const EdgeInsets.all(18),
       clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         // `.shop-item-legendary { background: linear-gradient(160deg,
@@ -806,7 +821,8 @@ class _ShopItemCard extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
             alignment: Alignment.center,
-            constraints: const BoxConstraints(minHeight: 44),
+            // `.shop-item-preview { min-height: 50px }` (styles-features.css:181-193).
+            constraints: const BoxConstraints(minHeight: 50),
             decoration: BoxDecoration(
               color: Colors.white.withValues(alpha: 0.03),
               border: Border.all(color: c.glassBorder),
