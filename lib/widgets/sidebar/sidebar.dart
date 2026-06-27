@@ -224,6 +224,14 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final channels = ref.watch(sortedChannelsProvider);
     final pinned = app.pinnedChannels;
     final pms = ref.watch(pmListProvider);
+    // Resolve D1 kind-0 profiles for every PM peer shown in the list so a
+    // conversation whose only events predate this session still shows the peer's
+    // real avatar + nym instead of an identicon (the PWA fetches PM-list
+    // profiles). Debounced + self/picture-guarded inside `_maybeBackfillProfiles`,
+    // so calling it each build is cheap.
+    ref
+        .read(nostrControllerProvider)
+        .ensureProfiles([for (final p in pms) p.pubkey]);
     final groups = ref.watch(groupsProvider);
     final users = ref.watch(usersProvider);
     final unread = ref.watch(unreadCountsProvider);
