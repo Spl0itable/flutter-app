@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
 import '../../core/crypto/bitchat.dart' as bitchat;
+import '../../core/crypto/crypto_worker.dart';
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
@@ -237,6 +238,12 @@ class NostrService {
   /// inbound EVENTs across them coalesces into one isolate hop. Mirrors the
   /// PWA's single shared `verify-worker.js`. Stateless, so one instance is safe.
   static final IsolateVerifier _verifier = IsolateVerifier();
+
+  /// Process-wide off-thread gift-wrap worker (the PWA's `crypto-pool.js`
+  /// analog), shared so inbound unwrap bursts and outbound wrap fan-outs across
+  /// every service instance coalesce. Stateless aside from its in-flight batch,
+  /// so one instance is safe.
+  static final CryptoWorker _cryptoWorker = CryptoWorker.instance;
 
   /// The [EventVerifier] handed to every pool: verify each inbound event off
   /// the main thread (batched). Preserves the per-event keep/drop contract the
@@ -805,7 +812,13 @@ class NostrService {
     }
 
     if (candidates.isEmpty) return;
-    final res = await giftwrap.unwrapGiftWrap(wrap, candidates);
+    // Local-key unwrap: per-DM ECDH + ChaCha20 + triple jsonDecode, looped over
+    // candidate keys. Bursts to ~1000 wraps on PM backfill, so run it off the
+    // main isolate via the shared crypto worker (the PWA's `crypto-pool.js`
+    // analog). The worker runs the SAME [giftwrap.unwrapGiftWrap] inside an
+    // isolate, preserving per-candidate try/next + the null-on-undecryptable
+    // skip, and falls back to the inline path on web / on isolate failure.
+    final res = await _cryptoWorker.unwrap(wrap, candidates);
     if (res == null) return;
 
     _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
@@ -1222,6 +1235,42 @@ class NostrService {
   // Gift-wrapped publish paths (PM / group / receipt / typing) + presence.
   // ---------------------------------------------------------------------------
 
+  /// Builds the signed kind-1059 gift wrap of [rumor] for [recipientPubkey],
+  /// choosing the off-thread worker for a [LocalSigner] and the remote-capable
+  /// async path for a NIP-46 signer.
+  ///
+  /// For a [LocalSigner] the whole wrap (seal + ephemeral wrap) is pure local
+  /// crypto, so it runs on the shared [_cryptoWorker] isolate (the PWA's
+  /// `crypto-pool.js` analog) — the worker generates the ephemeral wrap key
+  /// inside the isolate and runs the SAME `nip59Wrap`, producing a wrap
+  /// indistinguishable from the synchronous path. For a NIP-46 remote signer
+  /// the **seal** must round-trip the network (`nip44_encrypt` + `sign_event`),
+  /// so that path stays on [giftwrap.nip59WrapAsync] as before.
+  Future<NostrEvent?> _buildWrap(
+    UnsignedEvent rumor,
+    String recipientPubkey, {
+    int? expiration,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    if (sig is LocalSigner) {
+      return _cryptoWorker.wrapOne(
+        rumor: rumor,
+        senderPrivkey: sig.privkey,
+        recipientPubkey: recipientPubkey,
+        expiration: expiration,
+      );
+    }
+    // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer still
+    // uses a fresh local ephemeral key.
+    return giftwrap.nip59WrapAsync(
+      rumor: rumor,
+      senderSigner: sig,
+      recipientPubkey: recipientPubkey,
+      expiration: expiration,
+    );
+  }
+
   /// Gift-wraps [rumor] to [recipientPubkey] (NIP-59) and publishes it. Returns
   /// the wrap event, or null if we can't sign.
   Future<NostrEvent?> _wrapAndPublish(
@@ -1229,18 +1278,8 @@ class NostrService {
     String recipientPubkey, {
     int? expiration,
   }) async {
-    final sig = signer;
-    if (sig == null) return null;
-    // Route through the async, signer-driven wrap so a NIP-46 remote signer
-    // seals via its `nip44_encrypt` + `sign_event` RPCs; the wrap layer always
-    // uses a fresh local ephemeral key. For a [LocalSigner] this is equivalent
-    // to the sync `nip59Wrap` (same seal author + conversation key).
-    final wrap = await giftwrap.nip59WrapAsync(
-      rumor: rumor,
-      senderSigner: sig,
-      recipientPubkey: recipientPubkey,
-      expiration: expiration,
-    );
+    final wrap = await _buildWrap(rumor, recipientPubkey, expiration: expiration);
+    if (wrap == null) return null;
     // Gift wraps (kind 1059) publish via DM_EVENT so the proxy gives them
     // priority to the default relays (relays.js `sendDMToRelays`). In direct
     // mode this is a plain publish (the PoolTransport default).
@@ -1276,9 +1315,31 @@ class NostrService {
     required String Function(String memberPubkey) encryptTo,
     MessagingSettings settings = const MessagingSettings(),
   }) async {
-    if (signer == null) return false;
+    final sig = signer;
+    if (sig == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final expiration = settings.expirationFor(nowSec);
+
+    // Group fan-out is the worst multiplier — one full wrap (ECDH + sign) per
+    // recipient, right on the send tap. For a local key, ship the WHOLE
+    // recipient list to the worker in a single isolate hop (loop runs inside the
+    // isolate, one ephemeral key per recipient), then publish each result. The
+    // remote (NIP-46) path can't batch (each seal is a network RPC), so it keeps
+    // the per-recipient loop.
+    if (sig is LocalSigner) {
+      final targets = [for (final pk in recipients) encryptTo(pk)];
+      final wraps = await _cryptoWorker.wrapMany(
+        rumor: rumor,
+        senderPrivkey: sig.privkey,
+        recipientPubkeys: targets,
+        expiration: expiration,
+      );
+      for (final wrap in wraps) {
+        if (wrap != null) await pool.publishDm(wrap);
+      }
+      return true;
+    }
+
     for (final pk in recipients) {
       await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
     }
