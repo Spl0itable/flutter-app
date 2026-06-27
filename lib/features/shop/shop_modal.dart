@@ -12,6 +12,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/identity/modal_chrome.dart';
 import '../../services/api/api_client.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import 'shop_catalog.dart';
 import 'shop_controller.dart';
 import 'shop_models.dart';
@@ -107,41 +108,53 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   }
 
   Widget _header(NymColors c) {
-    // `.shop-header` is a space-between flex Row: the title/subtitle block on
-    // the left and the `.shop-recovery` restore field on the right. The close
-    // ✕ is the separate absolute `.shop-close` chip (added in build), so the
-    // header reserves right padding (40) to clear it.
+    // `.shop-header` resolves to a COLUMN, not a row: the base rule
+    // (styles-features.css:18-24, `display:flex; justify-content:space-between;
+    // align-items:center`) is OVERRIDDEN later in the same stylesheet by
+    // `.shop-header { flex-direction: column; align-items: flex-start; gap: 15px }`
+    // (styles-features.css:1497-1501). So the title/subtitle block stacks ABOVE a
+    // full-width `.shop-recovery` (`.shop-recovery { width: 100%; margin-left: 0 }`,
+    // styles-features.css:1503-1506) — NOT a left-title / right-field row. The
+    // close ✕ is the separate absolute `.shop-close` chip (added in build); the
+    // header keeps the PWA's symmetric 24px padding and lets the short FLAIR title
+    // / wrapping subtitle clear the chip.
     return Container(
-      padding: const EdgeInsets.fromLTRB(24, 24, 40, 24),
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'FLAIR',
-                  style: TextStyle(
-                    color: c.primary,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Get addon packs to change the styling of your messages '
-                  'and nickname that others will see across all channels '
-                  '(only in the Nymchat app).',
-                  style: TextStyle(color: c.textDim, fontSize: 12),
-                ),
-              ],
+          Text(
+            'FLAIR',
+            style: TextStyle(
+              color: c.primary,
+              fontSize: 24,
+              fontWeight: FontWeight.w700,
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(height: 4),
+          // `.shop-title .nm-h-16` subtitle: 12px, `--text-dim`, and it INHERITS
+          // the `.shop-title { font-weight: 700 }` (the `.nm-h-16` rules only set
+          // size + colour) — so the subtitle is bold too. Reserve right room for
+          // the absolute ✕ chip so the first wrapped line clears it.
+          Padding(
+            padding: const EdgeInsets.only(right: 28),
+            child: Text(
+              'Get addon packs to change the styling of your messages '
+              'and nickname that others will see across all channels '
+              '(only in the Nymchat app).',
+              style: TextStyle(
+                color: c.textDim,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          // `gap: 15px` between the title block and the recovery row.
+          const SizedBox(height: 15),
           _recoveryRow(c),
         ],
       ),
@@ -149,11 +162,11 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   }
 
   Widget _recoveryRow(NymColors c) {
+    // `.shop-recovery` is full-width (`width: 100%`); its input + Restore button
+    // flow inline. The input takes the remaining width, the button hugs its label.
     return Row(
-      mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: 180,
+        Expanded(
           child: TextField(
             controller: _recoveryController,
             style: TextStyle(color: c.text, fontSize: 13),
@@ -225,19 +238,23 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   }
 
   Widget _tabs(NymColors c) {
+    // `.shop-tabs { display:flex; background: rgba(0,0,0,.1); padding: 6px 6px 0;
+    // gap: 4px }` with `.shop-tab { flex: 1 }` (styles-features.css:73-94) — the 5
+    // tabs share the row width equally (no horizontal scroll), each filling 1/5.
+    const tabs = ShopTab.values;
     return Container(
       decoration: BoxDecoration(
         color: Colors.black.withValues(alpha: 0.1),
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       padding: const EdgeInsets.fromLTRB(6, 6, 6, 0),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            for (final t in ShopTab.values) _tabButton(c, t),
+      child: Row(
+        children: [
+          for (var i = 0; i < tabs.length; i++) ...[
+            if (i > 0) const SizedBox(width: 4), // `gap: 4px`
+            Expanded(child: _tabButton(c, tabs[i])),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -261,7 +278,8 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     return GestureDetector(
       onTap: () => _selectTab(t),
       child: Container(
-        margin: const EdgeInsets.only(right: 4),
+        // `.shop-tab { padding: 12px 10px }` — the 4px inter-tab gap is the
+        // parent Row's SizedBox, not a per-tab margin (the tab fills its flex:1).
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
         decoration: BoxDecoration(
           color: active ? c.primaryA(0.06) : Colors.transparent,
@@ -276,8 +294,13 @@ class _ShopModalState extends ConsumerState<ShopModal> {
             ),
           ),
         ),
+        // Equal-width tabs: centre the label and ellipsize if a narrow modal
+        // can't fit it (the PWA's `flex:1` tabs likewise shrink their text).
         child: Text(
           t.label,
+          textAlign: TextAlign.center,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             color: active ? c.primary : c.textDim,
             fontSize: 13,
@@ -345,6 +368,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       owned: state.owns(item.id),
       active: _isActive(item, state.active),
       inventory: inventory,
+      // The user's live chat layout drives whether the message-style / cosmetic
+      // / supporter demos render as bubbles or flat IRC rows (shop.js demos reuse
+      // the real `.message` classes, styled by `body.chat-bubbles`).
+      bubble: ref.watch(settingsProvider.select((s) => s.useBubbles)),
       ownedItem: inventory ? state.owned[item.id] : null,
       availability: availability,
       // Stamp a sample Genesis edition (#69) only on the unowned preview; the
@@ -676,6 +703,7 @@ class _ShopItemCard extends StatelessWidget {
     required this.owned,
     required this.active,
     required this.inventory,
+    required this.bubble,
     required this.onBuy,
     required this.onActivate,
     required this.onGift,
@@ -688,6 +716,11 @@ class _ShopItemCard extends StatelessWidget {
   final ShopItem item;
   final bool owned;
   final bool active;
+
+  /// The user's current chat layout (chat-bubbles vs IRC); threaded into the
+  /// live message-style / cosmetic / supporter demos so the card preview matches
+  /// how the cosmetic would render in the user's layout.
+  final bool bubble;
 
   /// True when rendered inside the inventory ("My Items") tab — owned items
   /// there expose a Transfer action (shop.js inventory render).
@@ -836,7 +869,7 @@ class _ShopItemCard extends StatelessWidget {
                     // preview row (shop.js:1048), not the full special preview.
                     : (inventory && item.type == 'supporter'
                         ? const SupporterBadge()
-                        : ShopItemPreview(item: item))),
+                        : ShopItemPreview(item: item, bubble: bubble))),
           ),
           const SizedBox(height: 10),
           if (_blockedByAvailability)
@@ -1086,20 +1119,27 @@ class _ActiveItemsPreview extends ConsumerWidget {
       ],
     );
 
+    // The active-items "Preview" renders a real `.message.self.shop-preview-message`
+    // (shop.js:944-965), which the PWA styles by the user's layout — so the
+    // demo content switches between the bubble and IRC treatments too.
+    final bubble = ref.watch(settingsProvider.select((s) => s.useBubbles));
+
     // Content bubble: active style's text treatment + cosmetic aura.
     Widget content;
     if (redacted) {
-      content = const ShopCosmeticBubblePreview(
+      content = ShopCosmeticBubblePreview(
         cosmeticId: 'cosmetic-redacted',
+        bubble: bubble,
       );
     } else if (active.style != null &&
         ShopCatalog.styleVisuals.containsKey(active.style)) {
       content = ShopStyleBubblePreview(
         styleId: active.style!,
         text: 'This is how your messages look.',
+        bubble: bubble,
       );
     } else if (supporter) {
-      content = const _SupporterContentLine();
+      content = _SupporterContentLine(bubble: bubble);
     } else {
       content = Text(
         'This is how your messages look.',
@@ -1147,28 +1187,51 @@ class _ActiveItemsPreview extends ConsumerWidget {
   }
 }
 
-/// The supporter content line ("This is how your messages look." in gold).
+/// The supporter content line ("This is how your messages look." in gold),
+/// rendered over the layout-appropriate supporter surface: a gold wash + left
+/// bar in IRC, a flat gold fill on a rounded bubble in chat-bubbles mode (matches
+/// [_SupporterStyleBubble]).
 class _SupporterContentLine extends StatelessWidget {
-  const _SupporterContentLine();
+  const _SupporterContentLine({this.bubble = true});
+
+  final bool bubble;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0x14FFD700),
-        border:
-            const Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
-        borderRadius: BorderRadius.circular(8),
+    const text = Text(
+      'This is how your messages look.',
+      style: TextStyle(
+        color: Color(0xFFFFD700),
+        fontSize: 12,
+        shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
       ),
-      child: const Text(
-        'This is how your messages look.',
-        style: TextStyle(
-          color: Color(0xFFFFD700),
-          fontSize: 12,
-          shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+    );
+    if (!bubble) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0x0DFFD700), Color(0x05FFD700)], // gold@.05 → @.02
+          ),
+          border: Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
+        ),
+        child: text,
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      decoration: const BoxDecoration(
+        color: Color(0x1FFFD700), // gold@.12
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(4),
+          topRight: Radius.circular(16),
+          bottomLeft: Radius.circular(16),
+          bottomRight: Radius.circular(16),
         ),
       ),
+      child: text,
     );
   }
 }

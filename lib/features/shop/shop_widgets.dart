@@ -341,26 +341,27 @@ class ShopStyleBubblePreview extends StatelessWidget {
     super.key,
     required this.styleId,
     this.text = 'Preview message',
+    this.bubble = true,
   });
 
   final String styleId;
   final String text;
 
-  /// Shop-card-only `.style-preview-*` translucent wash backgrounds
-  /// (styles-features.css:713-936). These 8 wash styles paint a denser tint
-  /// behind the CARD preview that the in-chat `.message-content` does NOT (so
-  /// `styleVisuals.contentBackground` is null for them — the rendered message is
-  /// correctly bg-less). Preview-only.
-  static const Map<String, Color> _previewWash = {
-    'style-ocean': Color(0x2938BDF8), // rgba(56,189,248,.16)
-    'style-sakura': Color(0x24FF7EB6), // rgba(255,126,182,.14)
-    'style-galaxy': Color(0x2EA855F7), // rgba(168,85,247,.18)
-    'style-toxic': Color(0x2484FF3B), // rgba(132,255,59,.14)
-    'style-blood': Color(0x33780000), // rgba(120,0,0,.2)
-    'style-royal': Color(0x2E8B5CF6), // rgba(139,92,246,.18)
-    'style-circuit': Color(0x242DD4BF), // rgba(45,212,191,.14)
-    // vapor uses background-clip:text (gradient glyphs), no solid card wash.
-  };
+  /// When true (chat-bubbles layout) the demo `.message-content` is the rounded
+  /// translucent bubble (`body.chat-bubbles .message-content`); when false (IRC
+  /// layout) it is the bare style-coloured glyph line with only `padding: 6px
+  /// 10px` (`body:not(.chat-bubbles) .shop-msg-demo .message-content`,
+  /// styles-features.css:1415), no bubble background, no radius.
+  final bool bubble;
+
+  // NOTE: the shop demo renders `<div class="message style-X">` (shop.js
+  // `_shopStyleDemo`, :724), so it is styled by the REAL `.message.style-X
+  // .message-content` rules — NOT the `.style-preview-X` classes (which carry a
+  // tinted card wash but are never applied by the shop render; the `preview`
+  // catalog field is unused). So the wash styles (ocean/sakura/galaxy/toxic/
+  // blood/royal/circuit) paint NO content background — only their glowing text +
+  // tiled `--style-pattern` watermark — over the layout's default bubble fill.
+  // Only satoshi/eclipse/crt carry a real content background (contentBackground).
 
   @override
   Widget build(BuildContext context) {
@@ -377,9 +378,11 @@ class ShopStyleBubblePreview extends StatelessWidget {
       return Text(text, style: TextStyle(color: c.text, fontSize: 12));
     }
     // The glyph shadow(s): explicit multi-offset (glitch) or the single glow,
-    // already nulled in light mode by `messageStyleDecoration`.
+    // already nulled in light mode by `messageStyleDecoration`. fire/ice paint a
+    // brighter glyph in the bubble than IRC (`body.chat-bubbles .message.style-X
+    // .message-content { color }`), so resolve the colour per the user's layout.
     final base = TextStyle(
-      color: deco.textColor,
+      color: deco.textColorFor(bubble: bubble),
       fontSize: 12,
       fontWeight: FontWeight.w600,
       fontFamily: deco.monospace ? 'monospace' : null,
@@ -395,15 +398,56 @@ class ShopStyleBubblePreview extends StatelessWidget {
     } else {
       label = Text(text, style: base);
     }
+    // The style's own in-chat `.message-content { background }` (satoshi/eclipse/
+    // crt only); null for every other style — they tint via text + watermark, not
+    // a content background, exactly as the rendered chat message does.
+    final styleBg = deco.contentBackground;
+    // IRC layout: `body:not(.chat-bubbles) .shop-msg-demo .message-content` is
+    // bare text with only `padding: 6px 10px` — NO rounded bubble, NO default
+    // `white@.14` fill. Only the style's own `.message-content { background }`
+    // (satoshi/eclipse/crt) still tints it (styleBg), with no radius.
+    if (!bubble) {
+      // No watermark and no content bg → just the bare padded glyph line.
+      if (watermark == null && styleBg == null) {
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: label,
+        );
+      }
+      // The style still carries its tiled `--style-pattern` watermark (ocean,
+      // sakura, …) and/or content bg (satoshi/eclipse/crt) in IRC — just no
+      // rounded bubble. The watermark Stack is clipped to the content rect.
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(color: styleBg),
+        clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            if (watermark != null)
+              Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
+            label,
+          ],
+        ),
+      );
+    }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
       decoration: BoxDecoration(
-        // Dark: the shop-card wash for the 8 wash styles; else the in-chat
-        // content background (satoshi/eclipse/crt). The bright dark washes are
-        // dropped in light mode (the PWA's light previews carry text colour, not
-        // a tinted card), leaving the mode-aware content background.
-        color: (c.isLight ? null : _previewWash[styleId]) ?? deco.contentBackground,
-        borderRadius: BorderRadius.circular(8),
+        // Bubble layout: `body.chat-bubbles .message-content` is the rounded
+        // translucent bubble (`background: rgba(255,255,255,.14)`, radius 16 /
+        // top-left 4 — styles-features.css:3603-3617). A style with its own
+        // content background (satoshi/eclipse/crt) or a card wash paints over it.
+        color: styleBg ??
+            (c.isLight
+                ? const Color(0x1A000000) // light: others → black@.10
+                : const Color(0x24FFFFFF)), // dark: white@.14
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(4),
+          topRight: Radius.circular(16),
+          bottomLeft: Radius.circular(16),
+          bottomRight: Radius.circular(16),
+        ),
       ),
       clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
       child: Stack(
@@ -427,10 +471,18 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
     super.key,
     required this.cosmeticId,
     this.text = 'Preview message',
+    this.bubble = true,
   });
 
   final String cosmeticId;
   final String text;
+
+  /// Chat-bubbles vs IRC layout. In bubble mode the aura decorates the rounded
+  /// translucent `.message-content` (which carries the default `white@.14` fill);
+  /// in IRC mode the aura paints its border-left + glow + gradient wash on the
+  /// flat row, with no rounded bubble fill
+  /// (`body:not(.chat-bubbles) .message.cosmetic-aura-*`).
+  final bool bubble;
 
   static const _radius = 8.0;
 
@@ -461,9 +513,17 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
     if (v == null) {
       return Text(text, style: TextStyle(color: c.text, fontSize: 12));
     }
-    Widget bubble = Container(
+    // In chat-bubbles mode the aura sits on the rounded `.message-content`, which
+    // carries the default translucent fill (`white@.14` dark / `black@.10` light)
+    // unless the aura paints its own gradient. In IRC mode the row is flat — the
+    // aura's border-left + glow + gradient wash paint directly, with no bubble fill.
+    final Color? defaultFill = (bubble && v.gradient == null)
+        ? (c.isLight ? const Color(0x1A000000) : const Color(0x24FFFFFF))
+        : null;
+    Widget cosmeticBubble = Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
+        color: defaultFill,
         gradient: (v.gradient != null && v.sheenGradient == null)
             ? LinearGradient(
                 begin: Alignment.topLeft,
@@ -481,7 +541,7 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
     );
     // Holographic sheen — a screen-blended multi-colour gradient behind the text.
     if (v.sheenGradient != null) {
-      bubble = ClipRRect(
+      cosmeticBubble = ClipRRect(
         borderRadius: BorderRadius.circular(_radius),
         child: Stack(
           children: [
@@ -497,22 +557,22 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
               ),
             ),
             const Positioned.fill(child: _HologramSheen()),
-            bubble,
+            cosmeticBubble,
           ],
         ),
       );
     }
     // Legendary prism ring — a conic sweep-gradient ring around the bubble.
     if (v.ringGradient != null) {
-      bubble = CustomPaint(
+      cosmeticBubble = CustomPaint(
         foregroundPainter: _PrismRingPainter(
           colors: v.ringGradient!,
           radius: _radius,
         ),
-        child: bubble,
+        child: cosmeticBubble,
       );
     }
-    return bubble;
+    return cosmeticBubble;
   }
 }
 
@@ -520,15 +580,23 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
 /// Styles + cosmetics use the live message-bubble demos (F4); flair shows the
 /// nym + badge; supporter shows the badge over a gold demo bubble.
 class ShopItemPreview extends StatelessWidget {
-  const ShopItemPreview({super.key, required this.item});
+  const ShopItemPreview({super.key, required this.item, this.bubble = true});
 
   final ShopItem item;
+
+  /// The user's current chat layout (chat-bubbles vs IRC). Threaded into the
+  /// live message demos so the card preview renders the cosmetic AS IT WOULD
+  /// APPEAR in the user's layout — the `.shop-msg-demo` reuses the real
+  /// `.message`/`.message-content` classes, which the PWA styles by
+  /// `body.chat-bubbles` vs `body:not(.chat-bubbles)`. The flair/supporter-badge
+  /// nym rows are identical in both layouts (plain `.shop-item-preview` text).
+  final bool bubble;
 
   @override
   Widget build(BuildContext context) {
     switch (item.type) {
       case 'message-style':
-        return ShopStyleBubblePreview(styleId: item.id);
+        return ShopStyleBubblePreview(styleId: item.id, bubble: bubble);
       case 'nickname-flair':
         // The Genesis card stamps a sample edition (#69) on the badge, matching
         // `_renderLimitedCard`.
@@ -554,11 +622,11 @@ class ShopItemPreview extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             // supporter-style demo bubble (gold text + wash).
-            const _SupporterStyleBubble(),
+            _SupporterStyleBubble(bubble: bubble),
           ],
         );
       case 'cosmetic':
-        return ShopCosmeticBubblePreview(cosmeticId: item.id);
+        return ShopCosmeticBubblePreview(cosmeticId: item.id, bubble: bubble);
       default:
         return const SizedBox.shrink();
     }
@@ -566,28 +634,56 @@ class ShopItemPreview extends StatelessWidget {
 }
 
 /// The supporter-style demo bubble (`.message.supporter-style`): gold glyphs +
-/// soft glow + faint gold wash + gold left bar.
+/// soft glow over the layout-appropriate surface.
+///
+/// * IRC (`body:not(.chat-bubbles) .message.supporter-style`,
+///   styles-features.css:1473): a 135° gold wash (`rgba(255,215,0,.05)` →
+///   `.02`) + a 3px gold left bar on the flat row, no radius.
+/// * Bubble (`body.chat-bubbles .message.supporter-style .message-content`,
+///   styles-features.css:3692): a flat `rgba(255,215,0,.12)` fill on the rounded
+///   bubble (radius 16 / top-left 4), no left bar.
 class _SupporterStyleBubble extends StatelessWidget {
-  const _SupporterStyleBubble();
+  const _SupporterStyleBubble({this.bubble = true});
+
+  final bool bubble;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0x14FFD700),
-        border: const Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
-        borderRadius: BorderRadius.circular(8),
+    const text = Text(
+      'Preview message',
+      style: TextStyle(
+        color: Color(0xFFFFD700),
+        fontSize: 12,
+        fontWeight: FontWeight.w600,
+        shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
       ),
-      child: const Text(
-        'Preview message',
-        style: TextStyle(
-          color: Color(0xFFFFD700),
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-          shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+    );
+    if (!bubble) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0x0DFFD700), Color(0x05FFD700)], // gold@.05 → @.02
+          ),
+          border: Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
+        ),
+        child: text,
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      decoration: const BoxDecoration(
+        color: Color(0x1FFFD700), // gold@.12
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(4),
+          topRight: Radius.circular(16),
+          bottomLeft: Radius.circular(16),
+          bottomRight: Radius.circular(16),
         ),
       ),
+      child: text,
     );
   }
 }
