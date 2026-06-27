@@ -248,6 +248,185 @@ void main() {
     });
   });
 
+  group('message-style glow / colour parity', () {
+    test('neon is a triple-layer 10/20/30px halo (not a single glow)', () {
+      final s = messageStyleDecoration('style-neon')!.textShadows!;
+      expect(s.map((e) => e.blurRadius).toList(), [10.0, 20.0, 30.0]);
+      expect(s.every((e) => e.color == const Color(0xFFFF00FF)), isTrue);
+    });
+
+    test('matrix is a double 10/20px halo', () {
+      final s = messageStyleDecoration('style-matrix')!.textShadows!;
+      expect(s.map((e) => e.blurRadius).toList(), [10.0, 20.0]);
+    });
+
+    test('fire glow blur is 14px (the real CSS, not a uniform 10)', () {
+      final s = messageStyleDecoration('style-fire')!.textShadows!;
+      expect(s.single.blurRadius, 14.0);
+    });
+
+    test('vapor carries the second cyan glow layer', () {
+      final s = messageStyleDecoration('style-vapor')!.textShadows!;
+      expect(s.length, 2);
+      expect(s[1].color, const Color(0x4D05D9E8)); // rgba(5,217,232,.3)
+      expect(s[1].blurRadius, 14.0);
+    });
+
+    test('royal carries the second gold glow layer', () {
+      final s = messageStyleDecoration('style-royal')!.textShadows!;
+      expect(s.length, 2);
+      expect(s[1].color, const Color(0x4DD4AF37)); // rgba(212,175,55,.3)
+    });
+
+    test('eclipse carries the 8+16px dual glow', () {
+      final s = messageStyleDecoration('style-eclipse')!.textShadows!;
+      expect(s.map((e) => e.blurRadius).toList(), [8.0, 16.0]);
+    });
+
+    test('most styles glow at 8px (ocean/gold/blood/circuit), not 10', () {
+      for (final id in [
+        'style-ocean',
+        'style-gold',
+        'style-blood',
+        'style-circuit',
+      ]) {
+        expect(messageStyleDecoration(id)!.textShadows!.single.blurRadius, 8.0,
+            reason: id);
+      }
+    });
+
+    test('satoshi has NO glow on the message (preview-only) but bolds glyphs', () {
+      final deco = messageStyleDecoration('style-satoshi')!;
+      expect(deco.textShadows, isNull, reason: 'no text-shadow on satoshi body');
+      expect(deco.bold, isTrue);
+    });
+
+    test('ghost glow has a 2px Y-offset and 16px blur', () {
+      final s = messageStyleDecoration('style-ghost')!.textShadows!.single;
+      expect(s.offset, const Offset(0, 2));
+      expect(s.blurRadius, 16.0);
+    });
+
+    test('fire/ice paint a brighter glyph in BUBBLE than IRC', () {
+      final fire = messageStyleDecoration('style-fire')!;
+      expect(fire.textColorFor(bubble: false), const Color(0xFFFFAA00));
+      expect(fire.textColorFor(bubble: true), const Color(0xFFFF6600));
+      final ice = messageStyleDecoration('style-ice')!;
+      expect(ice.textColorFor(bubble: false), const Color(0xFF00CCEE));
+      expect(ice.textColorFor(bubble: true), const Color(0xFF00CCFF));
+    });
+
+    test('aurora gradient is the 4-stop wrap + a blue glow', () {
+      final deco = messageStyleDecoration('style-aurora')!;
+      expect(deco.gradient!.length, 4);
+      expect(deco.gradient!.first, const Color(0xFF00FFD5));
+      expect(deco.gradient!.last, const Color(0xFF00FFD5),
+          reason: 'trailing #00ffd5 closes the cyan wrap');
+      expect(deco.gradientGlow, isNotNull);
+      expect(deco.gradientGlow!.color, const Color(0x4D5B8CFF));
+    });
+
+    test('light mode drops the bubble colour override + the multi-glow', () {
+      final fireLight = messageStyleDecoration('style-fire', isLight: true)!;
+      // Light uses the single light colour for both layouts (no bubble override).
+      expect(fireLight.textColorFor(bubble: true), const Color(0xFFCC4400));
+      expect(fireLight.textShadows, isNull);
+    });
+
+    test('light mode swaps the watermark fill for ghost/gold', () {
+      final ghostDark = messageStyleDecoration('style-ghost')!.watermark!;
+      final ghostLight =
+          messageStyleDecoration('style-ghost', isLight: true)!.watermark!;
+      expect(ghostDark.svg, contains('#ffffff'));
+      expect(ghostLight.svg, contains('#223044'),
+          reason: 'white ghosts → dark-blue on light');
+      final goldLight =
+          messageStyleDecoration('style-gold', isLight: true)!.watermark!;
+      expect(goldLight.svg, contains('#a07a00'));
+    });
+
+    test('supporter IRC paints a gold gradient; bubble a flat .12 wash', () {
+      expect(supporterStyleDecoration.backgroundGradient, isNotNull);
+      expect(supporterStyleDecoration.backgroundGradient!.first,
+          const Color(0x14FFD700)); // .08
+      expect(supporterStyleDecoration.contentBackground,
+          const Color(0x1FFFD700)); // .12 flat bubble
+      // The supporter glow is now an 8px blur (was a uniform 10).
+      expect(supporterStyleDecoration.textShadows!.single.blurRadius, 8.0);
+    });
+  });
+
+  group('cosmetic aura parity', () {
+    UserCosmetics withAura(String id) => UserCosmetics(cosmetics: [id]);
+
+    test('gold differs between bubble (.55 ring / 12px) and IRC (.35 / 18px)',
+        () {
+      final gold = resolveCosmeticAuras(withAura('cosmetic-aura-gold')).single;
+      expect(gold.insetColorFor(bubble: false), const Color(0x59FFD700)); // .35
+      expect(gold.insetColorFor(bubble: true), const Color(0x8CFFD700)); // .55
+      expect(gold.glowBlurFor(bubble: false), 18.0);
+      expect(gold.glowBlurFor(bubble: true), 12.0);
+      // gold paints its gradient as the bubble fill; neon/phoenix/cosmic don't.
+      expect(gold.bubblePaintsGradient, isTrue);
+    });
+
+    test('neon/phoenix/cosmic carry an IRC gradient but DO NOT fill the bubble',
+        () {
+      for (final id in [
+        'cosmetic-aura-neon',
+        'cosmetic-aura-phoenix',
+        'cosmetic-aura-cosmic',
+      ]) {
+        final a = resolveCosmeticAuras(withAura(id)).single;
+        expect(a.gradient, isNotNull, reason: '$id IRC row gradient');
+        expect(a.bubblePaintsGradient, isFalse, reason: '$id bubble box-shadow only');
+      }
+    });
+
+    test('frost tiles its snowflakes edge-only', () {
+      final frost = resolveCosmeticAuras(withAura('cosmetic-frost')).single;
+      expect(frost.edgeWatermark, isTrue);
+    });
+
+    test('light gold uses the PWA #b8960a border + softened ring/glow', () {
+      final goldLight = resolveCosmeticAuras(withAura('cosmetic-aura-gold'),
+              isLight: true)
+          .single;
+      expect(goldLight.borderAccent, const Color(0xFFB8960A));
+      expect(goldLight.insetColor, const Color(0x4DB48C00)); // rgba(180,140,0,.3)
+      expect(goldLight.glowBlurFor(bubble: false), 12.0);
+    });
+
+    test('every aura/special resolves a light variant (0/7 → 7/7)', () {
+      for (final id in [
+        'cosmetic-aura-gold',
+        'cosmetic-aura-neon',
+        'cosmetic-aura-rainbow',
+        'cosmetic-aura-phoenix',
+        'cosmetic-aura-cosmic',
+        'cosmetic-frost',
+        'cosmetic-bubble-hologram',
+      ]) {
+        final dark = resolveCosmeticAuras(withAura(id)).single;
+        final light = resolveCosmeticAuras(withAura(id), isLight: true).single;
+        // A light entry exists and differs from the dark one somewhere visible.
+        final changed = light.insetColor != dark.insetColor ||
+            light.glowColor != dark.glowColor ||
+            light.borderAccent != dark.borderAccent;
+        expect(changed, isTrue, reason: '$id should have a distinct light tone');
+      }
+    });
+
+    test('prism ring + hologram still flag the overlay painter', () {
+      expect(resolveCosmeticAuras(withAura('cosmetic-aura-rainbow'))
+          .single
+          .prismRing, isTrue);
+      expect(resolveCosmeticAuras(withAura('cosmetic-bubble-hologram'))
+          .single
+          .hologram, isTrue);
+    });
+  });
+
   group('MessageRow cosmetics rendering', () {
     final colors = resolveNymColors(
       theme: NymThemeKey.bitchat,
@@ -324,6 +503,75 @@ void main() {
 
       // SupporterBadge renders the "SUPPORTER" pill text.
       expect(find.text('SUPPORTER'), findsOneWidget);
+    });
+
+    // P0: the prism ring / holographic sheen must paint in IRC (previously the
+    // overlay painter was bubble-only, so IRC rainbow/hologram showed just a glow).
+    Future<void> pumpIrcCosmetic(
+        WidgetTester tester, String cosmeticId) async {
+      final kv = await () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        return KeyValueStore.open();
+      }();
+      final container = ProviderContainer(overrides: [
+        keyValueStoreProvider.overrideWithValue(kv),
+        nostrControllerProvider
+            .overrideWith((ref) => _IdentityController(ref, selfPubkey)),
+        otherUsersShopProvider.overrideWith(
+          (ref) => _SeededOtherUsersShop(kv, {
+            'pkother': ShopStatusActive(cosmetics: [cosmeticId]),
+          }),
+        ),
+      ]);
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            theme: buildNymThemeData(colors),
+            home: Scaffold(
+              body: MessageRow(
+                message: _msg(pubkey: 'pkOther'),
+                settings: const Settings(chatLayout: 'irc'),
+                reactions: const [],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    Finder overlayFinder() => find.byWidgetPredicate(
+        (w) => w is CustomPaint && w.painter is CosmeticOverlayPainter);
+
+    testWidgets('IRC rainbow paints the prism-ring overlay', (tester) async {
+      await pumpIrcCosmetic(tester, 'cosmetic-aura-rainbow');
+      expect(overlayFinder(), findsWidgets,
+          reason: 'prism ring must render in IRC, not just a glow');
+      final painter = tester
+          .widgetList<CustomPaint>(overlayFinder())
+          .map((w) => w.painter as CosmeticOverlayPainter)
+          .first;
+      expect(painter.aura.prismRing, isTrue);
+      expect(painter.bubble, isFalse);
+    });
+
+    testWidgets('IRC hologram paints the sheen overlay', (tester) async {
+      await pumpIrcCosmetic(tester, 'cosmetic-bubble-hologram');
+      expect(overlayFinder(), findsWidgets);
+      final painter = tester
+          .widgetList<CustomPaint>(overlayFinder())
+          .map((w) => w.painter as CosmeticOverlayPainter)
+          .first;
+      expect(painter.aura.hologram, isTrue);
+    });
+
+    testWidgets('IRC without a prism/hologram aura paints no overlay',
+        (tester) async {
+      await pumpIrcCosmetic(tester, 'cosmetic-aura-gold');
+      expect(overlayFinder(), findsNothing,
+          reason: 'gold is a row border/glow in IRC, not an overlay-painter aura');
     });
   });
 
