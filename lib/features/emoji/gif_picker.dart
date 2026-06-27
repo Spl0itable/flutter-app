@@ -306,7 +306,7 @@ class _GifPickerState extends ConsumerState<GifPicker> {
         focusNode: _searchFocus,
         onChanged: _onSearchChanged,
         style: TextStyle(color: c.textBright, fontSize: 12),
-        cursorColor: c.primary,
+        cursorColor: c.isLight ? Colors.black : Colors.white,
         decoration: InputDecoration(
           isDense: true,
           hintText: 'Search GIFs...',

@@ -559,7 +559,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                     child: TextField(
                       autofocus: true,
                       style: TextStyle(color: c.textBright, fontSize: 14),
-                      cursorColor: c.primary,
+                      cursorColor: c.isLight ? Colors.black : Colors.white,
                       onChanged: (v) => setSheetState(() => term = v),
                       decoration: InputDecoration(
                         isDense: true,

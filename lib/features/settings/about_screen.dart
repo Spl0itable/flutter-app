@@ -364,7 +364,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
       maxLines: 4,
       maxLength: 2000,
       style: TextStyle(color: c.text, fontSize: 13),
-      cursorColor: c.primary,
+      cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
         hintText: 'Write your message...',
         hintStyle: TextStyle(color: c.textDim, fontSize: 13),

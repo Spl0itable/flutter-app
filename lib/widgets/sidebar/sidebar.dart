@@ -1728,7 +1728,7 @@ class _SearchFieldState extends State<_SearchField> {
       controller: _controller,
       autofocus: true,
       style: TextStyle(color: c.textBright, fontSize: 12),
-      cursorColor: c.primary,
+      cursorColor: c.isLight ? Colors.black : Colors.white,
       onChanged: (v) {
         widget.onChanged(v);
         setState(() {}); // toggle the clear ✕ visibility

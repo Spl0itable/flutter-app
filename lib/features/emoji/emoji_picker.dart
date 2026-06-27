@@ -299,7 +299,7 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         controller: _searchController,
         onChanged: (v) => setState(() => _query = _sanitizeUserText(v).trim()),
         style: TextStyle(color: c.textBright, fontSize: 12),
-        cursorColor: c.primary,
+        cursorColor: c.isLight ? Colors.black : Colors.white,
         decoration: InputDecoration(
           isDense: true,
           hintText: 'Search emoji...',

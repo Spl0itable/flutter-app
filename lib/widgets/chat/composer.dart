@@ -1526,7 +1526,7 @@ class _ComposerState extends ConsumerState<Composer> {
         color: c.isLight ? Colors.black : Colors.white,
         fontSize: widget.compact ? 16 : 15,
       ),
-      cursorColor: c.primary,
+      cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
         isDense: true,
         // PWA `data-placeholder` teaches the `/` and `?` affordances (F9).
@@ -1710,7 +1710,7 @@ class _ComposerState extends ConsumerState<Composer> {
                         autofocus: true,
                         onChanged: (v) => setState(() => _translateQuery = v),
                         style: TextStyle(color: c.text, fontSize: 13),
-                        cursorColor: c.primary,
+                        cursorColor: c.isLight ? Colors.black : Colors.white,
                         decoration: InputDecoration(
                           isDense: true,
                           hintText: 'Search languages...',
