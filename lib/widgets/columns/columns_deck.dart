@@ -850,6 +850,14 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final pageCount = _columns.length + 1;
     return PageView.builder(
       controller: _pageController,
+      // PWA parity: the mobile column strip is `overflow-x:hidden` with columns
+      // `touch-action:pan-y` (styles-columns.css:496-517), so there is NO
+      // column-to-column touch paging — columns are switched only via the
+      // arrows/dots. Disabling touch paging here frees the horizontal-drag
+      // budget for each message row's swipe-to-act (G3). Arrow/dot navigation
+      // still works because it drives `animateToPage`/`jumpToPage`
+      // programmatically, which ignores scroll physics.
+      physics: const NeverScrollableScrollPhysics(),
       itemCount: pageCount,
       onPageChanged: (i) {
         if (i < _columns.length && i != _focused) {
@@ -1301,13 +1309,11 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final children = <Widget>[];
 
     if (mobile) {
-      // `.cv-col-move` prev arrow (columns.js:397 — feather chevron-left).
-      children.add(_HeaderIconButton(
-        svg: NymIcons.chevronLeft,
-        tooltip: 'Previous column',
-        enabled: widget.index > 0,
-        onTap: widget.onPrev,
-      ));
+      // PWA mobile header order (columns.js:391-399 + styles-columns.css:562-587):
+      // `[ dots — LEFT-aligned, fills the title slot ][ ◀ prev ][ ▶ next ][ ✕ ]`.
+      // The dots take the title's slot on the LEFT (left-aligned, flex:1) and
+      // BOTH move arrows sit together on the RIGHT, then the close button.
+      //
       // `.cv-col-dots`: the position-dot indicator, fills the title slot, taps
       // to open the tabs sheet.
       children.add(Expanded(
@@ -1319,6 +1325,13 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
             child: _HeaderDots(count: widget.total, active: widget.index),
           ),
         ),
+      ));
+      // `.cv-col-move` prev arrow (columns.js:397 — feather chevron-left).
+      children.add(_HeaderIconButton(
+        svg: NymIcons.chevronLeft,
+        tooltip: 'Previous column',
+        enabled: widget.index > 0,
+        onTap: widget.onPrev,
       ));
       // `.cv-col-move` next arrow (columns.js:398 — feather chevron-right).
       children.add(_HeaderIconButton(
@@ -1586,7 +1599,10 @@ class _HeaderDots extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    // PWA `.cv-col-dots` has no `justify-content`, so dots default to flex-start
+    // (LEFT-aligned) within their flex:1 slot (styles-columns.css:562-570).
+    return Align(
+      alignment: Alignment.centerLeft,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
