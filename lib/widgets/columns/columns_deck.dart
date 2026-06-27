@@ -9,6 +9,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/groups/group_logic.dart';
 import '../../features/pms/pm_logic.dart';
+import '../../features/reactions/reaction_picker.dart';
 import '../../models/channel.dart';
 import '../../models/group.dart';
 import '../../models/message.dart';
@@ -1250,22 +1251,37 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
                             useBubbles: settings.useBubbles,
                             emptyNote: _emptyNoteText(),
                           )
-                        : ListView.builder(
-                            controller: _scroll,
-                            reverse: true,
-                            padding: const EdgeInsets.all(10),
-                            itemCount: messages.length,
-                            itemBuilder: (context, revIndex) {
-                              final m =
-                                  messages[messages.length - 1 - revIndex];
-                              return MessageRow(
-                                message: m,
-                                settings: settings,
-                                reactions: reactions[m.id] ?? const [],
-                                showAvatar: false,
-                              );
-                            },
-                          ),
+                        : Builder(builder: (context) {
+                            // Group consecutive same-author messages into the
+                            // PWA `.message-group` runs and render each via
+                            // MessageGroup — the SAME path the single-chat view
+                            // uses — so columns get the gliding group avatar in
+                            // bubble layout (previously a flat row list passed
+                            // showAvatar:false, so columns had NO avatars). IRC
+                            // layout still renders bare, avatar-less rows.
+                            final groups = buildMessageGroups(
+                              messages,
+                              reactions: reactions,
+                              useBubbles: settings.useBubbles,
+                              mentionToken: '@${_baseNym(app.selfNym)}',
+                            );
+                            return ListView.builder(
+                              controller: _scroll,
+                              reverse: true,
+                              padding: const EdgeInsets.all(10),
+                              itemCount: groups.length,
+                              itemBuilder: (context, revIndex) {
+                                final entries =
+                                    groups[groups.length - 1 - revIndex];
+                                return MessageGroup(
+                                  entries: entries,
+                                  settings: settings,
+                                  onReactionPicker: (msg) =>
+                                      showReactionPicker(context, ref, msg),
+                                );
+                              },
+                            );
+                          }),
                   ),
                   // .cv-scroll-bottom: 36×36 circle, bottom/right 16, shown when
                   // scrolled >150px from the bottom (gap F10).
@@ -1299,6 +1315,13 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   /// single-view-only string (the `loadChannelFromRelays` path, messages.js:2840)
   /// and is NOT used by columns (08-H1).
   String _emptyNoteText() => 'No recent messages';
+
+  /// Strips the `#suffix` off a nym for the `@name` mention token (mirrors
+  /// messages_list `_baseNym`).
+  String _baseNym(String nym) {
+    final hash = nym.indexOf('#');
+    return hash > 0 ? nym.substring(0, hash) : nym;
+  }
 
   /// The `.cv-column-header` (padding 10/12, bottom border, gap 8). On desktop:
   /// 6-dot grip + icon + title (all draggable to reorder, `cursor:grab`) + a

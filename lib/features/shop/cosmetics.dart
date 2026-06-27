@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../../core/theme/nym_theme.dart' show kMonoFont, kSansSymFont;
 import '../../models/user.dart';
 import '../../services/api/storage_sync.dart' show ShopStatusActive;
 import '../../state/app_state.dart';
@@ -222,6 +223,7 @@ class MessageStyleDecoration {
     this.contentBackground,
     this.backgroundGradient,
     this.bubbleTextColor,
+    this.childColor,
     this.borderAccent,
     this.monospace = false,
     this.bold = false,
@@ -257,6 +259,16 @@ class MessageStyleDecoration {
   /// keeps [textColor]. Null = same colour in both layouts.
   final Color? bubbleTextColor;
 
+  /// The `.message-content > *` INNER-element colour, when it differs from the
+  /// bare-body [textColor] (the container/child split). Only satoshi splits: the
+  /// `.message-content` container — and so the bare body text — is white
+  /// (`#FFFFFF` dark / `#7a5500` light, styles-features.css:550 / themes:900),
+  /// while the inner `> *` children (links/mentions/emoji) are the bold orange
+  /// `#f7931a`/`#c47a15` (`:571` / themes:905). The shop DEMO wraps its sample in
+  /// a `<span>` (a child), so previews use this colour; real plain message text
+  /// is bare nodes, so the body uses [textColor]. Null = children share [textColor].
+  final Color? childColor;
+
   final Color? borderAccent;
   final bool monospace;
 
@@ -281,8 +293,15 @@ class MessageStyleDecoration {
   }
 
   /// The body text colour for [bubble] layout (the bubble override when set).
+  /// This is the `.message-content` CONTAINER colour — what bare body text uses.
   Color textColorFor({required bool bubble}) =>
       bubble ? (bubbleTextColor ?? textColor) : textColor;
+
+  /// The colour for an INNER `> *` element (link/mention/emoji) and for the shop
+  /// DEMO sample (which the PWA wraps in a `<span>`, so it is a child). Falls back
+  /// to the body colour for every style except the satoshi container/child split.
+  Color previewColorFor({required bool bubble}) =>
+      childColor ?? textColorFor(bubble: bubble);
 }
 
 /// A soft radial-gradient wash painted UNDER a watermark's tiles (the
@@ -305,14 +324,32 @@ class RadialWash {
   final double radius;
 }
 
+/// One glyph in a tiled TEXT watermark: [text] painted at the SVG baseline
+/// (`x`=[dx], `y`=[baselineY]) at [fontSize], monospace when [mono]. Used by the
+/// satoshi (₿) and matrix (10·01·11) patterns — flutter_svg's vector_graphics
+/// backend silently drops `<svg><text>`, so those two `--style-pattern`s are
+/// painted with a [TextPainter] tile instead (the path-based patterns stay SVG).
+class GlyphTile {
+  const GlyphTile(this.text, this.dx, this.baselineY, this.fontSize,
+      {this.mono = false});
+  final String text;
+  final double dx;
+  final double baselineY;
+  final double fontSize;
+  final bool mono;
+}
+
 /// A repeating texture painted behind a styled message's content. Either a tiled
-/// inline SVG (`svg` + the tile [size]) or a programmatic scanline painter
-/// ([scanlines] = CRT/eclipse). Mirrors `--style-pattern`.
+/// inline SVG (`svg` + the tile [size]), a tiled [glyphs] TextPainter (satoshi /
+/// matrix, whose `<text>` flutter_svg can't render), or a programmatic scanline
+/// painter ([scanlines] = CRT/eclipse). Mirrors `--style-pattern`.
 class StyleWatermark {
   const StyleWatermark.svg(this.svg, this.size, {this.radialWash})
       : scanline = null,
         scanlineGap = 0,
-        scanlineThickness = 0;
+        scanlineThickness = 0,
+        glyphs = null,
+        glyphColor = null;
 
   /// A repeating horizontal scanline (CRT): [scanline]-coloured lines of
   /// [scanlineThickness]px every [scanlineGap]px.
@@ -323,6 +360,17 @@ class StyleWatermark {
   })  : svg = null,
         size = Size.zero,
         scanline = color,
+        radialWash = null,
+        glyphs = null,
+        glyphColor = null;
+
+  /// A tiled TEXT pattern (satoshi/matrix): [glyphs] painted in [glyphColor]
+  /// across a [size] tile via [TextPainter] (flutter_svg drops `<text>`).
+  const StyleWatermark.glyphs(this.glyphs, this.size, this.glyphColor)
+      : svg = null,
+        scanline = null,
+        scanlineGap = 0,
+        scanlineThickness = 0,
         radialWash = null;
 
   final String? svg;
@@ -331,11 +379,17 @@ class StyleWatermark {
   final double scanlineGap;
   final double scanlineThickness;
 
+  /// The tiled-text glyphs (satoshi/matrix) + their colour, or null for the
+  /// SVG/scanline variants.
+  final List<GlyphTile>? glyphs;
+  final Color? glyphColor;
+
   /// An optional soft radial-gradient wash painted BEHIND the tiled SVG (the
   /// radial half of eclipse's `--style-pattern`), or null.
   final RadialWash? radialWash;
 
   bool get isScanlines => scanline != null;
+  bool get isGlyphs => glyphs != null;
 }
 
 /// A resolved special-cosmetic aura composed onto a message bubble/row
@@ -464,13 +518,28 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
   if (v == null) return null;
   final lightColor = isLight ? _styleLightColor[styleId] : null;
   final hasLightText = lightColor != null;
+  // The `.message-content` CONTAINER (bare body text) colour, for the styles
+  // whose body differs from their inner `> *` child colour. Only satoshi: the
+  // body is white (#FFFFFF dark / #7a5500 light) while the children stay the bold
+  // orange #f7931a/#c47a15. When set, the body uses this and [childColor] carries
+  // the orange for inner elements + the shop preview; otherwise body == inner.
+  final bodyColor =
+      isLight ? _styleLightBodyColor[styleId] : _styleBodyColor[styleId];
+  // The inner `> *` / preview colour: the light override when present, else the
+  // dark `styleVisuals` colour.
+  final innerColor = hasLightText ? lightColor : v.color;
   // satoshi is the one textured style with no `.message-content` text-shadow at
   // all (its glow is preview-only) — so it has neither a glyph-shadow nor a glow
   // layer here, and the single-glow [glow] fallback must NOT manufacture one.
   final hasMessageShadow = _styleGlyphShadows.containsKey(styleId) ||
       _styleGlowShadows.containsKey(styleId);
   return MessageStyleDecoration(
-    textColor: hasLightText ? lightColor : v.color,
+    // Body text uses the CONTAINER colour (white/brown for satoshi); every other
+    // style's container IS its inner colour, so this is just [innerColor].
+    textColor: bodyColor ?? innerColor,
+    // The inner `> *` element + shop-preview colour, set only when it differs
+    // from the body (the satoshi split). Null = children inherit [textColor].
+    childColor: bodyColor != null ? innerColor : null,
     // Light mode resets `text-shadow` to none — except glitch, whose light rule
     // leaves its red/cyan chromatic split (supplied via [glyphShadows]) intact.
     // Styles with no real message text-shadow (satoshi) drop the glow entirely.
@@ -491,7 +560,11 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // colour for both layouts (the bubble override is a dark-mode-only rule).
     bubbleTextColor: hasLightText ? null : _styleBubbleTextColor[styleId],
     monospace: v.monospace,
-    bold: _styleBold.contains(styleId),
+    // satoshi's `font-weight: bold` lives on the inner `> *` children
+    // (styles-features.css:572), NOT the `.message-content` container — so bare
+    // body text is NORMAL weight. When the style splits (bodyColor set), the bold
+    // belongs to the children, not the body, so drop it here.
+    bold: _styleBold.contains(styleId) && bodyColor == null,
     glyphShadows: _styleGlyphShadows[styleId],
     watermark: isLight
         ? (_styleLightWatermarks[styleId] ?? styleWatermarks[styleId])
@@ -579,9 +652,26 @@ const Map<String, Color> _styleBubbleTextColor = {
 /// satoshi (`styles-features.css:572`).
 const Set<String> _styleBold = {'style-satoshi'};
 
+/// Dark-mode `.message-content` CONTAINER body-text colour for styles whose bare
+/// body differs from their inner `> *` child colour. Only satoshi: the container
+/// is white (`color:#FFFFFF`, styles-features.css:550) while its inner spans are
+/// the bold orange `#f7931a` (`:571`). Real plain message text is bare nodes, so
+/// the body reads white; the orange is reserved for links/mentions/emoji and the
+/// shop preview (which wraps its sample in a `<span>`).
+const Map<String, Color> _styleBodyColor = {
+  'style-satoshi': Color(0xFFFFFFFF),
+};
+
+/// Light-mode `.message-content` CONTAINER body colour (the split styles). satoshi
+/// body is `#7a5500` (`body.light-mode .message.style-satoshi .message-content`,
+/// styles-themes-responsive.css:900); its inner children are `#c47a15` (`:905`).
+const Map<String, Color> _styleLightBodyColor = {
+  'style-satoshi': Color(0xFF7A5500),
+};
+
 /// Light-mode text colours (`body.light-mode .message.style-X .message-content`,
-/// styles-themes-responsive.css:810-1041). satoshi uses the colour of its inner
-/// text spans (`#c47a15`), not the dimmer `.message-content` colour.
+/// styles-themes-responsive.css:810-1041). For satoshi this is the INNER `> *`
+/// child colour (`#c47a15`); the body uses the dimmer container [_styleLightBodyColor].
 const Map<String, Color> _styleLightColor = {
   'style-matrix': Color(0xFF006600),
   'style-neon': Color(0xFF990099),
@@ -642,19 +732,23 @@ const Map<String, List<Shadow>> _styleGlyphShadows = {
 /// the glow/background instead (Flutter has no tiled radial-gradient layer here).
 final Map<String, StyleWatermark> styleWatermarks = {
   // satoshi: tiled ₿ glyph (styles-features.css:545-566), 50×40 tile.
-  'style-satoshi': StyleWatermark.svg(
-    "<svg xmlns='http://www.w3.org/2000/svg' width='50' height='40'>"
-        "<text x='0' y='30' font-size='32' fill='#f7931a' "
-        "fill-opacity='0.2'>₿</text></svg>",
+  // satoshi: tiled ₿ glyph at baseline (0,30), font-size 32, #f7931a @ .2 — a
+  // glyph tile (flutter_svg can't render the `<text>`); ₿ resolves via Noto Sans.
+  'style-satoshi': StyleWatermark.glyphs(
+    [GlyphTile('₿', 0, 30, 32)],
     const Size(50, 40),
+    Color(0x33F7931A), // #f7931a @ 0.2
   ),
-  // matrix: falling 10/01/11 monospace code (styles-features.css:593), 36×48.
-  'style-matrix': StyleWatermark.svg(
-    "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='48'>"
-        "<g font-family='monospace' font-size='12' fill='#00ff00' "
-        "fill-opacity='0.13'><text x='3' y='13'>10</text>"
-        "<text x='19' y='27'>01</text><text x='6' y='41'>11</text></g></svg>",
+  // matrix: falling 10/01/11 monospace code (styles-features.css:593), 36×48 —
+  // a glyph tile at the three SVG baselines, #00ff00 @ .13.
+  'style-matrix': StyleWatermark.glyphs(
+    [
+      GlyphTile('10', 3, 13, 12, mono: true),
+      GlyphTile('01', 19, 27, 12, mono: true),
+      GlyphTile('11', 6, 41, 12, mono: true),
+    ],
     const Size(36, 48),
+    Color(0x2100FF00), // #00ff00 @ 0.13
   ),
   // eclipse: dim star dots (styles-features.css:1257), 60×60, PLUS the radial
   // warm-orange wash half of --style-pattern (`radial-gradient(circle at 20% 50%,
@@ -829,13 +923,15 @@ final Map<String, StyleWatermark> _styleLightWatermarks = {
         "-1.4 0z M37.7 33a0.7 0.7 0 1 0 1.4 0 0.7 0.7 0 1 0 -1.4 0z'/></g></svg>",
     const Size(52, 52),
   ),
-  // matrix → #006600 @ 0.2 (:1029).
-  'style-matrix': StyleWatermark.svg(
-    "<svg xmlns='http://www.w3.org/2000/svg' width='36' height='48'>"
-        "<g font-family='monospace' font-size='12' fill='#006600' "
-        "fill-opacity='0.2'><text x='3' y='13'>10</text>"
-        "<text x='19' y='27'>01</text><text x='6' y='41'>11</text></g></svg>",
+  // matrix → #006600 @ 0.2 (:1029) — glyph tile (flutter_svg drops `<text>`).
+  'style-matrix': StyleWatermark.glyphs(
+    [
+      GlyphTile('10', 3, 13, 12, mono: true),
+      GlyphTile('01', 19, 27, 12, mono: true),
+      GlyphTile('11', 6, 41, 12, mono: true),
+    ],
     const Size(36, 48),
+    Color(0x33006600), // #006600 @ 0.2
   ),
   // ocean → #38a8d8 @ 0.3 (:1014).
   'style-ocean': StyleWatermark.svg(
@@ -1218,6 +1314,18 @@ class StyleWatermarkLayer extends StatelessWidget {
         ),
       );
     }
+    // satoshi ₿ / matrix 10·01·11: a tiled TextPainter pattern (flutter_svg
+    // can't render the `<text>` these `--style-pattern`s use).
+    if (watermark.isGlyphs) {
+      return IgnorePointer(
+        child: ClipRect(
+          child: CustomPaint(
+            size: Size.infinite,
+            painter: _GlyphTilePainter(watermark),
+          ),
+        ),
+      );
+    }
     // The tiled SVG, optionally over a soft radial wash (eclipse's warm glow).
     final tiles = edgeOnly
         ? _EdgeTiledSvg(svg: watermark.svg!, tile: watermark.size)
@@ -1262,6 +1370,52 @@ class _ScanlinePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ScanlinePainter old) => old.w != w;
+}
+
+/// Tiles a TEXT watermark ([StyleWatermark.glyphs]) across the box with a
+/// [TextPainter] — the satoshi ₿ and matrix 10·01·11 patterns flutter_svg can't
+/// draw. Each [GlyphTile]'s `baselineY` is the SVG text baseline, so the painter
+/// offsets each line up by its ascent to land the baseline there. ₿ resolves via
+/// the bundled [kSansSymFont] (Noto Sans has U+20BF); matrix uses [kMonoFont].
+class _GlyphTilePainter extends CustomPainter {
+  _GlyphTilePainter(this.w);
+  final StyleWatermark w;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final tile = w.size;
+    if (tile.width <= 0 || tile.height <= 0) return;
+    // Pre-lay each glyph once, then stamp it across the grid.
+    final painters = <(double, double, TextPainter)>[];
+    for (final g in w.glyphs!) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: g.text,
+          style: TextStyle(
+            color: w.glyphColor,
+            fontSize: g.fontSize,
+            fontFamily: g.mono ? kMonoFont : kSansSymFont,
+            height: 1.0,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final baseline =
+          tp.computeDistanceToActualBaseline(TextBaseline.alphabetic);
+      // SVG `y` is the baseline; TextPainter paints from the glyph top.
+      painters.add((g.dx, g.baselineY - baseline, tp));
+    }
+    for (var y = 0.0; y < size.height; y += tile.height) {
+      for (var x = 0.0; x < size.width; x += tile.width) {
+        for (final (dx, dy, tp) in painters) {
+          tp.paint(canvas, Offset(x + dx, y + dy));
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GlyphTilePainter old) => old.w != w;
 }
 
 /// Repeats a small inline SVG [tile] across the available box. Uses

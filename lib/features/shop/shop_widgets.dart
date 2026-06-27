@@ -342,10 +342,19 @@ class ShopStyleBubblePreview extends StatelessWidget {
     required this.styleId,
     this.text = 'Preview message',
     this.bubble = true,
+    this.sampleIsChild = true,
   });
 
   final String styleId;
   final String text;
+
+  /// Whether the sample text is an inner `> *` CHILD (the shop item-card demo
+  /// wraps "Preview message" in a `<span>`, shop.js `_shopStyleDemo`:724) or a
+  /// BARE body text node (the "This is how your messages look." active-items block
+  /// puts the text directly in `.message-content`, shop.js:964). It only matters
+  /// for the satoshi container/child split: a child shows the orange `#f7931a`,
+  /// the bare body shows the white/brown container colour.
+  final bool sampleIsChild;
 
   /// When true (chat-bubbles layout) the demo `.message-content` is the rounded
   /// translucent bubble (`body.chat-bubbles .message-content`); when false (IRC
@@ -382,7 +391,13 @@ class ShopStyleBubblePreview extends StatelessWidget {
     // brighter glyph in the bubble than IRC (`body.chat-bubbles .message.style-X
     // .message-content { color }`), so resolve the colour per the user's layout.
     final base = TextStyle(
-      color: deco.textColorFor(bubble: bubble),
+      // A wrapped `<span>` sample is an inner `> *` child — for satoshi the bold
+      // orange `#f7931a`/`#c47a15`; a bare body node uses the white/brown container
+      // colour. `previewColorFor` returns the child colour for the split styles,
+      // `textColorFor` the container body colour.
+      color: sampleIsChild
+          ? deco.previewColorFor(bubble: bubble)
+          : deco.textColorFor(bubble: bubble),
       fontSize: 12,
       fontWeight: FontWeight.w600,
       fontFamily: deco.monospace ? 'monospace' : null,
