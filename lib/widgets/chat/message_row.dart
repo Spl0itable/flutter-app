@@ -143,12 +143,20 @@ class MessageRow extends ConsumerStatefulWidget {
     this.showName = true,
     this.inGroup = false,
     this.onReactionPicker,
+    this.bubbleAnchorKey,
   });
 
   final Message message;
   final Settings settings;
   final List<MessageReaction> reactions;
   final bool mentioned;
+
+  /// Bubble layout: when set (the LAST message of a [MessageGroup]), keys the
+  /// rounded bubble container so the group's gliding avatar can bottom-align to
+  /// the bubble — NOT to the full group foot, which would drop it onto the
+  /// reactions / translation / receipt rows that sit BELOW the bubble. Null for
+  /// every other row.
+  final GlobalKey? bubbleAnchorKey;
 
   /// Bubble layout: this message is part of a consecutive same-author group.
   final bool grouped;
@@ -1128,7 +1136,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               ),
             ),
           ),
-        Align(alignment: sideAlign, child: bubble),
+        Align(
+          alignment: sideAlign,
+          // Key the rounded bubble (NOT the trailing reactions/translation/
+          // receipt rows) so the group avatar can bottom-align to it.
+          child: KeyedSubtree(key: widget.bubbleAnchorKey, child: bubble),
+        ),
         // PM sent/delivered/read receipt (`.delivery-status`). The PWA emits it as
         // a TOP-LEVEL sibling AFTER `.message-content` (`messages.js:940`), and the
         // base rule `flex-basis:100%; text-align:right; padding-right:4px`
@@ -2540,7 +2553,7 @@ class MessageGroupEntry {
 /// In IRC mode — and for standalone system / `/me` rows — a "group" is always a
 /// single entry and renders bare (no avatar gutter, no group chrome), so those
 /// paths are byte-for-byte what [MessageRow] produced before grouping existed.
-class MessageGroup extends ConsumerWidget {
+class MessageGroup extends ConsumerStatefulWidget {
   const MessageGroup({
     super.key,
     required this.entries,
@@ -2553,7 +2566,19 @@ class MessageGroup extends ConsumerWidget {
   final ValueChanged<Message>? onReactionPicker;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MessageGroup> createState() => _MessageGroupState();
+}
+
+class _MessageGroupState extends ConsumerState<MessageGroup> {
+  /// Anchors the gliding avatar to the LAST bubble (kept stable across rebuilds
+  /// so the keyed bubble subtree isn't torn down each frame).
+  final GlobalKey _bubbleKey = GlobalKey();
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final settings = widget.settings;
+    final onReactionPicker = widget.onReactionPicker;
     final useBubbles = settings.useBubbles;
     final first = entries.first.message;
     final self = first.isOwn;
@@ -2574,6 +2599,8 @@ class MessageGroup extends ConsumerWidget {
               showAvatar: false,
               inGroup: useBubbles,
               onReactionPicker: onReactionPicker,
+              // The LAST bubble anchors the gliding avatar (others-bubble path).
+              bubbleAnchorKey: i == entries.length - 1 ? _bubbleKey : null,
             ),
         ];
 
@@ -2634,6 +2661,7 @@ class MessageGroup extends ConsumerWidget {
             child: _StickyGroupAvatar(
               pubkey: first.pubkey,
               imageUrl: picture,
+              bubbleKey: _bubbleKey,
               onTap: () => _openAvatarMenu(context, ref, last),
             ),
           ),
@@ -2652,7 +2680,7 @@ class MessageGroup extends ConsumerWidget {
       context,
       target: target,
       message: last,
-      onReact: () => onReactionPicker?.call(last),
+      onReact: () => widget.onReactionPicker?.call(last),
     );
   }
 }
@@ -2678,11 +2706,18 @@ class _StickyGroupAvatar extends StatefulWidget {
     required this.pubkey,
     required this.imageUrl,
     required this.onTap,
+    this.bubbleKey,
   });
 
   final String pubkey;
   final String? imageUrl;
   final VoidCallback onTap;
+
+  /// Keys the LAST bubble in the group so the avatar's resting position bottom-
+  /// aligns to the bubble — not to the group foot, which includes the reactions /
+  /// translation / receipt rows BELOW the bubble (PWA keeps the avatar by the
+  /// last bubble). Null → fall back to the group foot.
+  final GlobalKey? bubbleKey;
 
   @override
   State<_StickyGroupAvatar> createState() => _StickyGroupAvatarState();
@@ -2729,6 +2764,28 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
     super.dispose();
   }
 
+  /// The avatar's bottom-most resting top: aligned to the LAST bubble's bottom
+  /// (via [_StickyGroupAvatar.bubbleKey]) rather than the full group foot, so a
+  /// trailing reactions / translation / receipt row doesn't drop the avatar below
+  /// the bubble. Falls back to [trackHeight] - avatar when the bubble can't be
+  /// measured yet (first frame; the post-frame tick settles it).
+  double _restingTop(double trackHeight) {
+    final fallback = (trackHeight - _avatar).clamp(0.0, double.infinity);
+    final track = context.findRenderObject();
+    final bubble = widget.bubbleKey?.currentContext?.findRenderObject();
+    if (track is RenderBox &&
+        track.hasSize &&
+        bubble is RenderBox &&
+        bubble.hasSize) {
+      // Bubble bottom in the track's coordinate space.
+      final bubbleBottom = bubble
+          .localToGlobal(Offset(0, bubble.size.height), ancestor: track)
+          .dy;
+      return (bubbleBottom - _avatar).clamp(0.0, fallback);
+    }
+    return fallback;
+  }
+
   /// The avatar's top within its [maxTop]-bounded track — `clamp(desired, 0,
   /// maxTop)` is precisely CSS sticky bounded to the containing block, where
   /// `desired` places the avatar 8px above the viewport bottom.
@@ -2760,22 +2817,27 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        final maxTop =
-            (constraints.maxHeight - _avatar).clamp(0.0, double.infinity);
+        final trackHeight = constraints.maxHeight;
         return ValueListenableBuilder<int>(
           valueListenable: _tick,
-          builder: (context, _, child) => Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Positioned(
-                left: 0,
-                top: _computeTop(maxTop),
-                width: _avatar,
-                height: _avatar,
-                child: child!,
-              ),
-            ],
-          ),
+          // Recompute BOTH the resting bound (bubble anchor) and the glide on
+          // every tick — the bubble's render box only exists from the 2nd frame,
+          // so the post-frame tick is what settles the avatar onto the bubble.
+          builder: (context, _, child) {
+            final maxTop = _restingTop(trackHeight);
+            return Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned(
+                  left: 0,
+                  top: _computeTop(maxTop),
+                  width: _avatar,
+                  height: _avatar,
+                  child: child!,
+                ),
+              ],
+            );
+          },
           child: avatar,
         );
       },
