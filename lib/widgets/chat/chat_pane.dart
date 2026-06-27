@@ -74,9 +74,16 @@ class ChatPane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.nym;
     return Container(
-      color: c.bg,
+      // `.main-content` is TRANSPARENT (styles-shell.css:730 — no background) so
+      // the fixed `#wallpaperLayer` (mounted behind this pane in `home_shell`)
+      // shows through. The opaque base comes from the Scaffold (`c.bg`); the
+      // header/composer paint their own `--glass-bg` surfaces and the messages
+      // area paints only a translucent wash (`rgba(0,0,0,0.15)` / light
+      // `rgba(255,255,255,0.3)`), so the wallpaper reads through the message
+      // region in both single-chat and columns views. Painting an opaque `c.bg`
+      // here (the old behaviour) covered the wallpaper everywhere.
+      color: Colors.transparent,
       child: Column(
         children: [
           _ChatHeader(

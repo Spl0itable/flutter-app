@@ -14,11 +14,13 @@ import '../../core/theme/nym_colors.dart';
 /// from `translateX(-100%)` to `translateX(100%)`. Each shape's base fill is
 /// `var(--bg-tertiary)` with `border-radius: 6px` (avatars 50%).
 ///
-/// Here the moving highlight is implemented once as a [ShaderMask] sweeping a
-/// `glassBorder`-cored gradient across the whole column (an [AnimationController]
-/// driving the `-1 → 1` translate), so all placeholder shapes shimmer in lockstep
-/// like the CSS. There are distinct bubble vs IRC variants matching the two chat
-/// layouts ([MessageSkeleton.bubble] / [MessageSkeleton.irc]).
+/// Here the moving highlight is reproduced PER SHAPE (matching the CSS `::after`
+/// on every `.sk-*`): each placeholder paints its `bg-tertiary` base plus a
+/// full-width `glassBorder`-cored gradient translated `-100% → +100%` and clipped
+/// to itself, all ticked by one shared [AnimationController] (`_t`) so every shape
+/// — narrow or wide — shimmers in lockstep like the CSS (rather than a single
+/// narrow band crossing the whole column, which lit shapes one region at a time).
+/// There are distinct bubble vs IRC variants matching the two chat layouts.
 class MessageSkeleton extends StatefulWidget {
   const MessageSkeleton({super.key, required this.useBubbles, this.rowCount = 8});
 
@@ -55,51 +57,66 @@ class _MessageSkeletonState extends State<MessageSkeleton>
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // The moving highlight is `var(--glass-border)` flanked by transparent
-    // (`linear-gradient(90deg, transparent, var(--glass-border), transparent)`).
-    final highlight = c.glassBorder;
 
-    // `.msg-skeleton { justify-content: flex-end }` — rows settle at the bottom,
-    // newest-style at the foot, like the reversed live list.
-    final rows = widget.useBubbles
-        ? _bubbleRows(c)
-        : _ircRows(c);
-
-    final column = Column(
-      mainAxisAlignment: MainAxisAlignment.end,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: rows,
-    );
-
-    // One ShaderMask over the whole column reproduces the synchronized
-    // per-shape `::after` sweep: a narrow highlight band translating across.
+    // The PWA runs the sweep PER SHAPE: every `.sk-bar/.sk-line/.sk-avatar` has
+    // its own `::after` (a full-WIDTH `linear-gradient(90deg, transparent,
+    // glass-border, transparent)`) that slides `translateX(-100%) → 100%`, all
+    // driven by the one shared `sk-shimmer` clock — so every placeholder, narrow
+    // or wide, lights up in lockstep (not a single narrow band crossing the
+    // column). We mirror that exactly: each shape paints its own clipped, moving
+    // full-width highlight (see `_bar`/`_avatar`). The whole row tree is rebuilt
+    // inside this AnimatedBuilder each tick so every shape re-reads `_t.value`.
     return ClipRect(
       child: AnimatedBuilder(
         animation: _t,
-        builder: (context, child) {
-          return ShaderMask(
-            blendMode: BlendMode.srcATop,
-            shaderCallback: (rect) {
-              // Map t∈[0,1] to a band traveling left→right across [-1, 1] of the
-              // width (matching translateX(-100%) → translateX(100%)).
-              final dx = (_t.value * 2 - 1) * rect.width;
-              return LinearGradient(
-                begin: Alignment.centerLeft,
-                end: Alignment.centerRight,
-                colors: [
-                  Colors.transparent,
-                  highlight,
-                  Colors.transparent,
-                ],
-                stops: const [0.35, 0.5, 0.65],
-              ).createShader(
-                Rect.fromLTWH(rect.left + dx, rect.top, rect.width, rect.height),
-              );
-            },
-            child: child,
+        builder: (context, _) {
+          // `.msg-skeleton { justify-content: flex-end }` — rows settle at the
+          // bottom, newest-style at the foot, like the reversed live list.
+          final rows = widget.useBubbles ? _bubbleRows(c) : _ircRows(c);
+          return Column(
+            mainAxisAlignment: MainAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: rows,
           );
         },
-        child: column,
+      ),
+    );
+  }
+
+  /// The per-shape moving highlight, a 1:1 port of the skeleton `::after`:
+  /// a full-WIDTH `linear-gradient(90deg, transparent, glass-border,
+  /// transparent)` (stops 0 / .5 / 1) translated horizontally from
+  /// `translateX(-100%)` to `translateX(100%)` as `_t` runs 0→1, clipped to the
+  /// shape. Painted over the shape's `bg-tertiary` base.
+  Widget _shimmer(NymColors c, {required double width, required double height, BoxShape shape = BoxShape.rectangle}) {
+    // -1 → +1 of the shape width == translateX(-100%) → translateX(100%).
+    final dx = (_t.value * 2 - 1) * width;
+    final radius = shape == BoxShape.circle
+        ? BorderRadius.circular(height / 2) // 50%
+        : const BorderRadius.all(Radius.circular(6));
+    return ClipRRect(
+      borderRadius: radius,
+      child: Stack(
+        children: [
+          // base fill: `var(--bg-tertiary)`.
+          Positioned.fill(child: ColoredBox(color: c.bgTertiary)),
+          // moving highlight band, the width of the shape, offset by dx.
+          Positioned(
+            left: dx,
+            top: 0,
+            width: width,
+            height: height,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [Colors.transparent, c.glassBorder, Colors.transparent],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -297,27 +314,22 @@ class _MessageSkeletonState extends State<MessageSkeleton>
   }
 
   // ---- shared shapes ----
-  // Base placeholder fill: `var(--bg-tertiary)`, `border-radius: 6px`.
+  // Base placeholder fill (`var(--bg-tertiary)`, `border-radius: 6px`) with the
+  // per-shape moving highlight (`::after`) painted over it.
   Widget _bar(NymColors c, {required double width, required double height}) {
-    return Container(
+    return SizedBox(
       width: width,
       height: height,
-      decoration: BoxDecoration(
-        color: c.bgTertiary,
-        borderRadius: const BorderRadius.all(Radius.circular(6)),
-      ),
+      child: _shimmer(c, width: width, height: height),
     );
   }
 
-  // `.sk-avatar { border-radius: 50% }`.
+  // `.sk-avatar { border-radius: 50% }` — same moving highlight, circular clip.
   Widget _avatar(NymColors c, double size) {
-    return Container(
+    return SizedBox(
       width: size,
       height: size,
-      decoration: BoxDecoration(
-        color: c.bgTertiary,
-        shape: BoxShape.circle,
-      ),
+      child: _shimmer(c, width: size, height: size, shape: BoxShape.circle),
     );
   }
 
