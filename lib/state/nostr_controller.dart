@@ -1121,6 +1121,17 @@ class NostrController {
     String? contextLabel,
     bool silent = false,
   }) {
+    // notifications.js `_addNotificationToHistory` (the silent/replayed path)
+    // drops events older than 24h (line 135) so a D1 backfill or reconnect
+    // replay doesn't resurface stale messages as fresh notifications (badge +
+    // modal). The loud `showNotification` path only ever sees live events
+    // (<10s old — see `_isHistorical`), so it carries no age gate; mirror that
+    // exact split here rather than gating both paths.
+    if (silent && tsMs != null) {
+      final cutoff24hMs =
+          DateTime.now().millisecondsSinceEpoch - 24 * 60 * 60 * 1000;
+      if (tsMs < cutoff24hMs) return;
+    }
     if (!silent) {
       unawaited(_ref.read(notificationsServiceProvider).notify(
             title: title,
