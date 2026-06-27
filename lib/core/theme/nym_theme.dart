@@ -165,21 +165,40 @@ const String kMonoFont = 'monospace';
 /// degrading Latin glyphs to boxes (the "all the text is fucked up" regression).
 const String kSansFont = 'Roboto';
 
-/// The bundled color-emoji family (`pubspec.yaml`): color glyphs for unicode
-/// emoji (😀 🔥 ❤ 🇺 …).
+/// The color-emoji family for unicode emoji (😀 🔥 ❤ 🇺 …). NOT bundled — left to
+/// the OS native color-emoji font (Apple Color Emoji on iOS, Noto Color Emoji on
+/// Android), which is what the PWA renders too and avoids a ~11MB binary bump.
+/// Kept in the fallback chain as an (unresolved) hint; Flutter skips the unknown
+/// family and lands on the OS emoji font for these codepoints.
 const String kEmojiFont = 'Noto Color Emoji';
 
 /// The bundled symbol family (`pubspec.yaml`): enclosed / circled letters and
 /// misc symbols the emoji font lacks (🅣 🅐 Ⓐ …, common in stylised nyms).
 const String kSymbolFont = 'Noto Sans Symbols';
 
-/// The glyph-coverage fallback chain appended after the real [kSansFont] primary
-/// (emoji first, then symbols). Because the primary is a bundled, always-resolved
-/// sans, the line strut comes from IT — not these fallbacks — so Latin metrics
-/// stay correct while emoji/symbol codepoints still resolve to colour/symbol
-/// glyphs. This mirrors the PWA's `--font-sans` chain (a real sans + the system
-/// emoji/symbol fonts), and is safe to apply globally + on the message renderer.
-const List<String> kEmojiFontFallback = [kEmojiFont, kSymbolFont];
+/// Bundled dingbats / arrows / geometric symbols (`pubspec.yaml`): checks ✓ ✔ ✗,
+/// stars, arrows — the codepoints Symbols-1 and Roboto both lack.
+const String kSymbol2Font = 'Noto Sans Symbols 2';
+
+/// Bundled broad text sans (`pubspec.yaml`): the catch-all for codepoints Roboto
+/// lacks but which are NOT emoji/dingbats — the bitcoin sign ₿ (U+20BF), extra
+/// currency/punctuation/dashes, Greek/Cyrillic — so they render instead of tofu.
+const String kSansSymFont = 'Noto Sans';
+
+/// The glyph-coverage fallback chain appended after the real [kSansFont] primary.
+/// Because the primary is a bundled, always-resolved sans, the line strut comes
+/// from IT — not these fallbacks — so Latin metrics stay correct while emoji and
+/// symbol codepoints still resolve. Order: OS color-emoji (via the unresolved
+/// [kEmojiFont] hint, then Flutter's platform fallback) → the bundled monochrome
+/// symbol fonts → broad [kSansSymFont] for everything else (e.g. ₿). This mirrors
+/// the PWA's `--font-sans` chain (a real sans + the system emoji/symbol fonts) and
+/// is safe to apply globally + on the message renderer.
+const List<String> kEmojiFontFallback = [
+  kEmojiFont,
+  kSymbolFont,
+  kSymbol2Font,
+  kSansSymFont,
+];
 
 /// Builds Flutter [ThemeData] wrapping a [NymColors]. Most custom widgets read
 /// tokens via `context.nym`; this provides sensible Material defaults +

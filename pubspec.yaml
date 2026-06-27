@@ -123,6 +123,23 @@ flutter:
           weight: 500
         - asset: assets/fonts/Roboto-Bold.ttf
           weight: 700
+    # Bundled TEXT-symbol fallbacks (small) so glyphs the primary Roboto lacks
+    # still resolve consistently on every device, instead of tofu boxes — the
+    # bitcoin sign ₿ (U+20BF), dingbats/checks ✓ ✔ ✗ (U+2713+), arrows, currency
+    # and misc symbols common in nyms/messages. These are monochrome text fonts
+    # (NOT the color-emoji font, which stays the OS native one — Apple Color Emoji
+    # on iOS — to match the PWA and avoid a ~11MB binary bump). Order in the
+    # fallback chain (nym_theme.dart kEmojiFontFallback): Symbols → Symbols2 →
+    # Sans, with color-emoji glyphs falling through to the OS font.
+    - family: Noto Sans Symbols
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols-Regular.ttf
+    - family: Noto Sans Symbols 2
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols2-Regular.ttf
+    - family: Noto Sans
+      fonts:
+        - asset: assets/fonts/NotoSans-Regular.ttf
 
 flutter_launcher_icons:
   android: true

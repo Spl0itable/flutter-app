@@ -2474,6 +2474,46 @@ class _StopBtn extends StatelessWidget {
   }
 }
 
+/// Folds a chronological (oldest-first) [messages] list into the PWA's
+/// `.message-group` runs: consecutive same-author bubble messages share one
+/// gliding avatar. In IRC mode ([useBubbles] false) every message is its own
+/// group; system / `/me` rows always stand alone, and an author or >5min time
+/// break splits a run. Mirrors [MessagesList]'s inline fold so the single-chat
+/// and columns views group — and so render avatars — identically (the columns
+/// view previously rendered a flat row list with no avatars at all).
+List<List<MessageGroupEntry>> buildMessageGroups(
+  List<Message> messages, {
+  required Map<String, List<MessageReaction>> reactions,
+  required bool useBubbles,
+  String mentionToken = '',
+}) {
+  // Same predicate as messages_list `_groupsWith` (5-minute window).
+  bool groupsWith(Message prev, Message cur) =>
+      !prev.isSystemRow &&
+      !cur.isSystemRow &&
+      !prev.isMeAction &&
+      !cur.isMeAction &&
+      prev.pubkey == cur.pubkey &&
+      (cur.createdAt - prev.createdAt).abs() <= 300;
+  final groups = <List<MessageGroupEntry>>[];
+  for (final m in messages) {
+    final entry = MessageGroupEntry(
+      message: m,
+      reactions: reactions[m.id] ?? const [],
+      mentioned:
+          mentionToken.isNotEmpty && !m.isOwn && m.content.contains(mentionToken),
+    );
+    if (useBubbles &&
+        groups.isNotEmpty &&
+        groupsWith(groups.last.last.message, m)) {
+      groups.last.add(entry);
+    } else {
+      groups.add([entry]);
+    }
+  }
+  return groups;
+}
+
 /// One message inside a [MessageGroup]: the message plus its already-resolved
 /// reactions and mention flag (computed once by [MessagesList] so the row needn't
 /// re-watch them).
