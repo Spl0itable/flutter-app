@@ -241,6 +241,9 @@ class NostrController {
       // resurrect from the D1 backlog on relaunch (F02; pms.js `nym_closed_pms`
       // / `nym_closed_pm_times`).
       _hydrateClosedPMs(appState);
+      // Restore the per-conversation read watermark so a relaunch's D1 backfill
+      // of older history doesn't re-count as unread (channelLastRead).
+      _hydrateChannelLastRead(appState);
       // Seed the notification badge's blocked-sender exclusion from the restored
       // block list (C02-4).
       _ref
@@ -4811,6 +4814,33 @@ class NostrController {
     appState.hydrateClosedPMs(closed, times);
   }
 
+  /// Persists the per-conversation read watermark (`nym_channel_last_read`) as a
+  /// JSON object so a relaunch's D1 backfill doesn't re-count already-read
+  /// history as unread (PWA `channelLastRead`, channels.js:1709-1735).
+  void _persistChannelLastRead() {
+    _ref.read(keyValueStoreProvider).setString(
+          StorageKeys.channelLastRead,
+          jsonEncode(_ref.read(appStateProvider.notifier).channelLastRead),
+        );
+  }
+
+  /// Restores the read watermark from KV at boot.
+  void _hydrateChannelLastRead(AppStateNotifier appState) {
+    final raw =
+        _ref.read(keyValueStoreProvider).getString(StorageKeys.channelLastRead);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final m = <String, int>{};
+      decoded.forEach((k, v) {
+        final t = v is num ? v.toInt() : int.tryParse('$v');
+        if (t != null) m['$k'] = t;
+      });
+      appState.hydrateChannelLastRead(m);
+    } catch (_) {}
+  }
+
   void _subscribeActiveChannelTyping() {
     final state = _ref.read(appStateProvider);
     if (state.view.kind != ViewKind.channel) return;
@@ -5164,6 +5194,8 @@ class NostrController {
     // Persist the closed-PM set on every mutation so a deleted PM stays deleted
     // across a relaunch (F02; pms.js `nym_closed_pms` / `nym_closed_pm_times`).
     _ref.read(appStateProvider.notifier).onClosedPmsChanged = _persistClosedPMs;
+    _ref.read(appStateProvider.notifier).onChannelReadChanged =
+        _persistChannelLastRead;
   }
 
   /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:

@@ -951,6 +951,45 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// before the controller boots, or in pure state tests.
   void Function()? onClosedPmsChanged;
 
+  /// Fired when [_channelLastRead] mutates (a view opened / marked read). The
+  /// controller wires this to KV persistence (`nym_channel_last_read`) so the
+  /// read watermark survives a relaunch — without it, every boot's D1 backfill
+  /// re-counts already-read history as unread (the PWA persists `channelLastRead`
+  /// and counts only `created_at > lastRead`, channels.js:1709). Best-effort.
+  void Function()? onChannelReadChanged;
+
+  /// Per-conversation read watermark: storage key → last-read created_at (sec).
+  /// A message bumps the unread badge only when `created_at > lastRead` — the
+  /// PWA's `_recomputeUnreadCount` / `channelLastRead` (channels.js:1709-1735),
+  /// so backfilled OR re-delivered OLD messages never inflate the badge.
+  final Map<String, int> _channelLastRead = <String, int>{};
+
+  /// Read-only view of the per-conversation read watermark (for persistence).
+  Map<String, int> get channelLastRead => Map.unmodifiable(_channelLastRead);
+
+  /// Records that [key] was read up to [tsSec] (keeps the max). Fires
+  /// [onChannelReadChanged] so the controller persists it.
+  void markChannelRead(String key, int tsSec) {
+    if (key.isEmpty || tsSec <= 0) return;
+    final cur = _channelLastRead[key] ?? 0;
+    if (tsSec <= cur) return;
+    _channelLastRead[key] = tsSec;
+    onChannelReadChanged?.call();
+  }
+
+  /// Restores the read watermark from KV at boot (paired with [channelLastRead]).
+  void hydrateChannelLastRead(Map<String, int> m) {
+    m.forEach((k, v) {
+      if (v > (_channelLastRead[k] ?? 0)) _channelLastRead[k] = v;
+    });
+  }
+
+  /// True when [m] is NEW relative to its conversation's read watermark — i.e.
+  /// it should bump the unread badge (`created_at > lastRead`). [key] is the
+  /// conversation storage key the badge is bucketed under.
+  bool _isUnreadByWatermark(String key, Message m) =>
+      m.createdAt > (_channelLastRead[key] ?? 0);
+
   int _localSeq = 1000000;
   int _ingestSeq = 1;
   final Set<String> _seenIds = <String>{};
@@ -1320,7 +1359,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // the badge — the PWA's `_recomputeUnreadCount` predicate (own / blocked /
     // WoT-gated excluded, but keyword + heuristic-spam STILL counted; see
     // [AppState.countsTowardUnread], channels.js `_recomputeUnreadCount`).
-    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
+    // `_isUnreadByWatermark` gates on `created_at > lastRead`, so a D1 backfill
+    // of older history never re-inflates the badge for an already-read channel.
+    if (key != state.view.storageKey &&
+        state.countsTowardUnread(m) &&
+        _isUnreadByWatermark(key, m)) {
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
 
@@ -1658,7 +1701,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.lastSeen = m.timestamp;
     }
 
-    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
+    if (key != state.view.storageKey &&
+        state.countsTowardUnread(m) &&
+        _isUnreadByWatermark(peer, m)) {
       state.unreadCounts[peer] = (state.unreadCounts[peer] ?? 0) + 1;
     }
     // Apply a buffered out-of-order edit whose original is this PM (matches on
@@ -1694,12 +1739,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       u.lastSeen = m.timestamp;
     }
-    if (key != state.view.storageKey && state.countsTowardUnread(m)) {
+    if (key != state.view.storageKey &&
+        state.countsTowardUnread(m) &&
+        _isUnreadByWatermark(key, m)) {
       // Key the unread count by the group's storage key (== `key`), NOT the bare
       // gid — the sidebar group row reads `unread[groupStorageKey(id)]`, so a
       // bare-gid write never surfaced as a badge. Predicate mirrors the PWA's
       // `_recomputeUnreadCount` (keyword/heuristic-spam still count; see
-      // [AppState.countsTowardUnread]).
+      // [AppState.countsTowardUnread]) + the `created_at > lastRead` watermark.
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
     }
     // Apply a buffered out-of-order edit whose original is this group message.
@@ -1977,9 +2024,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   Map<String, int> get closedPmTimes => Map.unmodifiable(_closedPMTimes);
 
   void switchView(ChatView view) {
-    // Clear unread for the target on entry (mirrors marking-as-read).
+    // Clear unread for the target on entry (mirrors marking-as-read), and stamp
+    // the read watermark to NOW so a later D1 backfill of this conversation's
+    // older history doesn't re-inflate the badge (PWA `_markChannelRead`).
     state.unreadCounts.remove(view.id);
     state.unreadCounts.remove(view.storageKey);
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    markChannelRead(view.id, nowSec);
+    markChannelRead(view.storageKey, nowSec);
     state = state.copyWith(view: view);
     // Best-effort D1 history backfill on open (channel-get / group archive).
     // Wrapped so a backfill failure can't break the view switch.
