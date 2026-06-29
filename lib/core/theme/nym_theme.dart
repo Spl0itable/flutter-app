@@ -172,31 +172,24 @@ const String kSansFont = 'Roboto';
 /// family and lands on the OS emoji font for these codepoints.
 const String kEmojiFont = 'Noto Color Emoji';
 
-/// The bundled symbol family (`pubspec.yaml`): enclosed / circled letters and
-/// misc symbols the emoji font lacks (🅣 🅐 Ⓐ …, common in stylised nyms).
-const String kSymbolFont = 'Noto Sans Symbols';
-
-/// Bundled dingbats / arrows / geometric symbols (`pubspec.yaml`): checks ✓ ✔ ✗,
-/// stars, arrows — the codepoints Symbols-1 and Roboto both lack.
-const String kSymbol2Font = 'Noto Sans Symbols 2';
-
-/// Bundled broad text sans (`pubspec.yaml`): the catch-all for codepoints Roboto
-/// lacks but which are NOT emoji/dingbats — the bitcoin sign ₿ (U+20BF), extra
-/// currency/punctuation/dashes, Greek/Cyrillic — so they render instead of tofu.
+/// Bundled broad text sans (`pubspec.yaml`): the catch-all for the codepoints
+/// Roboto lacks but which are NOT colour emoji — the bitcoin sign ₿ (U+20BF),
+/// extra currency / punctuation / dashes, Greek / Cyrillic — so they render
+/// instead of tofu. Deliberately a TEXT sans with NO emoji-range glyphs: a
+/// monochrome symbol font here (e.g. Noto Sans Symbols 2) would shadow the OS
+/// COLOUR emoji for codepoints like ⚡ ★ ☂ ❤ (they have both a text outline and
+/// an emoji presentation), rendering them as black outlines instead of colour.
 const String kSansSymFont = 'Noto Sans';
 
 /// The glyph-coverage fallback chain appended after the real [kSansFont] primary.
 /// Because the primary is a bundled, always-resolved sans, the line strut comes
-/// from IT — not these fallbacks — so Latin metrics stay correct while emoji and
-/// symbol codepoints still resolve. Order: OS color-emoji (via the unresolved
-/// [kEmojiFont] hint, then Flutter's platform fallback) → the bundled monochrome
-/// symbol fonts → broad [kSansSymFont] for everything else (e.g. ₿). This mirrors
-/// the PWA's `--font-sans` chain (a real sans + the system emoji/symbol fonts) and
-/// is safe to apply globally + on the message renderer.
+/// from IT — not these fallbacks — so Latin metrics stay correct. Order:
+/// [kEmojiFont] is an UNRESOLVED hint that Flutter skips, so colour-emoji
+/// codepoints fall through to the OS native emoji font (Apple Color Emoji on iOS),
+/// matching the PWA; [kSansSymFont] then catches the non-emoji text symbols Roboto
+/// lacks (₿). It carries NO emoji-range glyphs, so it never shadows colour emoji.
 const List<String> kEmojiFontFallback = [
   kEmojiFont,
-  kSymbolFont,
-  kSymbol2Font,
   kSansSymFont,
 ];
 
