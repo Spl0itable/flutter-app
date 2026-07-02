@@ -133,20 +133,21 @@ class StorageSync {
     'vault', // keypair/secret material never leaves the device
   };
 
-  /// The category name for a section, matching the PWA's d-tag form
-  /// `nymchat-settings-<section>` (settings.js:566). The PWA further hashes this
-  /// into an opaque per-account D1 column (`_d1Category`) and rides the real
-  /// name inside the encrypted blob as `__cat`; we keep the same blob shape but
-  /// use the cleartext category as the column (the worker accepts any
-  /// `nymchat-[a-z0-9-]{1,120}` category, storage.js:493) so a fresh native
-  /// install and the PWA can both read each other's rows.
-  // TODO(verify): the PWA uses the *hashed* opaque category as the D1 column
-  // (`_d1Category` = `nymchat-<sha256(pubkey:d1:dTag)>`). Using the cleartext
-  // category here is simpler and still valid per the worker regex, but does NOT
-  // byte-match the PWA's column name, so PWA<->native settings rows won't
-  // cross-read until the hashed-category scheme is mirrored. Settings still sync
-  // across native devices. Confirm whether cross-client read is required.
+  /// The real (routing) category name for a section, matching the PWA's d-tag
+  /// form `nymchat-settings-<section>` (settings.js:566). This is what rides
+  /// INSIDE the encrypted blob as `__cat`; the cleartext D1 column is the
+  /// opaque per-account hash from [d1Category].
   static String sectionCategory(String section) => 'nymchat-settings-$section';
+
+  /// The opaque per-account D1 column for a routing [dTag]:
+  /// `nymchat-<sha256hex("<pubkey>:d1:<dTag>")>` (`_d1Category` →
+  /// `_syncOuterDTag('d1:' + dTag)`, settings.js:177-190). Hashing keeps
+  /// per-group categories from being joined across members to reveal group
+  /// membership; the real category is recovered from `__cat` in the blob.
+  /// Reads stay backward-compatible: [settingsGet] recovers `__cat` from any
+  /// row regardless of its column name.
+  String d1Category(String dTag) =>
+      'nymchat-${_sha256Hex('$_pubkey:d1:$dTag')}';
 
   // ===========================================================================
   // Encrypted settings sync.
@@ -303,11 +304,14 @@ class StorageSync {
       seenCalls: seenCalls,
     );
     for (final entry in sections.entries) {
-      final category = sectionCategory(entry.key);
-      final ok = await _setSettingsCategory(category, jsonEncode(_withCat(
-        entry.value,
-        category,
-      )));
+      // The real category (`nymchat-settings-<section>`) rides inside the
+      // encrypted blob as `__cat`; the D1 column is its opaque per-account
+      // hash (`_d1Category`, settings.js:189/725).
+      final dTag = sectionCategory(entry.key);
+      final ok = await _setSettingsCategory(
+        d1Category(dTag),
+        jsonEncode(_withCat(entry.value, dTag)),
+      );
       if (ok) sent.add(entry.key);
     }
     return sent;
@@ -323,14 +327,16 @@ class StorageSync {
   Future<bool> notificationsWrapSet(
       Map<String, dynamic> seenNotifications) async {
     if (seenNotifications.isEmpty) return false;
-    const category = 'nymchat-notifications';
+    const dTag = 'nymchat-notifications';
     final payload = <String, dynamic>{
       'v': 2,
       'seenNotifications': seenNotifications,
     };
+    // Same hashed-column scheme as the settings sections (settings.js:560 →
+    // `_saveSettingsBlobToD1('nymchat-notifications', …)` → `_d1Category`).
     return _setSettingsCategory(
-      category,
-      jsonEncode(_withCat(payload, category)),
+      d1Category(dTag),
+      jsonEncode(_withCat(payload, dTag)),
     );
   }
 
@@ -707,6 +713,38 @@ class StorageSync {
     }
   }
 
+  /// Removes archived gift wraps by id from OUR D1 inbox (`pm-delete`,
+  /// storage.js:945-961; the worker deletes only rows under our own pubkey).
+  /// Chunked to the server's 200-id cap, mirroring `_purgeBotPMArchive`
+  /// (pms.js:1883-1891) and the NIP-09 PM branch of `_propagateDeletionToD1`
+  /// (nostr-core.js:1879-1883). No-op for ephemeral identities. Returns the
+  /// number of rows the worker reported removed; failures are swallowed.
+  Future<int> pmDelete(List<String> ids) async {
+    if (!_durable) return 0;
+    final clean = <String>[];
+    final seen = <String>{};
+    for (final raw in ids) {
+      final id = raw.toLowerCase();
+      if (_isHex64(id) && seen.add(id)) clean.add(id);
+    }
+    var removed = 0;
+    for (var i = 0; i < clean.length; i += 200) {
+      final end = (i + 200) < clean.length ? i + 200 : clean.length;
+      try {
+        final res = await _api.storageAction({
+          'action': 'pm-delete',
+          'pubkey': _pubkey,
+          'ids': clean.sublist(i, end),
+          'auth': await _auth('pm-delete'),
+        });
+        removed += (res['removed'] as num?)?.toInt() ?? 0;
+      } catch (_) {
+        // Best-effort purge.
+      }
+    }
+    return removed;
+  }
+
   /// Oldest restored wrap ts (`_pmD1OldestTs`) + an end-of-history flag
   /// (`_pmD1NoMore`) driving the pager (pms.js:1502).
   int? _pmOldestTs;
@@ -895,6 +933,29 @@ class StorageSync {
     return events;
   }
 
+  /// Purges a NIP-09-deleted channel message from the D1 archive
+  /// (`channel-delete`, storage.js:1123-1150). A PUBLIC call — the signed
+  /// kind-5 [deletionEvent] IS the authorization (the worker verifies its
+  /// signature and deletes only rows authored by its pubkey whose ids appear
+  /// in the `e` tags). [channel] is the channel name WITHOUT the leading `#`
+  /// (the PWA passes `key.slice(1)`, nostr-core.js:1874-1876). Best-effort.
+  Future<void> channelDelete(
+    String channel,
+    Map<String, dynamic> deletionEvent,
+  ) async {
+    if (channel.isEmpty) return;
+    try {
+      // Public: no pubkey/auth (`_storageApiRequest('channel-delete', …, false)`).
+      await _api.storageAction({
+        'action': 'channel-delete',
+        'channel': channel,
+        'deletionEvent': deletionEvent,
+      });
+    } catch (_) {
+      // Best-effort purge.
+    }
+  }
+
   // ===========================================================================
   // Channel activity discovery (D1 `channel-active`/`channel-active-named` +
   // `channel-activity`) — all PUBLIC reads, no auth. Mirrors channels.js
@@ -1002,6 +1063,114 @@ class StorageSync {
       });
     }
     return ChannelActivityResult(activity: activity, last: last);
+  }
+
+  // ===========================================================================
+  // Custom-emoji archive (D1 `emoji-get`) — emoji.js `_emojiRestoreFromD1`.
+  // ===========================================================================
+
+  /// Wall-clock (ms) of the last `emoji-get` fetch — the PWA re-fetches at
+  /// most every 10 minutes (`_emojiD1FetchedAt`, emoji.js:202-203).
+  int _emojiFetchedAt = 0;
+
+  /// Hydrates the deduped NIP-30 emoji set from the D1 archive (`emoji-get`,
+  /// storage.js:1168-1198): a PUBLIC NDJSON stream of the archived kind-30030
+  /// packs plus our own kind-10030 pack list. Mirrors `_emojiRestoreFromD1`
+  /// (emoji.js:198-222): throttled to one fetch per 10 minutes (reset on
+  /// transport failure so the next attempt retries); the caller replays each
+  /// returned event through the same ingest path live relay 30030/10030
+  /// events take. Returns the raw events; failures resolve to an empty list.
+  Future<List<Map<String, dynamic>>> emojiGet({bool force = false}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && _emojiFetchedAt != 0 && now - _emojiFetchedAt < 600000) {
+      return const [];
+    }
+    _emojiFetchedAt = now;
+    StorageStream stream;
+    try {
+      // Public read (`_storageApiStream('emoji-get', {}, false)`). The pubkey
+      // rides the body so the worker can append our own 10030 line
+      // (storage.js:1170/1186-1194); over the authed `/api` socket it is
+      // pinned server-side exactly like the PWA.
+      stream = await _api.storageStream({
+        'action': 'emoji-get',
+        'pubkey': _pubkey,
+      });
+    } catch (_) {
+      _emojiFetchedAt = 0; // allow a retry (emoji.js:208)
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
+  }
+
+  // ===========================================================================
+  // Zap-receipt archive (D1 `zap-put` / `zap-get`) — zaps.js:29-93.
+  // ===========================================================================
+
+  /// Uploads validated kind-9735 zap receipts to the D1 archive (`zap-put`,
+  /// storage.js:1328-1350; authed, ≤100 events per call — the caller batches).
+  /// The worker classifies each receipt by the `k` tag inside its
+  /// `description` (20000/23333→channel, 1059→pm, 0→profile) and re-verifies
+  /// the signature server-side. Best-effort; failures are swallowed (the
+  /// caller's queue re-flushes).
+  Future<bool> zapPut(List<Map<String, dynamic>> events) async {
+    if (events.isEmpty) return false;
+    try {
+      await _api.storageAction({
+        'action': 'zap-put',
+        'pubkey': _pubkey,
+        'events': events.take(100).toList(),
+        'auth': await _auth('zap-put'),
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Backfills archived kind-9735 receipts for the given zapped-message [ids]
+  /// (`zap-get`, storage.js:1286-1326 — a PUBLIC NDJSON stream, no auth, ≤500
+  /// ids). [scope] is `'pm'` or `'channel'` (anything else is coerced to
+  /// channel server-side); profile-scope receipts are keyed on the recipient
+  /// pubkey, so pass the pubkey as the id with scope `'channel'`'s DB —
+  /// mirroring `_backfillZapReceiptsFromD1([pubkey], 'profile')`, which the
+  /// worker also serves from the channels DB. Returns the raw receipt events;
+  /// failures resolve to an empty list.
+  Future<List<Map<String, dynamic>>> zapGet(
+    String scope,
+    List<String> ids,
+  ) async {
+    final clean = <String>[];
+    final seen = <String>{};
+    for (final raw in ids) {
+      final id = raw.toLowerCase();
+      if (!_isHex64(id) || !seen.add(id)) continue;
+      clean.add(id);
+      if (clean.length >= 500) break; // server caps at 500 (storage.js:1292)
+    }
+    if (clean.isEmpty) return const [];
+    StorageStream stream;
+    try {
+      // Public read: no pubkey/auth (`_storageApiStream('zap-get', …, false)`).
+      stream = await _api.storageStream({
+        'action': 'zap-get',
+        'scope': scope,
+        'ids': clean,
+      });
+    } catch (_) {
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
   }
 
   // ===========================================================================

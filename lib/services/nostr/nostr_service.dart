@@ -127,29 +127,6 @@ PresenceStatusMode presenceStatusModeFrom(String showStatus) {
   return PresenceStatusMode.enabled;
 }
 
-/// The self user's active shop cosmetics, carried on a presence broadcast so
-/// other clients can render flair without a shop-backend round-trip.
-///
-/// NOTE: the PWA's `publishShopUpdate` only emits `['shop-update','1']` as a
-/// cache-bust signal and the actual style/flair/supporter are fetched from the
-/// D1 shop backend (`shop-get-active`). The native build has no shop backend
-/// wired, so — in addition to the faithful `['shop-update','1']` tag — these
-/// values are inlined as extra presence tags so flair still renders.
-/// TODO(verify): confirm this tag extension is acceptable, or wire a native
-/// shop-status fetch to match the PWA's backend-driven flow exactly.
-class PresenceCosmetics {
-  const PresenceCosmetics({this.style, this.flair, this.supporter = false});
-
-  final String? style; // active message-style id
-  final String? flair; // active nickname-flair id
-  final bool supporter;
-
-  bool get isEmpty =>
-      (style == null || style!.isEmpty) &&
-      (flair == null || flair!.isEmpty) &&
-      !supporter;
-}
-
 /// Pure builder for the kind-30078 nym-presence tag list. Mirrors the PWA's
 /// `publishPresence` / `publishAvatarUpdate` / `publishShopUpdate` tag shapes so
 /// every presence flavor shares the `['d','nym-presence'],['t','nym-presence']`
@@ -162,7 +139,6 @@ class PresencePayload {
     this.mode = PresenceStatusMode.enabled,
     this.avatarUrl,
     this.shopUpdate = false,
-    this.cosmetics,
   });
 
   final String nym;
@@ -170,8 +146,12 @@ class PresencePayload {
   final String awayMessage;
   final PresenceStatusMode mode;
   final String? avatarUrl;
+
+  /// Emits the bare `['shop-update','1']` cache-bust flag (the ONLY shop tag
+  /// the protocol carries — `publishShopUpdate`, nostr-core.js:2876-2885).
+  /// Receivers react by force-refreshing the sender's D1 `shop-status` record;
+  /// the actual style/flair/cosmetics never ride the presence event.
   final bool shopUpdate;
-  final PresenceCosmetics? cosmetics;
 
   /// The status that actually goes on the public replaceable event. Only the
   /// `enabled` mode broadcasts the real status; otherwise `hidden` (PWA:
@@ -197,17 +177,6 @@ class PresencePayload {
     }
     if (shopUpdate) {
       out.add(['shop-update', '1']);
-      // Native-only cosmetic inlining (see PresenceCosmetics doc / TODO).
-      final c = cosmetics;
-      if (c != null) {
-        if (c.style != null && c.style!.isNotEmpty) {
-          out.add(['shop-style', c.style!]);
-        }
-        if (c.flair != null && c.flair!.isNotEmpty) {
-          out.add(['shop-flair', c.flair!]);
-        }
-        if (c.supporter) out.add(['shop-supporter', '1']);
-      }
     }
     return out;
   }
@@ -1470,9 +1439,10 @@ class NostrService {
   /// [mode]: only the `enabled` mode broadcasts the real status, otherwise
   /// `hidden` goes out so non-friends see nothing (PWA: `publicStatus`).
   ///
-  /// [avatarUrl] mirrors `publishAvatarUpdate` and [shopUpdate]/[cosmetics]
-  /// mirror `publishShopUpdate`; combining them in one event matches the PWA's
-  /// single-replaceable-event shape (all share `['d','nym-presence']`).
+  /// [avatarUrl] mirrors `publishAvatarUpdate` and [shopUpdate] mirrors
+  /// `publishShopUpdate` (the bare `['shop-update','1']` cache-bust flag);
+  /// combining them in one event matches the PWA's single-replaceable-event
+  /// shape (all share `['d','nym-presence']`).
   Future<NostrEvent?> publishPresence({
     required String status, // 'online' | 'away' | 'hidden'
     required String nym,
@@ -1480,7 +1450,6 @@ class NostrService {
     PresenceStatusMode mode = PresenceStatusMode.enabled,
     String? avatarUrl,
     bool shopUpdate = false,
-    PresenceCosmetics? cosmetics,
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -1492,7 +1461,6 @@ class NostrService {
       mode: mode,
       avatarUrl: avatarUrl,
       shopUpdate: shopUpdate,
-      cosmetics: cosmetics,
     ).tags();
     final signed = await sig.sign(
       UnsignedEvent(

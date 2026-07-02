@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/pow.dart' as pow;
+import '../core/crypto/schnorr.dart' as schnorr;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
@@ -23,12 +24,12 @@ import '../features/notifications/notifications_service.dart';
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
 import '../features/nymbot/nymbot_providers.dart';
-import '../features/nymbot/nymbot_service.dart';
 import '../features/p2p/p2p_models.dart';
 import '../features/p2p/p2p_service.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
 import '../features/zaps/lnurl.dart';
+import '../features/zaps/zap_archive.dart';
 import '../features/zaps/zap_logic.dart';
 import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
@@ -99,6 +100,11 @@ class NostrController {
   /// calls through it are lazy + failure-tolerant (the live host may be
   /// unreachable; the PWA treats every storage path as best-effort).
   StorageSync? _storageSync;
+
+  /// Zap-receipt D1 archive: batched `zap-put` of observed kind-9735 receipts
+  /// + `zap-get` backfill for hydrated history (zaps.js:29-93). Built alongside
+  /// [_storageSync]; null before boot.
+  ZapArchive? _zapArchive;
 
   /// Shared [ApiClient] for the storage-sync paths (one instance, reused).
   ApiClient? _api;
@@ -619,6 +625,8 @@ class NostrController {
     _service = null;
     _groups = null;
     _storageSync = null;
+    _zapArchive?.dispose();
+    _zapArchive = null;
     _lastPresenceBroadcast = 0;
     _presenceTimestamps.clear();
     _typingThrottle.clear();
@@ -630,6 +638,9 @@ class NostrController {
     _ref.read(settingsProvider.notifier).onSyncedChange = null;
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
+    // Stop broadcasting shop-update presence (the binding captured the old
+    // identity/service).
+    _ref.read(shopControllerProvider.notifier).onActiveItemsPublished = null;
   }
 
   /// Switches the running session to a freshly-imported nsec account WITHOUT an
@@ -1423,12 +1434,16 @@ class NostrController {
     final nym = e.tagValue('n');
     final away = e.tagValue('away');
     final avatar = e.tagValue('avatar-update');
-    // Shop cosmetics: the PWA's `shop-update` tag is a cache-bust flag and the
-    // real items come from the backend; the native build reads the inlined
-    // shop-style/flair/supporter tags (see PresenceCosmetics). When a
-    // `shop-update` arrives without inlined tags, the cosmetics are cleared.
+    // Shop cosmetics: the `shop-update` presence tag is a pure cache-bust flag
+    // (the ONLY shop tag the protocol carries — `publishShopUpdate`,
+    // nostr-core.js:2876-2885). The real items live in D1: on an inbound flag
+    // we drop the cached record and force-refresh the sender's `shop-status`
+    // (users.js:1221-1223 `invalidateShopCache` → shop.js:302-313).
     final hasShopUpdate =
         e.tagsNamed('shop-update').any((t) => t.length > 1 && t[1] == '1');
+    if (hasShopUpdate) {
+      _ref.read(otherUsersShopProvider.notifier).invalidate(e.pubkey);
+    }
     _ref.read(appStateProvider.notifier).setUserPresence(
           pubkey: e.pubkey,
           status: userStatusFromString(statusStr),
@@ -1443,22 +1458,6 @@ class NostrController {
           stampLastSeen: false,
           avatarUrl: avatar,
           hasAvatarTag: avatar != null,
-          shopUpdate: hasShopUpdate,
-          shopStyle: e.tagValue('shop-style'),
-          shopFlair: e.tagValue('shop-flair'),
-          isSupporter: e.tagsNamed('shop-supporter')
-              .any((t) => t.length > 1 && t[1] == '1'),
-          // Inlined special cosmetics + Genesis edition (one `shop-cosmetic` tag
-          // per active cosmetic; a `shop-edition` tag carries the Genesis number).
-          // The PWA's canonical source is the backend `shop-status` fetch
-          // (active.cosmetics/active.editions); these inlined tags let presence
-          // carry them without a round-trip. See CROSS-FILE NEED for the fetch.
-          shopCosmetics: e
-              .tagsNamed('shop-cosmetic')
-              .where((t) => t.length > 1 && t[1].isNotEmpty)
-              .map((t) => t[1])
-              .toList(),
-          shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
 
     // Resolve this user's D1 profile so their custom avatar replaces the
@@ -2310,6 +2309,12 @@ class NostrController {
     // Ignore the receipt we just published ourselves echoing back.
     if (_ownPublishedZapIds.contains(event.id)) return;
     if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
+
+    // Archive channel/pm (keyed on the e tag) and profile receipts (keyed on
+    // the recipient pubkey) to D1 so `zap-get` backfill can serve them
+    // (zaps.js:1164 `if (boltTag) this._archiveZapReceipt(…)`; the scope +
+    // e-tag gating lives inside [ZapArchive.archive]).
+    if (event.tagValue('bolt11') != null) _zapArchive?.archive(event);
 
     final info = ZapLogic.parseReceipt(event);
     if (info == null) {
@@ -3981,6 +3986,18 @@ class NostrController {
 
     final kind = originalKind ?? _viewDeletionKind(state);
 
+    // Locate the channel (if any) holding this message BEFORE the local
+    // removal, so the D1 purge can name it (nostr-core.js:1862-1873 scans the
+    // in-memory store for the message id).
+    String? channelName;
+    for (final entry in state.messages.entries) {
+      if (!entry.key.startsWith('#')) continue;
+      if (entry.value.any((m) => m.id == messageId)) {
+        channelName = entry.key.substring(1);
+        break;
+      }
+    }
+
     appState.removeMessage(messageId);
     _markDirty(view.storageKey);
 
@@ -3994,6 +4011,26 @@ class NostrController {
     );
     final signed = await _signer!.sign(unsigned);
     await service.pool.publish(signed);
+
+    // Mirror the NIP-09 deletion into the D1 archive (`_propagateDeletionToD1`,
+    // nostr-core.js:1858-1885): the channel copy via the PUBLIC `channel-delete`
+    // (the signed kind-5 IS the authorization, storage.js:1123-1150) and our
+    // own archived gift wrap via the authed `pm-delete` (storage.js:945-961) —
+    // otherwise the "deleted" message resurrects on the next D1 rehydration.
+    final sync = _storageSync;
+    if (sync != null) {
+      if (channelName != null) {
+        unawaited(sync.channelDelete(channelName, signed.toJson()));
+      }
+      // PM/group wraps we archived are keyed by their gift-wrap event ids;
+      // gate on the same archive-allowed check the PWA uses
+      // (`_pmArchiveAllowed`: durable identity + cachePMs).
+      if (kind == '${EventKind.giftWrap}' &&
+          sync.durableIdentity &&
+          _ref.read(settingsProvider).cachePMs) {
+        unawaited(sync.pmDelete([messageId]));
+      }
+    }
     _emitSystemMessage('Deletion request sent to relays');
     return true;
   }
@@ -4027,22 +4064,16 @@ class NostrController {
   PresenceStatusMode get _statusMode =>
       presenceStatusModeFrom(_ref.read(settingsProvider).showStatus);
 
-  /// The self user's active shop cosmetics, read from the shop controller so a
-  /// presence `shop-update` carries renderable flair (see PresenceCosmetics).
-  PresenceCosmetics _selfCosmetics() {
-    final active = _ref.read(shopControllerProvider).active;
-    return PresenceCosmetics(
-      style: active.style,
-      flair: active.flair.isNotEmpty ? active.flair.last : null,
-      supporter: active.supporter,
-    );
-  }
-
   /// Publishes our presence (kind-30078 nym-presence). [status] is our real
   /// status; the service computes the public status from [_statusMode]. Always
-  /// carries the avatar + shop-update tags so others can render our latest
-  /// avatar/flair from the single replaceable event.
-  Future<void> publishPresence(String status, {String awayMessage = ''}) async {
+  /// carries the avatar tag so others can render our latest avatar from the
+  /// single replaceable event. [shopUpdate] adds the one-off
+  /// `['shop-update','1']` cache-bust flag — ONLY set right after our active
+  /// shop items change (`publishShopUpdate`, nostr-core.js:2876-2885); routine
+  /// presence never carries it (nostr-core.js:2743-2751), so peers aren't
+  /// forced into a fresh D1 `shop-status` fetch on every broadcast.
+  Future<void> publishPresence(String status,
+      {String awayMessage = '', bool shopUpdate = false}) async {
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
@@ -4054,8 +4085,7 @@ class NostrController {
       awayMessage: awayMessage,
       mode: _statusMode,
       avatarUrl: (avatar != null && avatar.isNotEmpty) ? avatar : null,
-      shopUpdate: true,
-      cosmetics: _selfCosmetics(),
+      shopUpdate: shopUpdate,
     );
     _lastPresenceBroadcast = DateTime.now().millisecondsSinceEpoch;
 
@@ -4987,6 +5017,9 @@ class NostrController {
       if (_ownPublishedZapIds.length > 500) {
         _ownPublishedZapIds.remove(_ownPublishedZapIds.first);
       }
+      // Archive our own published channel receipt to D1 (zaps.js:1562
+      // `_archiveZapReceipt(signed, …)`) so other clients' backfill sees it.
+      _zapArchive?.archive(signed);
     }
   }
 
@@ -5170,6 +5203,8 @@ class NostrController {
         ));
     api.activateApiSocket();
     _storageSync = sync;
+    _zapArchive?.dispose();
+    _zapArchive = ZapArchive(sync);
 
     // N26: republish the notification read-state wrap whenever the seen-keys map
     // grows here (a notification read/dismissed), the native equivalent of the
@@ -5181,6 +5216,14 @@ class NostrController {
     // never query our own pubkey — our own record loads via shop-get below.
     _ref.read(otherUsersShopProvider.notifier).selfPubkey =
         identity.pubkey.toLowerCase();
+
+    // Broadcast the one-off `['shop-update','1']` presence after our active
+    // shop items change (shop.js:428 → `publishShopUpdate`,
+    // nostr-core.js:2876-2885) so peers drop their cached record and re-fetch
+    // our D1 `shop-status`. PWA status choice: online when enabled, else the
+    // payload's mode gate broadcasts `hidden`.
+    _ref.read(shopControllerProvider.notifier).onActiveItemsPublished =
+        () => unawaited(publishPresence('online', shopUpdate: true));
 
     // Fire a debounced encrypted-settings publish whenever a synced setting
     // changes (the PWA's `nostrSettingsSave()` peppered through every setter).
@@ -5244,12 +5287,49 @@ class NostrController {
         markVisibleChannelMessagesRead();
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
+        // PM-scope zap badges for the rendered group backlog (messages.js:3112
+        // gathers the rendered ids → `_backfillZapReceipts`, pm scope).
+        _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
       case ViewKind.pm:
         // Send a read receipt to the peer for each of their loaded messages
         // (PWA `openPM` → read-receipt send, pms.js:3015-3019; F02 blocker —
         // `sendReadReceipt` previously had zero callers). Scope-gated + deduped.
         markVisiblePmMessagesRead(view.id);
+        // PM-scope zap badges for the rendered conversation (messages.js:3112).
+        _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
     }
+  }
+
+  /// Backfills archived kind-9735 receipts for every message currently loaded
+  /// under [storageKey] — the native `_backfillZapReceipts` (zaps.js:5-27,
+  /// called with the rendered ids at messages.js:3112-3120). [scope] is `'pm'`
+  /// for PM/group conversations, `'channel'` otherwise. PM entries also push
+  /// the shared `nymMessageId` when it differs from the wrap id (the PWA's
+  /// `m.isPM && m.nymMessageId` branch). Each returned receipt rides the same
+  /// handler live receipts take ([_onPublicZapReceipt] = `handleZapReceipt`).
+  void _backfillZapReceiptsFor(String storageKey, {required String scope}) {
+    final archive = _zapArchive;
+    if (archive == null) return;
+    final msgs = _ref.read(appStateProvider).messages[storageKey];
+    if (msgs == null || msgs.isEmpty) return;
+    final ids = <String>[];
+    for (final m in msgs) {
+      if (m.id.isNotEmpty) ids.add(m.id);
+      final shared = m.nymMessageId;
+      if (scope == 'pm' &&
+          shared != null &&
+          shared.isNotEmpty &&
+          shared != m.id) {
+        ids.add(shared);
+      }
+    }
+    if (ids.isEmpty) return;
+    final appState = _ref.read(appStateProvider.notifier);
+    unawaited(archive.backfill(
+      ids,
+      scope,
+      (receipt) => _onPublicZapReceipt(receipt, appState),
+    ));
   }
 
   /// App returned to the foreground. Re-hydrate the open conversation from D1 so
@@ -5371,6 +5451,11 @@ class NostrController {
           // Skip a malformed archived event (mirrors the PWA's per-event catch).
         }
       }
+      // Zap-badge backfill for the hydrated history (`_backfillZapReceipts`
+      // with the rendered ids, messages.js:3112-3120; channel scope).
+      // `channel-get` streams zaps rows only within the channel window — this
+      // also recovers receipts on older cached messages.
+      _backfillZapReceiptsFor('#$channelKey', scope: 'channel');
     } catch (_) {
       // Best-effort: live subscription continues regardless.
     } finally {
@@ -5417,6 +5502,22 @@ class NostrController {
     if (sync == null) return;
     await _mergeRemoteSettings(sync);
     await _restorePmArchive(sync);
+    // Profile-zap backfill for ourselves (relays.js:2819-2820:
+    // `_backfillZapReceiptsFromD1([this.pubkey], 'profile')`) — profile
+    // receipts are keyed on the recipient pubkey, not an event id.
+    final selfPk = _identity?.pubkey;
+    if (selfPk != null && _zapArchive != null) {
+      final appState = _ref.read(appStateProvider.notifier);
+      unawaited(_zapArchive!.backfill(
+        [selfPk],
+        'profile',
+        (receipt) => _onPublicZapReceipt(receipt, appState),
+      ));
+    }
+    // Custom-emoji hydration from D1 (`_emojiRestoreFromD1`, emoji.js:198) —
+    // packs archived by the relay-pool worker but no longer on relays still
+    // appear. Runs alongside the live kind-30030 relay subscription.
+    unawaited(_restoreEmojiFromD1(sync));
     // Load the user's own shop record (owned + active cosmetics) from D1 so their
     // purchased flair/style applies on a fresh device (PWA `loadShopFromServer`,
     // shop.js:358). Local-key only (remote signers can't auth the read).
@@ -5665,6 +5766,34 @@ class NostrController {
     }
   }
 
+  /// Hydrates the deduped custom-emoji set from the D1 archive (`emoji-get` —
+  /// `_emojiRestoreFromD1`, emoji.js:198-222): each returned kind-30030 pack /
+  /// own kind-10030 list is signature-verified (the PWA's
+  /// `_verifyRelayEventAsync`) and routed through the SAME ingest handlers the
+  /// live relay subscription uses ([_ingestEmojiPack] / [_ingestUserEmojiList],
+  /// which dedup newest-wins), so a pack arriving from both sources applies
+  /// once. Throttling (10 min) lives in [StorageSync.emojiGet]. Best-effort.
+  Future<void> _restoreEmojiFromD1(StorageSync sync) async {
+    try {
+      final events = await sync.emojiGet();
+      for (final raw in events) {
+        try {
+          final event = NostrEvent.fromJson(raw);
+          if (!schnorr.verifyEvent(event)) continue;
+          if (event.kind == EventKind.emojiPack) {
+            _ingestEmojiPack(event);
+          } else if (event.kind == EventKind.userEmojiList) {
+            _ingestUserEmojiList(event);
+          }
+        } catch (_) {
+          // Skip a malformed archived pack.
+        }
+      }
+    } catch (_) {
+      // Best-effort.
+    }
+  }
+
   /// Restores the PM gift-wrap backlog from D1 for a durable identity, gated by
   /// `cachePMs` (pms.js `pmRestoreFromD1`). Each restored wrap is unwrapped +
   /// routed through the normal gift-wrap handler with the session dedup so it
@@ -5815,6 +5944,11 @@ class NostrController {
           final url = data['url'];
           if (url is String && url.isNotEmpty) {
             onProgress?.call(1.0);
+            // Replicate to the OTHER servers in the background via Blossom
+            // `mirror` (the server pulls the blob from the primary URL) —
+            // the bytes upload once, like the PWA (`_mirrorBlobBackground`,
+            // users.js:583/640-661).
+            unawaited(_mirrorBlobBackground(url, server, authHeader));
             return url;
           }
         } catch (e) {
@@ -5825,6 +5959,35 @@ class NostrController {
       api.dispose();
     }
     return null;
+  }
+
+  /// Mirrors an uploaded blob to the remaining Blossom servers through the
+  /// proxy's `action=mirror` (users.js:508-513 `_getBlossomMirrorUrl`;
+  /// proxy.js `handleBlossomMirror`): a PUT of `{url: <primaryUrl>}` carrying
+  /// the SAME kind-24242 `t:upload` auth header the primary upload used
+  /// (the PWA signs the mirror auth with `'upload'` too, users.js:642).
+  /// Best-effort and fully backgrounded — a mirror failure never affects the
+  /// already-returned primary URL.
+  Future<void> _mirrorBlobBackground(
+    String primaryUrl,
+    String excludeServer,
+    String authHeader,
+  ) async {
+    final remaining =
+        kBlossomServers.where((s) => s != excludeServer).toList();
+    if (remaining.isEmpty) return;
+    final api = ApiClient();
+    try {
+      await Future.wait(remaining.map((server) async {
+        try {
+          await api.mirrorBlob(primaryUrl, server, authHeader);
+        } catch (e) {
+          debugPrint('Blossom mirror to $server failed: $e');
+        }
+      }));
+    } finally {
+      api.dispose();
+    }
   }
 
   /// Shares [bytes] as a P2P file: builds the offer via [P2PService.shareFile],
@@ -6080,24 +6243,82 @@ class NostrController {
 
   /// True when [text] in a CHANNEL view should be routed to Nymbot instead of
   /// published as a normal message: a `?` command or an `@Nymbot` mention
-  /// (messages.js:2381). PM/group views never intercept (the channel bot
-  /// commands aren't wired for the paid PM surface — commands.js:438).
+  /// (messages.js:2381), detected on the non-quoted body since a quote prepend
+  /// can hide the prefix (the PWA checks `rawInput`), or a reply-quote of a
+  /// Nymbot message (`isNymbotReply`, messages.js:2383). PM/group views never
+  /// intercept (the channel bot commands aren't wired for the paid PM surface —
+  /// commands.js:438).
   bool shouldRouteToBot(String text) {
     final state = _ref.read(appStateProvider);
     if (state.view.kind != ViewKind.channel) return false;
-    return isBotCommand(text) || isNymbotMention(text);
+    if (isBotCommand(text) || isNymbotMention(text)) return true;
+    final body = _quoteBody(text);
+    if (body != text.trim() && (isBotCommand(body) || isNymbotMention(body))) {
+      return true;
+    }
+    return _quotedNymbotAuthor(text) != null && body.isNotEmpty;
   }
 
-  /// Routes a channel message to Nymbot: resolves `@Nymbot …` to `?ask …`
-  /// (commands.js:14), gathers the channel geohash + recent messages + active
-  /// users for the AI-aware commands, POSTs via [NymbotService.sendPublicCommand],
-  /// and surfaces the reply as a bot message in the channel.
-  ///
-  /// In the PWA the worker returns a *signed* event the client publishes to
-  /// relays, so the reply arrives back through the channel subscription. Here we
-  /// surface the reply text directly. TODO(verify): the native worker contract
-  /// returns `{event}`; if a future flow needs the relay round-trip, publish the
-  /// returned event instead of injecting locally.
+  /// The non-quoted remainder of a composed message (the PWA's
+  /// `nonQuotedText`, messages.js:138): every line not starting with `>`,
+  /// joined and trimmed.
+  static String _quoteBody(String text) => text
+      .split('\n')
+      .where((l) => !l.startsWith('>'))
+      .join('\n')
+      .trim();
+
+  /// The quoted author when the message replies to a Nymbot message
+  /// (`/^nymbot(?:#[a-f0-9]{4})?$/i` on the quote author, commands.js:28),
+  /// else null.
+  static String? _quotedNymbotAuthor(String text) {
+    final m = RegExp(r'^>\s*@([^:]+):').firstMatch(text);
+    if (m == null) return null;
+    final author = m.group(1)!.trim();
+    return RegExp(r'^nymbot(#[a-f0-9]{4})?$', caseSensitive: false)
+            .hasMatch(author)
+        ? author
+        : null;
+  }
+
+  /// Ports `_extractQuoteChain` (messages.js:103-143): parses the leading
+  /// `> @Author: text` / `> continuation` quote lines of a composed message
+  /// into `[{author, text}]` conversation entries for the worker's `?ask` /
+  /// `?guess` reply-chain context.
+  static List<Map<String, String>> _extractQuoteChain(String text) {
+    final conversation = <Map<String, String>>[];
+    String? author;
+    var buf = <String>[];
+    for (final line in text.split('\n')) {
+      final m = RegExp(r'^>\s*@([^:]+):\s*(.*)').firstMatch(line);
+      if (m != null) {
+        if (author != null) {
+          conversation.add({'author': author, 'text': buf.join('\n').trim()});
+        }
+        author = m.group(1)!.trim();
+        buf = [m.group(2) ?? ''];
+      } else if (line.startsWith('>') && author != null) {
+        buf.add(line.replaceFirst(RegExp(r'^>\s?'), ''));
+      } else if (author != null) {
+        conversation.add({'author': author, 'text': buf.join('\n').trim()});
+        author = null;
+        buf = [];
+      }
+    }
+    if (author != null) {
+      conversation.add({'author': author, 'text': buf.join('\n').trim()});
+    }
+    return conversation;
+  }
+
+  /// Routes a channel message to Nymbot: resolves `@Nymbot …` / a reply-quote
+  /// of a Nymbot message to `?ask`/`?guess` (commands.js:14-35), gathers the
+  /// channel key + reply-chain `conversation` + recent messages + active users
+  /// for the AI-aware commands, POSTs the command to `/api/bot`, and publishes
+  /// the worker-SIGNED reply event verbatim to the relay pool (`data.event`,
+  /// commands.js:196-224) — the reply then renders when it arrives back
+  /// through the channel subscription, exactly like the PWA, so every
+  /// participant sees it with the verified-bot signature and `nymquote` intact.
   Future<void> routeToBot(String rawText) async {
     final state = _ref.read(appStateProvider);
     final view = state.view;
@@ -6106,15 +6327,30 @@ class NostrController {
       return;
     }
 
-    // @Nymbot mention → ?ask <question> (commands.js:14).
-    var content = rawText.trim();
+    // Command detection runs on the non-quoted body (the PWA uses `rawInput`;
+    // a quote prepend would hide the `?` prefix).
+    final body = _quoteBody(rawText);
+    var content = body.isNotEmpty ? body : rawText.trim();
+
+    // @Nymbot mention → ?ask <question> (commands.js:14-26). A bare @Nymbot
+    // with a quote uses the quoted text as the question (commands.js:19-25).
     if (!isBotCommand(content) && isNymbotMention(content)) {
       final question = stripNymbotMention(content);
-      if (question.isEmpty) {
-        await _sendMessageContent(rawText); // nothing to ask
-        return;
+      if (question.isNotEmpty) {
+        content = '?ask $question';
+      } else {
+        final chain = _extractQuoteChain(rawText);
+        final quoted = chain.isNotEmpty ? (chain.first['text'] ?? '') : '';
+        if (quoted.isNotEmpty) content = '?ask $quoted';
       }
-      content = '?ask $question';
+    }
+
+    // Reply to a Nymbot message without an explicit command → ?ask, or ?guess
+    // when the quoted message carries a wordplay game token (commands.js:28-35).
+    if (_quotedNymbotAuthor(rawText) != null && !content.startsWith('?')) {
+      final hasGameToken =
+          RegExp(r'\[gc:[A-Za-z0-9+/=]+\]').hasMatch(rawText);
+      content = (hasGameToken ? '?guess ' : '?ask ') + content;
     }
 
     final parsed = parseBotCommand(content);
@@ -6123,15 +6359,23 @@ class NostrController {
       return;
     }
 
-    final isGeo = state.channels
-        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
-    final geohash = isGeo ? view.id : null;
+    // The PWA passes `this.currentGeohash` — the raw channel key for BOTH
+    // geohash and named channels (the worker's `isGeohashName` decides the
+    // reply kind/tag, bot.js:1826-1832).
+    final channelKey =
+        view.id.startsWith('#') ? view.id.substring(1) : view.id;
     final storageKey = view.storageKey;
     final cmd = parsed.name;
 
+    // Reply-chain conversation context for ?ask / ?guess (commands.js:42-45).
+    var conversation = const <Map<String, String>>[];
+    if (cmd == 'ask' || cmd == 'guess') {
+      conversation = _extractQuoteChain(rawText);
+    }
+
     // Channel context for the AI-aware commands (commands.js:46-191).
-    List<Map<String, dynamic>>? channelMessages;
-    List<Map<String, dynamic>>? activeUsers;
+    var channelMessages = const <Map<String, dynamic>>[];
+    var activeUsers = const <Map<String, dynamic>>[];
     const aiCommands = {'ask', 'summarize'};
     const memoryCommands = {'top', 'last', 'seen', 'who'};
     if (aiCommands.contains(cmd) || memoryCommands.contains(cmd)) {
@@ -6150,42 +6394,33 @@ class NostrController {
         : null;
 
     try {
-      final service = _ref.read(nymbotServiceProvider);
-      final reply = await service.sendPublicCommand(
-        cmd,
-        parsed.args,
-        geohash: geohash,
-        senderNym: senderNym,
-        publishedContent: rawText,
-        channelMessages: channelMessages,
-        activeUsers: activeUsers,
-      );
-      _injectBotReply(reply, geohash: geohash, channelKey: view.id);
+      // Body mirrors commands.js:196: `{command, args, geohash, conversation,
+      // senderNym, publishedContent, channelMessages, activeUsers}` (public —
+      // no auth). The worker returns `{event}`: a SIGNED kind-20000/23333
+      // event from the verified bot key.
+      final api = _api ??= ApiClient();
+      final data = await api.botAction({
+        'command': cmd,
+        'args': parsed.args,
+        'geohash': channelKey,
+        'conversation': conversation,
+        if (senderNym != null) 'senderNym': senderNym,
+        'publishedContent': rawText,
+        'channelMessages': channelMessages,
+        'activeUsers': activeUsers,
+      });
+      final event = data['event'];
+      if (event is Map) {
+        // Publish the worker-signed event VERBATIM (`['EVENT', data.event]`,
+        // commands.js:203-216); it arrives back via the channel subscription.
+        final botEvent =
+            NostrEvent.fromJson(Map<String, dynamic>.from(event));
+        await _service?.pool.publish(botEvent);
+      }
     } catch (e) {
       debugPrint('Nymbot command failed: $e');
       _emitSystemMessage('Nymbot is unavailable right now.');
     }
-  }
-
-  /// Injects Nymbot's reply as a verified-bot channel message via the public
-  /// `ingestEvent` path (a synthetic signed-looking event from [nymbotPubkey]).
-  void _injectBotReply(String reply,
-      {String? geohash, required String channelKey}) {
-    if (reply.trim().isEmpty) return;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final isGeo = geohash != null && geohash.isNotEmpty;
-    final event = NostrEvent(
-      pubkey: nymbotPubkey,
-      createdAt: nowSec,
-      kind: isGeo ? EventKind.geoChannel : EventKind.namedChannel,
-      tags: [
-        ['n', 'Nymbot'],
-        [isGeo ? 'g' : 'd', isGeo ? geohash : channelKey],
-      ],
-      content: reply,
-    );
-    event.id = event.computeId();
-    _ref.read(appStateProvider.notifier).ingestEvent(event);
   }
 
   /// Recent channel messages mapped to the worker's context shape
@@ -6219,7 +6454,12 @@ class NostrController {
     return out;
   }
 
-  /// Active users in the channel mapped to `{nym,pubkey}` (commands.js:155/185).
+  /// Active users in the channel mapped to the worker's context shape. The
+  /// AI-command path ([allUsers] false) carries the user's active shop `flair`
+  /// (comma-joined, `flair-` prefix stripped) and `style` (`style-` prefix
+  /// stripped) from `getUserShopItems(pubkey)` (commands.js:154-160); the
+  /// in-memory commands (top/last/seen/who) send bare `{nym,pubkey}` entries
+  /// (commands.js:183-188).
   List<Map<String, dynamic>> _botActiveUsers(AppState state, String channelId,
       {required bool allUsers}) {
     final rawName =
@@ -6230,14 +6470,42 @@ class NostrController {
           user.channels.any((c) =>
               c == rawName || c.startsWith(rawName) || rawName.startsWith(c));
       if (inChannel && user.nym.isNotEmpty) {
-        out.add({
+        final entry = <String, dynamic>{
           'nym':
               '${stripPubkeySuffix(user.nym)}#${getPubkeySuffix(pubkey)}',
           'pubkey': pubkey,
-        });
+        };
+        if (!allUsers) {
+          final items = _shopItemsFor(pubkey);
+          entry['flair'] = (items != null && items.flair.isNotEmpty)
+              ? items.flair
+                  .map((f) => f.replaceFirst('flair-', ''))
+                  .join(',')
+              : null;
+          entry['style'] = (items != null &&
+                  items.style != null &&
+                  items.style!.isNotEmpty)
+              ? items.style!.replaceFirst('style-', '')
+              : null;
+        }
+        out.add(entry);
       }
     });
     return out;
+  }
+
+  /// A user's active shop items as a `{style, flair[]}` view for the bot
+  /// context — self from the live shop state, others from the D1-backed
+  /// `shop-status` cache (the PWA's `getUserShopItems(pubkey)`).
+  ({String? style, List<String> flair})? _shopItemsFor(String pubkey) {
+    final self = _identity?.pubkey;
+    if (self != null && pubkey == self) {
+      final active = _ref.read(shopControllerProvider).active;
+      return (style: active.style, flair: active.flair);
+    }
+    final other = _ref.read(otherUsersShopProvider)[pubkey.toLowerCase()];
+    if (other == null) return null;
+    return (style: other.style, flair: other.flair);
   }
 
   /// Binds the private Nymbot chat to the live identity (so the paid PM surface

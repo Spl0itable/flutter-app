@@ -750,6 +750,16 @@ class ApiClient {
   String blossomUploadUrl(String server) =>
       '$_baseUrl?action=upload&server=${Uri.encodeComponent(server)}';
 
+  /// `PUT /api/proxy?action=mirror&server=<encoded>` (users.js:511) — asks a
+  /// Blossom server to pull an already-uploaded blob from its primary URL.
+  String blossomMirrorUrl(String server) =>
+      '$_baseUrl?action=mirror&server=${Uri.encodeComponent(server)}';
+
+  /// `GET|POST /api/proxy?action=json&url=<encoded>` — the JSON privacy proxy
+  /// (`proxiedJsonFetch`, relays.js:3192; worker `handleJsonProxy`, proxy.js:180).
+  String jsonProxyUrl(String url) =>
+      '$_baseUrl?action=json&url=${Uri.encodeComponent(url)}';
+
   /// `POST /api/proxy?action=zap-verify` (zaps.js:979 `_serverVerifyZapPaid`).
   String zapVerifyUrl() => '$_baseUrl?action=zap-verify';
 
@@ -843,6 +853,72 @@ class ApiClient {
       throw ApiException('upload', res.statusCode, res.body);
     }
     return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  /// PUT a Blossom mirror request through the proxy (`action=mirror`,
+  /// proxy.js:334): asks [server] to pull the already-uploaded blob at
+  /// [sourceUrl] instead of re-uploading the bytes (`_mirrorBlobBackground`,
+  /// users.js:640-655). [authHeader] is the same `Nostr <base64>` kind-24242
+  /// value as the primary upload — the PWA signs the mirror auth with
+  /// `t: 'upload'` too (users.js:642). Body is `{"url": <sourceUrl>}`.
+  /// Returns the parsed Blossom JSON (caller reads `data['url']`).
+  Future<Map<String, dynamic>> mirrorBlob(
+    String sourceUrl,
+    String server,
+    String authHeader,
+  ) async {
+    final payload = jsonEncode({'url': sourceUrl});
+    final res = await _client.put(
+      Uri.parse(blossomMirrorUrl(server)),
+      headers: _headers({
+        'Authorization': authHeader,
+        'Content-Type': 'application/json',
+      }),
+      body: payload,
+    );
+    _trackApiData('mirror',
+        sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw ApiException('mirror', res.statusCode, res.body);
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  /// Fetches a JSON resource through the `/api/proxy?action=json` privacy
+  /// proxy so the upstream host (e.g. an LNURL Lightning provider) only ever
+  /// sees Cloudflare IPs, mirroring `proxiedJsonFetch` (relays.js:3192-3200).
+  ///
+  /// The worker passes through GET and POST (any other method is coerced to
+  /// GET, proxy.js:195), forwards the request `Content-Type` + body on POST,
+  /// and returns the upstream body + status. Like the PWA, the direct fetch of
+  /// [targetUrl] happens ONLY when the proxied request itself fails at the
+  /// transport level — a non-2xx proxied response is returned as-is (the
+  /// upstream status rides through). The direct fallback deliberately omits
+  /// the Nymchat headers (a third-party host shouldn't see the app UA).
+  Future<http.Response> proxiedJsonFetch(
+    String targetUrl, {
+    String method = 'GET',
+    String? body,
+    String? contentType,
+  }) async {
+    Future<http.Response> run(Uri uri, Map<String, String>? headers) =>
+        method == 'POST'
+            ? _client.post(uri, headers: headers, body: body)
+            : _client.get(uri, headers: headers);
+    try {
+      final res = await run(
+        Uri.parse(jsonProxyUrl(targetUrl)),
+        _headers({if (contentType != null) 'Content-Type': contentType}),
+      );
+      _trackApiData('json',
+          sent: _bodyLen(body), recv: _bodyLen(res.bodyBytes));
+      return res;
+    } catch (_) {
+      return run(
+        Uri.parse(targetUrl),
+        contentType != null ? {'Content-Type': contentType} : null,
+      );
+    }
   }
 
   /// GET the geo relay list -> `[{url,lat,lng}]`. Filters out non-finite coords

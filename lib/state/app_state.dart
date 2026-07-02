@@ -1911,8 +1911,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// gift-wrapped friend-presence rumor).
   /// Applies a parsed nym-presence event to the user's store entry. Mirrors
   /// users.js `handlePresenceEvent`: updates status/away/nym, and — when the
-  /// presence carries an `avatar-update` / `shop-update` — the avatar
-  /// (`profile.picture`) and the broadcast shop cosmetics.
+  /// presence carries an `avatar-update` — the avatar (`profile.picture`).
+  /// A `shop-update` tag is handled by the controller (D1 shop-status cache
+  /// invalidation), never here.
   ///
   /// `hidden` status updates `lastSeen`/away tracking but leaves the
   /// activity-derived [User.status] alone (the PWA tracks visibility separately,
@@ -1927,12 +1928,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
     bool stampLastSeen = true,
     String? avatarUrl,
     bool hasAvatarTag = false,
-    bool shopUpdate = false,
-    String? shopStyle,
-    String? shopFlair,
-    bool isSupporter = false,
-    List<String>? shopCosmetics,
-    int? shopEdition,
   }) {
     final u = state.users.putIfAbsent(
       pubkey,
@@ -1963,18 +1958,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
 
-    // Shop cosmetics: a `shop-update` event refreshes the broadcast flair so it
-    // renders for everyone (users.js shop-update branch → re-fetch; native reads
-    // the inlined tags). Absent inlined tags, the cosmetics are cleared.
-    if (shopUpdate) {
-      u.shopStyle = (shopStyle != null && shopStyle.isNotEmpty) ? shopStyle : null;
-      u.shopFlair = (shopFlair != null && shopFlair.isNotEmpty) ? shopFlair : null;
-      u.isSupporter = isSupporter;
-      // Special cosmetics + Genesis edition broadcast by other users
-      // (`active.cosmetics`/`active.editions`, shop.js:459-478).
-      u.shopCosmetics = shopCosmetics ?? const <String>[];
-      u.shopEdition = shopEdition;
-    }
+    // Shop cosmetics deliberately NOT handled here: a presence `shop-update`
+    // tag is a pure cache-bust flag (users.js:1221-1223) — the controller
+    // reacts by invalidating the D1-backed `shop-status` cache
+    // (OtherUsersShopController.invalidate), which is the authoritative
+    // per-user cosmetics source. Presence never carries item data.
 
     state = state.copyWith();
   }

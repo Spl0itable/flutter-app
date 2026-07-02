@@ -64,24 +64,23 @@ void main() {
       expect(tagOf(friends, 'status'), 'hidden');
     });
 
-    test('avatar-update + shop-update tags appended with cosmetics', () {
+    test('avatar-update + bare shop-update flag appended (no inlined items)',
+        () {
+      // publishShopUpdate emits ONLY ['shop-update','1'] (nostr-core.js:
+      // 2876-2885); item data never rides presence — receivers refetch the
+      // D1 shop-status record instead.
       final tags = const PresencePayload(
         nym: 'satoshi',
         status: 'online',
         mode: PresenceStatusMode.enabled,
         avatarUrl: 'https://x/y.png',
         shopUpdate: true,
-        cosmetics: PresenceCosmetics(
-          style: 'style-satoshi',
-          flair: 'flair-crown',
-          supporter: true,
-        ),
       ).tags();
       expect(tagOf(tags, 'avatar-update'), 'https://x/y.png');
       expect(tagOf(tags, 'shop-update'), '1');
-      expect(tagOf(tags, 'shop-style'), 'style-satoshi');
-      expect(tagOf(tags, 'shop-flair'), 'flair-crown');
-      expect(tagOf(tags, 'shop-supporter'), '1');
+      expect(tagOf(tags, 'shop-style'), isNull);
+      expect(tagOf(tags, 'shop-flair'), isNull);
+      expect(tagOf(tags, 'shop-supporter'), isNull);
     });
 
     test('presenceStatusModeFrom maps showStatus strings', () {
@@ -92,7 +91,7 @@ void main() {
   });
 
   group('setUserPresence (presence ingest)', () {
-    test('sets status/away/avatar/shopStyle/shopFlair/isSupporter', () {
+    test('sets status/away/avatar', () {
       final notifier = AppStateNotifier();
       const ts = 1700000000;
       notifier.setUserPresence(
@@ -103,18 +102,11 @@ void main() {
         lastSeenMs: ts * 1000,
         avatarUrl: 'https://x/y.png',
         hasAvatarTag: true,
-        shopUpdate: true,
-        shopStyle: 'style-satoshi',
-        shopFlair: 'flair-crown',
-        isSupporter: true,
       );
       final u = notifier.state.users[other]!;
       expect(u.status, UserStatus.away);
       expect(u.awayMessage, 'brb lunch');
       expect(u.profile?.picture, 'https://x/y.png');
-      expect(u.shopStyle, 'style-satoshi');
-      expect(u.shopFlair, 'flair-crown');
-      expect(u.isSupporter, isTrue);
       expect(u.nym, 'satoshi#beef'); // suffix appended from pubkey
     });
 
@@ -136,26 +128,18 @@ void main() {
       expect(notifier.state.users[other]!.profile?.picture, isNull);
     });
 
-    test('shop-update without inlined tags clears cosmetics', () {
+    test('presence ingest never touches shop cosmetic fields', () {
+      // A shop-update presence is a cache-bust flag handled by the controller
+      // (OtherUsersShopController.invalidate) — setUserPresence must neither
+      // set nor clear the User cosmetic fields (users.js:1221-1223).
       final notifier = AppStateNotifier();
+      notifier.state.users[other] =
+          User(pubkey: other, nym: 'bob', shopStyle: 'style-satoshi');
       notifier.setUserPresence(
         pubkey: other,
         status: UserStatus.online,
-        shopUpdate: true,
-        shopStyle: 'style-satoshi',
-        shopFlair: 'flair-crown',
-        isSupporter: true,
       );
       expect(notifier.state.users[other]!.shopStyle, 'style-satoshi');
-      notifier.setUserPresence(
-        pubkey: other,
-        status: UserStatus.online,
-        shopUpdate: true,
-      );
-      final u = notifier.state.users[other]!;
-      expect(u.shopStyle, isNull);
-      expect(u.shopFlair, isNull);
-      expect(u.isSupporter, isFalse);
     });
 
     test('effectiveStatus honors getEffectiveUserStatus semantics', () {
