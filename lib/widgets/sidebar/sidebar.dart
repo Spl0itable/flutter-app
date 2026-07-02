@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -210,8 +209,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
     _persistCollapsed();
   }
 
+  // NO haptic: the PWA's section-title hold toggles `sidebar-reorder-mode`
+  // silently — it is the one long-press WITHOUT a `nymHapticTap`
+  // (sidebar-sections.js:335-338).
   void _toggleReorderMode() {
-    HapticFeedback.selectionClick();
     setState(() => _reorderMode = !_reorderMode);
   }
 
@@ -802,8 +803,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
 /// Wraps the identity header to implement the panic gesture: a tap fires
 /// [onTap], while a press held for [holdMs] fires [onHold] (and suppresses the
-/// following tap). Bound for pointer down/up/cancel, matching the PWA's
-/// mouse/touch handlers (`bindNymPanicGesture`).
+/// following tap). Bound for pointer down/move/up/cancel, matching the PWA's
+/// mouse/touch handlers (`bindNymPanicGesture`) — which also cancel the hold
+/// on `touchmove`/`mouseleave` (panic.js:27-33), so a finger that drags off or
+/// wiggles never detonates the wipe.
 class _PanicHoldDetector extends StatefulWidget {
   const _PanicHoldDetector({
     required this.child,
@@ -823,11 +826,20 @@ class _PanicHoldDetector extends StatefulWidget {
 }
 
 class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
+  /// Movement past this cancels the hold. The PWA cancels on ANY `touchmove`
+  /// (panic.js:32) — which mobile browsers only emit once the touch leaves
+  /// their internal slop, ~10px — so a drift beyond 10px is the equivalent
+  /// "the finger moved" signal (the PWA's other 500ms holds use the same
+  /// 10px MOVE_THRESHOLD, e.g. sidebar-sections.js:240).
+  static const double _moveTolerance = 10;
+
   Timer? _timer;
   bool _fired = false;
+  Offset _downAt = Offset.zero;
 
-  void _start(PointerDownEvent _) {
+  void _start(PointerDownEvent e) {
     _fired = false;
+    _downAt = e.position;
     _timer?.cancel();
     _timer = Timer(
       const Duration(milliseconds: _PanicHoldDetector.holdMs),
@@ -843,9 +855,19 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
     _timer = null;
   }
 
+  /// `touchmove`/`mouseleave` → cancel (panic.js:27-33): a wiggling or
+  /// dragging finger must never trigger the 2s emergency wipe.
+  void _move(PointerMoveEvent e) {
+    if (_timer == null) return;
+    if ((e.position - _downAt).distance > _moveTolerance) _cancel();
+  }
+
   void _up(PointerUpEvent _) {
+    final held = _timer != null;
     _cancel();
-    if (!_fired) widget.onTap();
+    // A movement-cancelled press must not fall through to the tap action
+    // either (the PWA's click handler only fires when the pointer stayed put).
+    if (!_fired && held) widget.onTap();
     _fired = false;
   }
 
@@ -859,6 +881,7 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
   Widget build(BuildContext context) {
     return Listener(
       onPointerDown: _start,
+      onPointerMove: _move,
       onPointerUp: _up,
       onPointerCancel: _cancel,
       child: widget.child,

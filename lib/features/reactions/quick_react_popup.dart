@@ -275,13 +275,17 @@ class _EmojiButtonState extends State<_EmojiButton> {
           duration: const Duration(milliseconds: 120),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-            // A `:shortcode:` recent renders as its custom-emoji image (PWA
-            // ui-context.js:1315 `renderCustomEmojiImg`); unicode stays text on
-            // the fast path. Reused by the call-chat quick-react (surface #19).
+            // An exact `:shortcode:` recent renders as its custom-emoji image
+            // (PWA ui-context.js:1313-1316 `renderCustomEmojiImg`, 30×30 via
+            // `.quick-react-emoji .custom-emoji`, margin 0); unicode stays a
+            // 28px text on the fast path. Reused by the call-chat quick-react
+            // (surface #19).
             child: InlineEmojiText(
               text: widget.emoji,
               style: const TextStyle(fontSize: 28, height: 1),
-              emojiSize: 28,
+              wholeStringOnly: true,
+              emojiSize: 30,
+              emojiMargin: EdgeInsets.zero,
             ),
           ),
         ),

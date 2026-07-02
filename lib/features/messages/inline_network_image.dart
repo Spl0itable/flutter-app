@@ -19,6 +19,7 @@
 //
 // URLs are expected to be ALREADY proxied by the caller.
 
+import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -56,7 +57,7 @@ class _Decoded {
 /// A network image that transparently handles SVG and degrades to [errorChild]
 /// (or a sensible default) when the bytes can't be fetched or decoded — without
 /// ever throwing to the framework.
-class InlineNetworkImage extends StatelessWidget {
+class InlineNetworkImage extends StatefulWidget {
   const InlineNetworkImage({
     super.key,
     required this.url,
@@ -66,6 +67,7 @@ class InlineNetworkImage extends StatelessWidget {
     this.placeholder,
     this.errorChild,
     this.memoryOnly = false,
+    this.retryOnError = false,
   });
 
   /// Already-proxied image URL.
@@ -87,6 +89,14 @@ class InlineNetworkImage extends StatelessWidget {
   /// them with zero disk I/O. Leave false for large one-off media, which benefit
   /// from the on-disk cache.
   final bool memoryOnly;
+
+  /// Retry a failed load up to 2 more times with a cache-busting `_r=N` query
+  /// param at an 800ms·n backoff — the PWA's custom-emoji `error` handler
+  /// (inline-bindings.js:166-183), which re-fetches so a transient CDN miss
+  /// gets a chance to populate the long-lived edge cache. The PWA only does
+  /// this for `img.custom-emoji`, so set it for EMOJI call sites and leave it
+  /// false for general inline media.
+  final bool retryOnError;
 
   /// URL → decoded SVG/raster (cached so a grid of repeats + rebuilds share one
   /// fetch+compile and bad URLs aren't retried into a crash loop).
@@ -141,14 +151,62 @@ class InlineNetworkImage extends StatelessWidget {
         (head.startsWith('<!--') && head.contains('<svg'));
   }
 
+  @override
+  State<InlineNetworkImage> createState() => _InlineNetworkImageState();
+}
+
+class _InlineNetworkImageState extends State<InlineNetworkImage> {
+  /// 0 = the caller's URL; 1..2 = cache-busted retries (`_r=N`).
+  int _attempt = 0;
+  Timer? _retryTimer;
+
+  @override
+  void didUpdateWidget(InlineNetworkImage old) {
+    super.didUpdateWidget(old);
+    if (old.url != widget.url) {
+      _retryTimer?.cancel();
+      _retryTimer = null;
+      _attempt = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _retryTimer?.cancel();
+    super.dispose();
+  }
+
+  /// The URL for the current attempt: the base URL, or (on retry) the base URL
+  /// with a cache-busting `_r=N` param appended (inline-bindings.js:176-180).
+  String get _effectiveUrl {
+    if (_attempt == 0) return widget.url;
+    final sep = widget.url.contains('?') ? '&' : '?';
+    return '${widget.url}$sep' '_r=$_attempt';
+  }
+
+  /// After a failed load, schedule the next attempt at `800ms * (tries + 1)`
+  /// (inline-bindings.js:177-180: `setTimeout(..., 800 * (tries + 1))`), up to
+  /// 2 retries.
+  void _scheduleRetry() {
+    if (!widget.retryOnError || _attempt >= 2 || _retryTimer != null) return;
+    _retryTimer = Timer(Duration(milliseconds: 800 * (_attempt + 1)), () {
+      if (!mounted) return;
+      setState(() {
+        _retryTimer = null;
+        _attempt++;
+      });
+    });
+  }
+
   Widget _fallback(BuildContext context) {
-    if (errorChild != null) return errorChild!;
+    _scheduleRetry();
+    if (widget.errorChild != null) return widget.errorChild!;
     return SizedBox(
-      width: width,
-      height: height,
+      width: widget.width,
+      height: widget.height,
       child: Icon(
         Icons.broken_image_outlined,
-        size: (width ?? height ?? 16) * 0.8,
+        size: (widget.width ?? widget.height ?? 16) * 0.8,
         color: Theme.of(context).disabledColor,
       ),
     );
@@ -156,24 +214,26 @@ class InlineNetworkImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final url = _effectiveUrl;
     // The in-memory http path handles BOTH svg and raster (and never touches the
     // sqflite-backed disk cache). Use it for SVG-looking URLs and whenever the
     // caller opts out of the disk cache ([memoryOnly], i.e. emoji).
-    if (memoryOnly || isSvgUrl(url)) {
+    if (widget.memoryOnly || isSvgUrl(url)) {
       return FutureBuilder<_Decoded?>(
-        future: _decode(url),
+        future: InlineNetworkImage._decode(url),
         builder: (ctx, snap) {
           if (snap.connectionState != ConnectionState.done) {
-            return placeholder ?? SizedBox(width: width, height: height);
+            return widget.placeholder ??
+                SizedBox(width: widget.width, height: widget.height);
           }
           final d = snap.data;
           if (d == null) return _fallback(ctx);
           if (d.picture != null && d.size.width > 0 && d.size.height > 0) {
             return SizedBox(
-              width: width,
-              height: height,
+              width: widget.width,
+              height: widget.height,
               child: FittedBox(
-                fit: fit,
+                fit: widget.fit,
                 child: SizedBox(
                   width: d.size.width,
                   height: d.size.height,
@@ -185,9 +245,9 @@ class InlineNetworkImage extends StatelessWidget {
           if (d.raster != null) {
             return Image.memory(
               d.raster!,
-              width: width,
-              height: height,
-              fit: fit,
+              width: widget.width,
+              height: widget.height,
+              fit: widget.fit,
               gaplessPlayback: true,
               errorBuilder: (ctx, _, __) => _fallback(ctx),
             );
@@ -198,10 +258,11 @@ class InlineNetworkImage extends StatelessWidget {
     }
     return CachedNetworkImage(
       imageUrl: url,
-      width: width,
-      height: height,
-      fit: fit,
-      placeholder: placeholder == null ? null : (_, __) => placeholder!,
+      width: widget.width,
+      height: widget.height,
+      fit: widget.fit,
+      placeholder:
+          widget.placeholder == null ? null : (_, __) => widget.placeholder!,
       errorWidget: (ctx, _, __) => _fallback(ctx),
     );
   }

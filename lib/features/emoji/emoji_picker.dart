@@ -199,13 +199,26 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         if (r != 0) return r;
         return b.createdAt.compareTo(a.createdAt);
       });
+    // The PWA renders at most 50 pack sections, each sliced to its first 120
+    // known emojis (`buildCustomEmojiSectionsHtml`, emoji.js:499-504). The
+    // 50-pack budget counts packs with ≥1 KNOWN emoji; the search filter only
+    // hides buttons afterwards (`_applyEmojiSearch`), so it doesn't free slots.
+    var shownPacks = 0;
     for (final pack in orderedPacks) {
-      final cells = <Widget>[];
+      if (shownPacks >= 50) break;
+      final known = <({String shortcode, String url})>[];
       for (final e in pack.emojis) {
-        if (!custom.codeToUrl.containsKey(e.shortcode)) continue;
-        if (!_matchesCustom(e.shortcode)) continue;
-        cells.add(_customCell(e.shortcode, custom.codeToUrl[e.shortcode]!));
+        final url = custom.codeToUrl[e.shortcode];
+        if (url == null) continue;
+        known.add((shortcode: e.shortcode, url: url));
+        if (known.length >= 120) break;
       }
+      if (known.isEmpty) continue;
+      shownPacks++;
+      final cells = <Widget>[
+        for (final e in known)
+          if (_matchesCustom(e.shortcode)) _customCell(e.shortcode, e.url),
+      ];
       if (cells.isEmpty) continue;
       final star = (isOwn(pack) || isSubscribed(pack)) ? ' ★' : '';
       sections.add(_section(
@@ -408,6 +421,9 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
         // A gridful of cells would otherwise hammer flutter_cache_manager's
         // sqflite DB (the "database has been locked 0:00:10" flood on open).
         memoryOnly: true,
+        // 2 cache-busting retries at 800ms·n, like the PWA's custom-emoji
+        // error handler (inline-bindings.js:166-183).
+        retryOnError: true,
         placeholder: const SizedBox(width: 30, height: 30),
         errorChild: const SizedBox(
             width: 30, height: 30, child: Icon(Icons.broken_image, size: 16)),

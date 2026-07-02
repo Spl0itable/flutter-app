@@ -259,6 +259,115 @@ class NymbotService {
       });
 
   // ===========================================================================
+  // Git provider APIs (client-side, PAT never leaves the device except to the
+  // provider itself) — ports of the PWA's `_gitApi*` helpers (pms.js:2159-2222)
+  // used by the in-chat `?git token/repos/repo` flows.
+  // ===========================================================================
+
+  /// Whether [token] plausibly matches the provider's PAT shape
+  /// (`_gitTokenValid`, pms.js:2177-2182): github.com enforces the
+  /// `ghp_/gho_/…/github_pat_` prefixes; everything else takes any 8-255 char
+  /// non-space token.
+  static bool gitTokenValid(GitConfig cfg, String token) {
+    if (cfg.provider == GitProvider.github && cfg.host == 'github.com') {
+      return RegExp(r'^(gh[a-z]_|github_pat_)[A-Za-z0-9_]{16,255}$')
+          .hasMatch(token);
+    }
+    return RegExp(r'^\S{8,255}$').hasMatch(token);
+  }
+
+  /// The provider's REST base (`_gitApiBase`, pms.js:2184-2190).
+  static String gitApiBase(GitConfig cfg) {
+    final host = cfg.host.isNotEmpty ? cfg.host : cfg.provider.defaultHost;
+    switch (cfg.provider) {
+      case GitProvider.gitlab:
+        return 'https://$host/api/v4';
+      case GitProvider.gitea:
+        return 'https://$host/api/v1';
+      case GitProvider.github:
+        return host == 'github.com'
+            ? 'https://api.github.com'
+            : 'https://$host/api/v3';
+    }
+  }
+
+  /// One authenticated GET against the provider API (`_gitApi`,
+  /// pms.js:2192-2206). Returns `(ok, status, data)`; network errors become
+  /// `(false, 0, null)` like the PWA.
+  Future<({bool ok, int status, Object? data})> gitApi(
+      GitConfig cfg, String path) async {
+    if (!cfg.hasToken) return (ok: false, status: 0, data: null);
+    try {
+      final headers = <String, String>{
+        'Authorization': 'Bearer ${cfg.token}',
+        'Accept': 'application/json',
+      };
+      if (cfg.provider == GitProvider.github) {
+        headers['Accept'] = 'application/vnd.github+json';
+        headers['X-GitHub-Api-Version'] = '2022-11-28';
+      }
+      final res = await _client.get(Uri.parse(gitApiBase(cfg) + path),
+          headers: headers);
+      Object? data;
+      try {
+        data = jsonDecode(res.body);
+      } catch (_) {
+        data = null;
+      }
+      return (
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode,
+        data: data,
+      );
+    } catch (_) {
+      return (ok: false, status: 0, data: null);
+    }
+  }
+
+  /// `_gitUserPath` (pms.js:2209).
+  static String gitUserPath() => '/user';
+
+  /// `_gitUserLogin` (pms.js:2210): GitLab exposes `username`, the rest `login`.
+  static String gitUserLogin(GitConfig cfg, Object? data) {
+    if (data is! Map) return '';
+    final v = cfg.provider == GitProvider.gitlab ? data['username'] : data['login'];
+    return v?.toString() ?? '';
+  }
+
+  /// `_gitReposPath` (pms.js:2211-2215).
+  static String gitReposPath(GitConfig cfg) {
+    switch (cfg.provider) {
+      case GitProvider.gitlab:
+        return '/projects?membership=true&per_page=30&order_by=last_activity_at';
+      case GitProvider.gitea:
+        return '/user/repos?limit=30';
+      case GitProvider.github:
+        return '/user/repos?per_page=30&sort=pushed';
+    }
+  }
+
+  /// `_gitRepoFullName` (pms.js:2216).
+  static String gitRepoFullName(GitConfig cfg, Object? repo) {
+    if (repo is! Map) return '';
+    final v = cfg.provider == GitProvider.gitlab
+        ? repo['path_with_namespace']
+        : repo['full_name'];
+    return v?.toString() ?? '';
+  }
+
+  /// `_gitRepoPath` (pms.js:2217-2219).
+  static String gitRepoPath(GitConfig cfg, String repo) =>
+      cfg.provider == GitProvider.gitlab
+          ? '/projects/${Uri.encodeComponent(repo)}'
+          : '/repos/$repo';
+
+  /// `_gitRepoRe` (pms.js:2220-2225): GitLab allows nested groups (up to 4
+  /// segments); the others are `owner/name`.
+  static RegExp gitRepoRe(GitConfig cfg) => cfg.provider == GitProvider.gitlab
+      ? RegExp(r'^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){1,3}$')
+      : RegExp(r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$');
+
+  // ===========================================================================
   // Auth (shared NIP-98 kind-27235, same builder as the shop)
   // ===========================================================================
 

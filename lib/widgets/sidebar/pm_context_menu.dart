@@ -41,7 +41,8 @@ Future<void> showSidebarQuickMenu(
   List<SidebarQuickMenuItem> items,
 ) async {
   if (items.isEmpty) return;
-  HapticFeedback.selectionClick();
+  // `nymHapticTap` = a 30ms vibrate (sidebar-sections.js:258).
+  HapticFeedback.lightImpact();
 
   final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
   if (overlay == null) return;

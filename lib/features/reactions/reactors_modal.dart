@@ -115,12 +115,17 @@ class ReactorsModal extends ConsumerWidget {
                     )
                   : Row(
                       children: [
-                        // A `:shortcode:` reaction renders as its custom-emoji
-                        // image at the 40px header size; unicode stays text.
+                        // `renderReactionEmoji` (emoji.js:342-351): only an
+                        // exact `:shortcode:` reaction renders as its custom-
+                        // emoji image, at `.custom-emoji-reaction` 1.45em of
+                        // the 40px `.reactors-modal-emoji` font (= 58px,
+                        // margin 0); unicode stays text.
                         InlineEmojiText(
                           text: emoji,
                           style: const TextStyle(fontSize: 40, height: 1),
-                          emojiSize: 40,
+                          wholeStringOnly: true,
+                          emojiSize: 40 * 1.45,
+                          emojiMargin: EdgeInsets.zero,
                         ),
                         const SizedBox(width: 6),
                         Text(

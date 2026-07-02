@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +11,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
 import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
+import '../../features/messages/inline_network_image.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/p2p/p2p_models.dart';
 import '../../features/p2p/p2p_service.dart';
@@ -144,6 +146,7 @@ class MessageRow extends ConsumerStatefulWidget {
     this.inGroup = false,
     this.onReactionPicker,
     this.bubbleAnchorKey,
+    this.swipeAvatarDx,
   });
 
   final Message message;
@@ -178,6 +181,13 @@ class MessageRow extends ConsumerStatefulWidget {
   /// Opens the full emoji reaction picker for this message (host supplies it).
   /// When null the add-reaction / "more" affordances are no-ops.
   final ValueChanged<Message>? onReactionPicker;
+
+  /// Bubble layout: live swipe-translation channel for the group's sticky
+  /// avatar. [MessageGroup] supplies it for the LAST bubble of an others'
+  /// group only — the PWA slides the `.message-group-avatar` together with
+  /// that message during a swipe (`findGroupAvatar`, messages.js:2151-2160 +
+  /// 2216-2219). Null everywhere else.
+  final ValueNotifier<double>? swipeAvatarDx;
 
   @override
   ConsumerState<MessageRow> createState() => _MessageRowState();
@@ -975,9 +985,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       onAction: (a) => _dispatchSwipeAction(context, a),
       // Desktop double-click → quote-reply (setupDoubleClickToReply).
       onDoubleTap: _quoteReply,
-      onLongPress: () => _onMessageLongPress(context),
+      // Quick-react popup anchored to the PRESS POINT (ui-context.js:1330).
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
       // Desktop right-click → context menu (PWA `contextmenu` handler).
       onSecondaryTap: () => _openContextMenu(context),
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
       child: decorated,
     );
   }
@@ -1072,35 +1084,26 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Re-render the relative time on a cadence (cheap; matches the PWA timer).
     _ensureRelativeTimer();
 
-    final bubble = _SwipeToAct(
-      settings: settings,
-      onAction: (a) => _dispatchSwipeAction(context, a),
-      // Desktop double-click → quote-reply (setupDoubleClickToReply).
-      onDoubleTap: _quoteReply,
-      onLongPress: () => _onMessageLongPress(context),
-      // Desktop right-click → context menu (PWA `contextmenu` handler).
-      onSecondaryTap: () => _openContextMenu(context),
-      child: ConstrainedBox(
-        // `.message-content` bubble: `min-width:180px; max-width:85%`.
-        constraints: BoxConstraints(
-          minWidth: 180,
-          maxWidth: MediaQuery.of(context).size.width * 0.85,
-        ),
-        child: _decorateBubble(
-          radius: radius,
-          bubbleColor: bubbleColor,
-          glow: deco?.glow,
-          // Only gold paints its gradient as the bubble fill; neon/phoenix/
-          // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
-          gradient: bubbleGradient,
-          auras: auras,
-          // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
-          // — rendered as a 1px secondary@0.25 inner border on the bubble.
-          mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-            child: innerContent,
-          ),
+    final bubble = ConstrainedBox(
+      // `.message-content` bubble: `min-width:180px; max-width:85%`.
+      constraints: BoxConstraints(
+        minWidth: 180,
+        maxWidth: MediaQuery.of(context).size.width * 0.85,
+      ),
+      child: _decorateBubble(
+        radius: radius,
+        bubbleColor: bubbleColor,
+        glow: deco?.glow,
+        // Only gold paints its gradient as the bubble fill; neon/phoenix/
+        // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
+        gradient: bubbleGradient,
+        auras: auras,
+        // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
+        // — rendered as a 1px secondary@0.25 inner border on the bubble.
+        mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+          child: innerContent,
         ),
       ),
     );
@@ -1170,6 +1173,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
+    // The swipe / long-press / double-tap surface is the whole `.message` row:
+    // the PWA binds `setupSwipeToReply` to `.message` and translates the FULL
+    // row — name + bubble + translation + readers + reactions all slide with
+    // the finger (messages.js:2165-2214) — not just the rounded bubble. The
+    // `.swipe-reply-indicator` chip is likewise positioned off this row's edge.
+    final swiped = _SwipeToAct(
+      settings: settings,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      // Desktop double-click → quote-reply (setupDoubleClickToReply).
+      onDoubleTap: _quoteReply,
+      // Quick-react popup anchored to the PRESS POINT (ui-context.js:1330).
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
+      // Desktop right-click → context menu (PWA `contextmenu` handler).
+      onSecondaryTap: () => _openContextMenu(context),
+      avatarDx: widget.swipeAvatarDx,
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
+      child: stack,
+    );
+
     // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
     // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
     // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
@@ -1184,7 +1206,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // and the single gliding [_StickyGroupAvatar], laying every bubble of the
     // run in one `.message-group-stack` column beside it.
     if (widget.inGroup) {
-      return Padding(padding: vPad, child: stack);
+      return Padding(padding: vPad, child: swiped);
     }
 
     // Legacy standalone path (direct [MessageRow] use, not via [MessageGroup]):
@@ -1212,7 +1234,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           ),
           const SizedBox(width: 6),
         ],
-        Flexible(child: stack),
+        Flexible(child: swiped),
       ],
     );
     return Padding(
@@ -1345,7 +1367,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final c = context.nym;
     final users = ref.watch(usersProvider);
     return GestureDetector(
-      onLongPress: () => _showSeenBy(context),
+      onLongPress: () {
+        // The PWA buzzes (nymHapticTap = 30ms vibrate) as the 500ms reader
+        // long-press fires (groups.js:2759-2763, 2806-2810).
+        HapticFeedback.lightImpact();
+        _showSeenBy(context);
+      },
       child: Padding(
         padding: const EdgeInsets.only(top: 3, right: 4),
         child: Row(
@@ -1451,8 +1478,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
     // Burst on add (not on removal), mirroring `_burstOnBadge` after sendReaction.
     if (ok && !wasReacted && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
-      HapticFeedback.selectionClick();
+      // The PWA buzzes on every successful add (`nymHapticTap` = a 30ms
+      // vibrate, reactions.js:968).
+      HapticFeedback.lightImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, r.emoji);
     }
@@ -1460,8 +1488,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
     // Long-press on a reaction badge buzzes before the reactors modal opens
-    // (`nymHapticTap`, reactions.js:526).
-    HapticFeedback.selectionClick();
+    // (`nymHapticTap` = a 30ms vibrate, reactions.js:526).
+    HapticFeedback.lightImpact();
     // The real reactor map (`reactorsFor` → pubkey → nym), each row carrying its
     // avatar picture so the modal loads faces (mirrors `showReactorsModal`).
     final app = ref.read(appStateProvider);
@@ -1491,17 +1519,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  void _onMessageLongPress(BuildContext context) {
-    // The PWA buzzes as the quick-react popup is built (`nymHapticTap`,
-    // ui-context.js:1279); a raw GestureDetector.onLongPress is otherwise silent.
-    HapticFeedback.selectionClick();
-    final rect = _globalRectOfContext(context);
+  void _onMessageLongPress(BuildContext context, Offset at) {
+    // The PWA buzzes as the quick-react popup is built (`nymHapticTap` = a
+    // 30ms vibrate, ui-context.js:1279); a raw long-press is otherwise silent.
+    HapticFeedback.lightImpact();
+    // The popup centers on the PRESS POINT (clientX/clientY), 55px above the
+    // finger (ui-context.js:1330-1347) — NOT on the message rect. A zero-size
+    // anchor at the touch point reproduces `left = clientX - w/2, top =
+    // clientY - 55` exactly.
+    final rect = Rect.fromCenter(center: at, width: 0, height: 0);
     // Quick-react row = recents-first, padded with the six defaults
     // (`_messageQuickReactDefaults`), deduped (ctx-menu F7).
     final recents = ref.read(recentEmojisProvider);
     showQuickReactPopup(
       context,
-      anchorRect: rect ?? Rect.zero,
+      anchorRect: rect,
       emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
@@ -1533,11 +1565,24 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       kind: inferOriginalKind(message, view: view),
     );
     if (ok && !already && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
-      HapticFeedback.selectionClick();
+      // The PWA buzzes on every successful add (`nymHapticTap` = a 30ms
+      // vibrate, reactions.js:968).
+      HapticFeedback.lightImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, emoji);
     }
+  }
+
+  /// Resolves `settings.swipeReactEmoji` to a custom-emoji image URL when it
+  /// is a known `:shortcode:` — the swipe ACTIONS 'react' icon renders the
+  /// custom-emoji IMAGE in that case (messages.js:2066-2074). Null → the text
+  /// glyph. Exact-case lookup, like the PWA's `customEmojis.has(m[1])`.
+  String? get _swipeReactEmojiUrl {
+    final m =
+        RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(settings.swipeReactEmoji);
+    if (m == null) return null;
+    final code = m.group(1)!;
+    return ref.watch(liveCustomEmojiProvider.select((s) => s.codeToUrl[code]));
   }
 
   /// Runs the committed swipe action (`_getSwipeActionConfig(action).run`,
@@ -1884,6 +1929,10 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
     return box.localToGlobal(Offset.zero) & box.size;
   }
 
+  /// Whole-string `:shortcode:` — only this shape can become a custom-emoji
+  /// image in a badge (`renderReactionEmoji`, emoji.js:342-351).
+  static final RegExp _rxWholeToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -1913,14 +1962,37 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
           ),
           // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
           // stays `--text` even when user-reacted (only bg/border/glow change —
-          // `styles-chat.css:439-443`). Routed through [InlineEmojiText] so a
-          // NIP-30 `:shortcode:` reaction renders as its custom-emoji image, not
-          // literal text; unicode reactions stay a plain styled Text.
-          child: InlineEmojiText(
-            text: '${r.emoji} ${abbreviateNumber(r.count)}',
-            style: TextStyle(color: c.text, fontSize: 12),
-            emojiSize: 18,
-          ),
+          // `styles-chat.css:439-443`). The emoji goes through the PWA's
+          // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
+          // `:shortcode:` reaction can render as its custom-emoji image, at the
+          // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
+          // (styles-chat.css:854-859, margin 0). The pill lays out as
+          // `display:flex; align-items:center; gap:3px` — with an image the
+          // count is a separate flex item 3px away; with plain text the PWA's
+          // text nodes merge into one `"emoji count"` run, so render that as a
+          // single Text.
+          child: _rxWholeToken.hasMatch(r.emoji)
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    InlineEmojiText(
+                      text: r.emoji,
+                      style: TextStyle(color: c.text, fontSize: 12),
+                      wholeStringOnly: true,
+                      emojiSize: 12 * 1.45,
+                      emojiMargin: EdgeInsets.zero,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      abbreviateNumber(r.count),
+                      style: TextStyle(color: c.text, fontSize: 12),
+                    ),
+                  ],
+                )
+              : Text(
+                  '${r.emoji} ${abbreviateNumber(r.count)}',
+                  style: TextStyle(color: c.text, fontSize: 12),
+                ),
         ),
       ),
     );
@@ -2574,6 +2646,19 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
   /// so the keyed bubble subtree isn't torn down each frame).
   final GlobalKey _bubbleKey = GlobalKey();
 
+  /// Live swipe translation of the group's LAST bubble. The PWA slides the
+  /// `.message-group-avatar` together with that message while it is swiped
+  /// (`findGroupAvatar` — the stack's last child — messages.js:2151-2160, then
+  /// `avatarEl.style.transform = translateX(...)`, :2216-2219, springing back
+  /// over the same 0.25s ease-out).
+  final ValueNotifier<double> _avatarDx = ValueNotifier<double>(0);
+
+  @override
+  void dispose() {
+    _avatarDx.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final entries = widget.entries;
@@ -2601,6 +2686,11 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
               onReactionPicker: onReactionPicker,
               // The LAST bubble anchors the gliding avatar (others-bubble path).
               bubbleAnchorKey: i == entries.length - 1 ? _bubbleKey : null,
+              // …and drags that avatar along while it is swiped (the swiped
+              // message must be the stack's LAST child, `findGroupAvatar`).
+              swipeAvatarDx: useBubbles && !self && i == entries.length - 1
+                  ? _avatarDx
+                  : null,
             ),
         ];
 
@@ -2648,6 +2738,10 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(6, 0, 14, 0),
       child: Stack(
+        // The PWA clips a swiped row (and its off-edge indicator chip) only at
+        // the SCROLLER (`.messages-container { overflow-x: hidden }`), never at
+        // the group box — so the chip may paint over the group's padding.
+        clipBehavior: Clip.none,
         children: [
           Padding(
             padding: const EdgeInsets.only(left: 38),
@@ -2658,11 +2752,20 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
             top: 0,
             bottom: 0,
             width: 32,
-            child: _StickyGroupAvatar(
-              pubkey: first.pubkey,
-              imageUrl: picture,
-              bubbleKey: _bubbleKey,
-              onTap: () => _openAvatarMenu(context, ref, last),
+            // Swiping the group's LAST bubble slides the avatar with it
+            // (messages.js:2216-2219); only the 32px gutter re-renders.
+            child: ValueListenableBuilder<double>(
+              valueListenable: _avatarDx,
+              builder: (context, dx, child) => Transform.translate(
+                offset: Offset(dx, 0),
+                child: child,
+              ),
+              child: _StickyGroupAvatar(
+                pubkey: first.pubkey,
+                imageUrl: picture,
+                bubbleKey: _bubbleKey,
+                onTap: () => _openAvatarMenu(context, ref, last),
+              ),
             ),
           ),
         ],
@@ -2846,35 +2949,57 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
 }
 
 /// Swipe-to-act wrapper around a message row (`setupSwipeToReply`,
-/// messages.js:2129-2278). A dominantly-horizontal drag follows the finger (the
-/// content slides up to 100px), reveals a directional action icon, fires a
-/// threshold haptic once, and on release past the threshold runs the configured
-/// action; a short swipe springs back. Also hosts double-tap-to-reply
-/// (`setupDoubleClickToReply`, messages.js:2280-2307).
+/// messages.js:2129-2278). A dominantly-horizontal TOUCH drag follows the
+/// finger (the content slides up to 100px, all travel measured from the
+/// touch-down point), reveals the directional `.swipe-reply-indicator` chip
+/// riding 40px off the row's edge, fires a threshold haptic, and on release
+/// past the threshold runs the action locked in at claim time; a short swipe
+/// springs back over 0.25s ease-out with the chip lingering 250ms. Also hosts
+/// long-press → quick-react (press-point anchored) and DESKTOP double-click →
+/// quote-reply (`setupDoubleClickToReply` bails on touch devices,
+/// messages.js:2284-2285).
 ///
 /// Mirrors the PWA constants: SWIPE_START 16px, EDGE_ZONE 50px (a right-swipe
 /// starting near the left screen edge is abandoned so the drawer-open gesture
-/// wins), follow cap 100px, threshold clamped 30-120. Armed only on touch
-/// platforms with `gesturesEnabled` (desktop keeps right-click + double-tap; the
-/// PWA likewise only attaches the touch handlers on touch devices).
+/// wins), follow cap 100px, threshold clamped 30-120. The drag recognizer
+/// accepts TOUCH pointers only — the PWA binds `touchstart`/`touchmove`, so
+/// any touch screen gets the gesture and mouse drags never do — and is gated
+/// on `gesturesEnabled` (messages.js:2141-2148, 2163-2164).
 class _SwipeToAct extends StatefulWidget {
   const _SwipeToAct({
     required this.settings,
     required this.onAction,
     required this.onDoubleTap,
-    required this.onLongPress,
+    required this.onLongPressStart,
     required this.onSecondaryTap,
+    this.avatarDx,
+    this.swipeReactEmojiUrl,
     required this.child,
   });
 
   final Settings settings;
 
   /// Runs the committed action string ('quote'/'translate'/'copy'/'react'/
-  /// 'zap'/'slap'/'hug'/'none').
+  /// 'zap'/'slap'/'hug').
   final ValueChanged<String> onAction;
   final VoidCallback onDoubleTap;
-  final VoidCallback onLongPress;
+
+  /// Long-press with the press point (`details.globalPosition`) — the PWA
+  /// anchors the quick-react pill to the touch coordinates (ui-context.js:1330).
+  final GestureLongPressStartCallback onLongPressStart;
   final VoidCallback onSecondaryTap;
+
+  /// When this row is the LAST bubble of an others' group, the group's
+  /// `.message-group-avatar` translation channel: written with the live signed
+  /// dx so the avatar slides with the message (messages.js:2151-2160,
+  /// 2216-2219). Its presence also selects the `-past-avatar` indicator inset
+  /// (left -86px) for right swipes (messages.js:2221-2225).
+  final ValueNotifier<double>? avatarDx;
+
+  /// Resolved custom-emoji image URL for the 'react' indicator when
+  /// `swipeReactEmoji` is a known `:shortcode:` (messages.js:2066-2074);
+  /// null → the emoji text glyph.
+  final String? swipeReactEmojiUrl;
   final Widget child;
 
   @override
@@ -2887,29 +3012,43 @@ class _SwipeToActState extends State<_SwipeToAct>
   static const double _edgeZone = 50; // EDGE_ZONE
   static const double _followCap = 100; // max |translateX|
 
+  /// The actions `_getSwipeActionConfig` knows (messages.js:2031-2126). At
+  /// claim time a direction resolving to anything else — including 'none' —
+  /// abandons the gesture outright (messages.js:2202-2206): the row never
+  /// moves, no indicator, no haptic.
+  static const Set<String> _knownActions = {
+    'quote', 'translate', 'copy', 'react', 'zap', 'slap', 'hug',
+  };
+
   // Created in initState (NOT a lazy `late final = …`): a row that is never
   // swiped would otherwise first touch `_settle` in dispose(), lazily creating
   // a ticker during teardown and throwing. (Caught by `flutter test`.)
   late final AnimationController _settle;
 
-  double _dx = 0;
-  bool _active = false; // a horizontal-dominant drag has been claimed
-  bool _abandoned = false; // started in the left edge zone (defer to drawer)
-  bool _thresholdFired = false; // one-shot threshold haptic latch
-  double _startX = 0; // global x where the drag began (for EDGE_ZONE)
+  double _dx = 0; // applied translation (signed by the locked direction)
+  double _travel = 0; // raw finger dx accumulated since touch-down
+  int _dir = 0; // LOCKED at claim (messages.js:2195): -1 left, +1 right
+  String _action = 'none'; // resolved once at claim for the locked direction
+  bool _active = false; // the gesture has been claimed
+  bool _abandoned = false; // edge zone / action 'none' — gesture given up
+  bool _thresholdFired = false; // threshold haptic latch (re-arms below)
+  bool _indicatorLit = false; // `.visible` — frozen at release for the linger
+  double _startX = 0; // global x of the touch-down (for EDGE_ZONE)
 
   @override
   void initState() {
     super.initState();
     _settle = AnimationController(
       vsync: this,
-      // `transition: transform 0.25s ease-out` on release (messages.js:2253).
+      // `transition: transform 0.25s ease-out` on release (messages.js:2253);
+      // the indicator lingers this long too (`setTimeout(remove, 250)`).
       duration: const Duration(milliseconds: 250),
     );
   }
 
   @override
   void dispose() {
+    widget.avatarDx?.value = 0;
     _settle.dispose();
     super.dispose();
   }
@@ -2918,60 +3057,78 @@ class _SwipeToActState extends State<_SwipeToAct>
   double get _threshold =>
       widget.settings.swipeThreshold.clamp(30, 120).toDouble();
 
-  bool get _enabled {
-    if (!widget.settings.gesturesEnabled) return false;
-    final p = Theme.of(context).platform;
-    return p == TargetPlatform.android || p == TargetPlatform.iOS;
+  void _setDx(double v) {
+    setState(() => _dx = v);
+    // The group avatar slides in lockstep (messages.js:2216-2219).
+    widget.avatarDx?.value = v;
   }
 
   void _onStart(DragStartDetails d) {
     _active = false;
     _abandoned = false;
     _thresholdFired = false;
+    _indicatorLit = false;
+    _dir = 0;
+    _action = 'none';
+    _travel = 0;
+    // DragStartBehavior.down → this IS the touch-down point (PWA startX).
     _startX = d.globalPosition.dx;
     _settle.stop();
-    _dx = 0;
+    if (_dx != 0) _setDx(0);
   }
 
   void _onUpdate(DragUpdateDetails d) {
     if (_abandoned) return;
-    final next = _dx + d.delta.dx;
-    // Claim the gesture once travel passes the start threshold. A RIGHT swipe
-    // (next > 0) that began within EDGE_ZONE of the left edge is abandoned so
-    // the sidebar-open edge-swipe wins (messages.js:2198-2201).
-    if (!_active && next.abs() > _swipeStart) {
-      if (next > 0 && _startX < _edgeZone) {
+    // All travel is measured from the touch-down point — the PWA's
+    // `dx = clientX - startX` (messages.js:2189). DragStartBehavior.down
+    // delivers the pre-arena-slop travel too, so no hidden ~18px is added on
+    // top of SWIPE_START/threshold.
+    _travel += d.delta.dx;
+    if (!_active) {
+      if (_travel.abs() <= _swipeStart) return;
+      // Direction is locked HERE and never re-derived — dragging back across
+      // the origin cannot flip the indicator/action (messages.js:2194-2202).
+      final dir = _travel < 0 ? -1 : 1;
+      // Defer to the sidebar-open gesture: right swipes that began within
+      // EDGE_ZONE of the left edge (messages.js:2196-2201).
+      if (dir > 0 && _startX < _edgeZone) {
         _abandoned = true;
         return;
       }
+      final action = dir < 0
+          ? widget.settings.swipeLeftAction
+          : widget.settings.swipeRightAction;
+      // 'none' (or unknown) → abandon: no translation, no haptic
+      // (messages.js:2202-2206).
+      if (!_knownActions.contains(action)) {
+        _abandoned = true;
+        return;
+      }
+      _dir = dir;
+      _action = action;
       _active = true;
     }
-    if (!_active) {
-      _dx = next;
-      return;
-    }
-    // Follow the finger, capped at ±100px (messages.js:2212-2219).
-    final double capped = next.clamp(-_followCap, _followCap).toDouble();
-    final pastNow = capped.abs() >= _threshold;
-    final wasPast = _dx.abs() >= _threshold;
-    if (pastNow && !_thresholdFired) {
-      // One-shot threshold haptic (messages.js:2239-2241).
-      HapticFeedback.selectionClick();
+    // Follow the finger: `swipeDistance = min(|dx|, 100)`, signed by the
+    // LOCKED direction (messages.js:2212-2213).
+    final double dist = _travel.abs().clamp(0.0, _followCap);
+    final past = dist >= _threshold;
+    if (past && !_thresholdFired) {
+      // Threshold haptic — `nymHapticTap` = a 30ms vibrate
+      // (messages.js:2239-2241, inline-bindings.js:106-115).
+      HapticFeedback.lightImpact();
       _thresholdFired = true;
+    } else if (!past) {
+      _thresholdFired = false; // re-arms if the finger retreats (:2242-2244)
     }
-    setState(() => _dx = capped);
-    // Keep the latch honest if the user retreats back under the threshold.
-    if (!pastNow && wasPast) _thresholdFired = false;
+    _indicatorLit = past;
+    _setDx(_dir * dist);
   }
 
   void _onEnd(DragEndDetails d) {
-    final committed = _active && !_abandoned && _dx.abs() >= _threshold;
-    if (committed) {
-      // dx < 0 (swipe LEFT) → swipeLeftAction; dx > 0 (swipe RIGHT) → right.
-      final action = _dx < 0
-          ? widget.settings.swipeLeftAction
-          : widget.settings.swipeRightAction;
-      widget.onAction(action);
+    // Commit when the (capped) travel sits past the threshold at release
+    // (messages.js:2249-2253); the action is the one locked at claim.
+    if (_active && !_abandoned && _dx.abs() >= _threshold) {
+      widget.onAction(_action);
     }
     _springBack();
   }
@@ -2984,24 +3141,28 @@ class _SwipeToActState extends State<_SwipeToAct>
     _thresholdFired = false;
     final from = _dx;
     if (from == 0) {
-      setState(() {});
+      setState(() {
+        _dir = 0;
+        _indicatorLit = false;
+      });
       return;
     }
-    final anim =
-        CurvedAnimation(parent: _settle, curve: Curves.easeOut);
-    void tick() => setState(() => _dx = from * (1 - anim.value));
+    final anim = CurvedAnimation(parent: _settle, curve: Curves.easeOut);
+    void tick() => _setDx(from * (1 - anim.value));
     anim.addListener(tick);
     _settle.forward(from: 0).whenCompleteOrCancel(() {
       anim.removeListener(tick);
-      if (mounted) setState(() => _dx = 0);
+      if (!mounted) return;
+      // The chip lingered through the 250ms spring-back — remove it now
+      // (`setTimeout(() => indicator.remove(), 250)`, messages.js:2257-2259).
+      setState(() {
+        _dx = 0;
+        _dir = 0;
+        _indicatorLit = false;
+      });
+      widget.avatarDx?.value = 0;
     });
   }
-
-  /// The action that WOULD fire for the current drag direction — drives the
-  /// revealed indicator icon.
-  String get _pendingAction => _dx < 0
-      ? widget.settings.swipeLeftAction
-      : widget.settings.swipeRightAction;
 
   String? _actionSvg(String action) {
     switch (action) {
@@ -3024,55 +3185,131 @@ class _SwipeToActState extends State<_SwipeToAct>
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final gestures = GestureDetector(
-      onDoubleTap: widget.onDoubleTap,
-      onLongPress: widget.onLongPress,
-      onSecondaryTap: widget.onSecondaryTap,
-      onHorizontalDragStart: _enabled ? _onStart : null,
-      onHorizontalDragUpdate: _enabled ? _onUpdate : null,
-      onHorizontalDragEnd: _enabled ? _onEnd : null,
-      onHorizontalDragCancel: _enabled ? _onCancel : null,
-      child: Transform.translate(
-        offset: Offset(_dx, 0),
-        child: widget.child,
-      ),
-    );
-    if (_dx == 0) return gestures;
+  /// The `.swipe-reply-indicator` chip (styles-chat.css:1592-1667): a 32px
+  /// `primary@0.15` circle holding the action glyph — SVG icons 16px tinted
+  /// `--primary`, the react emoji 23px text, a custom-emoji image 28px. It is
+  /// a CHILD of the translated row, positioned 40px OUTSIDE the edge the row
+  /// is leaving (`right:-40px` for left swipes, `left:-40px` for right swipes,
+  /// `left:-86px` past the group avatar), vertically centered — so it FOLLOWS
+  /// the finger. Opacity 0 until the drag passes the threshold, then 1 over
+  /// 0.15s ease (`.visible`).
+  Widget _buildIndicator(BuildContext context) {
     final c = context.nym;
-    final action = _pendingAction;
-    if (action == 'none') return gestures;
-    final past = _dx.abs() >= _threshold;
-    final color = past ? c.primary : c.textDim;
-    final svg = _actionSvg(action);
-    final indicator = action == 'react'
-        ? Text(widget.settings.swipeReactEmoji,
-            style: const TextStyle(fontSize: 20))
-        : (svg != null
-            ? NymSvgIcon(svg, size: 22, color: color)
-            : const SizedBox.shrink());
-    // The icon trails into view from the edge the content is leaving: a LEFT
-    // swipe (dx<0) reveals it on the right; a RIGHT swipe (dx>0) on the left.
-    final onRight = _dx < 0;
-    return Stack(
-      children: [
-        // Vertically centered against the row via top:0/bottom:0 + Center.
-        Positioned(
-          top: 0,
-          bottom: 0,
-          left: onRight ? null : 12,
-          right: onRight ? 12 : null,
-          child: Center(
-            child: AnimatedOpacity(
-              opacity: past ? 1 : 0.5,
-              duration: const Duration(milliseconds: 120),
-              child: indicator,
+    Widget glyph;
+    if (_action == 'react') {
+      final fallback = Text(
+        widget.settings.swipeReactEmoji,
+        style: const TextStyle(fontSize: 23, height: 1),
+      );
+      final url = widget.swipeReactEmojiUrl;
+      // `.swipe-react-emoji-img` custom emoji render at 28px, contain-fit.
+      glyph = url == null
+          ? fallback
+          : InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
+              width: 28,
+              height: 28,
+              fit: BoxFit.contain,
+              retryOnError: true,
+              errorChild: fallback,
+            );
+    } else {
+      final svg = _actionSvg(_action);
+      glyph = svg == null
+          ? const SizedBox.shrink()
+          : NymSvgIcon(svg, size: 16, color: c.primary);
+    }
+    // Right swipes on a bubble that sits beside the group avatar park the chip
+    // PAST the avatar (`swipe-reply-indicator-past-avatar`, left:-86px).
+    final pastAvatar = _dir > 0 && widget.avatarDx != null;
+    return Positioned(
+      top: 0,
+      bottom: 0,
+      right: _dir < 0 ? -40 : null,
+      left: _dir < 0 ? null : (pastAvatar ? -86 : -40),
+      child: Center(
+        child: AnimatedOpacity(
+          opacity: _indicatorLit ? 1 : 0,
+          // `transition: opacity 0.15s ease`.
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.ease,
+          child: Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              // `background: rgb(from var(--primary) r g b / 0.15)`.
+              color: c.primaryA(0.15),
             ),
+            child: glyph,
           ),
         ),
-        gestures,
-      ],
+      ),
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // The chip exists from the moment the gesture is claimed until 250ms after
+    // release (transparent below the threshold), riding INSIDE the translated
+    // subtree so it moves with the finger.
+    Widget body = widget.child;
+    if (_dir != 0) {
+      body = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.child,
+          _buildIndicator(context),
+        ],
+      );
+    }
+
+    final p = Theme.of(context).platform;
+    final touchPlatform =
+        p == TargetPlatform.android || p == TargetPlatform.iOS;
+    Widget result = GestureDetector(
+      // The PWA's long-press / dblclick surface is the whole `.message` row —
+      // including the blank run beside a narrow bubble — so empty areas must
+      // hit-test too.
+      behavior: HitTestBehavior.translucent,
+      // dblclick quote-reply is DESKTOP-ONLY: the PWA bails on touch devices
+      // (`if ('ontouchstart' in window) return`, messages.js:2284-2285). Not
+      // registering it on touch also spares every tap the double-tap
+      // disambiguation delay.
+      onDoubleTap: touchPlatform ? null : widget.onDoubleTap,
+      onLongPressStart: widget.onLongPressStart,
+      onSecondaryTap: widget.onSecondaryTap,
+      child: Transform.translate(
+        offset: Offset(_dx, 0),
+        child: body,
+      ),
+    );
+
+    // The swipe claims TOUCH pointers only (the PWA binds touchstart/touchmove
+    // — any touch screen gets it, mouse drags never do), with travel measured
+    // from the touch-down point (DragStartBehavior.down) so SWIPE_START and
+    // the action threshold match the PWA's finger distances exactly.
+    if (widget.settings.gesturesEnabled) {
+      result = RawGestureDetector(
+        behavior: HitTestBehavior.translucent,
+        gestures: <Type, GestureRecognizerFactory>{
+          HorizontalDragGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+              HorizontalDragGestureRecognizer>(
+            () => HorizontalDragGestureRecognizer(
+              supportedDevices: const {PointerDeviceKind.touch},
+            ),
+            (r) => r
+              ..dragStartBehavior = DragStartBehavior.down
+              ..onStart = _onStart
+              ..onUpdate = _onUpdate
+              ..onEnd = _onEnd
+              ..onCancel = _onCancel,
+          ),
+        },
+        child: result,
+      );
+    }
+    return result;
   }
 }

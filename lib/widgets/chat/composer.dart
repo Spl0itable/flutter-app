@@ -2168,7 +2168,9 @@ class _SendButtonState extends State<_SendButton> {
       _anonFired = true;
       _suppressClickUntil =
           DateTime.now().add(const Duration(milliseconds: 800));
-      HapticFeedback.mediumImpact();
+      // `nymHapticTap` = the same 30ms vibrate every long-press site uses
+      // (ui-context.js:1217, inline-bindings.js:106-115).
+      HapticFeedback.lightImpact();
       setState(() => _preGlow = true);
       widget.onAnon!.call();
       // Revert label + glow after 1s.
@@ -2370,13 +2372,14 @@ class _QuotePreviewChip extends StatelessWidget {
           // The quoted line renders custom emoji as images, matching the PWA's
           // `renderCustomEmojiInEscapedText` in setQuoteReply (messages.js:1847,
           // "keep shortcodes so they render as images"). `InlineEmojiText` falls
-          // back to a plain Text for unicode-only text (F-02-B).
+          // back to a plain Text for unicode-only text (F-02-B). Image size is
+          // the base `.custom-emoji` 1.75em of the 12px `.quote-preview-text`
+          // (= 21px) — the InlineEmojiText default.
           InlineEmojiText(
             text: text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: c.textDim, fontSize: 12),
-            emojiSize: 14,
           ),
         ],
       ),
@@ -2860,8 +2863,9 @@ class EmojiSentinelController extends TextEditingController {
           context: context, style: style, withComposing: withComposing);
     }
     final baseStyle = style ?? const TextStyle();
-    // ~1.3× the font size, square — matches the spec for the typed-emoji glyph.
-    final side = (baseStyle.fontSize ?? 14) * 1.3;
+    // 1.4× the font size, square — `div.message-input .custom-emoji
+    // { width/height: 1.4em }` (styles-chat.css:1703-1708).
+    final side = (baseStyle.fontSize ?? 14) * 1.4;
     final children = <InlineSpan>[];
     final buf = StringBuffer();
 
@@ -2892,8 +2896,9 @@ class EmojiSentinelController extends TextEditingController {
             width: side,
             height: side,
             fit: BoxFit.contain,
-            // Same disk-cache + SVG handling + literal-fallback as the rendered
-            // message emoji (message_content.dart `CustomEmojiNode`).
+            // Same disk-cache + SVG handling + retry + literal-fallback as the
+            // rendered message emoji (message_content.dart `CustomEmojiNode`).
+            retryOnError: true,
             errorChild: Text(':$code:', style: baseStyle),
           ),
         ),

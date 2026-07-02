@@ -28,7 +28,6 @@ import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
-import '../../emoji/emoji_data.dart' show kEmojiShortcodeMap;
 import '../inline_network_image.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
@@ -534,6 +533,7 @@ class _RichInline extends StatelessWidget {
               // few per visible message — so they don't storm the cache DB, and
               // the disk cache lets them persist across restarts. (The high-volume
               // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
+              retryOnError: true,
               errorChild: Text(':$shortcode:', style: base),
             ),
           ),
@@ -1881,13 +1881,22 @@ class _BlurRevealState extends State<_BlurReveal> {
 }
 
 /// Renders a short string inline while resolving NIP-30 custom emoji: any
-/// `:shortcode:` known to [liveCustomEmojiProvider] (and bare http(s) custom-
-/// emoji URLs) becomes an inline image; everything else is plain styled text.
+/// `:shortcode:` known to [liveCustomEmojiProvider] becomes an inline image;
+/// everything else is plain styled text.
 ///
 /// This is the lightweight counterpart to [MessageContent] for surfaces that
 /// show a reaction emoji or a short notification line — reaction badges, the
 /// reactors sheet, the notifications panel — where a full formatted block is too
 /// heavy and where, until now, `:shortcode:` reactions showed as literal text.
+///
+/// It mirrors the PWA's two short-text helpers (emoji.js):
+///   - `renderCustomEmojiInEscapedText` (:560-568) — the default: every KNOWN
+///     custom `:code:` in the string becomes an image; built-in unicode
+///     shortcodes (e.g. `:tada:`) are NOT substituted (only message bodies do
+///     that, message-format.js:251-257) and unknown codes stay literal.
+///   - `renderReactionEmoji` (:342-351) — [wholeStringOnly]: ONLY a text that
+///     is exactly `:code:` for a known custom code becomes an image; a token
+///     embedded in longer content stays literal.
 ///
 /// Text runs keep the caller's [style] verbatim (no colour-emoji fallback is
 /// forced onto them, which would wreck Latin metrics/glyphs the same way the old
@@ -1898,6 +1907,8 @@ class InlineEmojiText extends ConsumerWidget {
     required this.text,
     required this.style,
     this.emojiSize,
+    this.wholeStringOnly = false,
+    this.emojiMargin = const EdgeInsets.symmetric(horizontal: 1),
     this.maxLines,
     this.overflow,
     this.textAlign,
@@ -1906,9 +1917,20 @@ class InlineEmojiText extends ConsumerWidget {
   final String text;
   final TextStyle style;
 
-  /// Side length for an inline custom-emoji image. Defaults to ~1.2× the font
-  /// size so the glyph sits a touch above the cap height like the PWA's emoji.
+  /// Exact side length for an inline custom-emoji image. Defaults to 1.75× the
+  /// font size — the PWA's base `.custom-emoji { width/height: 1.75em }`
+  /// (styles-chat.css:839-846). Surfaces with their own CSS size (reaction
+  /// badges 1.45em, quick-react 30px, burst 45px, …) pass it explicitly.
   final double? emojiSize;
+
+  /// `renderReactionEmoji` semantics (emoji.js:342-351): only an exact
+  /// `^:code:$` text resolves to an image; embedded tokens stay literal.
+  final bool wholeStringOnly;
+
+  /// Margin around the emoji image. The base `.custom-emoji` rule is
+  /// `margin: 0 1px`; reaction surfaces (`.custom-emoji-reaction`,
+  /// `.quick-react-emoji .custom-emoji`) override it to 0.
+  final EdgeInsets emojiMargin;
 
   final int? maxLines;
   final TextOverflow? overflow;
@@ -1917,60 +1939,73 @@ class InlineEmojiText extends ConsumerWidget {
   /// `:shortcode:` token (NIP-30 codes are `[a-zA-Z0-9_]+`, emoji.js).
   static final RegExp _rxToken = RegExp(r':([a-zA-Z0-9_]+):');
 
+  /// Whole-string `:shortcode:` (emoji.js `renderReactionEmoji` `^:code:$`).
+  static final RegExp _rxWholeToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final codeToUrl = ref.watch(liveCustomEmojiProvider).codeToUrl;
+    final side = emojiSize ?? (style.fontSize ?? 14) * 1.75;
 
-    // Fast path: no `:shortcode:` token at all → a single styled Text (keeps
-    // these surfaces find-by-text friendly and avoids a needless RichText).
-    if (!_rxToken.hasMatch(text)) {
-      return Text(text,
-          style: style,
-          maxLines: maxLines,
-          overflow: overflow,
-          textAlign: textAlign);
-    }
+    Widget plainText() => Text(text,
+        style: style,
+        maxLines: maxLines,
+        overflow: overflow,
+        textAlign: textAlign);
 
-    final side = (emojiSize ?? (style.fontSize ?? 14)) * 1.2;
-    final spans = <InlineSpan>[];
-    var last = 0;
-    for (final m in _rxToken.allMatches(text)) {
-      final code = m.group(1)!;
-      // PWA resolution order (message-format.js:251-257): the built-in unicode
-      // `emojiMap` (lowercased key) is tried FIRST and substitutes the literal
-      // shortcode with its glyph; only then the NIP-30 custom-emoji image
-      // (looked up with the EXACT case). `kEmojiShortcodeMap` is the full PWA
-      // map (emoji_data.dart) — so common `:shortcodes:` (e.g. `:tada:`,
-      // `:rocket:`) render as the unicode emoji here too, not literal text.
-      final builtin = kEmojiShortcodeMap[code.toLowerCase()];
-      final url = builtin == null ? codeToUrl[code] : null;
-      if (builtin == null && url == null) {
-        continue; // unknown code → leave the literal `:code:` in trailing text
-      }
-      if (m.start > last) {
-        spans.add(TextSpan(text: text.substring(last, m.start), style: style));
-      }
-      if (builtin != null) {
-        // Built-in unicode glyph: plain text run (no colour-emoji fallback is
-        // forced — it renders via the platform emoji font like the PWA's glyph).
-        spans.add(TextSpan(text: builtin, style: style));
-      } else {
-        spans.add(WidgetSpan(
+    InlineSpan emojiSpan(String code, String url) => WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 1),
+            padding: emojiMargin,
             child: InlineNetworkImage(
-              url: proxiedMedia(url!, emoji: true),
+              url: proxiedMedia(url, emoji: true),
               width: side,
               height: side,
               fit: BoxFit.contain,
               // Disk-cached (sparse: a reaction badge / a notification line
               // shows one emoji). Only the picker grid uses memoryOnly.
+              retryOnError: true,
               errorChild: Text(':$code:', style: style),
             ),
           ),
-        ));
+        );
+
+    if (wholeStringOnly) {
+      // `renderReactionEmoji`: an image ONLY when the whole text is a known
+      // custom `:code:`; anything else (unicode, unknown code, embedded token)
+      // is the literal escaped text.
+      final code = _rxWholeToken.firstMatch(text)?.group(1);
+      final url = code == null ? null : codeToUrl[code];
+      if (url == null) return plainText();
+      return Text.rich(
+        emojiSpan(code!, url),
+        maxLines: maxLines,
+        overflow: overflow,
+        textAlign: textAlign,
+      );
+    }
+
+    // Fast path: no `:shortcode:` token at all → a single styled Text (keeps
+    // these surfaces find-by-text friendly and avoids a needless RichText).
+    if (!_rxToken.hasMatch(text)) return plainText();
+
+    final spans = <InlineSpan>[];
+    var last = 0;
+    for (final m in _rxToken.allMatches(text)) {
+      final code = m.group(1)!;
+      // `renderCustomEmojiInEscapedText` (emoji.js:560-568) replaces ONLY
+      // known custom codes; built-in unicode shortcodes are never substituted
+      // on these surfaces (`registerCustomEmoji` refuses codes shadowing the
+      // built-in `emojiMap`, emoji.js:121, so `customEmojis` never has them)
+      // and unknown codes stay literal text.
+      final url = codeToUrl[code];
+      if (url == null) {
+        continue; // unknown code → leave the literal `:code:` in trailing text
       }
+      if (m.start > last) {
+        spans.add(TextSpan(text: text.substring(last, m.start), style: style));
+      }
+      spans.add(emojiSpan(code, url));
       last = m.end;
     }
     if (last < text.length) {

@@ -1,15 +1,29 @@
 /// Riverpod wiring for the Nymbot feature: the [NymbotService] singleton, the
-/// private-chat state, and the `?`/`@Nymbot` interception helpers.
+/// private-chat engine, and the `?`/`@Nymbot` interception helpers.
 ///
-/// These providers are self-contained — the parent app wires them into the
-/// composer via the [isBotCommand] / [isNymbotMention] interceptors and opens
-/// `BotChatScreen` for the private bot PM.
+/// The private Nymbot conversation lives in the CANONICAL PM store
+/// (`AppState.messages['pm-<botPubkey>']`), exactly like the PWA keeps it in
+/// `pmMessages` (pms.js:1291-1339) — so the bot thread renders through the same
+/// message pipeline as every other PM (sidebar row, unread counts, receipts,
+/// reactions, system messages, typing indicator). [BotChatController] is the
+/// port of the PWA's `_handleBotPM` / `_handleBotGitCommand` /
+/// `_handleBotModelCommand` / `_handleBotTransferCommand` engine (pms.js).
 library;
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/crypto/bech32_codec.dart' show decodeNpub;
+import '../../core/utils/nym_utils.dart';
+import '../../models/message.dart';
+import '../../state/app_state.dart';
+import '../../widgets/context_menu/interaction_hooks.dart'
+    show giftCreditsRequestProvider;
+import '../pms/pm_logic.dart';
 import 'bot_commands.dart';
 import 'nymbot_models.dart';
 import 'nymbot_service.dart';
@@ -44,6 +58,14 @@ String stripNymbotMention(String text) =>
 
 bool _isSpace(String ch) => ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
 
+/// The bot-PM control commands that are handled entirely ON-DEVICE — they are
+/// never encrypted, published to relays, shown as message bubbles, or stored
+/// (`?git` can carry an access token). A 1:1 port of the interception regex in
+/// the PWA's `sendPM` (pms.js:1584-1591).
+final RegExp botPMCommandRe = RegExp(
+    r'^\s*\?(github|git|help|commands|balance|buy|clear|transfer|gift|model)\b',
+    caseSensitive: false);
+
 // =============================================================================
 // Service provider
 // =============================================================================
@@ -56,120 +78,180 @@ final nymbotServiceProvider = Provider<NymbotService>((ref) {
 });
 
 // =============================================================================
-// Private bot-chat state
+// `?buy` modal mailbox
 // =============================================================================
 
-/// One message in the private Nymbot chat.
-class BotChatMessage {
-  const BotChatMessage({
-    required this.id,
-    required this.text,
-    required this.fromUser,
-    required this.timestamp,
-    this.reasoning,
-    this.pending = false,
-    this.error = false,
-    this.taskType,
-    this.proModel,
-    this.cost,
-  });
-
-  final String id;
-  final String text;
-  final bool fromUser; // true = sent by the local user, false = Nymbot.
-  final DateTime timestamp;
-
-  /// Collapsed "💭 Reasoning" content for bot replies, when present.
-  final String? reasoning;
-
-  final bool pending; // awaiting reply / in-flight.
-  final bool error;
-  final String? taskType;
-  final String? proModel;
-  final int? cost;
-
-  bool get hasReasoning =>
-      reasoning != null && reasoning!.trim().isNotEmpty;
-
-  BotChatMessage copyWith({
-    String? text,
-    String? reasoning,
-    bool? pending,
-    bool? error,
-    String? taskType,
-    String? proModel,
-    int? cost,
-  }) =>
-      BotChatMessage(
-        id: id,
-        text: text ?? this.text,
-        fromUser: fromUser,
-        timestamp: timestamp,
-        reasoning: reasoning ?? this.reasoning,
-        pending: pending ?? this.pending,
-        error: error ?? this.error,
-        taskType: taskType ?? this.taskType,
-        proModel: proModel ?? this.proModel,
-        cost: cost ?? this.cost,
-      );
+/// A pending request to open the bot-credits BUY modal (the PWA's
+/// `showBotCreditsModal(null, tier)` from `?buy` and the noCredits path,
+/// pms.js:2413/2478). The engine posts here; the bot-chat surface (and the
+/// shell) listens, opens [BotCreditsModal] with [tier] preselected, then
+/// consumes.
+class BotBuyRequest {
+  const BotBuyRequest({required this.tier});
+  final CreditTier tier;
 }
 
-/// Immutable snapshot of the private Nymbot chat.
+class BotBuyRequestHooks extends StateNotifier<BotBuyRequest?> {
+  BotBuyRequestHooks() : super(null);
+
+  void request(CreditTier tier) => state = BotBuyRequest(tier: tier);
+
+  /// Clears the pending request once the modal has opened.
+  void consume() => state = null;
+}
+
+/// The `?buy` mailbox. The engine writes; the bot-chat screen reads.
+final botBuyRequestProvider =
+    StateNotifierProvider<BotBuyRequestHooks, BotBuyRequest?>(
+  (ref) => BotBuyRequestHooks(),
+);
+
+// =============================================================================
+// Private bot-chat engine state
+// =============================================================================
+
+/// Immutable snapshot of the private Nymbot chat controls. The conversation
+/// itself lives in the canonical PM store (`AppState.messages['pm-<bot>']`).
 class BotChatState {
   const BotChatState({
-    this.messages = const [],
     this.proModel,
     this.git,
     this.balance = BotBalance.empty,
+    this.balanceKnown = false,
     this.sending = false,
+    this.clearedAtSec = 0,
   });
-
-  final List<BotChatMessage> messages;
 
   /// The pinned Pro model (`?model <name>`), or null for standard routing.
   final ProModel? proModel;
 
-  /// Connected git repo config (`?git`), or null when not connected.
+  /// Connected git provider config (`?git`), or null when never configured.
   final GitConfig? git;
 
   final BotBalance balance;
+
+  /// True once a balance response has landed (the header shows
+  /// "checking credits…" until then — PWA `channelMeta` initial text).
+  final bool balanceKnown;
+
   final bool sending;
+
+  /// The `?clear` watermark (seconds), 0 = never cleared. A cleared chat is
+  /// empty but NOT new — the welcome bubble is suppressed (PWA
+  /// `_getBotPmClearedAt`, pms.js:1692-1703 / 3072-3075).
+  final int clearedAtSec;
 
   bool get isPro => proModel != null;
 
   BotChatState copyWith({
-    List<BotChatMessage>? messages,
     Object? proModel = _sentinel,
     Object? git = _sentinel,
     BotBalance? balance,
+    bool? balanceKnown,
     bool? sending,
+    int? clearedAtSec,
   }) =>
       BotChatState(
-        messages: messages ?? this.messages,
         proModel:
             identical(proModel, _sentinel) ? this.proModel : proModel as ProModel?,
         git: identical(git, _sentinel) ? this.git : git as GitConfig?,
         balance: balance ?? this.balance,
+        balanceKnown: balanceKnown ?? this.balanceKnown,
         sending: sending ?? this.sending,
+        clearedAtSec: clearedAtSec ?? this.clearedAtSec,
       );
 
   static const _sentinel = Object();
 }
 
-/// Controller for the private Nymbot chat. Holds the message list, the pinned
-/// Pro model, the git config (PAT on-device only), and the credit balance.
+/// Engine for the private Nymbot chat — the native `_handleBotPM` (pms.js:2393).
+///
+/// Owns the pinned Pro model, the git config (PAT on-device only, persisted in
+/// prefs like the PWA's `nym_botpm_git` localStorage blob), the credit balance,
+/// and the command/reply flows. Messages are read from / written into the
+/// canonical PM store so the conversation persists in shared state, surfaces in
+/// the sidebar, and renders through the canonical chat widgets.
 ///
 /// The actual `pubkey`/`auth` blob comes from the parent identity layer — the
 /// app sets it via [bind] before sending. Until bound, sends are refused so this
 /// stays decoupled from shared identity state.
 class BotChatController extends StateNotifier<BotChatState> {
-  BotChatController(this._service) : super(const BotChatState());
+  BotChatController(this._ref, this._service) : super(const BotChatState()) {
+    _hydrate();
+    // Anything already in the thread (restored history) is not a new send.
+    _primeHandled(_thread);
+  }
 
+  final Ref _ref;
   final NymbotService _service;
 
   String? _pubkey;
   Map<String, dynamic>? _auth;
   Uint8List? _privkey;
+
+  /// Own-message ids already routed to the bot (or pre-existing history), so
+  /// the app-state observer never double-fires a request.
+  final Set<String> _handledIds = <String>{};
+  bool _primed = false;
+  int _lastLen = -1;
+  String _lastLastId = '';
+
+  /// Message ids of the transient bot-styled info bubbles (welcome, `?help`
+  /// guide, command outputs — PWA `_displayBotInfoMessage`), local-only.
+  int _infoSeq = 0;
+
+  // --- Persistence (the PWA's nym_botpm_* localStorage keys) ----------------
+
+  static const _kProModelPref = 'nym_botpm_pro_model';
+  static const _kGitPref = 'nym_botpm_git';
+  static const _kClearedAtPref = 'nym_botpm_cleared_at';
+  static const _kWelcomedPref = 'nym_botpm_welcomed';
+
+  Future<SharedPreferences> get _prefs => SharedPreferences.getInstance();
+
+  Future<void> _hydrate() async {
+    try {
+      final p = await _prefs;
+      if (!mounted) return;
+      final modelKey = p.getString(_kProModelPref) ?? '';
+      ProModel? model;
+      for (final m in kProModels) {
+        if (m.key == modelKey) model = m;
+      }
+      GitConfig? git;
+      final rawGit = p.getString(_kGitPref);
+      if (rawGit != null && rawGit.isNotEmpty) {
+        try {
+          git = GitConfig.fromJson(
+              (jsonDecode(rawGit) as Map).cast<String, dynamic>());
+        } catch (_) {}
+      }
+      final clearedAt = int.tryParse(p.getString(_kClearedAtPref) ?? '') ?? 0;
+      state = state.copyWith(
+          proModel: model, git: git, clearedAtSec: clearedAt);
+    } catch (_) {
+      // Prefs unavailable (tests) — stay with in-memory defaults.
+    }
+  }
+
+  void _persistProModel(ProModel? model) {
+    unawaited(_prefs.then((p) => model == null
+        ? p.remove(_kProModelPref)
+        : p.setString(_kProModelPref, model.key)));
+  }
+
+  void _persistGit(GitConfig? git) {
+    unawaited(_prefs.then((p) => git == null
+        ? p.remove(_kGitPref)
+        : p.setString(_kGitPref, jsonEncode(git.toJson()))));
+  }
+
+  void _setClearedAt(int sec) {
+    state = state.copyWith(clearedAtSec: sec);
+    unawaited(_prefs.then((p) => p.setString(_kClearedAtPref, '$sec')));
+  }
+
+  // --- Identity ---------------------------------------------------------------
 
   /// Wires in the user's identity for paid requests. Called by the parent app
   /// (`bindBotChat`). Pass [privkey] so per-request NIP-98 `auth` is built for
@@ -198,165 +280,962 @@ class BotChatController extends StateNotifier<BotChatState> {
     return _auth;
   }
 
-  // --- Local controls --------------------------------------------------------
+  // --- Canonical-store plumbing -----------------------------------------------
 
-  /// Applies `?model <name|off>`. `off` (or unknown) clears the pin.
-  void setModel(String arg) {
-    if (arg.trim().toLowerCase() == 'off') {
-      state = state.copyWith(proModel: null);
+  /// The bot conversation's storage key (`pm-<botPubkey>`).
+  static final String conversationKey = PmLogic.pmStorageKey(kNymbotPubkey);
+
+  AppStateNotifier get _app => _ref.read(appStateProvider.notifier);
+  AppState get _appState => _ref.read(appStateProvider);
+
+  List<Message> get _thread =>
+      _appState.messages[conversationKey] ?? const <Message>[];
+
+  /// The bot's base display nym ('Nymbot' — seeded user, app.js:1103-1111).
+  String get _botNym =>
+      stripPubkeySuffix(_appState.users[kNymbotPubkey]?.nym ?? 'Nymbot');
+
+  /// Centered system line in the bot conversation (PWA `displaySystemMessage`).
+  void _system(String text) =>
+      _app.addSystemMessage(text, storageKey: conversationKey);
+
+  /// A transient bot-styled info bubble (welcome, `?help` guide, command
+  /// outputs) that looks like a message from Nymbot — the PWA's
+  /// `_displayBotInfoMessage` (pms.js:1776-1813). Rendered through the normal
+  /// message pipeline (author row, verified ✓, in-bubble time).
+  void _displayBotInfoMessage(String text, {String? id, int? createdAtMs}) {
+    final nowMs = createdAtMs ?? DateTime.now().millisecondsSinceEpoch;
+    _app.ingestPMMessage(Message(
+      id: id ?? 'nymbot-info-$nowMs-${_infoSeq++}',
+      author: _botNym,
+      pubkey: kNymbotPubkey,
+      content: text,
+      createdAt: nowMs ~/ 1000,
+      ms: nowMs,
+      timestamp: nowMs,
+      isPM: true,
+      conversationKey: conversationKey,
+      conversationPubkey: kNymbotPubkey,
+      eventKind: 1059,
+      isBot: true,
+      senderVerified: true,
+    ));
+  }
+
+  /// Show/clear the synthetic "Nymbot is thinking" indicator in the bot PM —
+  /// `_setBotTyping` (pms.js:1980-1995): 30s auto-expiry, rendered by the
+  /// shared typing-indicator strip (verb 'thinking' for the bot).
+  void _setBotTyping(bool on) {
+    _app.setTyping(
+      storageKey: conversationKey,
+      pubkey: kNymbotPubkey,
+      typing: on,
+      expiresAtMs: DateTime.now().millisecondsSinceEpoch + 30000,
+    );
+  }
+
+  /// Advances sent→delivered→read receipts on our own messages in the Nymbot
+  /// chat (`_markBotPMReceipts`, pms.js:2062-2081). Never regresses; failed
+  /// messages are skipped.
+  void _markBotPMReceipts(String receiptType) {
+    final target = PmLogic.deliveryFromReceipt(receiptType);
+    for (final m in _thread) {
+      if (!m.isOwn ||
+          m.deliveryStatus == DeliveryStatus.failed ||
+          m.nymMessageId == null) {
+        continue;
+      }
+      if (PmLogic.statusOrder(target) > PmLogic.statusOrder(m.deliveryStatus)) {
+        _app.applyReceipt(
+            ReceiptInfo(messageId: m.nymMessageId!, receiptType: receiptType));
+      }
+    }
+  }
+
+  /// Marks every message currently in the thread as already-handled so the
+  /// observer only reacts to NEW sends.
+  void _primeHandled(List<Message> list) {
+    for (final m in list) {
+      _handledIds.add(m.id);
+    }
+    _primed = true;
+    _lastLen = list.length;
+    _lastLastId = list.isNotEmpty ? list.last.id : '';
+  }
+
+  /// App-state observer: routes NEW own messages in the bot thread (e.g. sent
+  /// through the canonical PM composer) into the bot engine, so the bot replies
+  /// no matter which surface sent the message. `?` control commands are pulled
+  /// back out of the thread (the PWA never shows them as bubbles,
+  /// pms.js:1584-1591) and executed on-device.
+  void onAppState(AppState app) {
+    final list = app.messages[conversationKey];
+    if (list == null) return;
+    if (!_primed) {
+      _primeHandled(list);
       return;
     }
-    state = state.copyWith(proModel: lookupProModel(arg));
+    // Cheap no-change guard (app state updates are frequent).
+    if (list.length == _lastLen &&
+        (list.isEmpty || list.last.id == _lastLastId)) {
+      return;
+    }
+    _lastLen = list.length;
+    _lastLastId = list.isNotEmpty ? list.last.id : '';
+
+    final fresh = <Message>[];
+    for (final m in list) {
+      if (_handledIds.add(m.id)) fresh.add(m);
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    for (final m in fresh) {
+      if (!m.isOwn || m.kind != MessageKind.normal || m.isFileOffer) continue;
+      // Only LIVE sends trigger the bot — restored/backlogged history must
+      // never re-bill (the PWA gates its reply flow on the live send path).
+      if (m.isHistorical || nowMs - m.timestamp > 15000) continue;
+      final content = m.content;
+      if (botPMCommandRe.hasMatch(content)) {
+        // Control commands never render as bubbles (PWA intercepts them before
+        // publish); pull the echo back out, then run the command.
+        _app.removeMessage(m.id);
+        unawaited(handleBotPMCommand(content));
+      } else {
+        unawaited(_runBotExchange(m));
+      }
+    }
   }
 
-  void setModelDirect(ProModel? model) =>
-      state = state.copyWith(proModel: model);
+  // --- Intro / welcome ----------------------------------------------------------
 
-  /// Connects a git repo. The PAT lives only in [GitConfig.token] here — wiped
-  /// by [wipeOnPanic].
-  void connectGit(GitConfig config) => state = state.copyWith(git: config);
+  /// Renders the empty-conversation intro when the bot PM opens with no
+  /// messages: the 'Start of private message' system line, the welcome bubble
+  /// (only when the chat was never `?clear`-ed), and a silent credit refresh —
+  /// `loadPMMessages`'s empty branch (pms.js:3065-3082).
+  void ensureIntro() {
+    final list = _thread;
+    if (!_primed) _primeHandled(list);
+    if (list.isNotEmpty) return;
+    _system('Start of private message');
+    if (state.clearedAtSec == 0) {
+      // Stamped one second later so it sorts AFTER the start line (system rows
+      // and ingested messages use separate seq counters; the createdAt second
+      // is the primary order key).
+      _displayBotInfoMessage(botWelcomeText,
+          id: 'nymbot-welcome',
+          createdAtMs: DateTime.now().millisecondsSinceEpoch + 1000);
+    }
+    unawaited(checkBotCredits(display: false));
+  }
 
-  void disconnectGit() => state = state.copyWith(git: null);
+  /// Brand-new users get a proactive PM from Nymbot so a highlighted
+  /// conversation appears in their sidebar from the start. Sent locally, once
+  /// per device — `_maybeSendBotWelcomePM` (pms.js:1840-1879).
+  Future<void> maybeSendBotWelcomePM() async {
+    SharedPreferences p;
+    try {
+      p = await _prefs;
+    } catch (_) {
+      return;
+    }
+    if (p.getString(_kWelcomedPref) == 'true') return;
+    if (_appState.selfPubkey.isEmpty) return;
+    if (_thread.isNotEmpty) {
+      await p.setString(_kWelcomedPref, 'true');
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final nowSec = nowMs ~/ 1000;
+    _app.ingestPMMessage(Message(
+      id: 'nymbot-welcome-$nowSec',
+      author: _botNym,
+      pubkey: kNymbotPubkey,
+      content: botFirstContactText,
+      createdAt: nowSec,
+      ms: nowMs,
+      timestamp: nowSec * 1000,
+      isPM: true,
+      conversationKey: conversationKey,
+      conversationPubkey: kNymbotPubkey,
+      eventKind: 1059,
+      isBot: true,
+      senderVerified: true,
+    ));
+    await p.setString(_kWelcomedPref, 'true');
+  }
+
+  // --- Local controls --------------------------------------------------------
+
+  /// Directly pins/clears the Pro model (the premium picker sheet). Persisted
+  /// like the PWA's `nym_botpm_pro_model`.
+  void setModelDirect(ProModel? model) {
+    state = state.copyWith(proModel: model);
+    _persistProModel(model);
+  }
+
+  /// Connects a git repo (the premium connect modal). The PAT lives only in
+  /// [GitConfig.token] + prefs here — wiped by [wipeOnPanic].
+  void connectGit(GitConfig config) {
+    state = state.copyWith(git: config);
+    _persistGit(config);
+  }
+
+  void disconnectGit() {
+    state = state.copyWith(git: null);
+    _persistGit(null);
+  }
 
   /// Panic Mode hook: wipe the on-device PAT + git config.
-  void wipeOnPanic() => state = state.copyWith(git: null);
-
-  void setBalance(BotBalance b) => state = state.copyWith(balance: b);
-
-  /// `?clear` — wipes the local chat history and starts fresh (PWA
-  /// `_clearBotPMHistory`, pms.js:1894). Does not touch credits or the pinned
-  /// model.
-  void clearHistory() => state = state.copyWith(messages: const []);
-
-  /// Appends a local, non-billed Nymbot info message — the in-chat equivalent of
-  /// the PWA's `displaySystemMessage` for command usage / errors / confirmations
-  /// (e.g. the `?transfer` and `?gift` usage and result lines). No network.
-  void addBotInfo(String text) {
-    final now = DateTime.now();
-    state = state.copyWith(
-      messages: [
-        ...state.messages,
-        BotChatMessage(
-          id: 'sys_${now.microsecondsSinceEpoch}',
-          text: text,
-          fromUser: false,
-          timestamp: now,
-        ),
-      ],
-    );
+  void wipeOnPanic() {
+    state = state.copyWith(git: null);
+    _persistGit(null);
   }
 
-  // --- Network ---------------------------------------------------------------
+  void setBalance(BotBalance b) =>
+      state = state.copyWith(balance: b, balanceKnown: true);
 
-  /// Sends a private chat message and appends the reply (with reasoning split
-  /// out). Returns the reply, or null if not bound / on error (the error is also
-  /// reflected as a failed message in [state]).
-  Future<BotReply?> send(String text, {String? eventId, bool fresh = false}) async {
-    if (_pubkey == null || text.trim().isEmpty) return null;
+  // --- Command dispatch (the PWA `_handleBotPM` command branches) -------------
 
-    final now = DateTime.now();
-    final userMsg = BotChatMessage(
-      id: 'u_${now.microsecondsSinceEpoch}',
-      text: text,
-      fromUser: true,
-      timestamp: now,
-    );
-    final pendingId = 'b_${now.microsecondsSinceEpoch}';
-    final pendingMsg = BotChatMessage(
-      id: pendingId,
-      text: '',
-      fromUser: false,
-      timestamp: now,
-      pending: true,
-      proModel: state.proModel?.key,
-    );
-    state = state.copyWith(
-      messages: [...state.messages, userMsg, pendingMsg],
-      sending: true,
-    );
+  /// Executes a `?` control command typed in the bot PM. On-device only — never
+  /// published, never billed (pms.js:2393-2445).
+  Future<void> handleBotPMCommand(String content) async {
+    final trimmed = content.trim();
+    _markBotPMReceipts('delivered');
+    _markBotPMReceipts('read');
+    if (RegExp(r'^\?(help|commands)\b', caseSensitive: false)
+        .hasMatch(trimmed)) {
+      _displayBotPmHelp();
+      return;
+    }
+    if (RegExp(r'^\?balance\b', caseSensitive: false).hasMatch(trimmed)) {
+      await checkBotCredits(display: true);
+      return;
+    }
+    if (RegExp(r'^\?buy\b', caseSensitive: false).hasMatch(trimmed)) {
+      _ref.read(botBuyRequestProvider.notifier).request(
+          state.isPro ? CreditTier.pro : CreditTier.standard);
+      return;
+    }
+    if (RegExp(r'^\?model\b', caseSensitive: false).hasMatch(trimmed)) {
+      handleModelCommand(trimmed);
+      return;
+    }
+    if (RegExp(r'^\?clear\b', caseSensitive: false).hasMatch(trimmed)) {
+      await clearBotPMHistory();
+      return;
+    }
+    if (RegExp(r'^\?transfer\b', caseSensitive: false).hasMatch(trimmed)) {
+      await handleTransferCommand(trimmed);
+      return;
+    }
+    if (RegExp(r'^\?gift\b', caseSensitive: false).hasMatch(trimmed)) {
+      _handleGiftCommand(trimmed);
+      return;
+    }
+    if (RegExp(r'^\?(github|git)\b', caseSensitive: false).hasMatch(trimmed)) {
+      await handleGitCommand(trimmed);
+      return;
+    }
+  }
 
+  /// Sends one user message from the bot-chat composer: control commands run
+  /// on-device (no bubble); everything else lands in the canonical PM store as
+  /// an own message and is routed to the worker. Mirrors `sendPM`'s bot branch
+  /// (pms.js:1579-1600).
+  ///
+  /// CROSS-FILE NEED: the PWA also publishes the user message as a real NIP-17
+  /// PM to the bot pubkey before calling the worker (multi-device thread).
+  /// Publishing is owned by NostrController — see handoffs.
+  Future<void> sendUserBotPM(String content) async {
+    final trimmed = content.trim();
+    if (trimmed.isEmpty) return;
+    if (botPMCommandRe.hasMatch(trimmed)) {
+      await handleBotPMCommand(trimmed);
+      return;
+    }
+    final app = _appState;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final msg = Message(
+      id: 'botpm-own-$nowMs-${_infoSeq++}',
+      author: app.selfNym,
+      pubkey: app.selfPubkey,
+      content: content,
+      createdAt: nowMs ~/ 1000,
+      ms: nowMs,
+      timestamp: nowMs,
+      isOwn: true,
+      isPM: true,
+      conversationKey: conversationKey,
+      conversationPubkey: kNymbotPubkey,
+      eventKind: 1059,
+      senderVerified: true,
+      nymMessageId: PmLogic.generateSharedEventId(),
+      deliveryStatus: DeliveryStatus.sent,
+    );
+    _handledIds.add(msg.id);
+    _app.ingestPMMessage(msg);
+    await _runBotExchange(msg);
+  }
+
+  // --- Network -----------------------------------------------------------------
+
+  /// The paid request/reply round-trip for one user message ([m] already in the
+  /// canonical store): delivered receipt → typing 'thinking' strip → worker call
+  /// → read receipt → bot reply bubble (+ cost / low-balance system lines) —
+  /// `_handleBotPM`'s paid branch (pms.js:2445-2519).
+  Future<void> _runBotExchange(Message m) async {
+    if (_pubkey == null) {
+      _system(
+          'Nymbot: could not publish your encrypted message. Please try again.');
+      return;
+    }
+    _markBotPMReceipts('delivered');
+    _setBotTyping(true);
+    state = state.copyWith(sending: true);
     try {
+      // A leading `!` marks a one-off "fresh" message that ignores history
+      // (pms.js:2450 `isFresh`).
+      final fresh = RegExp(r'^\s*!\s*\S').hasMatch(m.content);
+      var text = m.content;
+      if (fresh) text = text.trimLeft().substring(1).trim();
+      final pro = state.proModel;
+      final git = state.git;
       final reply = await _service.sendBotMessage(
         text,
         pubkey: _pubkey!,
         auth: _authFor('pm'),
-        eventId: eventId,
-        proModel: state.proModel?.key,
+        eventId: m.nymMessageId,
+        proModel: pro?.key,
         fresh: fresh,
-        git: state.git,
+        // Repo mode rides only on Pro replies with a connected repo
+        // (pms.js:2455-2466).
+        git: (pro != null && git != null && git.hasRepo) ? git : null,
       );
-      _replacePending(
-        pendingId,
-        (m) => m.copyWith(
-          text: reply.text,
-          reasoning: reply.reasoning,
-          pending: false,
-          taskType: reply.taskType,
-          cost: reply.cost,
-        ),
-      );
+      if (!mounted) return;
+      _setBotTyping(false);
+      _markBotPMReceipts('read');
+
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _app.ingestPMMessage(Message(
+        id: 'nymbot-reply-$nowMs-${_infoSeq++}',
+        author: _botNym,
+        pubkey: kNymbotPubkey,
+        content: reply.text,
+        createdAt: nowMs ~/ 1000,
+        ms: nowMs,
+        timestamp: nowMs,
+        isPM: true,
+        conversationKey: conversationKey,
+        conversationPubkey: kNymbotPubkey,
+        eventKind: 1059,
+        isBot: true,
+        senderVerified: true,
+        thinking: reply.reasoning,
+      ));
+
       if (reply.balance != null) {
-        // Reflect the post-charge balance on whichever ledger was used.
-        final b = state.balance;
-        state = state.copyWith(
-          balance: reply.pro
-              ? BotBalance(
-                  balance: b.balance,
-                  totalPurchased: b.totalPurchased,
-                  totalUsed: b.totalUsed,
-                  proBalance: reply.balance!,
-                  proTotalPurchased: b.proTotalPurchased,
-                  proTotalUsed: b.proTotalUsed,
-                )
-              : BotBalance(
-                  balance: reply.balance!,
-                  totalPurchased: b.totalPurchased,
-                  totalUsed: b.totalUsed,
-                  proBalance: b.proBalance,
-                  proTotalPurchased: b.proTotalPurchased,
-                  proTotalUsed: b.proTotalUsed,
-                ),
-        );
+        _applyLedgerBalance(reply.balance!, pro: reply.pro);
+        // Cost notices for heavy replies (pms.js:2499-2512).
+        final cost = reply.cost ?? 0;
+        if (reply.git && cost > 0) {
+          final calls = reply.modelCalls ?? 0;
+          _system('Repo task used $cost Pro credit${cost == 1 ? '' : 's'}'
+              '${calls > 1 ? ' ($calls model calls)' : ''}. '
+              'Pro balance: ${reply.balance}.');
+        } else if (reply.pro && cost > 0) {
+          final sel = state.proModel;
+          if (sel != null && cost > sel.baseCredits) {
+            _system('Long reply used $cost Pro credits (scales with length). '
+                'Pro balance: ${reply.balance}.');
+          }
+        } else if (!reply.pro && cost > 1) {
+          _system('${reply.taskType ?? 'Heavy'} reply used $cost credits. '
+              'Balance: ${reply.balance}.');
+        }
+        if (reply.lowBalance) {
+          _system(reply.pro
+              ? 'Nymbot Pro credits running low: ${reply.balance} left. '
+                  'Type ?buy and switch to Pro to top up.'
+              : 'Nymbot credits running low: ${reply.balance} '
+                  'credit${reply.balance == 1 ? '' : 's'} left. '
+                  'Type ?buy to top up.');
+        }
       }
-      state = state.copyWith(sending: false);
-      return reply;
     } on NymbotInsufficientCredits catch (e) {
-      _replacePending(
-        pendingId,
-        (m) => m.copyWith(
-          text: e.message,
-          pending: false,
-          error: true,
-        ),
-      );
-      state = state.copyWith(sending: false);
-      return null;
+      _setBotTyping(false);
+      _markBotPMReceipts('read');
+      // Out of credits → neutral system line + the buy modal, never a red
+      // bubble (pms.js:2470-2483).
+      final custom =
+          e.message.isNotEmpty && e.message != 'Insufficient credits';
+      _system(custom
+          ? e.message
+          : (e.pro
+              ? "You're out of Nymbot Pro credits (${e.balance} left). "
+                  'Type ?buy and switch to Pro, or ?model off for standard '
+                  'replies.'
+              : "You're out of Nymbot credits (${e.balance} left). "
+                  'Zap Nymbot or type ?buy to purchase more.'));
+      _applyLedgerBalance(e.balance, pro: e.pro);
+      _ref.read(botBuyRequestProvider.notifier).request(
+          e.pro ? CreditTier.pro : CreditTier.standard);
+    } on NymbotException catch (e) {
+      _setBotTyping(false);
+      // `status >= 400 || data.error` → 'Nymbot: <error|request failed>'
+      // (pms.js:2484-2487).
+      String detail = 'request failed';
+      final body = e.body;
+      if (body != null && body.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(body);
+          if (decoded is Map && decoded['error'] is String) {
+            detail = decoded['error'] as String;
+          }
+        } catch (_) {}
+      }
+      _system('Nymbot: $detail');
     } catch (_) {
-      // PWA surfaces failures as a system line ("Failed to reach Nymbot…"),
-      // not a tappable retry affordance — so don't promise a retry we can't run.
-      _replacePending(
-        pendingId,
-        (m) => m.copyWith(
-          text: 'Failed to reach Nymbot. Please try again.',
-          pending: false,
-          error: true,
-        ),
-      );
-      state = state.copyWith(sending: false);
-      return null;
+      _setBotTyping(false);
+      _system('Nymbot is unavailable right now. Please try again.');
+    } finally {
+      if (mounted) state = state.copyWith(sending: false);
     }
   }
 
-  /// Refreshes the credit balance from the worker.
-  Future<void> refreshBalance() async {
+  void _applyLedgerBalance(int balance, {required bool pro}) {
+    final b = state.balance;
+    state = state.copyWith(
+      balanceKnown: true,
+      balance: pro
+          ? BotBalance(
+              balance: b.balance,
+              totalPurchased: b.totalPurchased,
+              totalUsed: b.totalUsed,
+              proBalance: balance,
+              proTotalPurchased: b.proTotalPurchased,
+              proTotalUsed: b.proTotalUsed,
+            )
+          : BotBalance(
+              balance: balance,
+              totalPurchased: b.totalPurchased,
+              totalUsed: b.totalUsed,
+              proBalance: b.proBalance,
+              proTotalPurchased: b.proTotalPurchased,
+              proTotalUsed: b.proTotalUsed,
+            ),
+    );
+  }
+
+  /// Refreshes the credit balance from the worker; with [display] it also
+  /// prints the balance as a bot info bubble — `_checkBotCredits`
+  /// (pms.js:2525-2548).
+  Future<void> checkBotCredits({required bool display}) async {
     if (_pubkey == null) return;
     try {
-      final b = await _service.balance(pubkey: _pubkey!, auth: _authFor('balance'));
-      state = state.copyWith(balance: b);
+      final b =
+          await _service.balance(pubkey: _pubkey!, auth: _authFor('balance'));
+      if (!mounted) return;
+      state = state.copyWith(balance: b, balanceKnown: true);
+      if (display) {
+        final std = b.balance;
+        final pro = b.proBalance;
+        _displayBotInfoMessage(
+            'Your balance: **$std** standard credit${std == 1 ? '' : 's'} · '
+            '**$pro** Pro credit${pro == 1 ? '' : 's'}.'
+            '${std <= 0 && pro <= 0 ? ' Type `?buy` to purchase more.' : ''}');
+      }
+    } on NymbotException {
+      if (display) _system('Nymbot: could not check balance');
     } catch (_) {
-      // Lazy/best-effort; leave existing balance in place.
+      if (display) {
+        _system('Could not reach Nymbot to check your balance.');
+      }
     }
   }
+
+  /// Back-compat convenience for the screen's open-time refresh.
+  Future<void> refreshBalance() => checkBotCredits(display: false);
+
+  // --- ?model (pms.js `_handleBotModelCommand`, :2119-2145) -------------------
+
+  void handleModelCommand(String trimmed) {
+    final arg = trimmed
+        .replaceFirst(RegExp(r'^\?model\b', caseSensitive: false), '')
+        .trim()
+        .toLowerCase();
+    final current = state.proModel;
+    if (arg.isEmpty) {
+      final lines = [
+        for (final m in kProModels)
+          '• `${m.key}`${current?.key == m.key ? ' ✓' : ''} — ${m.label}, ${m.priceLabel}',
+      ];
+      _displayBotInfoMessage([
+        if (current != null)
+          'Nymbot Pro model: **${current.label}** (${current.priceLabel}).'
+        else
+          'Nymbot Pro is off — replies use standard multi-model routing and standard credits.',
+        ...lines,
+        'Short replies cost the base price; long replies scale with length. The maximum is reserved from your balance per message and only the actual cost is charged.',
+        'Use `?model <name>` to select one, or `?model off` for standard routing. Pro credits: `?buy` → Pro.',
+      ].join('\n'));
+      return;
+    }
+    if (arg == 'off' || arg == 'standard' || arg == 'none') {
+      setModelDirect(null);
+      _system(
+          'Nymbot Pro off — back to standard multi-model routing (standard credits).');
+      return;
+    }
+    ProModel? picked;
+    for (final m in kProModels) {
+      if (m.key == arg) picked = m;
+    }
+    if (picked == null) {
+      // Unknown model: KEEP the current pin (pms.js:2139-2142).
+      _system(
+          'Unknown model "$arg". Type ?model to see the available Pro models.');
+      return;
+    }
+    setModelDirect(picked);
+    _system('Nymbot Pro model set to ${picked.label} — every reply now uses '
+        'it (${picked.priceLabel}). Type ?model off to switch back.');
+  }
+
+  // --- ?clear (pms.js `_clearBotPMHistory`, :1894-1917) -----------------------
+
+  Future<void> clearBotPMHistory() async {
+    _setClearedAt(DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    // Best-effort server-side context wipe (`_clearBotServerThread`). The D1
+    // PM-archive purge (`_purgeBotPMArchive`) is owned by the storage-sync
+    // slice — see handoffs.
+    if (_pubkey != null) {
+      unawaited(_service
+          .clearHistory(pubkey: _pubkey!, auth: _authFor('clear-history'))
+          .catchError((_) => <String, dynamic>{}));
+    }
+    // Wipe the local thread from the canonical store.
+    final ids = [for (final m in _thread) m.id];
+    for (final id in ids) {
+      _app.removeMessage(id);
+    }
+    _handledIds.clear();
+    _lastLen = 0;
+    _lastLastId = '';
+    // Re-render the empty conversation: start line, NO welcome (clearedAt),
+    // then the confirmation (pms.js:1908-1916).
+    _system('Start of private message');
+    _system('Nymbot chat cleared — starting fresh. Earlier messages are no '
+        'longer used as context.');
+  }
+
+  // --- ?help (pms.js `_displayBotPmHelp`, :1733-1770) -------------------------
+
+  void _displayBotPmHelp() {
+    final proModel = state.proModel;
+    final git = state.git;
+    final modelLines = [
+      for (final m in kProModels) '  `${m.key}` — ${m.label}, ${m.priceLabel}',
+    ];
+    final statusBits = <String>[];
+    if (state.balanceKnown) {
+      final std = state.balance.balance;
+      final pro = state.balance.proBalance;
+      statusBits.add('$std standard credit${std == 1 ? '' : 's'}');
+      statusBits.add('$pro Pro credit${pro == 1 ? '' : 's'}');
+    }
+    statusBits.add(proModel != null
+        ? 'Pro model: ${proModel.label}'
+        : 'Pro model: off (standard routing)');
+    if (git != null && git.hasRepo) {
+      statusBits.add(
+          'repo: ${git.repo}${git.allowWrites ? ' (writes on)' : ' (read-only)'}');
+    }
+    _displayBotInfoMessage([
+      '**📖 Nymbot premium guide**',
+      'You right now: ${statusBits.join(' · ')}.',
+      '',
+      '**1. Standard premium (this chat)**',
+      'Each message is auto-routed to the best AI model for its task. Replies cost **standard credits** (10 sats each, bulk bonuses from 500 sats): 1 credit for general chat, creative writing, or translation; 2 credits for coding or reasoning/math.',
+      '',
+      '**2. Nymbot Pro**',
+      'Pin every reply to a specific frontier model instead of auto-routing. Pro replies spend separate **Pro credits** (100 sats each, bulk bonuses from 5K sats):',
+      ...modelLines,
+      'Pick with `?model <name>` (e.g. `?model claude-opus`), back to standard with `?model off`. Buy Pro credits via `?buy` → Pro switch.',
+      '',
+      '**3. Git repos (Pro)**',
+      'Connect a repository — GitHub, GitLab, or Gitea/Forgejo (incl. Codeberg & self-hosted) — and Pro replies become a coding agent over your real code: it lists, reads, and searches files, and with writes enabled it commits to a branch (or directly) and opens pull/merge requests.',
+      'Setup: `?git provider github|gitlab|gitea [host]` → `?git token <pat>` → `?git repos` → `?git repo owner/name [branch]` → optionally `?git writes on`. Type `?git` anytime for status.',
+      "Repo tasks use up to 6 model calls, each at the model's Pro credit price — only calls actually used are charged. Your token stays on this device, is never published to relays, and is never stored server-side.",
+      '',
+      '**4. Credits**',
+      '`?balance` shows both balances · `?buy` purchases over Lightning (Standard/Pro switch) · `?gift @nym#xxxx` gifts credits · `?transfer @nym#xxxx confirm` moves your ENTIRE balance (both pools) to another pubkey.',
+      'Credits are tied to your nym — save your nsec (sidebar → your nym → Reveal private key) so they survive a new session.',
+      '',
+      '**5. Chat tricks**',
+      'Start a message with `!` for a one-off answer that ignores history · `?clear` wipes the conversation · quote-reply any message to ask a follow-up about it.',
+      '',
+      'This guide is free — type `?help` anytime.',
+    ].join('\n'), id: 'nymbot-help-${DateTime.now().millisecondsSinceEpoch}');
+  }
+
+  // --- ?gift (pms.js `_handleBotPM` ?gift branch, :2426-2441) -----------------
+
+  void _handleGiftCommand(String trimmed) {
+    final arg = trimmed
+        .replaceFirst(RegExp(r'^\?gift\b', caseSensitive: false), '')
+        .trim()
+        .replaceFirst(RegExp(r'^@'), '');
+    if (arg.isEmpty) {
+      _system('Usage: ?gift @nym#xxxx — gift Nymbot credits to another user.');
+      return;
+    }
+    final giftPubkey = resolvePubkeyFromNym(arg);
+    if (giftPubkey == null) {
+      _system('Could not find user "$arg". Try ?gift with their full nym '
+          '(e.g. ?gift @cyber_wolf#a3f2).');
+      return;
+    }
+    final giftNym =
+        stripPubkeySuffix(_appState.users[giftPubkey]?.nym ?? giftPubkey.substring(0, 8));
+    // Open the gift-credit modal prefilled with the recipient
+    // (`showBotCreditsModal({pubkey, nym})`) via the shared mailbox the shell
+    // listens to.
+    _ref
+        .read(giftCreditsRequestProvider.notifier)
+        .request(pubkey: giftPubkey, nym: giftNym);
+  }
+
+  // --- ?transfer (pms.js `_handleBotTransferCommand`, :1919-1976) -------------
+
+  Future<void> handleTransferCommand(String trimmed) async {
+    final raw = trimmed
+        .replaceFirst(RegExp(r'^\?transfer\b', caseSensitive: false), '')
+        .trim();
+    final parts = raw.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    final confirming =
+        parts.isNotEmpty && parts.last.toLowerCase() == 'confirm';
+    final targetArg = (confirming ? parts.sublist(0, parts.length - 1) : parts)
+        .join(' ')
+        .trim()
+        .replaceFirst(RegExp(r'^@'), '');
+    if (targetArg.isEmpty) {
+      _system('Usage: ?transfer @nym#xxxx or ?transfer <npub/hex pubkey> — '
+          'moves your entire Nymbot credit balance to another pubkey. Append '
+          '"confirm" to execute (e.g. ?transfer @friend#a1b2 confirm).');
+      return;
+    }
+    String? targetPubkey;
+    if (RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(targetArg)) {
+      targetPubkey = targetArg.toLowerCase();
+    } else if (RegExp(r'^npub1', caseSensitive: false).hasMatch(targetArg)) {
+      try {
+        targetPubkey = decodeNpub(targetArg).toLowerCase();
+      } catch (_) {}
+    }
+    targetPubkey ??= resolvePubkeyFromNym(targetArg);
+    if (targetPubkey == null) {
+      _system('Could not resolve "$targetArg". Try ?transfer with a full nym '
+          '(e.g. ?transfer @friend#a1b2 confirm), an npub, or a 64-char hex '
+          'pubkey.');
+      return;
+    }
+    if (targetPubkey == _appState.selfPubkey) {
+      _system("You can't transfer credits to your own pubkey.");
+      return;
+    }
+    final targetNym = stripPubkeySuffix(
+        _appState.users[targetPubkey]?.nym ?? targetPubkey.substring(0, 8));
+
+    if (!confirming) {
+      await checkBotCredits(display: false);
+      final have = state.balance.balance;
+      final havePro = state.balance.proBalance;
+      if (have <= 0 && havePro <= 0) {
+        _system('You have no Nymbot credits to transfer.');
+        return;
+      }
+      final segs = <String>[];
+      if (have > 0) segs.add('$have credit${have == 1 ? '' : 's'}');
+      if (havePro > 0) {
+        segs.add('$havePro Pro credit${havePro == 1 ? '' : 's'}');
+      }
+      _system('Transfer ALL ${segs.join(' and ')} to @$targetNym? This '
+          'empties your balance. To confirm, type: ?transfer @$targetNym'
+          '#${getPubkeySuffix(targetPubkey)} confirm');
+      return;
+    }
+
+    try {
+      final res = await transferCredits(targetPubkey);
+      if (res == null || res['error'] != null) {
+        _system('Transfer failed: ${res?['error'] ?? 'request failed'}');
+        return;
+      }
+      final moved = <String>[];
+      final transferred = (res['transferred'] as num?)?.toInt() ?? 0;
+      final proTransferred = (res['proTransferred'] as num?)?.toInt() ?? 0;
+      if (transferred > 0) {
+        moved.add('$transferred credit${transferred == 1 ? '' : 's'}');
+      }
+      if (proTransferred > 0) {
+        moved.add('$proTransferred Pro credit${proTransferred == 1 ? '' : 's'}');
+      }
+      _system('Transferred ${moved.isEmpty ? '0 credits' : moved.join(' and ')} '
+          'to @$targetNym. Your balance is now 0.');
+    } catch (_) {
+      _system('Transfer failed. Please try again.');
+    }
+  }
+
+  /// Resolves a nym argument to a pubkey, mirroring the PWA's
+  /// `resolvePubkeyFromNym` priority: exact `base#suffix` first, then a bare
+  /// base-nym match (case-insensitive). Returns null when nothing matches.
+  String? resolvePubkeyFromNym(String arg) {
+    final raw = arg.trim().replaceFirst(RegExp(r'^@'), '');
+    if (raw.isEmpty) return null;
+    if (RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(raw)) {
+      return raw.toLowerCase();
+    }
+    final users = _appState.users;
+    final needle = raw.toLowerCase();
+    for (final entry in users.entries) {
+      final full =
+          '${stripPubkeySuffix(entry.value.nym)}#${getPubkeySuffix(entry.key)}';
+      if (full.toLowerCase() == needle) return entry.key;
+    }
+    for (final entry in users.entries) {
+      if (stripPubkeySuffix(entry.value.nym).toLowerCase() == needle) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  // --- ?git (pms.js `_handleBotGitCommand`, :2224-2348) -----------------------
+
+  Future<void> handleGitCommand(String trimmed) async {
+    final parts = trimmed
+        .replaceFirst(RegExp(r'^\?(github|git)\b', caseSensitive: false), '')
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .toList();
+    final cmd = (parts.isNotEmpty ? parts[0] : 'status').toLowerCase();
+    var cfg = state.git ??
+        const GitConfig(provider: GitProvider.github, host: 'github.com');
+    final provInfo = cfg.provider;
+
+    if (cmd == 'provider') {
+      final name = (parts.length > 1 ? parts[1] : '').toLowerCase();
+      GitProvider? provider;
+      for (final p in GitProvider.values) {
+        if (p.wire == name) provider = p;
+      }
+      if (provider == null) {
+        _system('Usage: ?git provider github|gitlab|gitea [host] — e.g. '
+            '?git provider gitlab, ?git provider gitea codeberg.org, or a '
+            'self-hosted domain like ?git provider gitlab git.mycompany.com. '
+            'Switching providers clears the saved token and repo.');
+        return;
+      }
+      var host = (parts.length > 2 ? parts[2] : '').toLowerCase();
+      if (host.isEmpty) host = provider.defaultHost;
+      if (!RegExp(r'^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$').hasMatch(host)) {
+        _system('Invalid host name.');
+        return;
+      }
+      // Switching providers clears the saved token and repo (fresh config).
+      connectGit(GitConfig(provider: provider, host: host));
+      _system('Provider set to ${provider.label} at $host. Now add a token: '
+          '?git token <${provider.tokenHint.split(' (').first}>.');
+      return;
+    }
+
+    if (cmd == 'token') {
+      final token = parts.length > 1 ? parts[1] : '';
+      if (!NymbotService.gitTokenValid(cfg, token)) {
+        _system("That doesn't look like a valid ${provInfo.label} token. "
+            'Create a ${provInfo.tokenHint} scoped to just the repos you want '
+            'Nymbot to use, then run ?git token <token>.');
+        return;
+      }
+      cfg = cfg.copyWith(token: token, login: null);
+      connectGit(cfg);
+      final who = await _service.gitApi(cfg, NymbotService.gitUserPath());
+      final login = NymbotService.gitUserLogin(cfg, who.data);
+      if (who.ok && login.isNotEmpty) {
+        cfg = cfg.copyWith(login: login);
+        connectGit(cfg);
+        _system('${provInfo.label} token saved for @$login (stored only on '
+            'this device). Next: ?git repos to list repos, then '
+            '?git repo owner/name.');
+      } else {
+        _system('${provInfo.label} token saved, but it could not be verified'
+            '${who.status != 0 ? ' (HTTP ${who.status})' : ''}. Check that '
+            "it's valid and has repo access.");
+      }
+      return;
+    }
+
+    if (cmd == 'repos') {
+      if (!cfg.hasToken) {
+        _system(
+            'No ${provInfo.label} token yet — run ?git token <token> first.');
+        return;
+      }
+      final res = await _service.gitApi(cfg, NymbotService.gitReposPath(cfg));
+      final data = res.data;
+      if (!res.ok || data is! List) {
+        _system('Could not list repos (HTTP '
+            '${res.status != 0 ? res.status : '?'}). Check the token with '
+            '?git status.');
+        return;
+      }
+      if (data.isEmpty) {
+        _system("The token can't see any repos. Grant it repository access "
+            'on ${provInfo.label}.');
+        return;
+      }
+      final lines = [
+        for (final r in data)
+          '• `${NymbotService.gitRepoFullName(cfg, r)}`'
+              '${(r is Map && (r['private'] == true || r['visibility'] == 'private')) ? ' 🔒' : ''}',
+      ];
+      _displayBotInfoMessage([
+        'Repos this token can access:',
+        ...lines,
+        'Select one with `?git repo owner/name [branch]`.',
+      ].join('\n'));
+      return;
+    }
+
+    if (cmd == 'repo') {
+      if (!cfg.hasToken) {
+        _system(
+            'No ${provInfo.label} token yet — run ?git token <token> first.');
+        return;
+      }
+      final repo = (parts.length > 1 ? parts[1] : '').trim();
+      if (!NymbotService.gitRepoRe(cfg).hasMatch(repo)) {
+        _system('Usage: ?git repo owner/name [branch] (run ?git repos to see '
+            'what the token can access).');
+        return;
+      }
+      final res =
+          await _service.gitApi(cfg, NymbotService.gitRepoPath(cfg, repo));
+      if (!res.ok || res.data == null) {
+        _system("Can't access $repo (HTTP "
+            "${res.status != 0 ? res.status : '?'}). Check the name and the "
+            "token's repo access.");
+        return;
+      }
+      final fullName = NymbotService.gitRepoFullName(cfg, res.data);
+      final branchArg = parts.length > 2 ? parts[2] : '';
+      final branchOk =
+          branchArg.isNotEmpty && RegExp(r'^[\w./-]{1,100}$').hasMatch(branchArg);
+      cfg = cfg.copyWith(
+        repo: fullName.isNotEmpty ? fullName : repo,
+        branch: branchOk ? branchArg : null,
+      );
+      connectGit(cfg);
+      final defaultBranch =
+          (res.data is Map) ? (res.data as Map)['default_branch'] : null;
+      final branchLabel =
+          branchOk ? branchArg : '${defaultBranch ?? 'default'} (default)';
+      _system('Repo connected: ${cfg.repo} on branch $branchLabel, '
+          '${cfg.allowWrites ? 'writes enabled' : 'read-only'}. Every Pro '
+          'reply now works inside this repo.'
+          '${state.proModel == null ? ' ⚠ Pick a Pro model first with ?model — repo mode needs one.' : ''}');
+      return;
+    }
+
+    if (cmd == 'branch') {
+      if (!cfg.hasRepo) {
+        _system('Select a repo first: ?git repo owner/name.');
+        return;
+      }
+      final branch = (parts.length > 1 ? parts[1] : '').trim();
+      if (branch.isNotEmpty && !RegExp(r'^[\w./-]{1,100}$').hasMatch(branch)) {
+        _system('Invalid branch name.');
+        return;
+      }
+      cfg = cfg.copyWith(branch: branch.isEmpty ? null : branch);
+      connectGit(cfg);
+      _system(branch.isNotEmpty
+          ? 'Working branch set to $branch.'
+          : 'Working branch reset to the repo default.');
+      return;
+    }
+
+    if (cmd == 'writes') {
+      if (!cfg.hasRepo) {
+        _system('Select a repo first: ?git repo owner/name.');
+        return;
+      }
+      final arg = (parts.length > 1 ? parts[1] : '').toLowerCase();
+      if (arg != 'on' && arg != 'off') {
+        _system('Usage: ?git writes on or ?git writes off.');
+        return;
+      }
+      cfg = cfg.copyWith(allowWrites: arg == 'on');
+      connectGit(cfg);
+      _system(cfg.allowWrites
+          ? 'Writes enabled — Nymbot can now commit files, create branches, '
+              'and open pull/merge requests in the connected repo. Make sure '
+              'the token has content and pull-request write access.'
+          : 'Writes disabled — Nymbot is back to read-only repo access.');
+      return;
+    }
+
+    if (cmd == 'off') {
+      cfg = cfg.copyWith(repo: '', branch: null, allowWrites: false);
+      if (cfg.hasToken) {
+        connectGit(cfg);
+      } else {
+        disconnectGit();
+      }
+      _system('Repo disconnected — Pro replies are back to normal chat. The '
+          'token is still saved; ?git disconnect removes it too.');
+      return;
+    }
+
+    if (cmd == 'disconnect') {
+      disconnectGit();
+      _system('Git provider disconnected — token and repo selection removed '
+          'from this device.');
+      return;
+    }
+
+    // Bare `?git` (or unknown subcommand) → the status card (pms.js:2339-2348).
+    final proModel = state.proModel;
+    _displayBotInfoMessage([
+      '**Nymbot × Git** — let Pro replies work inside one of your repos, '
+          'Claude Code-style: it reads your actual files and, if you allow '
+          'writes, commits to a branch (or directly) and opens pull/merge '
+          'requests. Supports GitHub, GitLab, and Gitea/Forgejo (incl. '
+          'Codeberg and self-hosted).',
+      'Provider: **${provInfo.label}** at '
+          '**${cfg.host.isNotEmpty ? cfg.host : provInfo.defaultHost}** — '
+          'change with `?git provider github|gitlab|gitea [host]`',
+      'Token: ${cfg.hasToken ? (cfg.login != null ? 'connected as **@${cfg.login}**' : 'saved') : 'not set — `?git token <token>` (${provInfo.tokenHint})'}',
+      'Repo: ${cfg.hasRepo ? '**${cfg.repo}**${cfg.branch != null && cfg.branch!.isNotEmpty ? ' @ ${cfg.branch}' : ''} (${cfg.allowWrites ? 'writes enabled' : 'read-only'})' : 'none — `?git repos` then `?git repo owner/name`'}',
+      'Pro model: ${proModel != null ? proModel.label : 'none — repo mode requires one (`?model`)'}',
+      '',
+      'Commands: `?git provider …` · `?git token <pat>` · `?git repos` · '
+          '`?git repo owner/name [branch]` · `?git branch [name]` · '
+          '`?git writes on|off` · `?git off` · `?git disconnect`',
+      'Pricing: repo tasks run as an agent with up to 6 model calls per '
+          'message${proModel != null ? ' (${proModel.label}: ${proModel.priceLabel} per call)' : ''} '
+          "— the worst case is reserved from your balance, but you're only "
+          'charged for the calls and reply length actually used.',
+      'Privacy: the token stays on this device (cleared by Panic Mode), is '
+          'sent only to the Nymbot worker with each repo message, and is '
+          'never stored server-side or published to relays. Use a token '
+          'scoped to just the repos you need — read-only unless you enable '
+          'writes.',
+    ].join('\n'));
+  }
+
+  // --- Purchases ----------------------------------------------------------------
 
   /// Creates a buy invoice (Standard/Pro). When [recipientPubkey] is set the
   /// credits are gifted to that user (PWA `generateBotCreditInvoice` with
@@ -441,23 +1320,18 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
     return res;
   }
-
-  void _replacePending(
-    String id,
-    BotChatMessage Function(BotChatMessage) update,
-  ) {
-    state = state.copyWith(
-      messages: [
-        for (final m in state.messages) m.id == id ? update(m) : m,
-      ],
-    );
-  }
 }
 
-/// The private Nymbot chat controller.
+/// The private Nymbot chat engine. Also observes the canonical PM store so a
+/// message sent to the bot from ANY surface (bot screen or the canonical PM
+/// composer) triggers the paid request/reply flow.
 final botChatControllerProvider =
     StateNotifierProvider<BotChatController, BotChatState>((ref) {
-  return BotChatController(ref.watch(nymbotServiceProvider));
+  final controller = BotChatController(ref, ref.watch(nymbotServiceProvider));
+  ref.listen<AppState>(appStateProvider, (prev, next) {
+    controller.onAppState(next);
+  });
+  return controller;
 });
 
 /// Convenience: the catalogue of public `?` commands (for help/autocomplete UI).
@@ -465,3 +1339,47 @@ final botCommandsProvider = Provider<List<BotCommand>>((_) => kBotCommands);
 
 /// Convenience: the Pro model list (for the `?model` picker).
 final proModelsProvider = Provider<List<ProModel>>((_) => kProModels);
+
+// =============================================================================
+// Welcome copy (pms.js `_botWelcomeHtml` :1706-1729 / `_botFirstContactText`
+// :1822-1838) — verbatim, with the HTML `<strong>`/`<code>` markers as the
+// markdown the shared formatter renders.
+// =============================================================================
+
+/// The first-person introduction rendered as a bot bubble when a user first
+/// opens the premium chat.
+const String botWelcomeText =
+    "Hey, I'm **Nymbot** 👋 — your private, end-to-end encrypted 1:1 AI assistant.\n"
+    '\n'
+    "I'm smarter than the free public-channel bot. I read each message, figure out the type of task (coding, reasoning/math, creative writing, translation, or general chat) and route it to the best AI model for the job — so my answers are sharper.\n"
+    '\n'
+    "**Here's how to get the most out of me:**\n"
+    '• `?help` — full guide to premium vs Pro, the git repo integration, and every command (free).\n'
+    '• Just type normally — I use our whole conversation as context.\n'
+    '• Start a message with `!` to get a one-off answer that ignores all earlier chat history (e.g. `!what is 2+2`).\n'
+    "• Quote-reply any message to ask a follow-up about it — I'll see what you're replying to.\n"
+    '• `?clear` — wipe this chat and start fresh.\n'
+    '• `?balance` — check your credit balance (also shown in the header).\n'
+    '• `?buy` — purchase more credits. `?gift @nym#xxxx` — gift credits to someone.\n'
+    '• `?model` — go **Pro**: pick a specific frontier model (Claude Fable 5, Claude Opus/Sonnet/Haiku, GPT-5.1, Codex) for every reply, paid with separate Pro credits.\n'
+    '• `?git` — connect a git repo (GitHub, GitLab, Gitea/Codeberg) so Pro replies read your actual code and can even commit, branch, and open PRs — like a chat-based coding agent.\n'
+    '• `?transfer @nym#xxxx confirm` — move ALL your credits to another pubkey (great for switching nyms).\n'
+    '\n'
+    "**Pricing:** general chat, creative writing, and translation replies cost **1 credit**. Coding and reasoning/math replies cost **2 credits** (they use larger models). Pro replies start at **1–2 Pro credits** and scale with reply length (each model's range is in `?model`). Credits are tied to your nym — save your nsec so you don't lose them.\n"
+    '\n'
+    'So, what can I help you with?';
+
+/// The slightly-edited welcome used for the proactive first-contact PM that
+/// brand-new users receive (a REAL persisted PM in the sidebar thread).
+const String botFirstContactText =
+    "Welcome to **Nymchat** 👋 — I'm **Nymbot**, your built-in AI assistant.\n"
+    '\n'
+    'In any public channel you can ask me anything for **free** — just type `?ask <your question>` or mention `@Nymbot`. Type `?help` in a channel to see everything I can do.\n'
+    '\n'
+    "Right here in our private 1:1 chat is the **premium** tier: it's end-to-end encrypted and I route each message to the best AI model for the job (coding, reasoning/math, creative writing, translation, or general chat). These private replies cost **credits** — general chat, creative writing, and translation cost 1 credit each; coding and reasoning/math cost 2 credits each.\n"
+    '\n'
+    'Want even more power? **Nymbot Pro** lets you pick a specific frontier model — Claude Fable 5, Claude Opus, GPT-5.1, and more — for every reply. Type `?model` to see them; Pro replies use separate Pro credits. Pro can even connect to a git repo (`?git` — GitHub, GitLab, Gitea/Codeberg) to read your code and ship commits or PRs.\n'
+    '\n'
+    'Type `?buy` to get credits (Standard or Pro) and `?balance` to check your balance. Credits are tied to your nym, so save your nsec to keep them. Type `?help` here anytime for the full free guide to premium, Pro, and the git integration.\n'
+    '\n'
+    'So, what can I help you with?';

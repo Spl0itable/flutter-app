@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -57,9 +58,19 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// knows whether opening/closing the drawer is meaningful.
   bool _narrow = false;
 
-  /// Accumulated rightward travel of an in-progress left-edge open-swipe
+  /// The sidebar edge-swipe threshold: a DEDICATED constant, `this.
+  /// swipeThreshold = 50` (app.js:1053-1054) — NOT the user-tunable message
+  /// `settings.swipeThreshold` (default 60, options 40-100).
+  static const double _sidebarSwipeThreshold = 50;
+
+  /// Accumulated rightward travel of an in-progress left-edge swipe
   /// (`setupMobileGestures`, ui-context.js:5-32). Reset at each drag start/end.
   double _edgeSwipeDx = 0;
+
+  /// False once this drag has toggled the drawer (the PWA nulls `swipeStartX`
+  /// after firing so one touch toggles at most once) or, on the open-drawer
+  /// surface, when the touch did not start within 50px of the left edge.
+  bool _edgeSwipeArmed = false;
 
   @override
   void initState() {
@@ -132,6 +143,25 @@ class HomeShellState extends ConsumerState<HomeShell>
     _drawerStateBeforeTour = null;
     if (prev == null || !mounted) return;
     if (prev != _drawerOpen) setState(() => _drawerOpen = prev);
+  }
+
+  // --- Left-edge swipe (`setupMobileGestures`, ui-context.js:5-32) ----------
+
+  void _edgeSwipeStart(bool armed) {
+    _edgeSwipeDx = 0;
+    _edgeSwipeArmed = armed;
+  }
+
+  void _edgeSwipeUpdate(DragUpdateDetails d) {
+    if (!_edgeSwipeArmed) return;
+    _edgeSwipeDx += d.delta.dx;
+    // `swipeDistance > this.swipeThreshold` → `toggleSidebar()`, then tracking
+    // stops for the rest of the touch (ui-context.js:16-25). Toggle, not open:
+    // the same left-edge right-swipe CLOSES an open drawer.
+    if (_edgeSwipeDx > _sidebarSwipeThreshold) {
+      _edgeSwipeArmed = false;
+      setState(() => _drawerOpen = !_drawerOpen);
+    }
   }
 
   @override
@@ -221,20 +251,25 @@ class HomeShellState extends ConsumerState<HomeShell>
   }
 
   Widget _mobile(BuildContext context, bool useColumns) {
+    // The edge-swipe gesture is phone-only (`if (window.innerWidth <= 768)`,
+    // ui-context.js:6).
+    final phone = MediaQuery.of(context).size.width <= 768;
     return Stack(
       children: [
         Positioned.fill(
           child: _content(context, useColumns, compact: true),
         ),
 
-        // Left-edge swipe to open the drawer (`setupMobileGestures`,
+        // Left-edge swipe to TOGGLE the drawer (`setupMobileGestures`,
         // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
         // a touch starting within 50px of the left edge that travels right past
-        // the swipe threshold toggles the sidebar. A 50px-wide strip mirrors the
-        // `clientX < 50` arming; only horizontal drags are claimed, so vertical
-        // scroll + message swipe (which itself defers left-edge swipes) are
-        // unaffected. Present only while closed.
-        if (!_drawerOpen && MediaQuery.of(context).size.width <= 768)
+        // the fixed 50px threshold calls `toggleSidebar()`. A 50px-wide strip
+        // mirrors the `clientX < 50` arming; only horizontal drags are claimed,
+        // so vertical scroll + message swipe (which itself defers left-edge
+        // swipes) are unaffected. While the drawer is OPEN the strip sits under
+        // it, so the drawer carries its own handler below (the PWA's document-
+        // level listener fires either way and toggles the drawer closed).
+        if (!_drawerOpen && phone)
           Positioned(
             left: 0,
             top: 0,
@@ -242,18 +277,15 @@ class HomeShellState extends ConsumerState<HomeShell>
             width: 50,
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,
-              onHorizontalDragStart: (_) => _edgeSwipeDx = 0,
-              onHorizontalDragUpdate: (d) {
-                _edgeSwipeDx += d.delta.dx;
-                final threshold =
-                    ref.read(settingsProvider).swipeThreshold.toDouble();
-                if (_edgeSwipeDx > threshold && !_drawerOpen) {
-                  _edgeSwipeDx = 0;
-                  setState(() => _drawerOpen = true);
-                }
-              },
-              onHorizontalDragEnd: (_) => _edgeSwipeDx = 0,
-              onHorizontalDragCancel: () => _edgeSwipeDx = 0,
+              // Travel measured from the touch-down point (the PWA's
+              // `swipeDistance = clientX - swipeStartX`), not from where the
+              // recognizer won the arena — otherwise ~18px of slop is silently
+              // added to the 50px threshold.
+              dragStartBehavior: DragStartBehavior.down,
+              onHorizontalDragStart: (_) => _edgeSwipeStart(true),
+              onHorizontalDragUpdate: _edgeSwipeUpdate,
+              onHorizontalDragEnd: (_) => _edgeSwipeArmed = false,
+              onHorizontalDragCancel: () => _edgeSwipeArmed = false,
             ),
           ),
 
@@ -286,21 +318,36 @@ class HomeShellState extends ConsumerState<HomeShell>
             // `.sidebar.open { box-shadow: 10px 0 40px rgba(0,0,0,0.5) }` — a
             // directional (rightward-only) drop shadow, not a Material ambient
             // elevation (styles-themes-responsive.css:198-201).
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                boxShadow: _drawerOpen
-                    ? [
-                        BoxShadow(
-                          offset: const Offset(10, 0),
-                          blurRadius: 40,
-                          color: Colors.black.withValues(alpha: 0.5),
-                        ),
-                      ]
-                    : const [],
-              ),
-              child: Sidebar(
-                compact: true,
-                onItemSelected: () => setState(() => _drawerOpen = false),
+            child: GestureDetector(
+              // While the drawer is open it covers the 50px edge strip, so it
+              // hosts the same toggle gesture: the PWA's document-level
+              // listener arms on any touch starting at `clientX < 50` and a
+              // 50px rightward travel calls `toggleSidebar()` — CLOSING it.
+              dragStartBehavior: DragStartBehavior.down,
+              onHorizontalDragStart: phone
+                  ? (d) => _edgeSwipeStart(d.globalPosition.dx < 50)
+                  : null,
+              onHorizontalDragUpdate: phone ? _edgeSwipeUpdate : null,
+              onHorizontalDragEnd:
+                  phone ? (_) => _edgeSwipeArmed = false : null,
+              onHorizontalDragCancel:
+                  phone ? () => _edgeSwipeArmed = false : null,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  boxShadow: _drawerOpen
+                      ? [
+                          BoxShadow(
+                            offset: const Offset(10, 0),
+                            blurRadius: 40,
+                            color: Colors.black.withValues(alpha: 0.5),
+                          ),
+                        ]
+                      : const [],
+                ),
+                child: Sidebar(
+                  compact: true,
+                  onItemSelected: () => setState(() => _drawerOpen = false),
+                ),
               ),
             ),
           ),

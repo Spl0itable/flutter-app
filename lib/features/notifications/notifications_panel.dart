@@ -605,7 +605,10 @@ class _NotificationRow extends ConsumerWidget {
                     // .notification-item-body: text 13, line-height 1.4, 2-line
                     // clamp. Routed through [InlineEmojiText] so a `:shortcode:`
                     // in the previewed message / reaction renders as its custom-
-                    // emoji image instead of literal text.
+                    // emoji image instead of literal text
+                    // (`renderCustomEmojiInEscapedText`, notifications.js:554);
+                    // image is the base `.custom-emoji` 1.75em of 13px (the
+                    // InlineEmojiText default).
                     InlineEmojiText(
                       text: body,
                       maxLines: 2,

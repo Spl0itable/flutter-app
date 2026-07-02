@@ -136,14 +136,17 @@ class _BurstWidgetState extends State<_BurstWidget>
         opacity: opacity.clamp(0.0, 1.0),
         child: Transform.scale(
           scale: scale,
-          // `renderReactionEmoji` (emoji.js:342) renders a custom `:code:`
-          // reaction as its `<img>`, not literal text; mirror that with
+          // `renderReactionEmoji` (emoji.js:342-351) renders an exact custom
+          // `:code:` reaction as its `<img>` (45×45, `.reaction-burst img`,
+          // styles-features.css:369-374), not literal text; mirror that with
           // InlineEmojiText (unicode falls through to a styled Text fast-path).
           // `decoration: none` also belt-and-suspenders kills the yellow
           // underline on the text fast-path.
           child: InlineEmojiText(
             text: widget.emoji,
+            wholeStringOnly: true,
             emojiSize: glyph,
+            emojiMargin: EdgeInsets.zero,
             style: const TextStyle(
               fontSize: glyph,
               height: 1,
