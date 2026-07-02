@@ -576,7 +576,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     if (idx < 0 || idx >= _columns.length) return;
     if (_isMobile) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _pageController.hasClients) {
+        if (mounted && _pageController.hasClients && _columns.isNotEmpty) {
           _pageController.jumpToPage(idx.clamp(0, _columns.length - 1));
         }
       });
@@ -632,7 +632,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final page = _pageController.page?.round() ?? 0;
     if (page != _focused && _focused < _columns.length) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _pageController.hasClients) {
+        if (mounted && _pageController.hasClients && _columns.isNotEmpty) {
           _pageController.jumpToPage(_focused.clamp(0, _columns.length - 1));
         }
       });
@@ -2686,6 +2686,10 @@ class _TabsSheetState extends State<_TabsSheet> {
                         ),
                       );
                     },
+                    // `onReorder` over `onReorderItem`: the latter doesn't exist
+                    // on the build toolchain's Flutter; this works on both
+                    // (deprecated-only on newer SDKs).
+                    // ignore: deprecated_member_use
                     onReorder: (oldIndex, newIndex) {
                       if (newIndex > oldIndex) newIndex -= 1;
                       setState(() {

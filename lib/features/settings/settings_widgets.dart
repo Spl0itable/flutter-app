@@ -101,13 +101,25 @@ class FormGroup extends StatelessWidget {
     this.label,
     required this.child,
     this.hint,
+    this.amberHint,
     this.warning,
+    this.footer,
   });
 
   final String? label;
   final Widget child;
   final String? hint;
+
+  /// A plain amber `.form-hint.nm-h-59` line (`color: var(--warning-color,
+  /// #f0a030); margin-top: 4px`, no-inline.css:77) — un-boxed hint text, used
+  /// by e.g. the hardcore-keypair warning (index.html hardcoreKeypairWarning).
+  final String? amberHint;
   final String? warning;
+
+  /// Optional trailing widget rendered after the hint(s), inside the group —
+  /// e.g. the "Reset columns to defaults" button that follows the Chat View
+  /// hint in the PWA markup (index.html `.nm-h-58`).
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -138,6 +150,17 @@ class FormGroup extends StatelessWidget {
               style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
             ),
           ],
+          if (amberHint != null) ...[
+            const SizedBox(height: 4),
+            // `.nm-h-59`: plain form-hint text in the amber warning color
+            // (`var(--warning-color, #f0a030)` — the variable is undefined in
+            // the PWA CSS, so the #f0a030 fallback always applies). No box.
+            Text(
+              amberHint!,
+              style: const TextStyle(
+                  color: Color(0xFFF0A030), fontSize: 11, height: 1.4),
+            ),
+          ],
           if (warning != null) ...[
             const SizedBox(height: 6),
             // `.form-warning`: danger-tinted box (not the amber warning color).
@@ -153,6 +176,10 @@ class FormGroup extends StatelessWidget {
                 style: TextStyle(color: c.danger, fontSize: 11, height: 1.4),
               ),
             ),
+          ],
+          if (footer != null) ...[
+            const SizedBox(height: 12),
+            footer!,
           ],
         ],
       ),
@@ -252,6 +279,7 @@ class FormInput extends StatelessWidget {
     this.onChanged,
     this.focusNode,
     this.onTap,
+    this.prefix,
   });
 
   final TextEditingController? controller;
@@ -260,6 +288,10 @@ class FormInput extends StatelessWidget {
   final ValueChanged<String>? onChanged;
   final FocusNode? focusNode;
   final VoidCallback? onTap;
+
+  /// Optional leading in-field icon (the PWA's `.settings-search-icon`: a 16px
+  /// glyph inset at the left with the input's text starting at 36px).
+  final Widget? prefix;
 
   @override
   Widget build(BuildContext context) {
@@ -274,6 +306,16 @@ class FormInput extends StatelessWidget {
       cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
         isDense: true,
+        // `.settings-search .form-input { padding-left: 36px }` with the 16px
+        // icon inset at the left (styles-components.css:148-157).
+        prefixIcon: prefix == null
+            ? null
+            : Padding(
+                padding: const EdgeInsets.only(left: 12, right: 8),
+                child: prefix,
+              ),
+        prefixIconConstraints:
+            const BoxConstraints(minWidth: 36, minHeight: 16),
         hintText: hint,
         hintStyle: TextStyle(color: c.textDim, fontSize: 13),
         contentPadding:

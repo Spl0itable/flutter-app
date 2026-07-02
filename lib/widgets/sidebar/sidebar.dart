@@ -9,12 +9,12 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/groups/group_logic.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
 import '../../features/identity/panic_wipe.dart';
-import '../../features/nymbot/bot_chat_screen.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/relays/relay_stats_modal.dart';
@@ -35,6 +35,8 @@ import '../nym_icons.dart';
 import 'channel_list_item.dart';
 import 'pm_context_menu.dart';
 import 'pm_list_item.dart';
+import 'sidebar_row_gestures.dart';
+import 'sidebar_skeleton.dart';
 import 'user_list_item.dart';
 
 /// The three reorderable sidebar sections (`data-section` ids in the PWA).
@@ -118,12 +120,27 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
   bool _loaded = false;
 
+  // `.sidebar-skeleton` safety clear: the PWA drops any shimmer rows that
+  // never got cleared by real content after 8s (`_sidebarSkelTimer`,
+  // init.js:105). Until then, each empty list shows its skeleton rows.
+  bool _skelTimedOut = false;
+  Timer? _skelTimer;
+
   @override
   void initState() {
     super.initState();
     _order = List.of(_SectionId.values);
+    _skelTimer = Timer(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _skelTimedOut = true);
+    });
     // Restore persisted collapse + order on first build (the KV store is a
     // provider, so defer to didChangeDependencies where ref.read is valid).
+  }
+
+  @override
+  void dispose() {
+    _skelTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -218,10 +235,55 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
     final app = ref.watch(appStateProvider);
     final view = ref.watch(currentViewProvider);
-    // `sortedChannelsProvider`: nymchat → active → pinned → proximity →
-    // activity/unread, with hidden/blocked channels filtered out (the PWA's
-    // `sortChannelsByActivity` + `applyHiddenChannels`).
-    final channels = ref.watch(sortedChannelsProvider);
+    // Visible channels + PWA sort. `applyHiddenChannels` (channels.js:820-833)
+    // NEVER hides `#nymchat` or the ACTIVE row — neither via the per-channel
+    // hidden set nor via hide-non-pinned — which is exactly what keeps the
+    // "Unhide channel" menu label reachable on the channel you're in.
+    final sortByProximity = ref.watch(
+        settingsProvider.select((settings) => settings.sortByProximity));
+    final hideNonPinned = ref.watch(
+        settingsProvider.select((settings) => settings.hideNonPinned));
+    final location = ref.watch(userLocationProvider);
+    final activeChannelKey =
+        view.kind == ViewKind.channel ? view.id.toLowerCase() : '';
+    final visibleChannels = app.channels
+        .where((ch) => !app.blockedChannels.contains(ch.key))
+        .where((ch) =>
+            ch.key == kDefaultChannel ||
+            ch.key == activeChannelKey ||
+            (!app.hiddenChannels.contains(ch.key) &&
+                !(hideNonPinned && !app.pinnedChannels.contains(ch.key))))
+        .toList();
+    // `sortChannelsByActivity` (nymchat → active → pinned → proximity →
+    // activity/unread) sets the DOM order …
+    var channels = ChannelManager.sortChannels(
+      visibleChannels,
+      ChannelSortContext(
+        activeKey: activeChannelKey,
+        pinned: app.pinnedChannels,
+        lastActivity: app.channelLastActivity,
+        unreadCounts: app.unreadCounts,
+        sortByProximity: sortByProximity,
+        userLocation: location,
+      ),
+    );
+    // … and CSS `order` bands re-sort it stably on top (styles-shell.css:
+    // 344-390): nymchat (-4) > active (-3) > pinned (-2) > has-unread (-1,
+    // toggled by `_renderUnreadBadge` when count > 0) > rest (0). The band
+    // partition below preserves comparator order within each band, exactly
+    // like flex `order` ties breaking on DOM order.
+    int orderBand(ChannelEntry ch) {
+      if (ch.key == kDefaultChannel) return -4;
+      if (ch.key == activeChannelKey) return -3;
+      if (app.pinnedChannels.contains(ch.key)) return -2;
+      if ((app.unreadCounts[ch.storageKey] ?? 0) > 0) return -1;
+      return 0;
+    }
+
+    channels = [
+      for (var band = -4; band <= 0; band++)
+        ...channels.where((ch) => orderBand(ch) == band),
+    ];
     final pinned = app.pinnedChannels;
     final pms = ref.watch(pmListProvider);
     // Resolve D1 kind-0 profiles for every PM peer shown in the list so a
@@ -244,6 +306,14 @@ class _SidebarState extends ConsumerState<Sidebar> {
     ]..sort((a, b) => b.lastMessageTime.compareTo(a.lastMessageTime));
 
     final notifier = ref.read(appStateProvider.notifier);
+
+    // `.sidebar-skeleton` rows: each list shimmers until its first real item
+    // is inserted (`_clearSidebarSkel`) — bounded by the 8s safety clear.
+    // The channel list's skeletons sit AFTER the static `#nymchat` row
+    // (index.html:498-506), so they clear on the first non-default channel.
+    final showChannelSkel =
+        !_skelTimedOut && !app.channels.any((ch) => ch.key != kDefaultChannel);
+    final showPmSkel = !_skelTimedOut && pmEntries.isEmpty;
 
     void select(ChatView v) {
       notifier.switchView(v);
@@ -360,6 +430,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   textSize: textSize,
                   onTap: () => select(ChatView.channel(ch.key)),
                 ),
+              // `.ssk-channel` ×4 (index.html:503-506; widths w3/w1/w4/w2).
+              if (showChannelSkel)
+                for (final f in const [0.70, 0.42, 0.50, 0.58])
+                  SidebarSkeletonRow.channel(barWidthFactor: f),
               if (r.more > 0)
                 _ViewMoreButton(
                   more: r.more,
@@ -432,30 +506,17 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 NewPmModal.open(context);
               },
             ),
-            searchHint: 'Search messages…',
+            searchHint: 'Search PMs…',
             children: [
-              // Nymbot: a pinned PM row at the top of Private Messages — the
-              // entry point to the dedicated bot chat (the PWA surfaces the bot
-              // as a highlighted PM conversation). `PMListItem` renders its
-              // avatar + verified ✓ from the pubkey; tap binds the paid session
-              // then opens `BotChatScreen`.
-              if (term.isEmpty || 'nymbot'.contains(term))
-                PMListItem(
-                  nym: 'Nymbot',
-                  pubkey: NostrController.nymbotPubkey,
-                  active: false,
-                  unread: 0,
-                  textSize: textSize,
-                  onTap: () {
-                    widget.onItemSelected?.call();
-                    ref.read(nostrControllerProvider).bindBotChat();
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const BotChatScreen(),
-                      ),
-                    );
-                  },
-                ),
+              // NO fixed Nymbot row: the PWA's `#pmList` only ever contains
+              // real conversations inserted by `addPMConversation`
+              // (pms.js:2714). The bot is a seeded USER (app.js:1102-1111) —
+              // it surfaces under Online Nyms and appears here only once an
+              // actual PM thread with it exists.
+              // `.ssk-pm` ×3 (index.html:543-546; widths w2/w3/w1).
+              if (showPmSkel)
+                for (final f in const [0.58, 0.70, 0.42])
+                  SidebarSkeletonRow.pm(barWidthFactor: f),
               for (final e in r.rows)
                 if (e.group != null)
                   _GroupListItem(
@@ -538,6 +599,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
             onLongPressTitle: _toggleReorderMode,
             searchHint: 'Search nyms…',
             children: [
+              // `.ssk-nym` ×5 (index.html:577-582; widths w3/w1/w4/w2/w3).
+              if (!_skelTimedOut && onlineUsers.isEmpty)
+                for (final f in const [0.70, 0.42, 0.50, 0.58, 0.70])
+                  SidebarSkeletonRow.nym(barWidthFactor: f),
               for (final u in nymRows)
                 UserListItem(
                   user: u,
@@ -1098,7 +1163,10 @@ class _NavSection extends StatelessWidget {
               ),
             ),
           ),
-          if (searching)
+          // `.section-collapsed > *:not(.nav-title) { display:none !important }`
+          // (styles-shell.css:221-224): collapsing hides EVERYTHING but the
+          // title row — including an open search input.
+          if (open && searching)
             Padding(
               padding: const EdgeInsets.fromLTRB(0, 0, 0, 6),
               child: _SearchField(
@@ -1264,9 +1332,10 @@ String _hex(Color c) {
 /// groups.js `_buildGroupItemHTML`). Same box metrics as [PMListItem]. The icon
 /// is either a custom avatar, a 34×22 stack of up to 3 member avatars + a
 /// corner group-glyph badge (the common case), or a 26px `.group-icon-wrap`
-/// fallback (no other members). A tap opens the group; a sidebar long-press /
-/// right-click opens the one-item "Leave conversation" `.quick-context-menu`
-/// (the rich `#groupContextMenu` panel is opened from the chat header instead).
+/// fallback (no other members). A tap opens the group; a 500ms press-and-hold
+/// opens the one-item "Leave conversation" `.quick-context-menu` at the press
+/// point (the rich `#groupContextMenu` panel is opened from the chat header
+/// instead).
 class _GroupListItem extends ConsumerWidget {
   const _GroupListItem({
     required this.group,
@@ -1293,7 +1362,19 @@ class _GroupListItem extends ConsumerWidget {
         // PWA `leaveSvg` is the feather log-out (== NymIcons.logout).
         svg: NymIcons.logout,
         danger: true,
-        onSelected: () => ref.read(nostrControllerProvider).leaveGroup(group.id),
+        // `deleteGroup` (groups.js:1851-1854): danger confirm first, then
+        // `leaveGroup`.
+        onSelected: () async {
+          if (!context.mounted) return;
+          final ok = await showAppConfirm(
+            context,
+            'Leave and delete this group conversation?',
+            danger: true,
+            okLabel: 'Leave',
+          );
+          if (!ok || !context.mounted) return;
+          await ref.read(nostrControllerProvider).leaveGroup(group.id);
+        },
       ),
     ]);
   }
@@ -1308,40 +1389,37 @@ class _GroupListItem extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      child: Material(
-        color: Colors.transparent,
-        // Single InkWell recognizer set so the long-press fires reliably inside
-        // the scrollable sidebar (see ChannelListItem/PMListItem) + a free
-        // Feedback.forLongPress haptic.
-        child: Builder(
-          builder: (rowContext) => InkWell(
-            onTap: onTap,
-            onLongPress: () {
-              final box = rowContext.findRenderObject() as RenderBox?;
-              final pos = (box != null && box.hasSize)
-                  ? box.localToGlobal(box.size.center(Offset.zero))
-                  : Offset.zero;
-              _leaveMenu(rowContext, ref, pos);
-            },
-            onSecondaryTapDown: (d) =>
-                _leaveMenu(rowContext, ref, d.globalPosition),
-            borderRadius: NymRadius.rxs,
-            child: Stack(
+      // The PWA's 500ms press-and-hold (mouse button 0 / touch, 10px move
+      // cancel) opens the quick menu at the press point and swallows the
+      // following tap; right-click deliberately does nothing
+      // (sidebar-sections.js:239-303).
+      child: SidebarRowGestures(
+        onTap: onTap,
+        onShowMenu: (pos) {
+          _leaveMenu(context, ref, pos);
+          return true;
+        },
+        builder: (context, hovered) => Stack(
               children: [
                 Container(
                   constraints: const BoxConstraints(minHeight: 36),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  // `:hover { padding-left: 14px }` (rest 12px).
+                  padding: EdgeInsets.fromLTRB(hovered ? 14 : 12, 9, 12, 9),
                   decoration: BoxDecoration(
                     // `.pm-item.active` (shared by group rows): primary@0.10 fill
                     // + primary@0.05 glow (dark); `body.light-mode` neutralises to
                     // black@0.06 with `box-shadow:none` (styles-themes-responsive
-                    // .css:1139), border + accent bar stay primary.
+                    // .css:1139), border + accent bar stay primary. Hover (loses
+                    // to active): white@0.06 dark / black@0.04 light.
                     color: active
                         ? (c.isLight
                             ? Colors.black.withValues(alpha: 0.06)
                             : c.primaryA(0.10))
-                        : Colors.transparent,
+                        : hovered
+                            ? (c.isLight
+                                ? Colors.black.withValues(alpha: 0.04)
+                                : Colors.white.withValues(alpha: 0.06))
+                            : Colors.transparent,
                     borderRadius: NymRadius.rxs,
                     border: Border.all(
                       color: active ? c.primaryA(0.20) : Colors.transparent,
@@ -1353,11 +1431,12 @@ class _GroupListItem extends ConsumerWidget {
                   ),
                   child: Row(
                     children: [
-                      // Custom avatar → 34×22 member stack → 26px icon-wrap
-                      // fallback. `margin-right:6px`.
+                      // Custom avatar (`.group-avatar-wrap`, margin-right 4px,
+                      // styles-features.css:5348) → 34×22 member stack → 26px
+                      // icon-wrap fallback (both margin-right 6px).
                       if (avatarUrl != null && avatarUrl.isNotEmpty)
                         Padding(
-                          padding: const EdgeInsets.only(right: 6),
+                          padding: const EdgeInsets.only(right: 4),
                           child: ClipOval(
                             child: NymAvatar(
                               seed: group.id,
@@ -1380,9 +1459,10 @@ class _GroupListItem extends ConsumerWidget {
                           child: _GroupIconWrap(c: c),
                         ),
                       Flexible(
+                        // `.pm-name` (shared by group rows): white-space:normal
+                        // + word-break:break-word (styles-shell.css:418-429) —
+                        // long names WRAP, no ellipsis.
                         child: RichText(
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                           text: TextSpan(
                             style: TextStyle(
                               color: c.textDim,
@@ -1438,8 +1518,6 @@ class _GroupListItem extends ConsumerWidget {
                   ),
               ],
             ),
-          ),
-        ),
       ),
     );
   }

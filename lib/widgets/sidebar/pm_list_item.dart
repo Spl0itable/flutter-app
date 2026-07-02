@@ -10,14 +10,7 @@ import '../../state/nostr_controller.dart';
 import '../common/nym_avatar.dart';
 import '../context_menu/profile_badges.dart';
 import 'pm_context_menu.dart';
-
-/// Global-coordinate centre of [c]'s render box — the anchor for a long-press
-/// context menu (`InkWell.onLongPress` carries no pointer position).
-Offset _rowCenter(BuildContext c) {
-  final box = c.findRenderObject() as RenderBox?;
-  if (box == null || !box.hasSize) return Offset.zero;
-  return box.localToGlobal(box.size.center(Offset.zero));
-}
+import 'sidebar_row_gestures.dart';
 
 /// A single PM thread row (`.pm-item`, pms.js `createPMConversation`). Same box
 /// metrics as `.channel-item` with a 26px PM avatar (`margin-right:4px`), the
@@ -25,8 +18,9 @@ Offset _rowCenter(BuildContext c) {
 /// {friend}`) and an optional unread pill. The live sidebar PM row has **no**
 /// status dot — that lives only in the chat-header avatar.
 ///
-/// A long-press (mobile) or secondary-tap / right-click (desktop) opens the
-/// `.quick-context-menu` (Block/Unblock user, Leave conversation) — see
+/// A 500ms press-and-hold (mouse primary button or touch — the PWA binds no
+/// `contextmenu` handler) opens the `.quick-context-menu` (Block/Unblock user,
+/// Leave conversation) at the press point — see [SidebarRowGestures] /
 /// [showPmContextMenu].
 class PMListItem extends ConsumerWidget {
   const PMListItem({
@@ -60,39 +54,41 @@ class PMListItem extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      child: Material(
-        color: Colors.transparent,
-        // Tap, long-press and secondary-tap share ONE InkWell recognizer set so
-        // the long-press reliably wins the gesture arena inside the scrollable
-        // sidebar (the previous GestureDetector-around-InkWell split swallowed
-        // the long-press, so PM rows opened no context menu). InkWell.onLongPress
-        // also fires Feedback.forLongPress (the PWA's `nymHapticTap`).
-        child: Builder(
-          builder: (rowContext) => InkWell(
-            onTap: onTap,
-            onLongPress: () => showPmContextMenu(
-                rowContext, ref, pubkey, _rowCenter(rowContext)),
-            onSecondaryTapDown: (d) =>
-                showPmContextMenu(rowContext, ref, pubkey, d.globalPosition),
-            borderRadius: NymRadius.rxs,
-            // `.pm-item.active` shares `.channel-item.active`: primary fill/
-            // border/glow + a 3px primary accent bar (NOT purple).
-            child: Stack(
+      // The PWA's 500ms press-and-hold (mouse button 0 / touch, 10px move
+      // cancel) opens the quick menu at the press point and swallows the
+      // following tap; right-click deliberately does nothing
+      // (sidebar-sections.js:239-303).
+      child: SidebarRowGestures(
+        onTap: onTap,
+        onShowMenu: (pos) {
+          if (pubkey.isEmpty) return false;
+          showPmContextMenu(context, ref, pubkey, pos);
+          return true;
+        },
+        // `.pm-item.active` shares `.channel-item.active`: primary fill/
+        // border/glow + a 3px primary accent bar (NOT purple).
+        builder: (context, hovered) => Stack(
             children: [
               Container(
                 constraints: const BoxConstraints(minHeight: 36),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                // `:hover { padding-left: 14px }` (rest 12px).
+                padding: EdgeInsets.fromLTRB(hovered ? 14 : 12, 9, 12, 9),
                 decoration: BoxDecoration(
                   // `.pm-item.active` fill is primary@0.10 + a primary@0.05 glow
                   // (dark); `body.light-mode` neutralises it to black@0.06 with
                   // `box-shadow:none` (styles-themes-responsive.css:1139), the
-                  // primary@0.20 border + primary accent bar stay.
+                  // primary@0.20 border + primary accent bar stay. Hover
+                  // (loses to active): white@0.06 dark / black@0.04 light
+                  // (styles-shell.css:368-374 / styles-themes-responsive:1132).
                   color: active
                       ? (c.isLight
                           ? Colors.black.withValues(alpha: 0.06)
                           : c.primaryA(0.10))
-                      : Colors.transparent,
+                      : hovered
+                          ? (c.isLight
+                              ? Colors.black.withValues(alpha: 0.04)
+                              : Colors.white.withValues(alpha: 0.06))
+                          : Colors.transparent,
                   borderRadius: NymRadius.rxs,
                   border: Border.all(
                     color: active ? c.primaryA(0.20) : Colors.transparent,
@@ -109,7 +105,9 @@ class PMListItem extends ConsumerWidget {
                     const SizedBox(width: 4),
                     Flexible(
                       // `.pm-name`: color --text-dim, normal weight, with a dim
-                      // `.nym-suffix` tail.
+                      // `.nym-suffix` tail. `white-space:normal` +
+                      // `word-break:break-word` (styles-shell.css:418-429) —
+                      // long names WRAP onto multiple lines, no ellipsis.
                       child: Text.rich(
                         TextSpan(
                           children: [
@@ -124,8 +122,6 @@ class PMListItem extends ConsumerWidget {
                             ),
                           ],
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           color: c.textDim,
                           fontSize: textSize,
@@ -179,8 +175,6 @@ class PMListItem extends ConsumerWidget {
                   ),
                 ),
             ],
-          ),
-        ),
         ),
       ),
     );

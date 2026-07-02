@@ -762,7 +762,10 @@ class ShopController extends StateNotifier<ShopState> {
   /// `reconcilePendingPurchases` → `_reconcileShopEntry`). Call on foreground /
   /// shop open. Entries older than 2h are dropped; `kind: 'credit'` entries
   /// belong to the Nymbot-credit domain and are left untouched here.
-  Future<void> reconcilePendingPurchases(ShopIdentity identity) async {
+  Future<void> reconcilePendingPurchases(
+    ShopIdentity identity, {
+    String? gifterNym,
+  }) async {
     if (_reconciling) return;
     final pending = _loadPendingPurchases();
     if (pending.isEmpty) return;
@@ -779,7 +782,7 @@ class ShopController extends StateNotifier<ShopState> {
         }
         if (entry['kind'] != 'shop') continue; // credit entries: other domain
         try {
-          await _reconcileShopEntry(entry, invoiceId, identity);
+          await _reconcileShopEntry(entry, invoiceId, identity, gifterNym);
         } catch (_) {
           // Leave for the next foreground (shop.js:1412).
         }
@@ -793,6 +796,7 @@ class ShopController extends StateNotifier<ShopState> {
     Map<String, dynamic> entry,
     String invoiceId,
     ShopIdentity identity,
+    String? gifterNym,
   ) async {
     // The live buy dialog owns its own invoice (shop.js:1420).
     if (activeInvoiceId == invoiceId) return;
@@ -801,7 +805,8 @@ class ShopController extends StateNotifier<ShopState> {
     final item = ShopCatalog.byId(itemId);
     // claim() applies the record, publishes any giftEvent and removes the
     // pending entry (shop.js `_claimShopPurchase` → `_applyShopClaim`).
-    final data = await claim(invoiceId, identity: identity);
+    final data =
+        await claim(invoiceId, identity: identity, gifterNym: gifterNym);
     if (data['alreadyClaimed'] == true) return;
     final name = item?.name ?? 'item';
     if (data['gift'] == true) {

@@ -89,7 +89,9 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     if (identity != null) {
       final ctrl = ref.read(shopControllerProvider.notifier);
       unawaited(ctrl.loadFromServer(identity));
-      unawaited(ctrl.reconcilePendingPurchases(identity));
+      unawaited(
+        ctrl.reconcilePendingPurchases(identity, gifterNym: _gifterNym(ref)),
+      );
     }
   }
 
@@ -687,25 +689,33 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           "Enter the recipient's hex pubkey (64 characters). The item will be "
           'revoked from your inventory and assigned to theirs.',
       selfPubkey: identity.pubkey,
-      selfMessage: 'You already own this item.',
+      // shop.js:1731 — the exact self-transfer rejection copy.
+      selfMessage: 'Cannot transfer to yourself.',
       // Transfer modal: "Confirm" CTA + no price (shop.js:1698-1702, 1711).
       ctaLabel: 'Confirm',
       showPrice: false,
     );
     if (recipient == null || !mounted) return;
     try {
-      await ref
-          .read(shopControllerProvider.notifier)
-          .transfer(item.id, recipient, identity: identity);
+      await ref.read(shopControllerProvider.notifier).transfer(
+            item.id,
+            recipient,
+            identity: identity,
+            gifterNym: _gifterNym(ref),
+          );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${item.name} transferred.')),
+          SnackBar(
+            content: Text(
+              '${item.name} transferred to ${recipient.substring(0, 8)}...',
+            ),
+          ),
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Transfer failed: $e')),
+          SnackBar(content: Text('Transfer failed: ${_errorMessage(e)}')),
         );
       }
     }
@@ -1977,7 +1987,8 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       case _BuyPhase.paid:
         return [
           const SizedBox(height: 8),
-          const Text('✅', style: TextStyle(fontSize: 32)),
+          // `.nm-shop-10 { font-size: 24px }` — the ✅ glyph.
+          const Text('✅', style: TextStyle(fontSize: 24)),
           const SizedBox(height: 8),
           Text(
             _isGift ? 'Gift sent!' : 'Purchase successful!',

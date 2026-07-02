@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -45,9 +46,20 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
   /// Opens the settings dialog as a modal route.
   static Future<void> open(BuildContext context) {
+    // `.modal` overlay: glass default `rgba(0,0,0,0.7)` (styles-chat.css:1974);
+    // `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1635).
+    final solidUi =
+        ProviderScope.containerOf(context).read(settingsProvider).solidUi;
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
+      barrierColor: !solidUi
+          ? Colors.black.withValues(alpha: 0.7)
+          : isLight
+              ? const Color(0x73000000) // black @ 0.45
+              : const Color(0xBF000000), // black @ 0.75
       builder: (_) => const SettingsScreen(),
     );
   }
@@ -83,7 +95,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String? _cacheReadout;
 
   // Section open/collapsed state (all expanded by default, matching the PWA's
-  // aria-expanded="true").
+  // aria-expanded="true"). Restored from `nym_settings_sections_collapsed` on
+  // open and persisted on every toggle (inline-bindings.js:28-46
+  // persist/restoreSettingsSectionState).
   final Map<String, bool> _open = {
     'appearance': true,
     'privacy': true,
@@ -92,6 +106,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     'mobile': true,
     'data': true,
   };
+
+  /// Whether the blocked-users profile fetch is in flight (users.js:1767
+  /// `updateBlockedList` renders "Loading..." while `loadBlockedUsersAsync`
+  /// resolves unknown blocked users' metadata).
+  bool _blockedProfilesLoading = false;
+
+  /// Whether a custom-wallpaper pick is being processed (the PWA's
+  /// "Uploading..." state in the Upload tile, app.js:4184).
+  bool _wallpaperUploading = false;
 
   // Live text-size preview value (commits to the controller on change end).
   double? _textSizePreview;
@@ -133,6 +156,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final kv = ref.read(keyValueStoreProvider);
     _landing = readLandingChannel(kv);
     _landingController.text = _landing.label;
+    // Restore the persisted section collapse layout (the PWA calls
+    // `restoreSettingsSectionState` on every settings open, app.js:3197;
+    // collapsed sections are stored as `{key: 1}` in
+    // `nym_settings_sections_collapsed`, inline-bindings.js:36-46).
+    try {
+      final raw = kv.getString(_kSettingsSectionsCollapsedKey);
+      if (raw != null && raw.isNotEmpty) {
+        final map = jsonDecode(raw);
+        if (map is Map) {
+          for (final key in _open.keys.toList()) {
+            final v = map[key];
+            if (v != null && v != 0 && v != false) _open[key] = false;
+          }
+        }
+      }
+    } catch (_) {}
     _landingFocus.addListener(() {
       if (!_landingFocus.hasFocus && _landingOpen) {
         setState(() => _landingOpen = false);
@@ -143,26 +182,54 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _loadCacheSize();
     // Pull any inbound pending settings transfers (F17).
     ref.read(nostrControllerProvider).refreshPendingSettingsTransfers();
+    // Resolve unknown blocked users' profiles so the Blocked Users list can
+    // show real nyms (users.js `loadBlockedUsersAsync` → metadata fetch).
+    _fetchBlockedProfiles();
   }
 
-  /// Reads the real on-device cache size from the controller and formats it as
-  /// MB into [_cacheReadout] (F7). Mirrors the PWA's `refreshAppCacheSize`
-  /// (app.js:3681): show "Calculating…" until the async read resolves, then the
-  /// byte total (or the honest empty-state string when nothing is cached).
+  /// Fetches kind-0 profiles for blocked users we don't know yet, showing the
+  /// PWA's "Loading..." placeholder in the Blocked Users list meanwhile
+  /// (users.js:1774-1815 `updateBlockedList`/`loadBlockedUsersAsync`).
+  Future<void> _fetchBlockedProfiles() async {
+    final app = ref.read(appStateProvider);
+    final unknown = app.blockedUsers.where((pk) {
+      final user = app.users[pk];
+      return user == null || user.nym.isEmpty;
+    }).toList();
+    if (unknown.isEmpty) return;
+    setState(() => _blockedProfilesLoading = true);
+    try {
+      await ref.read(nostrControllerProvider).resolveProfiles(unknown);
+    } catch (_) {
+      // Best-effort; unresolved entries fall back to `anon#xxxx`.
+    }
+    if (!mounted) return;
+    setState(() => _blockedProfilesLoading = false);
+  }
+
+  /// Reads the real on-device cache size from the controller and formats the
+  /// PWA readout into [_cacheReadout] (F7). Mirrors `refreshAppCacheSize`
+  /// (app.js:3681-3716): show "Calculating…" until the async read resolves,
+  /// then `"<size> cached on device — N channels, N PM/group threads,
+  /// N profiles, N reaction records"` (size auto-scaled B/KB/MB/GB), the
+  /// honest empty-state string when nothing is cached, or the
+  /// cache-unavailable string when the store errors.
   Future<void> _loadCacheSize() async {
     final controller = ref.read(nostrControllerProvider);
     try {
       final bytes = await controller.cacheSizeBytes();
       if (!mounted) return;
       setState(() {
-        _cacheReadout = bytes <= 0
-            ? 'No cached data on device yet'
-            : '${formatCacheMb(bytes)} cached on device';
+        _cacheReadout =
+            cacheReadoutFor(ref.read(appStateProvider), realBytes: bytes);
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      // Fall back to the honest empty-state rather than a perpetual spinner.
-      setState(() => _cacheReadout = 'No cached data on device yet');
+      // The PWA's failed-probe branch: `IndexedDB unavailable (<reason>) —
+      // cache disabled in this app` (app.js:3702-3705); the native store's
+      // equivalent honest failure state.
+      setState(() => _cacheReadout =
+          'Cache unavailable ($e) — cache disabled in this app');
     }
   }
 
@@ -176,10 +243,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     super.dispose();
   }
 
-  bool _matches(String haystack) {
-    if (_search.isEmpty) return true;
-    return haystack.toLowerCase().contains(_search.toLowerCase());
+  /// Toggles a section's collapsed state and persists the layout to
+  /// `nym_settings_sections_collapsed` (inline-bindings.js:28
+  /// `persistSettingsSectionState`: collapsed keys map to `1`, expanded keys
+  /// are removed).
+  void _toggleSection(String key) {
+    setState(() => _open[key] = !(_open[key] ?? true));
+    final collapsed = <String, int>{
+      for (final e in _open.entries)
+        if (!e.value) e.key: 1,
+    };
+    ref
+        .read(keyValueStoreProvider)
+        .setString(_kSettingsSectionsCollapsedKey, jsonEncode(collapsed));
   }
+
+  /// The option-label text of a select's items, for the per-group search text
+  /// (the PWA's `filterSettings` matches each `.form-group`'s full rendered
+  /// `textContent`, which includes every `<option>` label,
+  /// inline-bindings.js:66-74).
+  static String _optText<T>(List<({T value, String label})> items) =>
+      items.map((it) => it.label).join(' ');
 
   /// Mutates the Save-gated [_draft] in place (09-M1). Save-gated dropdowns call
   /// this from their `onChanged` instead of the live `ctrl.setX` setter, so the
@@ -215,55 +299,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _SectionSpec(
         key: 'appearance',
         title: 'Appearance',
-        keywords: 'appearance theme color mode chat view wallpaper '
-            'message layout transparency text size',
-        builder: () => _appearance(settings, ctrl),
+        groups: _appearance(settings, ctrl),
       ),
       _SectionSpec(
         key: 'privacy',
         title: 'Privacy & Security',
-        keywords: 'privacy security identity encryption keypair proof of work '
-            'accept private messages calls disappearing pm forward secrecy '
-            'read receipts typing indicators status cache blur images blocked '
-            'keywords friends blocked users',
-        builder: () => _privacy(settings, ctrl),
+        groups: _privacy(settings, ctrl),
       ),
       _SectionSpec(
         key: 'messaging',
         title: 'Messaging & Display',
-        keywords: 'messaging display translation language notification sound '
-            'auto-scroll show timestamps time format date format random '
-            'nickname style ephemeral',
-        builder: () => _messaging(settings, ctrl),
+        groups: _messaging(settings, ctrl),
       ),
       _SectionSpec(
         key: 'channels',
         title: 'Channels',
-        keywords: 'channels group chats pms only proximity landing channel '
-            'hide non-favorited hidden blocked',
-        builder: () => _channels(settings, ctrl),
+        groups: _channels(settings, ctrl),
       ),
       // Mobile Gestures — only on a mobile-width viewport (PWA mobile-only).
       if (isMobileWidth)
         _SectionSpec(
           key: 'mobile',
           title: 'Mobile Gestures',
-          keywords: 'mobile gestures swipe left right action react emoji '
-              'sensitivity threshold',
-          builder: () => _mobile(settings, ctrl),
+          groups: _mobile(settings, ctrl),
         ),
       _SectionSpec(
         key: 'data',
         title: 'Data & Backup',
-        keywords: 'data backup low data mode transfer settings pending '
-            'transfers cache clear reset defaults',
-        builder: () => _data(settings, ctrl),
+        groups: _data(settings, ctrl),
       ),
     ];
 
-    final visibleSections = sections
-        .where((s) => _matches(s.title) || _matches(s.keywords))
-        .toList();
+    // `filterSettings` (inline-bindings.js:53-91): a section-title match shows
+    // the whole section; otherwise each `.form-group` is matched individually
+    // against its full text (label + hint + option labels + placeholders +
+    // rendered content) and hidden on a miss. Matching sections are
+    // force-expanded while a query is active; an empty query restores the
+    // saved collapse layout.
+    final q = _search.trim().toLowerCase();
+    final visibleSections = <({_SectionSpec spec, List<_GroupSpec> groups})>[];
+    for (final s in sections) {
+      final sectionMatches = q.isNotEmpty && s.title.toLowerCase().contains(q);
+      final groups = q.isEmpty
+          ? s.groups
+          : [
+              for (final g in s.groups)
+                if (sectionMatches || g.text.toLowerCase().contains(q)) g,
+            ];
+      if (q.isNotEmpty && groups.isEmpty) continue;
+      visibleSections.add((spec: s, groups: groups));
+    }
 
     return Center(
       child: Padding(
@@ -306,36 +391,47 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         _header(c),
+                        // `.settings-search` is `position: sticky; top: 0` over
+                        // the scrolling modal body (styles-components.css:136),
+                        // so it renders as a pinned row above the scroll view.
+                        _searchBar(c),
                         Flexible(
                       child: SingleChildScrollView(
-                        // Sections are full-bleed; the search bar / no-results
-                        // text carry the `.modal-content { padding: 32px }`
-                        // horizontal inset themselves.
+                        // Sections are full-bleed; the no-results text carries
+                        // the `.modal-content { padding: 32px }` horizontal
+                        // inset itself.
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 32),
-                              child: _searchBar(c),
-                            ),
                             if (visibleSections.isEmpty)
+                              // `.settings-no-results { padding: 18px 0 6px;
+                              //   color: text-dim; font-size: 13px;
+                              //   text-align: center }`.
                               Padding(
-                                padding: const EdgeInsets.fromLTRB(32, 24, 32, 24),
+                                padding:
+                                    const EdgeInsets.fromLTRB(32, 18, 32, 6),
                                 child: Text(
                                   'No settings match your search.',
+                                  textAlign: TextAlign.center,
                                   style: TextStyle(
                                       color: c.textDim, fontSize: 13),
                                 ),
                               ),
                             for (final s in visibleSections)
                               SettingsSection(
-                                title: s.title,
-                                open: _open[s.key] ?? true,
-                                onToggle: () => setState(
-                                    () => _open[s.key] = !(_open[s.key] ?? true)),
-                                children: [s.builder()],
+                                title: s.spec.title,
+                                // A live query force-expands matching sections
+                                // (filterSettings removes `collapsed` without
+                                // persisting); empty query renders the saved
+                                // layout.
+                                open: q.isNotEmpty
+                                    ? true
+                                    : (_open[s.spec.key] ?? true),
+                                onToggle: () => _toggleSection(s.spec.key),
+                                children: [
+                                  for (final g in s.groups) g.child,
+                                ],
                               ),
                           ],
                         ),
@@ -383,11 +479,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Widget _searchBar(NymColors c) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+    // `.settings-search { padding: 4px 32px 14px; background: var(--glass-bg) }`
+    // with the 16px magnifier SVG inset at the input's left
+    // (styles-components.css:136-157 + index.html:1351-1353).
+    return Container(
+      color: c.glassBg,
+      padding: const EdgeInsets.fromLTRB(32, 4, 32, 14),
       child: FormInput(
         controller: _searchController,
         hint: 'Search settings...',
+        prefix: NymSvgIcon(NymIcons.search, size: 16, color: c.textDim),
         onChanged: (v) => setState(() => _search = v),
       ),
     );
@@ -527,39 +628,84 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // value is byte-identical to the old `writeLandingChannel` write.
     ctrl.setPinnedLandingChannel(_landing.toJsonString());
 
+    // Hidden #autoEphemeralSelect compatibility handling (app.js:3862-3870):
+    // the PWA seeds the (permanently hidden) select from `nym_auto_ephemeral`
+    // on open and reads it back on Save — anything but 'true' removes the
+    // auto-ephemeral keys.
+    final kvStore = ref.read(keyValueStoreProvider);
+    if (kvStore.getString(StorageKeys.autoEphemeral) == 'true') {
+      kvStore.setString(StorageKeys.autoEphemeral, 'true');
+    } else {
+      kvStore.remove(StorageKeys.autoEphemeral);
+      kvStore.remove(StorageKeys.autoEphemeralNick);
+      kvStore.remove(StorageKeys.autoEphemeralChannel);
+    }
+
     if (!mounted) return;
     _systemMessage('Settings saved');
     Navigator.of(context).maybePop();
   }
 
-  /// Chat-Wallpaper "Upload" tile: pick an image from the gallery, copy it into
-  /// the app documents dir so it persists across launches, store its absolute
-  /// path in `nym_wallpaper_custom_url`, then select custom mode. Mirrors the
-  /// PWA `triggerWallpaperUpload`/`handleWallpaperUpload` (app.js:4173-4209),
-  /// except the PWA uploads to a remote URL whereas here the file lives on-device
-  /// (the render path in wallpaper_layer.dart handles both). No-op on cancel.
+  /// Chat-Wallpaper "Upload" tile: pick an image from the gallery, validate
+  /// the PWA's 1920x1080 minimum (users.js:830-850 `uploadWallpaper`), copy it
+  /// into the app documents dir so it persists across launches, store its
+  /// absolute path in `nym_wallpaper_custom_url`, then select custom mode.
+  /// Mirrors the PWA `triggerWallpaperUpload`/`handleWallpaperUpload`
+  /// (app.js:4177-4209) — including the Upload tile's "Uploading..." state and
+  /// thumbnail — except the PWA uploads to a remote URL whereas here the file
+  /// lives on-device (the render path in wallpaper_layer.dart handles both).
+  /// No-op on cancel.
   Future<void> _uploadCustomWallpaper(SettingsController ctrl) async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (picked == null) return; // user cancelled the picker
-    final dir = await getApplicationDocumentsDirectory();
-    final dest = p.join(
-      dir.path,
-      'wallpaper_custom${p.extension(picked.path)}',
-    );
-    await File(picked.path).copy(dest);
-    await ref.read(keyValueStoreProvider).setString(
-          StorageKeys.wallpaperCustomUrl,
-          dest,
-        );
-    // Live-applied like the PWA's custom upload; mirror into the draft so the
-    // Save fan-out (which sends `_draft.wallpaperType`) keeps 'custom' selected.
-    ctrl.setWallpaperType('custom');
-    if (!mounted) return;
-    _mutate((d) => d.copyWith(wallpaperType: 'custom'));
-    _systemMessage('Wallpaper uploaded and applied.');
+    if (mounted) setState(() => _wallpaperUploading = true);
+    try {
+      // Validate the minimum image size (users.js:831-850: reject anything
+      // under 1920x1080 with the exact PWA system message; a decode failure
+      // counts as invalid, like the PWA's `img.onerror`).
+      const minWidth = 1920, minHeight = 1080;
+      var validSize = false;
+      try {
+        final bytes = await File(picked.path).readAsBytes();
+        final codec = await ui.instantiateImageCodec(bytes);
+        final frame = await codec.getNextFrame();
+        validSize =
+            frame.image.width >= minWidth && frame.image.height >= minHeight;
+        frame.image.dispose();
+        codec.dispose();
+      } catch (_) {
+        validSize = false;
+      }
+      if (!validSize) {
+        _systemMessage(
+            'Wallpaper image must be at least ${minWidth}x$minHeight pixels.');
+        return;
+      }
+      final dir = await getApplicationDocumentsDirectory();
+      final dest = p.join(
+        dir.path,
+        'wallpaper_custom${p.extension(picked.path)}',
+      );
+      await File(picked.path).copy(dest);
+      await ref.read(keyValueStoreProvider).setString(
+            StorageKeys.wallpaperCustomUrl,
+            dest,
+          );
+      // Live-applied like the PWA's custom upload; mirror into the draft so the
+      // Save fan-out (which sends `_draft.wallpaperType`) keeps 'custom'
+      // selected.
+      ctrl.setWallpaperType('custom');
+      if (!mounted) return;
+      _mutate((d) => d.copyWith(wallpaperType: 'custom'));
+      _systemMessage('Wallpaper uploaded and applied.');
+    } finally {
+      if (mounted) setState(() => _wallpaperUploading = false);
+    }
   }
 
-  /// Add Keyword (F4): persist + render the new row + confirm.
+  /// Add Keyword (F4): persist + render the new row + confirm + queue the
+  /// cross-device sync (users.js:121-148 `addBlockedKeyword` ends with
+  /// `nostrSettingsSave()`).
   void _addKeyword(SettingsController ctrl) {
     final raw = _keywordController.text.trim();
     if (raw.isEmpty) return;
@@ -568,18 +714,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _keywordController.clear();
     if (added != null) {
       _systemMessage('Blocked keyword: "$added"');
+      ref.read(nostrControllerProvider).syncSettings();
     }
     setState(() {});
   }
 
-  /// Persists the live blocked-keyword Set to `nym_blocked_keywords` as the
-  /// JSON array the PWA uses (saveBlockedKeywords). The store has no typed
+  /// Persists a live moderation Set to KV as the JSON string array the PWA
+  /// uses (`saveFriends`/`saveBlockedUsers`/`saveHiddenChannels`/
+  /// `saveBlockedChannels`/`saveBlockedKeywords`). The store has no typed
   /// set-setter, so we serialize through `setString`.
-  void _persistBlockedKeywords() {
-    final kws = ref.read(appStateProvider).blockedKeywords.toList();
+  void _persistStringSet(String key, Set<String> values) {
     ref
         .read(keyValueStoreProvider)
-        .setString(StorageKeys.blockedKeywords, jsonEncode(kws));
+        .setString(key, jsonEncode(values.toList()));
+  }
+
+  /// Persists the live blocked-keyword Set to `nym_blocked_keywords`.
+  void _persistBlockedKeywords() {
+    _persistStringSet(
+        StorageKeys.blockedKeywords, ref.read(appStateProvider).blockedKeywords);
   }
 
   /// Quick React emoji "Change" (F5): open the emoji picker; on pick stage the
@@ -670,13 +823,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final controller = ref.read(nostrControllerProvider);
     // Reflect the in-flight wipe in the readout immediately.
     setState(() => _cacheReadout = null);
+    var wiped = true;
     try {
       await controller.clearCache();
     } catch (_) {
-      // Best-effort; still re-read so the readout reflects the true state.
+      // Best-effort; re-read so the readout reflects the true state.
+      wiped = false;
     }
     if (!mounted) return;
-    await _loadCacheSize();
+    if (wiped) {
+      // The PWA re-probes the (now empty) persisted store and lands on the
+      // empty state (app.js:3701-3708). The in-memory session counts are NOT
+      // cleared (the PWA clears the persisted cache, not the open session), so
+      // recomputing from app state here would show stale items.
+      setState(() => _cacheReadout = 'No cached data on device yet');
+    } else {
+      await _loadCacheSize();
+    }
     _systemMessage(
         'Local storage cache cleared. Settings, group memberships, and login '
         'preserved.');
@@ -754,6 +917,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       setState(() => _transferError = err);
       return;
     }
+    // `_canSendGiftWraps()` precondition (shop.js:1788-1791): gift wraps need a
+    // signer-capable identity; without one show the PWA's exact error.
+    if (ref.read(nostrControllerProvider).identity == null) {
+      setState(() =>
+          _transferError = 'Settings transfer requires a logged-in account.');
+      return;
+    }
     setState(() {
       _transferError = null;
       _transferSending = true;
@@ -819,14 +989,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // --- Appearance -----------------------------------------------------------
 
-  Widget _appearance(Settings s, SettingsController ctrl) {
-    final c = context.nym;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Color mode segment. Live-applied (PWA auto-saves + applies on click,
-        // app.js:3205-3211): commit immediately AND mirror into the draft.
-        FormGroup(
+  List<_GroupSpec> _appearance(Settings s, SettingsController ctrl) {
+    const columnsWallpaperItems = <({bool value, String label})>[
+      (value: false, label: 'Solid background'),
+      (value: true, label: 'Show wallpaper through messages'),
+    ];
+    const transparencyItems = <({bool value, String label})>[
+      (value: false, label: 'Solid'),
+      (value: true, label: 'Glass'),
+    ];
+    // The custom-wallpaper thumbnail shown on the Upload tile when custom mode
+    // is active (`initWallpaperUI`, app.js:4211-4227).
+    final customWallpaperPath = s.wallpaperType == 'custom'
+        ? ref.read(keyValueStoreProvider).getString(StorageKeys.wallpaperCustomUrl)
+        : null;
+    return [
+      // Color mode segment. Live-applied (PWA auto-saves + applies on click,
+      // app.js:3205-3211): commit immediately AND mirror into the draft.
+      _GroupSpec(
+        text: 'Light Auto Dark Auto matches your system preference',
+        child: FormGroup(
           hint: 'Auto matches your system preference',
           child: SegmentGroup<ColorMode>(
             value: s.colorMode,
@@ -841,24 +1023,46 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
         ),
-        // Theme picker (each swatch shows its real accent). Live-applied
-        // (PWA `themeSelect.onchange`, app.js:3471-3476).
-        FormGroup(
+      ),
+      // Theme `<select>` (index.html:1370-1380 `#themeSelect .form-select`).
+      // Live-applied (PWA `themeSelect.onchange`, app.js:3471-3476).
+      _GroupSpec(
+        text: 'Theme ${_optText(_themeOptions)}',
+        child: FormGroup(
           label: 'Theme',
-          child: _ThemePicker(
+          child: FormSelect<NymThemeKey>(
             value: s.theme,
+            items: _themeOptions,
             onChanged: (v) {
               ctrl.setTheme(v);
               _mutate((d) => d.copyWith(theme: v));
             },
           ),
         ),
-        // Chat View (single / columns) — two preview cards (.view-option).
-        FormGroup(
+      ),
+      // Chat View (single / columns) — two preview cards (.view-option) with
+      // the unconditional "Reset columns to defaults" button after the hint
+      // (index.html:1401; the button has no cv-only-setting class, so it shows
+      // in single-chat mode too).
+      _GroupSpec(
+        text: 'Chat View Single Chat (Default) Column View Single shows one '
+            'conversation at a time. Column view shows channels, PMs, and '
+            'group chats side by side in scrollable columns you can add, '
+            'remove, and drag to reorder. Reset columns to defaults',
+        child: FormGroup(
           label: 'Chat View',
           hint: 'Single shows one conversation at a time. Column view shows '
               'channels, PMs, and group chats side by side in scrollable '
               'columns you can add, remove, and drag to reorder.',
+          // `.nm-h-58` (btn-small): NOT uppercase (`resetColumnView`).
+          footer: Align(
+            alignment: Alignment.centerLeft,
+            child: NymOutlineButton(
+              label: 'Reset columns to defaults',
+              uppercase: false,
+              onPressed: ctrl.resetColumns,
+            ),
+          ),
           // Live-applied (PWA `selectChatView`, app.js:4115).
           child: _ViewPicker(
             value: s.useColumns ? 'columns' : 'single',
@@ -868,47 +1072,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
         ),
-        // Reset columns to defaults (PWA index.html:1406, `resetColumnView`).
-        // `.nm-h-58` (btn-small): 11px text-dim, NOT uppercase.
-        if (s.useColumns)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: NymOutlineButton(
-                label: 'Reset columns to defaults',
-                uppercase: false,
-                onPressed: ctrl.resetColumns,
-              ),
-            ),
-          ),
-        // Column Message Wallpaper (cv-only).
-        if (s.useColumns)
-          FormGroup(
+      ),
+      // Column Message Wallpaper (cv-only: shown under body.columns-mode,
+      // styles-columns.css:64-70).
+      if (s.useColumns)
+        _GroupSpec(
+          text: 'Column Message Wallpaper ${_optText(columnsWallpaperItems)} '
+              'In column view, let your chat wallpaper show through the '
+              'message area of each column instead of a solid background.',
+          child: FormGroup(
             label: 'Column Message Wallpaper',
             hint: 'In column view, let your chat wallpaper show through the '
                 'message area of each column instead of a solid background.',
             // Live-applied (PWA `onColumnsWallpaperChange`, app.js:2218).
             child: FormSelect<bool>(
               value: s.columnsWallpaper,
-              items: const [
-                (value: false, label: 'Solid background'),
-                (value: true, label: 'Show wallpaper through messages'),
-              ],
+              items: columnsWallpaperItems,
               onChanged: (v) {
                 ctrl.setColumnsWallpaper(v);
                 _mutate((d) => d.copyWith(columnsWallpaper: v));
               },
             ),
           ),
-        // Chat Wallpaper grid.
-        FormGroup(
+        ),
+      // Chat Wallpaper grid.
+      _GroupSpec(
+        text: 'Chat Wallpaper None Geometric Circuit Dots Waves Topography '
+            'Hexagons Diamonds Upload Choose a background pattern or upload '
+            'your own image (min 1920x1080)',
+        child: FormGroup(
           label: 'Chat Wallpaper',
           hint: 'Choose a background pattern or upload your own image '
               '(min 1920x1080)',
           // Live-applied (PWA `selectWallpaper`, app.js:4159-4161).
           child: _WallpaperPicker(
             value: s.wallpaperType,
+            customThumbPath: customWallpaperPath,
+            uploading: _wallpaperUploading,
             onChanged: (v) {
               ctrl.setWallpaperType(v);
               _mutate((d) => d.copyWith(wallpaperType: v));
@@ -916,9 +1116,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onUploadCustom: () => _uploadCustomWallpaper(ctrl),
           ),
         ),
-        // Message Layout (bubbles / irc). Live-applied (PWA
-        // `selectMessageLayout`, app.js:4127).
-        FormGroup(
+      ),
+      // Message Layout (bubbles / irc). Live-applied (PWA
+      // `selectMessageLayout`, app.js:4127). The search text includes the mock
+      // preview lines (they're part of the group's rendered textContent).
+      _GroupSpec(
+        text: 'Message Layout Bubbles (Default) IRC Style Choose between '
+            "classic IRC-style or modern chat bubbles alice#e45f hey there! "
+            "you#6si9 hello! bob#2t5g what's up?",
+        child: FormGroup(
           label: 'Message Layout',
           hint: 'Choose between classic IRC-style or modern chat bubbles',
           child: _LayoutPicker(
@@ -929,8 +1135,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
         ),
-        // Visual Transparency.
-        FormGroup(
+      ),
+      // Visual Transparency.
+      _GroupSpec(
+        text: 'Visual Transparency ${_optText(transparencyItems)} Choose '
+            'between Solid or Glass, where messages, modals, sidebars, and '
+            'other surfaces are rendered with either solid backgrounds or a '
+            'translucent "Glass" look.',
+        child: FormGroup(
           label: 'Visual Transparency',
           hint: 'Choose between Solid or Glass, where messages, modals, '
               'sidebars, and other surfaces are rendered with either solid '
@@ -938,24 +1150,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // Live-applied (PWA `onTransparencyChange`, app.js:2223).
           child: FormSelect<bool>(
             value: s.transparencyEnabled,
-            items: const [
-              (value: false, label: 'Solid'),
-              (value: true, label: 'Glass'),
-            ],
+            items: transparencyItems,
             onChanged: (v) {
               ctrl.setTransparencyEnabled(v);
               _mutate((d) => d.copyWith(transparencyEnabled: v));
             },
           ),
         ),
-        // Text Size slider with live preview + reset. Live-applied/committed
-        // (PWA `commitTextSize`, app.js:2182).
-        FormGroup(
+      ),
+      // Text Size slider with live preview + reset. Live-applied/committed
+      // (PWA `commitTextSize`, app.js:2182).
+      _GroupSpec(
+        text: 'Text Size Adjust the size of all text across the app '
+            '${(_textSizePreview ?? s.textSize.toDouble()).round()}px Reset',
+        child: FormGroup(
           label: 'Text Size',
           hint: 'Adjust the size of all text across the app',
           child: _TextSizeRow(
             value: (_textSizePreview ?? s.textSize.toDouble()),
-            previewColor: c.primary,
             onChanged: (v) => setState(() => _textSizePreview = v),
             onChangeEnd: (v) {
               ctrl.setTextSize(v.round());
@@ -969,13 +1181,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             },
           ),
         ),
-      ],
-    );
+      ),
+    ];
   }
 
   // --- Privacy & Security ---------------------------------------------------
 
-  Widget _privacy(Settings s, SettingsController ctrl) {
+  List<_GroupSpec> _privacy(Settings s, SettingsController ctrl) {
     // The moderation sets (friends / blocked users / blocked keywords) live on
     // AppState, not Settings.
     final app = ref.watch(appStateProvider);
@@ -986,10 +1198,66 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ref.read(nostrControllerProvider).identity?.loginMethod != null;
     // Save-gated draft value (09-M1); locked to 'persistent' while logged in.
     final keypairValue = nostrLoggedIn ? 'persistent' : _draftKeypair;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FormGroup(
+    const keypairItems = <({String value, String label})>[
+      (value: 'persistent', label: 'Disabled (reuse same keypair)'),
+      (value: 'random', label: 'Enabled (new identity each session)'),
+      (value: 'hardcore', label: 'Hardcore (new keypair every message)'),
+    ];
+    const hardcoreWarning =
+        '⚠ Hardcore mode changes your identity after every sent message. PMs '
+        'and group chats will not work reliably since recipients cannot reply '
+        'to a constantly changing pubkey. Settings will not sync across '
+        'devices.';
+    const powItems = <({int value, String label})>[
+      (value: 0, label: 'Disabled'),
+      (value: 8, label: 'Very Low (8 bits)'),
+      (value: 12, label: 'Low (12 bits)'),
+      (value: 16, label: 'Medium (16 bits)'),
+      (value: 20, label: 'High (20 bits)'),
+      (value: 24, label: 'Very High (24 bits)'),
+    ];
+    const acceptItems = <({String value, String label})>[
+      (value: 'enabled', label: 'Enabled'),
+      (value: 'friends', label: 'Friends only'),
+      (value: 'disabled', label: 'Disabled'),
+    ];
+    const callsWarning =
+        '⚠ Audio/video calls and P2P file sharing connect peers directly over '
+        'WebRTC, which can reveal your true IP address to the other party. '
+        'Use a VPN or Tor to help conceal it.';
+    const dmTtlItems = <({int value, String label})>[
+      (value: 3600, label: '1 hour'),
+      (value: 21600, label: '6 hours'),
+      (value: 86400, label: '1 day'),
+      (value: 259200, label: '3 days'),
+      (value: 604800, label: '7 days'),
+    ];
+    const scopeItems = <({String value, String label})>[
+      (value: 'everywhere', label: 'Enabled everywhere'),
+      (value: 'pms-groups', label: 'Both PMs and group chats'),
+      (value: 'pms', label: 'Only PMs'),
+      (value: 'groups', label: 'Only group chats'),
+      (value: 'disabled', label: 'Disabled completely'),
+    ];
+    const showStatusItems = <({String value, String label})>[
+      (value: 'true', label: 'Enabled'),
+      (value: 'friends', label: 'Friends only'),
+      (value: 'false', label: 'Disabled'),
+    ];
+    const blurItems = <({String value, String label})>[
+      (value: 'true', label: 'Enabled (blur by default)'),
+      (value: 'friends', label: 'Disabled (for friends only)'),
+      (value: 'false', label: 'Disabled (show all images)'),
+    ];
+    return [
+      _GroupSpec(
+        text: 'Identity Encryption Encrypt identity (nsec) key on this '
+            "device… Optionally protect your saved identity's (nsec) private "
+            'key with a password, PIN, passkey, or biometric (Face/Touch ID) '
+            "so it can't be read from this device without unlocking. Passkeys "
+            '(synced or hardware security keys) and biometrics use WebAuthn '
+            'where supported, with password/PIN as the universal fallback.',
+        child: FormGroup(
           label: 'Identity Encryption',
           hint: "Optionally protect your saved identity's (nsec) private key "
               'with a password, PIN, passkey, or biometric (Face/Touch ID) so '
@@ -1002,82 +1270,86 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onPressed: () => VaultSettingsModal.open(context),
           ),
         ),
-        FormGroup(
+      ),
+      // The hidden hardcore warning is part of the group's textContent even
+      // when collapsed away in the PWA, so it's always searchable.
+      _GroupSpec(
+        text: 'Generate Random Keypair Per Session ${_optText(keypairItems)} '
+            'Generate a new random keypair on every session restart for '
+            'improved pseudonymity. When disabled, your generated keypair '
+            'persists across reloads. $hardcoreWarning',
+        child: FormGroup(
           label: 'Generate Random Keypair Per Session',
           hint: 'Generate a new random keypair on every session restart for '
               'improved pseudonymity. When disabled, your generated keypair '
               'persists across reloads.',
-          warning: keypairValue == 'hardcore'
-              ? '⚠ Hardcore mode changes your identity after every sent '
-                  'message. PMs and group chats will not work reliably since '
-                  'recipients cannot reply to a constantly changing pubkey. '
-                  'Settings will not sync across devices.'
-              : null,
+          // `#hardcoreKeypairWarning` (index.html:1541): a plain amber
+          // `.form-hint.nm-h-59` line, NOT the danger `.form-warning` box.
+          amberHint: keypairValue == 'hardcore' ? hardcoreWarning : null,
           child: FormSelect<String>(
             value: keypairValue,
             // Locked at 'persistent' while logged in with a Nostr identity —
             // rotation would conflict with it (app.js:3237-3241).
             disabled: nostrLoggedIn,
             tooltip: 'Not available while logged in with a Nostr identity',
-            items: const [
-              (value: 'persistent', label: 'Disabled (reuse same keypair)'),
-              (value: 'random', label: 'Enabled (new identity each session)'),
-              (value: 'hardcore', label: 'Hardcore (new keypair every message)'),
-            ],
+            items: keypairItems,
             // Save-gated (PWA commits keypair mode in saveSettings,
             // app.js:3873-3877).
             onChanged: (v) => setState(() => _draftKeypair = v),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Proof of Work Difficulty ${_optText(powItems)} Enable for '
+            'anti-spam to require messages have a minimum PoW',
+        child: FormGroup(
           label: 'Proof of Work Difficulty',
           hint: 'Enable for anti-spam to require messages have a minimum PoW',
           child: FormSelect<int>(
             value: _draftPow,
-            items: const [
-              (value: 0, label: 'Disabled'),
-              (value: 8, label: 'Very Low (8 bits)'),
-              (value: 12, label: 'Low (12 bits)'),
-              (value: 16, label: 'Medium (16 bits)'),
-              (value: 20, label: 'High (20 bits)'),
-              (value: 24, label: 'Very High (24 bits)'),
-            ],
+            items: powItems,
             // Save-gated (PWA reads #powDifficultySelect in saveSettings).
             onChanged: (v) => setState(() => _draftPow = v),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Accept Private Messages & Group Chat Requests '
+            '${_optText(acceptItems)} Control who can send you PMs and group '
+            'chat invites. "Friends only" filters messages from non-friends.',
+        child: FormGroup(
           label: 'Accept Private Messages & Group Chat Requests',
           hint: 'Control who can send you PMs and group chat invites. '
               '"Friends only" filters messages from non-friends.',
           child: FormSelect<String>(
             value: s.acceptPMs,
-            items: const [
-              (value: 'enabled', label: 'Enabled'),
-              (value: 'friends', label: 'Friends only'),
-              (value: 'disabled', label: 'Disabled'),
-            ],
+            items: acceptItems,
             onChanged: (v) => _mutate((d) => d.copyWith(acceptPMs: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Accept Audio & Video Calls ${_optText(acceptItems)} Control '
+            'who can ring you with an audio or video call. "Friends only" '
+            'silently ignores calls from non-friends. $callsWarning',
+        child: FormGroup(
           label: 'Accept Audio & Video Calls',
           hint: 'Control who can ring you with an audio or video call. '
               '"Friends only" silently ignores calls from non-friends.',
-          warning: '⚠ Audio/video calls and P2P file sharing connect peers '
-              'directly over WebRTC, which can reveal your true IP address to '
-              'the other party. Use a VPN or Tor to help conceal it.',
+          warning: callsWarning,
           child: FormSelect<String>(
             value: s.acceptCalls,
-            items: const [
-              (value: 'enabled', label: 'Enabled'),
-              (value: 'friends', label: 'Friends only'),
-              (value: 'disabled', label: 'Disabled'),
-            ],
+            items: acceptItems,
             onChanged: (v) => _mutate((d) => d.copyWith(acceptCalls: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Disappearing PM (forward secrecy) Disabled Enabled When '
+            'enabled, your private messages include an "expiration" tag '
+            '(NIP‑40) so relays/clients can delete them after the period '
+            'chosen when enabled.',
+        child: FormGroup(
           label: 'Disappearing PM (forward secrecy)',
           hint: 'When enabled, your private messages include an "expiration" '
               'tag (NIP‑40) so relays/clients can delete them after the period '
@@ -1092,60 +1364,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 _mutate((d) => d.copyWith(dmForwardSecrecyEnabled: v)),
           ),
         ),
-        // Disappear After (TTL) — shown when forward secrecy is enabled.
-        if (s.dmForwardSecrecyEnabled)
-          FormGroup(
+      ),
+      // Disappear After (TTL) — shown when forward secrecy is enabled.
+      if (s.dmForwardSecrecyEnabled)
+        _GroupSpec(
+          text: 'Disappear After ${_optText(dmTtlItems)} This sets the '
+              '"expiration" timestamp on each outgoing gift‑wrapped PM.',
+          child: FormGroup(
             label: 'Disappear After',
             hint: 'This sets the "expiration" timestamp on each outgoing '
                 'gift‑wrapped PM.',
             child: FormSelect<int>(
               value: s.dmTtlSeconds,
-              items: const [
-                (value: 3600, label: '1 hour'),
-                (value: 21600, label: '6 hours'),
-                (value: 86400, label: '1 day'),
-                (value: 259200, label: '3 days'),
-                (value: 604800, label: '7 days'),
-              ],
+              items: dmTtlItems,
               onChanged: (v) => _mutate((d) => d.copyWith(dmTtlSeconds: v)),
             ),
           ),
-        FormGroup(
+        ),
+      _GroupSpec(
+        text: 'Read Receipts ${_optText(scopeItems)} Choose where senders can '
+            "see when you've read their messages (✓✓). \"Enabled everywhere\" "
+            'includes PMs, group chats, and public channels.',
+        child: FormGroup(
           label: 'Read Receipts',
           hint: "Choose where senders can see when you've read their messages "
               '(✓✓). "Enabled everywhere" includes PMs, group chats, and '
               'public channels.',
           child: FormSelect<String>(
             value: s.readReceiptsScope,
-            items: const [
-              (value: 'everywhere', label: 'Enabled everywhere'),
-              (value: 'pms-groups', label: 'Both PMs and group chats'),
-              (value: 'pms', label: 'Only PMs'),
-              (value: 'groups', label: 'Only group chats'),
-              (value: 'disabled', label: 'Disabled completely'),
-            ],
+            items: scopeItems,
             onChanged: (v) => _mutate((d) => d.copyWith(readReceiptsScope: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Typing Indicators ${_optText(scopeItems)} Choose where others '
+            'can see when you\'re typing. "Enabled everywhere" includes PMs, '
+            'group chats, and public channels.',
+        child: FormGroup(
           label: 'Typing Indicators',
           hint: "Choose where others can see when you're typing. "
               '"Enabled everywhere" includes PMs, group chats, and public '
               'channels.',
           child: FormSelect<String>(
             value: s.typingIndicatorsScope,
-            items: const [
-              (value: 'everywhere', label: 'Enabled everywhere'),
-              (value: 'pms-groups', label: 'Both PMs and group chats'),
-              (value: 'pms', label: 'Only PMs'),
-              (value: 'groups', label: 'Only group chats'),
-              (value: 'disabled', label: 'Disabled completely'),
-            ],
+            items: scopeItems,
             onChanged: (v) =>
                 _mutate((d) => d.copyWith(typingIndicatorsScope: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Show Status Indicators ${_optText(showStatusItems)} When '
+            'enabled, online/away/offline status dots are shown on avatars '
+            'and in user profiles. "Friends only" broadcasts a hidden status '
+            'publicly while privately sharing your real status with people '
+            "you've marked as friends, so only they can see it. When "
+            'disabled, your status is hidden from everyone, but you can still '
+            "see other people's status indicators.",
+        child: FormGroup(
           label: 'Show Status Indicators',
           hint: 'When enabled, online/away/offline status dots are shown on '
               'avatars and in user profiles. "Friends only" broadcasts a '
@@ -1155,15 +1432,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               "still see other people's status indicators.",
           child: FormSelect<String>(
             value: s.showStatus,
-            items: const [
-              (value: 'true', label: 'Enabled'),
-              (value: 'friends', label: 'Friends only'),
-              (value: 'false', label: 'Disabled'),
-            ],
+            items: showStatusItems,
             onChanged: (v) => _mutate((d) => d.copyWith(showStatus: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Cache PMs & Group Chats On Device Enabled Disabled When '
+            'enabled, decrypted private messages and group chats are stored '
+            'on this device so they appear instantly on app launch. Disable '
+            "if you'd rather not have decrypted message content kept at rest "
+            'in app storage. Toggling off clears the existing cached PM/group '
+            'data.',
+        child: FormGroup(
           label: 'Cache PMs & Group Chats On Device',
           hint: 'When enabled, decrypted private messages and group chats are '
               'stored on this device so they appear instantly on app launch. '
@@ -1182,23 +1463,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(cachePMs: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Blur Images from Others ${_optText(blurItems)} Blur images '
+            'shared by others until clicked. Your own images are never '
+            'blurred. "Friends only" shows images from friends unblurred.',
+        child: FormGroup(
           label: 'Blur Images from Others',
           hint: 'Blur images shared by others until clicked. Your own images '
               'are never blurred. "Friends only" shows images from friends '
               'unblurred.',
           child: FormSelect<String>(
             value: _draftBlur,
-            items: const [
-              (value: 'true', label: 'Enabled (blur by default)'),
-              (value: 'friends', label: 'Disabled (for friends only)'),
-              (value: 'false', label: 'Disabled (show all images)'),
-            ],
+            items: blurItems,
             // Save-gated (PWA commits blur in saveSettings, app.js:3729-3754).
             onChanged: (v) => setState(() => _draftBlur = v),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Blocked Keywords/Phrases Add keyword or phrase to block '
+            'Add Keyword Remove '
+            '${app.blockedKeywords.isEmpty ? 'No blocked keywords' : app.blockedKeywords.join(' ')}',
+        child: FormGroup(
           label: 'Blocked Keywords/Phrases',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1224,12 +1511,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 onRemove: (kw) {
                   ref.read(appStateProvider.notifier).removeBlockedKeyword(kw);
                   _persistBlockedKeywords();
+                  ref.read(nostrControllerProvider).syncSettings();
                 },
               ),
             ],
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Friends Remove Friends can have special privileges like '
+            'bypassing image blur and message filters. Add friends from the '
+            'context menu on any user. '
+            '${app.friends.isEmpty ? 'No friends added' : app.friends.map(_nymLabelFor).join(' ')}',
+        child: FormGroup(
           label: 'Friends',
           hint: 'Friends can have special privileges like bypassing image '
               'blur and message filters. Add friends from the context menu on '
@@ -1239,19 +1533,70 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             emptyText: 'No friends added',
             buttonLabel: 'Remove',
             labelFor: _nymLabelFor,
-            onRemove: (pk) =>
-                ref.read(appStateProvider.notifier).removeFriend(pk),
+            labelSpanFor: _nymSpanFor,
+            // `removeFriendByPubkey` (users.js:1953-1961): delete + saveFriends
+            // + system message + nostrSettingsSave. The controller wrapper
+            // persists `nym_friends` and emits "Removed … from friends".
+            onRemove: (pk) {
+              final controller = ref.read(nostrControllerProvider);
+              controller.toggleFriend(pk);
+              controller.syncSettings();
+            },
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Blocked Users Unblock '
+            '${app.blockedUsers.isEmpty ? 'No blocked users' : app.blockedUsers.map(_nymLabelFor).join(' ')}',
+        child: FormGroup(
           label: 'Blocked Users',
-          child: _removableList(
-            entries: app.blockedUsers,
-            emptyText: 'No blocked users',
-            buttonLabel: 'Unblock',
-            labelFor: _nymLabelFor,
-            onRemove: (pk) =>
-                ref.read(appStateProvider.notifier).removeBlockedUser(pk),
+          child: _blockedProfilesLoading
+              // `updateBlockedList` renders "Loading..." while unknown blocked
+              // users' profiles are fetched (users.js:1774-1781).
+              ? _emptyListBox('Loading...')
+              : _removableList(
+                  entries: app.blockedUsers,
+                  emptyText: 'No blocked users',
+                  buttonLabel: 'Unblock',
+                  labelFor: _nymLabelFor,
+                  labelSpanFor: _nymSpanFor,
+                  // `unblockByPubkey` (users.js): delete + saveBlockedUsers +
+                  // "Unblocked …" system message + nostrSettingsSave. The
+                  // controller wrapper persists `nym_blocked` + emits the
+                  // message.
+                  onRemove: (pk) {
+                    final controller = ref.read(nostrControllerProvider);
+                    controller.unblockUser(pk);
+                    controller.syncSettings();
+                  },
+                ),
+        ),
+      ),
+    ];
+  }
+
+  /// The rich `name` + dim `#suffix` span for a moderation-list row
+  /// (users.js `getNymHtmlFromPubkey` → `dimNymSuffix`: the trailing 4-hex
+  /// suffix renders in `.nym-suffix` — opacity .7, 0.9em, weight 100).
+  TextSpan _nymSpanFor(String pubkey) {
+    final c = context.nym;
+    final nym = _nymLabelFor(pubkey);
+    final m = RegExp(r'^([\s\S]*?)#([0-9a-f]{4})$', caseSensitive: false)
+        .firstMatch(nym);
+    if (m == null) {
+      return TextSpan(
+          text: nym, style: TextStyle(color: c.text, fontSize: 13));
+    }
+    return TextSpan(
+      children: [
+        TextSpan(
+            text: m.group(1), style: TextStyle(color: c.text, fontSize: 13)),
+        TextSpan(
+          text: '#${m.group(2)}',
+          style: TextStyle(
+            color: c.text.withValues(alpha: 0.7),
+            fontSize: 13 * 0.9,
+            fontWeight: FontWeight.w100,
           ),
         ),
       ],
@@ -1260,11 +1605,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // --- Messaging & Display --------------------------------------------------
 
-  Widget _messaging(Settings s, SettingsController ctrl) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FormGroup(
+  List<_GroupSpec> _messaging(Settings s, SettingsController ctrl) {
+    const timeFormatItems = <({String value, String label})>[
+      (value: '24hr', label: '24-hour (14:30)'),
+      (value: '12hr', label: '12-hour (2:30 PM)'),
+    ];
+    const dateFormatItems = <({String value, String label})>[
+      (value: 'default', label: 'Default (May 28, 2026)'),
+      (value: 'mdy', label: 'MM/DD/YYYY (05/28/2026)'),
+      (value: 'dmy', label: 'DD/MM/YYYY (28/05/2026)'),
+      (value: 'ymd', label: 'YYYY-MM-DD (2026-05-28)'),
+    ];
+    const nickStyleItems = <({String value, String label})>[
+      (value: 'fancy', label: 'Fancy (adjective_noun)'),
+      (value: 'simple', label: 'Simple (nym1234)'),
+    ];
+    return [
+      _GroupSpec(
+        text: 'Translation Language ${_optText(_translationLanguages)} Choose '
+            'your preferred language for translating messages via the context '
+            'menu.',
+        child: FormGroup(
           label: 'Translation Language',
           hint: 'Choose your preferred language for translating messages via '
               'the context menu.',
@@ -1274,7 +1635,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(translateLanguage: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Notification Sound ${_optText(_soundOptions)}',
+        child: FormGroup(
           label: 'Notification Sound',
           child: FormSelect<String>(
             value: s.sound,
@@ -1283,7 +1647,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _onSoundChanged(ctrl, v),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Auto-scroll Messages Enabled Disabled',
+        child: FormGroup(
           label: 'Auto-scroll Messages',
           child: FormSelect<bool>(
             value: s.autoscroll,
@@ -1294,7 +1661,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(autoscroll: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Show Timestamps Show Hide',
+        child: FormGroup(
           label: 'Show Timestamps',
           child: FormSelect<bool>(
             value: s.showTimestamps,
@@ -1305,82 +1675,99 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(showTimestamps: v)),
           ),
         ),
-        // Time/Date Format are hidden when Show Timestamps = Hide (09-M2),
-        // mirroring the PWA's `#timeFormatGroup`/`#dateFormatGroup` display
-        // toggle (app.js:3492-3499 + the #timestampSelect change listener
-        // app.js:6843-6852). `s` is the draft, so toggling re-renders this.
-        if (s.showTimestamps) ...[
-          FormGroup(
+      ),
+      // Time/Date Format are hidden when Show Timestamps = Hide (09-M2),
+      // mirroring the PWA's `#timeFormatGroup`/`#dateFormatGroup` display
+      // toggle (app.js:3492-3499 + the #timestampSelect change listener
+      // app.js:6843-6852). `s` is the draft, so toggling re-renders this.
+      if (s.showTimestamps) ...[
+        _GroupSpec(
+          text: 'Time Format ${_optText(timeFormatItems)}',
+          child: FormGroup(
             label: 'Time Format',
             child: FormSelect<String>(
               value: s.timeFormat,
-              items: const [
-                (value: '24hr', label: '24-hour (14:30)'),
-                (value: '12hr', label: '12-hour (2:30 PM)'),
-              ],
+              items: timeFormatItems,
               onChanged: (v) => _mutate((d) => d.copyWith(timeFormat: v)),
             ),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Date Format ${_optText(dateFormatItems)} Used in the full '
+              'timestamp shown when tapping a message time',
+          child: FormGroup(
             label: 'Date Format',
-            hint: 'Used in the full timestamp shown when tapping a message time',
+            hint:
+                'Used in the full timestamp shown when tapping a message time',
             child: FormSelect<String>(
               value: s.dateFormat,
-              items: const [
-                (value: 'default', label: 'Default (May 28, 2026)'),
-                (value: 'mdy', label: 'MM/DD/YYYY (05/28/2026)'),
-                (value: 'dmy', label: 'DD/MM/YYYY (28/05/2026)'),
-                (value: 'ymd', label: 'YYYY-MM-DD (2026-05-28)'),
-              ],
+              items: dateFormatItems,
               onChanged: (v) => _mutate((d) => d.copyWith(dateFormat: v)),
             ),
           ),
-        ],
-        FormGroup(
+        ),
+      ],
+      _GroupSpec(
+        text: 'Random Nickname Style ${_optText(nickStyleItems)} Style used '
+            'when generating random nicknames',
+        child: FormGroup(
           label: 'Random Nickname Style',
           hint: 'Style used when generating random nicknames',
           child: FormSelect<String>(
             value: s.nickStyle,
-            items: const [
-              (value: 'fancy', label: 'Fancy (adjective_noun)'),
-              (value: 'simple', label: 'Simple (nym1234)'),
-            ],
+            items: nickStyleItems,
             onChanged: (v) => _mutate((d) => d.copyWith(nickStyle: v)),
           ),
         ),
-        // NOTE: #autoEphemeralSettingGroup is hidden by default in the PWA
-        // (nm-hidden) and only shown in ephemeral-login context, so it is
-        // omitted here to match the default rendering.
-      ],
-    );
+      ),
+      // NOTE: #autoEphemeralSettingGroup is permanently hidden in the PWA
+      // (nm-hidden), so no control renders here — but its save-time key
+      // cleanup is mirrored in `_onSave` (app.js:3862-3870).
+    ];
   }
 
   // --- Channels -------------------------------------------------------------
 
-  Widget _channels(Settings s, SettingsController ctrl) {
+  List<_GroupSpec> _channels(Settings s, SettingsController ctrl) {
     final state = ref.watch(appStateProvider);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FormGroup(
+    const gcPmOnlyItems = <({bool value, String label})>[
+      (value: false, label: 'Disabled (show geohash channels)'),
+      (value: true, label: 'Enabled (group chats & PMs only)'),
+    ];
+    const proximityItems = <({bool value, String label})>[
+      (value: false, label: 'Disabled'),
+      (value: true, label: 'Enabled (requires location access)'),
+    ];
+    const hideNonPinnedItems = <({bool value, String label})>[
+      (value: false, label: 'Disabled'),
+      (value: true, label: 'Enabled (only show favorited channels)'),
+    ];
+    return [
+      _GroupSpec(
+        text: 'Group Chats & PMs Only Mode ${_optText(gcPmOnlyItems)} Hides '
+            'all geohash channels and focuses the app on group chats and '
+            'private messages only. Reduces bandwidth by skipping channel '
+            'subscriptions.',
+        child: FormGroup(
           label: 'Group Chats & PMs Only Mode',
           hint: 'Hides all geohash channels and focuses the app on group '
               'chats and private messages only. Reduces bandwidth by skipping '
               'channel subscriptions.',
           child: FormSelect<bool>(
             value: s.groupChatPMOnlyMode,
-            items: const [
-              (value: false, label: 'Disabled (show geohash channels)'),
-              (value: true, label: 'Enabled (group chats & PMs only)'),
-            ],
+            items: gcPmOnlyItems,
             onChanged: (v) =>
                 _mutate((d) => d.copyWith(groupChatPMOnlyMode: v)),
           ),
         ),
-        // Geohash-specific settings (data-geohash-setting) are hidden in
-        // group-chat/PM-only mode (F6; app.js:3598-3607).
-        if (!s.groupChatPMOnlyMode) ...[
-          FormGroup(
+      ),
+      // Geohash-specific settings (data-geohash-setting) are hidden in
+      // group-chat/PM-only mode (F6; app.js:3598-3607).
+      if (!s.groupChatPMOnlyMode) ...[
+        _GroupSpec(
+          text: 'Sort Geohash Channels by Proximity ${_optText(proximityItems)} '
+              'Sort geohash channels by distance from your location',
+          child: FormGroup(
             label: 'Sort Geohash Channels by Proximity',
             hint: 'Sort geohash channels by distance from your location',
             // Save-gated: the PWA reads `#proximitySelect` and runs the
@@ -1389,57 +1776,105 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // is handled in `_onSave`.
             child: FormSelect<bool>(
               value: s.sortByProximity,
-              items: const [
-                (value: false, label: 'Disabled'),
-                (value: true, label: 'Enabled (requires location access)'),
-              ],
+              items: proximityItems,
               onChanged: (v) => _mutate((d) => d.copyWith(sortByProximity: v)),
             ),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Default Landing Channel Type to search or select a '
+              'channel... Channel to load when you first open or reload the '
+              'app',
+          child: FormGroup(
             label: 'Default Landing Channel',
             hint: 'Channel to load when you first open or reload the app',
             child: _landingChannelField(state.channels),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Hide All Non-Favorited Channels '
+              '${_optText(hideNonPinnedItems)} When enabled, only your '
+              'favorited channels will appear in the sidebar',
+          child: FormGroup(
             label: 'Hide All Non-Favorited Channels',
             hint: 'When enabled, only your favorited channels will appear in '
                 'the sidebar',
             child: FormSelect<bool>(
               value: s.hideNonPinned,
-              items: const [
-                (value: false, label: 'Disabled'),
-                (value: true, label: 'Enabled (only show favorited channels)'),
-              ],
+              items: hideNonPinnedItems,
               onChanged: (v) => _mutate((d) => d.copyWith(hideNonPinned: v)),
             ),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Hidden Channels Unhide '
+              '${state.hiddenChannels.isEmpty ? 'No hidden channels' : state.hiddenChannels.map(_hiddenChannelLabel).join(' ')}',
+          child: FormGroup(
             label: 'Hidden Channels',
             child: _removableList(
               entries: state.hiddenChannels,
               emptyText: 'No hidden channels',
               buttonLabel: 'Unhide',
-              labelFor: (key) => '#$key',
-              onRemove: (key) =>
-                  ref.read(appStateProvider.notifier).removeHiddenChannel(key),
+              // `updateHiddenChannelsList` (channels.js:942-945): `#key` plus
+              // the decoded geohash location, e.g. `#9q (37.77°N, 122.41°W)`.
+              labelFor: _hiddenChannelLabel,
+              // `unhideChannelFromSettings` (channels.js:955-961): delete +
+              // saveHiddenChannels + nostrSettingsSave + applyHiddenChannels.
+              onRemove: (key) {
+                ref.read(appStateProvider.notifier).removeHiddenChannel(key);
+                _persistStringSet(StorageKeys.hiddenChannels,
+                    ref.read(appStateProvider).hiddenChannels);
+                ref.read(nostrControllerProvider).syncSettings();
+              },
             ),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Blocked Channels Unblock '
+              '${state.blockedChannels.isEmpty ? 'No blocked channels' : state.blockedChannels.map(_blockedChannelLabel).join(' ')}',
+          child: FormGroup(
             label: 'Blocked Channels',
             child: _removableList(
               entries: state.blockedChannels,
               emptyText: 'No blocked channels',
               buttonLabel: 'Unblock',
-              labelFor: (key) => '#$key',
-              onRemove: (key) =>
-                  ref.read(appStateProvider.notifier).removeBlockedChannel(key),
+              // `updateBlockedChannelsList` (channels.js:915): geohash keys
+              // render `#key [GEO]`, ephemeral keys `#key [EPH]`.
+              labelFor: _blockedChannelLabel,
+              // `unblockChannelFromSettings` (channels.js:926-932) →
+              // `unblockChannel(key, geohash)`: delete + saveBlockedChannels +
+              // nostrSettingsSave + re-add the channel to the sidebar.
+              onRemove: (key) {
+                final controller = ref.read(nostrControllerProvider);
+                final isGeo = isValidGeohash(key);
+                ref
+                    .read(appStateProvider.notifier)
+                    .unblockChannel(key, geohash: isGeo ? key : '');
+                _persistStringSet(StorageKeys.blockedChannels,
+                    ref.read(appStateProvider).blockedChannels);
+                // Re-adding through the controller is idempotent and persists
+                // the rejoined channel list (the PWA's `addChannel` path).
+                controller.addChannel(key, geohash: isGeo ? key : '');
+                controller.syncSettings();
+              },
             ),
           ),
-        ],
+        ),
       ],
-    );
+    ];
   }
+
+  /// `#key (37.77°N, 122.41°W)` for a hidden geohash channel, bare `#key`
+  /// otherwise (channels.js:942-945).
+  String _hiddenChannelLabel(String key) {
+    final loc = geohashLocationLabel(key);
+    return loc.isEmpty ? '#$key' : '#$key ($loc)';
+  }
+
+  /// `#key [GEO]` for a geohash channel, `#key [EPH]` for an ephemeral one
+  /// (channels.js:915).
+  String _blockedChannelLabel(String key) =>
+      isValidGeohash(key) ? '#$key [GEO]' : '#$key [EPH]';
 
   /// Default-landing-channel searchable field (F8): a text input that, when
   /// focused/typed, shows a grouped suggestions overlay (Common / Joined
@@ -1510,7 +1945,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ));
       }
-      final selected = o.value == _landing;
+      // `.channel-dropdown-option.nm-app-3 { padding: 8px 12px; color:
+      // var(--text) }` (no-inline.css:103) — plain rows with no selected
+      // highlight (the PWA's hover handler sets `var(--background)`, an
+      // undefined variable, so even hover renders no visible tint;
+      // app.js:3428-3441).
       rows.add(InkWell(
         onTap: () {
           setState(() {
@@ -1522,14 +1961,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         },
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          color: selected ? c.primaryA(0.10) : null,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Text(
             o.label,
-            style: TextStyle(
-              color: selected ? c.primary : c.text,
-              fontSize: 13,
-            ),
+            style: TextStyle(color: c.text, fontSize: 13),
           ),
         ),
       ));
@@ -1539,7 +1974,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // --- Mobile Gestures ------------------------------------------------------
 
-  Widget _mobile(Settings s, SettingsController ctrl) {
+  List<_GroupSpec> _mobile(Settings s, SettingsController ctrl) {
     const swipeActions = <({String value, String label})>[
       (value: 'quote', label: 'Quote Reply'),
       (value: 'translate', label: 'Translate'),
@@ -1561,10 +1996,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 'hug', label: 'Give Warm Hug'),
       (value: 'none', label: 'None'),
     ];
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FormGroup(
+    const thresholdItems = <({int value, String label})>[
+      (value: 40, label: 'High (40px)'),
+      (value: 60, label: 'Medium (60px)'),
+      (value: 80, label: 'Low (80px)'),
+      (value: 100, label: 'Very Low (100px)'),
+    ];
+    return [
+      _GroupSpec(
+        text: 'Swipe Gestures (Mobile) Enabled Disabled Swipe a message '
+            'horizontally to trigger an action. Disable to turn off all swipe '
+            'gestures on messages.',
+        child: FormGroup(
           label: 'Swipe Gestures (Mobile)',
           hint: 'Swipe a message horizontally to trigger an action. Disable '
               'to turn off all swipe gestures on messages.',
@@ -1577,10 +2020,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(gesturesEnabled: v)),
           ),
         ),
-        // Swipe sub-settings hide when gestures are disabled (F16;
-        // app.js:3305 updateSwipeSubsettings).
-        if (s.gesturesEnabled) ...[
-          FormGroup(
+      ),
+      // Swipe sub-settings hide when gestures are disabled (F16;
+      // app.js:3305 updateSwipeSubsettings).
+      if (s.gesturesEnabled) ...[
+        _GroupSpec(
+          text: 'Swipe Left Action ${_optText(swipeActions)} Action triggered '
+              'when swiping a message to the left.',
+          child: FormGroup(
             label: 'Swipe Left Action',
             hint: 'Action triggered when swiping a message to the left.',
             child: FormSelect<String>(
@@ -1594,7 +2041,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
-          FormGroup(
+        ),
+        _GroupSpec(
+          text: 'Swipe Right Action ${_optText(swipeRightActions)} Action '
+              'triggered when swiping a message to the right.',
+          child: FormGroup(
             label: 'Swipe Right Action',
             hint: 'Action triggered when swiping a message to the right.',
             child: FormSelect<String>(
@@ -1608,10 +2059,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
           ),
-          // The Quick-React-emoji group only shows when a swipe action is set
-          // to "Quick React" (the PWA's `needsEmoji`).
-          if (s.swipeLeftAction == 'react' || s.swipeRightAction == 'react')
-            FormGroup(
+        ),
+        // The Quick-React-emoji group only shows when a swipe action is set
+        // to "Quick React" (the PWA's `needsEmoji`).
+        if (s.swipeLeftAction == 'react' || s.swipeRightAction == 'react')
+          _GroupSpec(
+            text: 'Quick React Emoji ${s.swipeReactEmoji} Change Emoji always '
+                'used when a swipe gesture is set to "Quick React". Tap to '
+                'choose from the full emoji picker.',
+            child: FormGroup(
               label: 'Quick React Emoji',
               hint: 'Emoji always used when a swipe gesture is set to "Quick '
                   'React". Tap to choose from the full emoji picker.',
@@ -1638,33 +2094,36 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
               ),
             ),
-          FormGroup(
+          ),
+        _GroupSpec(
+          text: 'Swipe Sensitivity ${_optText(thresholdItems)} How far you '
+              'need to swipe before the action fires. Higher sensitivity '
+              'means a shorter swipe.',
+          child: FormGroup(
             label: 'Swipe Sensitivity',
             hint: 'How far you need to swipe before the action fires. Higher '
                 'sensitivity means a shorter swipe.',
             child: FormSelect<int>(
               value: s.swipeThreshold,
-              items: const [
-                (value: 40, label: 'High (40px)'),
-                (value: 60, label: 'Medium (60px)'),
-                (value: 80, label: 'Low (80px)'),
-                (value: 100, label: 'Very Low (100px)'),
-              ],
+              items: thresholdItems,
               onChanged: (v) => _mutate((d) => d.copyWith(swipeThreshold: v)),
             ),
           ),
-        ],
+        ),
       ],
-    );
+    ];
   }
 
   // --- Data & Backup --------------------------------------------------------
 
-  Widget _data(Settings s, SettingsController ctrl) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        FormGroup(
+  List<_GroupSpec> _data(Settings s, SettingsController ctrl) {
+    final transfers = ref.watch(pendingSettingsTransfersProvider);
+    return [
+      _GroupSpec(
+        text: 'Low Data Mode Disabled Enabled Reduces bandwidth by connecting '
+            'to only 5 default relays and loading geo relays on-demand when '
+            'entering channels',
+        child: FormGroup(
           label: 'Low Data Mode',
           hint: 'Reduces bandwidth by connecting to only 5 default relays and '
               'loading geo relays on-demand when entering channels',
@@ -1681,7 +2140,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onChanged: (v) => _mutate((d) => d.copyWith(lowDataMode: v)),
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Transfer Settings to Another User Recipient hex pubkey '
+            '(64 chars) Send Transfers your nickname, avatar, and all '
+            'preferences to the specified pubkey',
+        child: FormGroup(
           label: 'Transfer Settings to Another User',
           hint: 'Transfers your nickname, avatar, and all preferences to the '
               'specified pubkey',
@@ -1721,20 +2185,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Pending Settings Transfers Accept Decline '
+            '${transfers.isEmpty ? 'No pending transfers' : transfers.map((t) => _humanizeSection(t.section)).join(' ')}',
+        child: FormGroup(
           label: 'Pending Settings Transfers',
           child: _pendingTransfers(),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Clear Local Storage Cache ${_cacheReadout ?? 'Calculating…'} '
+            'Clears the on-device app cache (channel history, PMs, group '
+            'chats, profiles, reactions). Preserves your login, settings, '
+            'group memberships, and flair purchases.',
+        child: FormGroup(
           hint: 'Clears the on-device app cache (channel history, PMs, group '
               'chats, profiles, reactions). Preserves your login, settings, '
               'group memberships, and flair purchases.',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Real on-device cache readout (F7; refreshAppCacheSize). Shows
-              // the PWA's "Calculating…" placeholder until the async
-              // `cacheSizeBytes()` read resolves, then the formatted MB total.
+              // Real on-device cache readout (F7; refreshAppCacheSize,
+              // app.js:3681-3716). Shows the PWA's "Calculating…" placeholder
+              // until the async read resolves, then the auto-scaled size +
+              // item breakdown.
               Text(
                 _cacheReadout ?? 'Calculating…',
                 style: TextStyle(color: context.nym.textDim, fontSize: 12),
@@ -1750,7 +2225,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ],
           ),
         ),
-        FormGroup(
+      ),
+      _GroupSpec(
+        text: 'Reset Settings to Defaults Resets preferences (theme, layout, '
+            'wallpaper, sound, favorited/hidden/blocked channels, blocked '
+            'users, blocked keywords) to defaults. Preserves your login, '
+            'group memberships, PM history, and flair purchases.',
+        child: FormGroup(
           hint: 'Resets preferences (theme, layout, wallpaper, sound, '
               'favorited/hidden/blocked channels, blocked users, blocked '
               'keywords) to defaults. Preserves your login, group '
@@ -1763,8 +2244,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
         ),
-      ],
-    );
+      ),
+    ];
   }
 
   /// The list container chrome shared by the moderation lists and the
@@ -1805,13 +2286,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// A populated moderation list (`.keyword-list` / `.blocked-list`): one row
   /// per entry with a trailing Remove/Unblock button, falling back to the dim
   /// empty placeholder when [entries] is empty (F1). Each row resolves a
-  /// display label via [labelFor]. Rows are borderless (PWA `.blocked-item`/
-  /// `.keyword-item` have no dividers), `padding:5px; margin:2px 0`.
+  /// display label via [labelFor] — or, when [labelSpanFor] is provided, a
+  /// rich span (the PWA's `getNymHtmlFromPubkey` rows: base nym + dim
+  /// `.nym-suffix`). Rows are borderless (PWA `.blocked-item`/`.keyword-item`
+  /// have no dividers), `padding:5px; margin:2px 0`.
   Widget _removableList({
     required Iterable<String> entries,
     required String emptyText,
     required String buttonLabel,
     required String Function(String entry) labelFor,
+    TextSpan Function(String entry)? labelSpanFor,
     required void Function(String entry) onRemove,
   }) {
     final items = entries.toList();
@@ -1832,11 +2316,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      labelFor(items[i]),
-                      style: TextStyle(color: c.text, fontSize: 13),
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: labelSpanFor != null
+                        ? Text.rich(
+                            labelSpanFor(items[i]),
+                            overflow: TextOverflow.ellipsis,
+                          )
+                        : Text(
+                            labelFor(items[i]),
+                            style: TextStyle(color: c.text, fontSize: 13),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                   ),
                   const SizedBox(width: 8),
                   // `.icon-btn` (Remove/Unblock/Unhide) is uppercase.
@@ -1966,101 +2455,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 }
 
-/// Section descriptor for search filtering.
+/// Section descriptor: a titled collection of searchable form groups.
 class _SectionSpec {
   _SectionSpec({
     required this.key,
     required this.title,
-    required this.keywords,
-    required this.builder,
+    required this.groups,
   });
   final String key;
   final String title;
-  final String keywords;
-  final Widget Function() builder;
+  final List<_GroupSpec> groups;
 }
+
+/// One searchable `.form-group` (inline-bindings.js `filterSettings` hides
+/// non-matching groups individually): [text] is the group's full rendered
+/// text — label + hints + option labels + placeholders + list contents.
+class _GroupSpec {
+  const _GroupSpec({required this.text, required this.child});
+  final String text;
+  final Widget child;
+}
+
+/// The KV key for the persisted section collapse layout
+/// (inline-bindings.js:28-46 `persist`/`restoreSettingsSectionState`).
+const String _kSettingsSectionsCollapsedKey = 'nym_settings_sections_collapsed';
 
 // === Pickers ================================================================
 
-/// Theme picker showing each of the six themes with its real accent dot.
-class _ThemePicker extends ConsumerWidget {
-  const _ThemePicker({required this.value, required this.onChanged});
-  final NymThemeKey value;
-  final ValueChanged<NymThemeKey> onChanged;
-
-  static const _labels = {
-    NymThemeKey.bitchat: 'Bitchat (Multicolor)',
-    NymThemeKey.matrix: 'Matrix Green',
-    NymThemeKey.amber: 'Amber Terminal',
-    NymThemeKey.cyber: 'Cyberpunk',
-    NymThemeKey.hacker: 'Hacker Blue',
-    NymThemeKey.ghost: 'Ghost (B&W)',
-  };
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.nym;
-    final brightness = c.brightness;
-    return Column(
-      children: [
-        for (final t in NymThemeKey.values)
-          () {
-            final accent = resolveNymColors(
-              theme: t,
-              brightness: brightness,
-              solidUi: true,
-            ).primary;
-            final selected = t == value;
-            return InkWell(
-              onTap: () => onChanged(t),
-              borderRadius: NymRadius.rsm,
-              child: Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: selected
-                      ? c.primaryA(0.10)
-                      : c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
-                  borderRadius: NymRadius.rsm,
-                  border: Border.all(
-                    color: selected ? c.primaryA(0.5) : c.glassBorder,
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 16,
-                      height: 16,
-                      decoration: BoxDecoration(
-                        color: accent,
-                        shape: BoxShape.circle,
-                        border: Border.all(color: c.glassBorder),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        _labels[t]!,
-                        style: TextStyle(
-                          color: selected ? c.primary : c.text,
-                          fontSize: 13,
-                          fontWeight:
-                              selected ? FontWeight.w600 : FontWeight.w400,
-                        ),
-                      ),
-                    ),
-                    if (selected)
-                      Icon(Icons.check, size: 16, color: c.primary),
-                  ],
-                ),
-              ),
-            );
-          }(),
-      ],
-    );
-  }
-}
+/// Theme options, verbatim and in order from `#themeSelect`
+/// (index.html:1370-1380) — a standard `.form-select` dropdown.
+const List<({NymThemeKey value, String label})> _themeOptions = [
+  (value: NymThemeKey.bitchat, label: 'Bitchat (Multicolor)'),
+  (value: NymThemeKey.matrix, label: 'Matrix Green'),
+  (value: NymThemeKey.amber, label: 'Amber Terminal'),
+  (value: NymThemeKey.cyber, label: 'Cyberpunk'),
+  (value: NymThemeKey.hacker, label: 'Hacker Blue'),
+  (value: NymThemeKey.ghost, label: 'Ghost (B&W)'),
+];
 
 /// Wallpaper picker: 3-column grid of the 8 built-in patterns + Upload, with
 /// the selected option ringed in the accent color.
@@ -2069,6 +2500,8 @@ class _WallpaperPicker extends StatelessWidget {
     required this.value,
     required this.onChanged,
     required this.onUploadCustom,
+    this.customThumbPath,
+    this.uploading = false,
   });
   final String value;
   final ValueChanged<String> onChanged;
@@ -2078,6 +2511,15 @@ class _WallpaperPicker extends StatelessWidget {
   /// stateless — the async work lives in the parent state). PWA ref:
   /// `triggerWallpaperUpload`/`handleWallpaperUpload` (app.js:4173-4209).
   final Future<void> Function() onUploadCustom;
+
+  /// The active custom wallpaper's on-device path, painted as the Upload
+  /// tile's background thumbnail when custom mode is selected
+  /// (`initWallpaperUI`, app.js:4211-4227 + `handleWallpaperUpload`'s
+  /// post-upload thumbnail, app.js:4190-4192). Null → generic upload glyph.
+  final String? customThumbPath;
+
+  /// The in-flight "Uploading..." state on the Upload tile (app.js:4184).
+  final bool uploading;
 
   static const _options = <({String id, String label})>[
     (id: 'none', label: 'None'),
@@ -2130,8 +2572,7 @@ class _WallpaperPicker extends StatelessWidget {
                         ? NymSvgIcon(NymIcons.close,
                             size: 18, color: c.textDim)
                         : o.id == 'custom'
-                            ? NymSvgIcon(NymIcons.upload,
-                                size: 18, color: c.textDim)
+                            ? _customTile(c)
                             : ClipRRect(
                                 borderRadius: NymRadius.rxs,
                                 child: CustomPaint(
@@ -2157,6 +2598,28 @@ class _WallpaperPicker extends StatelessWidget {
           ),
       ],
     );
+  }
+
+  /// The Upload tile's content: "Uploading..." while an upload is in flight
+  /// (app.js:4184), the active custom wallpaper as a cover-fit thumbnail when
+  /// one is set (app.js:4190-4192, 4220-4226), else the upload glyph.
+  Widget _customTile(NymColors c) {
+    if (uploading) {
+      return Text(
+        'Uploading...',
+        style: TextStyle(color: c.textDim, fontSize: 10),
+      );
+    }
+    final path = customThumbPath;
+    if (path != null && path.isNotEmpty && File(path).existsSync()) {
+      return ClipRRect(
+        borderRadius: NymRadius.rxs,
+        child: SizedBox.expand(
+          child: Image.file(File(path), fit: BoxFit.cover),
+        ),
+      );
+    }
+    return NymSvgIcon(NymIcons.upload, size: 18, color: c.textDim);
   }
 }
 
@@ -2649,14 +3112,12 @@ class _LayoutPicker extends StatelessWidget {
 class _TextSizeRow extends StatelessWidget {
   const _TextSizeRow({
     required this.value,
-    required this.previewColor,
     required this.onChanged,
     required this.onChangeEnd,
     required this.onReset,
   });
 
   final double value;
-  final Color previewColor;
   final ValueChanged<double> onChanged;
   final ValueChanged<double> onChangeEnd;
   final VoidCallback onReset;
@@ -2693,9 +3154,15 @@ class _TextSizeRow extends StatelessWidget {
         ),
         Text('A', style: TextStyle(color: c.textDim, fontSize: 20)),
         const SizedBox(width: 8),
-        Text(
-          '${value.round()}px',
-          style: TextStyle(color: previewColor, fontSize: 12),
+        // `#textSizeValue` (`.nm-h-57`): 12px `--text-dim`, min-width 32,
+        // centered (no-inline.css:75).
+        Container(
+          constraints: const BoxConstraints(minWidth: 32),
+          alignment: Alignment.center,
+          child: Text(
+            '${value.round()}px',
+            style: TextStyle(color: c.textDim, fontSize: 12),
+          ),
         ),
         const SizedBox(width: 8),
         NymOutlineButton(
