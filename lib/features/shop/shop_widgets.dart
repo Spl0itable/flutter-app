@@ -7,7 +7,12 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../core/theme/nym_colors.dart';
 import 'cosmetics.dart'
-    show StyleWatermarkLayer, messageStyleDecoration, styleWatermarks;
+    show
+        CosmeticAura,
+        CosmeticOverlayPainter,
+        StyleWatermarkLayer,
+        cosmeticAuraFor,
+        messageStyleDecoration;
 import 'shop_catalog.dart';
 import 'shop_models.dart';
 
@@ -313,7 +318,32 @@ class SupporterBadge extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ShopSvgIcon(svg: ShopCatalog.trophyIcon, size: 14, color: iconColor),
+          // `.supporter-badge-icon svg { filter: drop-shadow(0 0 4px
+          // rgba(255,215,0,.6)) }` (styles-features.css:1462-1466) — a gold
+          // glow behind the trophy glyph. The light-mode rules recolour the
+          // icon but do NOT reset the filter, so the glow survives light mode.
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ImageFiltered(
+                    imageFilter: ui.ImageFilter.blur(
+                      sigmaX: Shadow.convertRadiusToSigma(4),
+                      sigmaY: Shadow.convertRadiusToSigma(4),
+                    ),
+                    child: const ShopSvgIcon(
+                      svg: ShopCatalog.trophyIcon,
+                      size: 14,
+                      color: Color(0x99FFD700), // rgba(255,215,0,.6)
+                    ),
+                  ),
+                ),
+              ),
+              ShopSvgIcon(
+                  svg: ShopCatalog.trophyIcon, size: 14, color: iconColor),
+            ],
+          ),
           const SizedBox(width: 5),
           Text(
             'SUPPORTER',
@@ -321,7 +351,8 @@ class SupporterBadge extends StatelessWidget {
               color: textColor,
               fontSize: 11,
               letterSpacing: 1,
-              fontWeight: FontWeight.w600,
+              // `.supporter-badge-text` declares no font-weight → 400.
+              fontWeight: FontWeight.w400,
             ),
           ),
         ],
@@ -332,10 +363,10 @@ class SupporterBadge extends StatelessWidget {
 
 /// A live message-bubble preview for a message style (F4 / `_shopStyleDemo`):
 /// a real `.message-content`-equivalent container rendering "Preview message"
-/// in the style's colour + glow ([ShopCatalog.styleVisuals]) with the
-/// translucent content background and — for the textured styles — the SAME tiled
-/// `--style-pattern` SVG the rendered chat message uses (cosmetics.dart
-/// [styleWatermarks] via [StyleWatermarkLayer]), so the card matches the bubble.
+/// in the style's colour + glow with the translucent content background and —
+/// for the textured styles — the SAME mode-aware tiled `--style-pattern` SVG
+/// the rendered chat message uses ([messageStyleDecoration]'s watermark via
+/// [StyleWatermarkLayer]), so the card matches the bubble in BOTH themes.
 class ShopStyleBubblePreview extends StatelessWidget {
   const ShopStyleBubblePreview({
     super.key,
@@ -379,12 +410,13 @@ class ShopStyleBubblePreview extends StatelessWidget {
     // the card preview switches to the PWA's `body.light-mode` style colours /
     // dropped glow in light mode instead of showing the unreadable dark neons.
     final deco = messageStyleDecoration(styleId, isLight: c.isLight);
-    // The same tiled `--style-pattern` SVG the rendered message uses
-    // (cosmetics.dart `styleWatermarks`), so the shop card preview matches the
-    // chat bubble 1:1 instead of approximating with a single repeating glyph.
-    final watermark = styleWatermarks[styleId];
+    // The MODE-AWARE tiled `--style-pattern` (deco.watermark) — light mode swaps
+    // the darker light-theme tiles (ghost #223044, matrix #006600, …) exactly
+    // like the chat bubble; reading the dark map directly would tile invisible
+    // white ghosts on a light card.
+    final watermark = deco?.watermark;
     if (deco == null) {
-      return Text(text, style: TextStyle(color: c.text, fontSize: 12));
+      return Text(text, style: TextStyle(color: c.text, fontSize: 13));
     }
     // The glyph shadow(s): explicit multi-offset (glitch) or the single glow,
     // already nulled in light mode by `messageStyleDecoration`. fire/ice paint a
@@ -398,8 +430,13 @@ class ShopStyleBubblePreview extends StatelessWidget {
       color: sampleIsChild
           ? deco.previewColorFor(bubble: bubble)
           : deco.textColorFor(bubble: bubble),
-      fontSize: 12,
-      fontWeight: FontWeight.w600,
+      // `.shop-msg-demo .message-content { font-size: 13px }` (styles-features
+      // .css:1406-1413), normal weight — only satoshi's inner `> *` children are
+      // bold (`font-weight: bold`, :572), which the wrapped-span sample hits.
+      fontSize: 13,
+      fontWeight: (deco.bold || (sampleIsChild && deco.childColor != null))
+          ? FontWeight.bold
+          : FontWeight.normal,
       fontFamily: deco.monospace ? 'monospace' : null,
       shadows: deco.textShadows,
     );
@@ -413,10 +450,11 @@ class ShopStyleBubblePreview extends StatelessWidget {
     } else {
       label = Text(text, style: base);
     }
-    // The style's own in-chat `.message-content { background }` (satoshi/eclipse/
-    // crt only); null for every other style — they tint via text + watermark, not
-    // a content background, exactly as the rendered chat message does.
-    final styleBg = deco.contentBackground;
+    // The style's own in-chat `.message-content { background }` for this layout
+    // (satoshi/eclipse/crt, plus aurora's TRANSPARENT bubble replacement); null
+    // for every other style — they tint via text + watermark, not a content
+    // background, exactly as the rendered chat message does.
+    final styleBg = deco.contentBackgroundFor(bubble: bubble);
     // IRC layout: `body:not(.chat-bubbles) .shop-msg-demo .message-content` is
     // bare text with only `padding: 6px 10px` — NO rounded bubble, NO default
     // `white@.14` fill. Only the style's own `.message-content { background }`
@@ -477,10 +515,160 @@ class ShopStyleBubblePreview extends StatelessWidget {
   }
 }
 
+/// Composes one or more [CosmeticAura]s onto [child] the same way the chat
+/// bubble does: the fill (bubble gradient / flat wash / default translucent
+/// bubble), the IRC `border-left` accent, every aura's outer glow, the tiled
+/// watermark (frost edge snowflakes / cosmic starfield) and the
+/// prism-ring / hologram / inset-ring overlay painter.
+class ShopAuraBubble extends StatelessWidget {
+  const ShopAuraBubble({
+    super.key,
+    required this.auras,
+    required this.child,
+    required this.bubble,
+    this.padding,
+    this.defaultFill = true,
+  });
+
+  final List<CosmeticAura> auras;
+  final Widget child;
+
+  /// Chat-bubbles vs IRC layout: bubble mode decorates the rounded translucent
+  /// `.message-content`; IRC mode paints border-left + gradient wash on the
+  /// flat row (`body:not(.chat-bubbles) .message.cosmetic-aura-*`).
+  final bool bubble;
+
+  final EdgeInsetsGeometry? padding;
+
+  /// Whether to paint the layout's default translucent bubble fill under
+  /// aura-less fills (false when [child] already draws its own bubble, e.g. the
+  /// active-items preview wrapping a styled content bubble).
+  final bool defaultFill;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    if (auras.isEmpty) return child;
+    final last = auras.last;
+
+    // Fill: the bubble paints the aura gradient only when the PWA bubble has
+    // one (gold); otherwise the aura's flat wash (frost) or the layout default.
+    // IRC paints the 135° row gradient / flat wash with no default fill.
+    List<Color>? fillGradient;
+    Color? fillColor;
+    if (bubble) {
+      if (last.bubblePaintsGradient) {
+        fillGradient = last.bubbleFillGradient;
+      } else {
+        fillColor = last.background ??
+            (defaultFill
+                ? (c.isLight ? const Color(0x1A000000) : const Color(0x24FFFFFF))
+                : null);
+      }
+    } else {
+      fillGradient = last.gradient;
+      fillColor = last.background;
+    }
+
+    // Every aura's outer glow (`0 0 {blur}px {color}`), at the layout's blur.
+    final shadows = <BoxShadow>[
+      for (final a in auras)
+        if (a.glowColor != null && a.glowBlurFor(bubble: bubble) > 0)
+          BoxShadow(
+            color: a.glowColor!,
+            blurRadius: a.glowBlurFor(bubble: bubble),
+          ),
+    ];
+
+    // IRC `border-left: 3px solid …` accent (last aura carrying one).
+    final borderAccent = bubble
+        ? null
+        : auras.reversed
+            .map((a) => a.borderAccent)
+            .firstWhere((b) => b != null, orElse: () => null);
+
+    // Watermark (first aura carrying one) + overlay (first prism/holo/ring aura).
+    CosmeticAura? watermarkAura;
+    for (final a in auras) {
+      if (a.watermark != null) {
+        watermarkAura = a;
+        break;
+      }
+    }
+    CosmeticAura? overlayAura;
+    for (final a in auras) {
+      if (a.hasOverlay) {
+        overlayAura = a;
+        break;
+      }
+    }
+
+    // The rounded bubble radius (4 / 16, like the demo bubbles) — IRC rows are
+    // square. A non-uniform Border(left) forbids a radius, so IRC keeps zero.
+    final radius = bubble
+        ? const BorderRadius.only(
+            topLeft: Radius.circular(4),
+            topRight: Radius.circular(16),
+            bottomLeft: Radius.circular(16),
+            bottomRight: Radius.circular(16),
+          )
+        : BorderRadius.zero;
+
+    final needsStack = watermarkAura != null || overlayAura != null;
+    final inner = padding == null
+        ? child
+        : Padding(padding: padding!, child: child);
+    return Container(
+      decoration: BoxDecoration(
+        color: fillGradient == null ? fillColor : null,
+        gradient: fillGradient != null
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: fillGradient,
+              )
+            : null,
+        border: borderAccent != null
+            ? Border(left: BorderSide(color: borderAccent, width: 3))
+            : null,
+        borderRadius: bubble ? radius : null,
+        boxShadow: shadows.isEmpty ? null : shadows,
+      ),
+      clipBehavior: needsStack ? Clip.antiAlias : Clip.none,
+      child: !needsStack
+          ? inner
+          : Stack(
+              children: [
+                if (watermarkAura != null)
+                  Positioned.fill(
+                    child: StyleWatermarkLayer(
+                      watermark: watermarkAura.watermark!,
+                      edgeOnly: watermarkAura.edgeWatermark,
+                    ),
+                  ),
+                inner,
+                if (overlayAura != null)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: CustomPaint(
+                        painter: CosmeticOverlayPainter(
+                          aura: overlayAura,
+                          radius: radius,
+                          bubble: bubble,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+}
+
 /// A live message-bubble preview for a cosmetic aura (F4 / `_shopCosmeticDemo`):
-/// composes the exact `box-shadow` ring + glow + border-left + gradient from
-/// [ShopCatalog.cosmeticVisuals], plus the legendary prism ring / holographic
-/// sheen and the redacted blackout — all locally, no `cosmetics.dart`.
+/// composes the SAME mode-aware [CosmeticAura] the chat bubble uses (ring +
+/// glow + border-left + gradient + frost snowflake edges / cosmic starfield /
+/// prism ring / hologram sheen) via [ShopAuraBubble], plus the redacted blackout.
 class ShopCosmeticBubblePreview extends StatelessWidget {
   const ShopCosmeticBubblePreview({
     super.key,
@@ -492,102 +680,46 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
   final String cosmeticId;
   final String text;
 
-  /// Chat-bubbles vs IRC layout. In bubble mode the aura decorates the rounded
-  /// translucent `.message-content` (which carries the default `white@.14` fill);
-  /// in IRC mode the aura paints its border-left + glow + gradient wash on the
-  /// flat row, with no rounded bubble fill
-  /// (`body:not(.chat-bubbles) .message.cosmetic-aura-*`).
+  /// Chat-bubbles vs IRC layout (see [ShopAuraBubble.bubble]).
   final bool bubble;
-
-  static const _radius = 8.0;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // Redacted: the `.cosmetic-redacted-message` blank — a translucent white
-    // bar (`background: rgba(255,255,255,.15)`, color transparent, radius xs=8,
-    // min-width 120px, min-height 1.2em — styles-features.css:1424-1435). The
-    // shop demo applies the class immediately (shop.js:779), so the card always
-    // shows the blanked state.
+    // Redacted: the `.cosmetic-redacted-message` blank — a translucent bar
+    // (`background: rgba(255,255,255,.15)` dark / `rgba(0,0,0,.12)` light —
+    // styles-features.css:1424-1435 + themes:954-957 — color transparent,
+    // radius xs, min-width 120px). The shop demo applies the class immediately
+    // (shop.js:779), so the card always shows the blanked state.
     if (cosmeticId == 'cosmetic-redacted') {
       return Container(
         constraints: const BoxConstraints(minWidth: 120),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: const Color(0x26FFFFFF), // rgba(255,255,255,.15)
-          borderRadius: BorderRadius.circular(_radius),
+          color: c.isLight
+              ? const Color(0x1F000000) // rgba(0,0,0,.12)
+              : const Color(0x26FFFFFF), // rgba(255,255,255,.15)
+          borderRadius: BorderRadius.circular(8),
         ),
         // Transparent text reserves the 1.2em line-height of a real message.
         child: Text(
           text,
-          style: const TextStyle(color: Colors.transparent, fontSize: 12),
+          style: const TextStyle(color: Colors.transparent, fontSize: 13),
         ),
       );
     }
-    final v = ShopCatalog.cosmeticVisuals[cosmeticId];
-    if (v == null) {
-      return Text(text, style: TextStyle(color: c.text, fontSize: 12));
+    final aura = cosmeticAuraFor(cosmeticId, isLight: c.isLight);
+    if (aura == null) {
+      return Text(text, style: TextStyle(color: c.text, fontSize: 13));
     }
-    // In chat-bubbles mode the aura sits on the rounded `.message-content`, which
-    // carries the default translucent fill (`white@.14` dark / `black@.10` light)
-    // unless the aura paints its own gradient. In IRC mode the row is flat — the
-    // aura's border-left + glow + gradient wash paint directly, with no bubble fill.
-    final Color? defaultFill = (bubble && v.gradient == null)
-        ? (c.isLight ? const Color(0x1A000000) : const Color(0x24FFFFFF))
-        : null;
-    Widget cosmeticBubble = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: defaultFill,
-        gradient: (v.gradient != null && v.sheenGradient == null)
-            ? LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: v.gradient!,
-              )
-            : null,
-        border: v.borderLeft != null
-            ? Border(left: BorderSide(color: v.borderLeft!, width: 3))
-            : null,
-        borderRadius: BorderRadius.circular(_radius),
-        boxShadow: v.boxShadows,
-      ),
-      child: Text(text, style: TextStyle(color: c.text, fontSize: 12)),
+    return ShopAuraBubble(
+      auras: [aura],
+      bubble: bubble,
+      padding: bubble
+          ? const EdgeInsets.fromLTRB(12, 8, 12, 6)
+          : const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Text(text, style: TextStyle(color: c.text, fontSize: 13)),
     );
-    // Holographic sheen — a screen-blended multi-colour gradient behind the text.
-    if (v.sheenGradient != null) {
-      cosmeticBubble = ClipRRect(
-        borderRadius: BorderRadius.circular(_radius),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: v.sheenGradient!,
-                  ),
-                ),
-              ),
-            ),
-            const Positioned.fill(child: _HologramSheen()),
-            cosmeticBubble,
-          ],
-        ),
-      );
-    }
-    // Legendary prism ring — a conic sweep-gradient ring around the bubble.
-    if (v.ringGradient != null) {
-      cosmeticBubble = CustomPaint(
-        foregroundPainter: _PrismRingPainter(
-          colors: v.ringGradient!,
-          radius: _radius,
-        ),
-        child: cosmeticBubble,
-      );
-    }
-    return cosmeticBubble;
   }
 }
 
@@ -653,10 +785,13 @@ class ShopItemPreview extends StatelessWidget {
 ///
 /// * IRC (`body:not(.chat-bubbles) .message.supporter-style`,
 ///   styles-features.css:1473): a 135° gold wash (`rgba(255,215,0,.05)` →
-///   `.02`) + a 3px gold left bar on the flat row, no radius.
+///   `.02`) + a 3px gold left bar on the flat row, no radius. Light mode
+///   (themes:934-936): wash `rgba(180,140,0,.06→.02)`, bar `#b8960a`.
 /// * Bubble (`body.chat-bubbles .message.supporter-style .message-content`,
 ///   styles-features.css:3692): a flat `rgba(255,215,0,.12)` fill on the rounded
-///   bubble (radius 16 / top-left 4), no left bar.
+///   bubble (radius 16 / top-left 4), no left bar. Light mode (themes:1421):
+///   `rgba(180,150,0,.08)`.
+/// Text: dark `#ffd700` + 8px gold glow; light `#8a6d00`, no glow (themes:939).
 class _SupporterStyleBubble extends StatelessWidget {
   const _SupporterStyleBubble({this.bubble = true});
 
@@ -664,34 +799,48 @@ class _SupporterStyleBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const text = Text(
+    final isLight = context.nym.isLight;
+    final text = Text(
       'Preview message',
       style: TextStyle(
-        color: Color(0xFFFFD700),
-        fontSize: 12,
-        fontWeight: FontWeight.w600,
-        shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+        color: isLight ? const Color(0xFF8A6D00) : const Color(0xFFFFD700),
+        // `.shop-msg-demo .message-content { font-size: 13px }`, normal weight.
+        fontSize: 13,
+        shadows: isLight
+            ? null
+            : const [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
       ),
     );
     if (!bubble) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0x0DFFD700), Color(0x05FFD700)], // gold@.05 → @.02
+            colors: isLight
+                ? const [Color(0x0FB48C00), Color(0x05B48C00)] // .06 → .02
+                : const [Color(0x0DFFD700), Color(0x05FFD700)], // .05 → .02
           ),
-          border: Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
+          border: Border(
+            left: BorderSide(
+              color: isLight
+                  ? const Color(0xFFB8960A)
+                  : const Color(0xFFFFD700),
+              width: 3,
+            ),
+          ),
         ),
         child: text,
       );
     }
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      decoration: const BoxDecoration(
-        color: Color(0x1FFFD700), // gold@.12
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: isLight
+            ? const Color(0x14B49600) // rgba(180,150,0,.08)
+            : const Color(0x1FFFD700), // gold@.12
+        borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(4),
           topRight: Radius.circular(16),
           bottomLeft: Radius.circular(16),
@@ -703,64 +852,12 @@ class _SupporterStyleBubble extends StatelessWidget {
   }
 }
 
-/// Paints a conic prism ring around a bubble (F8 — `cosmetic-aura-rainbow`'s
-/// masked 3px `conic-gradient`). A `SweepGradient` stroked at the bubble border.
-class _PrismRingPainter extends CustomPainter {
-  _PrismRingPainter({required this.colors, required this.radius});
-
-  final List<Color> colors;
-  final double radius;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    const stroke = 3.0;
-    final rrect = RRect.fromRectAndRadius(
-      rect.deflate(stroke / 2),
-      Radius.circular(radius),
-    );
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke
-      ..shader = SweepGradient(
-        colors: colors,
-        center: Alignment.center,
-      ).createShader(rect);
-    canvas.drawRRect(rrect, paint);
-  }
-
-  @override
-  bool shouldRepaint(_PrismRingPainter old) => old.colors != colors;
-}
-
-/// The holographic diagonal white sheen band (F8 — `cosmetic-bubble-hologram`'s
-/// 115deg `rgba(255,255,255,.28)` sheen, screen-blended).
-class _HologramSheen extends StatelessWidget {
-  const _HologramSheen();
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment(-1, -0.6),
-          end: Alignment(1, 0.6),
-          colors: [
-            Colors.transparent,
-            Color(0x47FFFFFF),
-            Colors.transparent,
-          ],
-          stops: [0.40, 0.50, 0.60],
-        ),
-        backgroundBlendMode: BlendMode.screen,
-      ),
-    );
-  }
-}
-
 /// The limited-tab supply/availability badge (F5 — `.shop-supply-badge
 /// shop-supply-{state}`). Three colour tiers: available green `#52ff9d`, soon
 /// blue `#7fdfff`, ended/soldout red `#ff6b6b` (`styles-features.css:1342-1359`).
+/// Light mode swaps ONLY the text colour (`body.light-mode .shop-supply-*`,
+/// styles-themes-responsive.css:1044-1047): available `#1f8a4c`, soon
+/// `#1f6f8a`, ended/soldout `#c0392b`; the bg/border rgba tints stay.
 class ShopSupplyBadge extends StatelessWidget {
   const ShopSupplyBadge({super.key, required this.availability});
 
@@ -768,16 +865,19 @@ class ShopSupplyBadge extends StatelessWidget {
 
   static const _available = (
     fg: Color(0xFF52FF9D),
+    lightFg: Color(0xFF1F8A4C),
     bg: Color(0x1F52FF9D),
     border: Color(0x5952FF9D),
   );
   static const _soon = (
     fg: Color(0xFF7FDFFF),
+    lightFg: Color(0xFF1F6F8A),
     bg: Color(0x1F7FDFFF),
     border: Color(0x597FDFFF),
   );
   static const _danger = (
     fg: Color(0xFFFF6B6B),
+    lightFg: Color(0xFFC0392B),
     bg: Color(0x1FFF6B6B),
     border: Color(0x59FF6B6B),
   );
@@ -792,6 +892,7 @@ class ShopSupplyBadge extends StatelessWidget {
       ShopAvailabilityState.soldout =>
         _danger,
     };
+    final fg = context.nym.isLight ? tier.lightFg : tier.fg;
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
@@ -803,7 +904,7 @@ class ShopSupplyBadge extends StatelessWidget {
       child: Text(
         availability.label,
         style: TextStyle(
-          color: tier.fg,
+          color: fg,
           fontSize: 11,
           fontWeight: FontWeight.w600,
           letterSpacing: 0.3,
@@ -893,6 +994,8 @@ class _BundleChip extends StatelessWidget {
 
 /// The gold edition-number stamp (`#{n}/{max}`, `.shop-edition-no`,
 /// `styles-features.css:1385-1390`): gold `#ffdf6b`, 12px 700, soft gold glow.
+/// Light mode (`body.light-mode .shop-edition-no`, themes:1048): darker amber
+/// `#8a6d00`, no glow (`text-shadow: none`).
 class ShopEditionNumber extends StatelessWidget {
   const ShopEditionNumber({super.key, required this.edition, this.editionMax});
 
@@ -901,13 +1004,16 @@ class ShopEditionNumber extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isLight = context.nym.isLight;
     return Text(
       '#$edition${editionMax != null ? '/$editionMax' : ''}',
-      style: const TextStyle(
-        color: Color(0xFFFFDF6B),
+      style: TextStyle(
+        color: isLight ? const Color(0xFF8A6D00) : const Color(0xFFFFDF6B),
         fontSize: 12,
         fontWeight: FontWeight.w700,
-        shadows: [Shadow(color: Color(0x66FFD700), blurRadius: 6)],
+        shadows: isLight
+            ? null
+            : const [Shadow(color: Color(0x66FFD700), blurRadius: 6)],
       ),
     );
   }

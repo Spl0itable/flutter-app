@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -221,6 +222,8 @@ class MessageStyleDecoration {
     this.gradient,
     this.gradientGlow,
     this.contentBackground,
+    this.bubbleContentBackground,
+    this.transparentBubble = false,
     this.backgroundGradient,
     this.bubbleTextColor,
     this.childColor,
@@ -247,6 +250,20 @@ class MessageStyleDecoration {
   final Shadow? gradientGlow;
 
   final Color? contentBackground;
+
+  /// The bubble-layout `.message-content { background }` when it differs from
+  /// the IRC [contentBackground] (`body.chat-bubbles .message.style-X
+  /// .message-content { background: … !important }`): light-mode satoshi paints
+  /// `rgba(247,147,26,.12)` in bubbles but the IRC `rgba(196,122,21,.1)` tint.
+  /// Null = [contentBackground] in both layouts.
+  final Color? bubbleContentBackground;
+
+  /// True when the bubble layout REPLACES the default translucent bubble fill
+  /// with a fully transparent one — aurora (`body.chat-bubbles .message.
+  /// style-aurora .message-content` clips its gradient to the text over a
+  /// `linear-gradient(transparent, transparent)` border-box layer `!important`,
+  /// styles-features.css:3675-3686), so the bubble shape disappears.
+  final bool transparentBubble;
 
   /// A 135deg background gradient painted on the IRC row (`body:not(.chat-bubbles)
   /// .message.X { background: linear-gradient(135deg,…) }`) — supporter's gold
@@ -296,6 +313,18 @@ class MessageStyleDecoration {
   /// This is the `.message-content` CONTAINER colour — what bare body text uses.
   Color textColorFor({required bool bubble}) =>
       bubble ? (bubbleTextColor ?? textColor) : textColor;
+
+  /// The `.message-content` background for the layout: the bubble override /
+  /// transparent-bubble replacement in bubble mode, else [contentBackground].
+  /// A NON-null return replaces the layout's default translucent bubble fill
+  /// (aurora returns fully transparent); null = keep the default fill.
+  Color? contentBackgroundFor({required bool bubble}) {
+    if (bubble) {
+      if (transparentBubble) return const Color(0x00000000);
+      return bubbleContentBackground ?? contentBackground;
+    }
+    return contentBackground;
+  }
 
   /// The colour for an INNER `> *` element (link/mention/emoji) and for the shop
   /// DEMO sample (which the PWA wraps in a `<span>`, so it is a child). Falls back
@@ -556,6 +585,13 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     contentBackground:
         (isLight ? _styleLightContentBackground[styleId] : null) ??
             _styleContentBackground[styleId],
+    // Bubble-layout background override — light satoshi's rgba(247,147,26,.12)
+    // (styles-themes-responsive.css:1417) vs its IRC rgba(196,122,21,.1) tint.
+    bubbleContentBackground:
+        isLight ? _styleLightBubbleContentBackground[styleId] : null,
+    // Aurora replaces the bubble fill with a transparent border-box layer in
+    // BOTH modes (styles-features.css:3675-3686 + themes:843's light gradient).
+    transparentBubble: styleId == 'style-aurora',
     // Bubble-only colour overrides (fire/ice). Light mode uses the single light
     // colour for both layouts (the bubble override is a dark-mode-only rule).
     bubbleTextColor: hasLightText ? null : _styleBubbleTextColor[styleId],
@@ -703,10 +739,17 @@ const Map<String, List<Color>> _styleLightGradient = {
   ],
 };
 
-/// Light-mode content-background overrides (satoshi tints lighter:
-/// `rgba(196,122,21,0.1)`).
+/// Light-mode IRC content-background overrides (satoshi tints
+/// `rgba(196,122,21,0.1)`, styles-themes-responsive.css:899-901).
 const Map<String, Color> _styleLightContentBackground = {
   'style-satoshi': Color(0x1AC47A15),
+};
+
+/// Light-mode BUBBLE content-background overrides (`body.light-mode.chat-bubbles
+/// .message.style-satoshi .message-content { background: rgba(247,147,26,.12)
+/// !important }`, styles-themes-responsive.css:1417-1419).
+const Map<String, Color> _styleLightBubbleContentBackground = {
+  'style-satoshi': Color(0x1FF7931A),
 };
 
 /// Explicit glyph shadows for styles whose CSS `text-shadow` is not a single
@@ -1042,7 +1085,10 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
 const MessageStyleDecoration supporterStyleDecorationLight =
     MessageStyleDecoration(
   textColor: Color(0xFF8A6D00),
-  contentBackground: Color(0x14B48C00), // rgba(180,140,0,~.08) bubble wash
+  // body.light-mode.chat-bubbles .message.supporter-style .message-content
+  // { background: rgba(180,150,0,0.08) !important } (themes:1421) — note the
+  // 150 green channel (NOT the 140 of the wash/border rules).
+  contentBackground: Color(0x14B49600), // rgba(180,150,0,.08) bubble wash
   // body.light-mode:not(.chat-bubbles) .message.supporter-style { bg gradient
   // rgba(180,140,0,.06→.02) } (:935).
   backgroundGradient: [Color(0x0FB48C00), Color(0x05B48C00)],
@@ -1057,20 +1103,25 @@ const MessageStyleDecoration supporterStyleDecorationLight =
 /// Resolves the active special-cosmetic auras for [cosmetics] (in declared
 /// order, excluding the redacted privacy item which is handled separately).
 ///
-/// [isLight] selects the `body.light-mode .message.cosmetic-X` override: the
-/// bright dark rings/borders are too strong on a light surface, so the PWA (gold)
-/// — and, where the PWA has no explicit light rule, a derived readable tone —
-/// swaps to a darker, softer aura. Mirrors how the styles thread `isLight`.
+/// [isLight] selects the `body.light-mode .message.cosmetic-X` override — the
+/// PWA ships one ONLY for gold; the other auras keep their dark values in light
+/// mode (see [cosmeticAuraFor]).
 List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics,
     {bool isLight = false}) {
-  final table = isLight ? _cosmeticAurasLight : _cosmeticAuras;
   final out = <CosmeticAura>[];
   for (final id in cosmetics.cosmetics) {
-    final aura = table[id] ?? _cosmeticAuras[id];
+    final aura = cosmeticAuraFor(id, isLight: isLight);
     if (aura != null) out.add(aura);
   }
   return out;
 }
+
+/// The aura for a single cosmetic [id], mode-aware. Only GOLD has a light-mode
+/// override in the PWA; every other aura keeps its dark values in light mode
+/// (styles-themes-responsive.css:923-931 is the sole `body.light-mode`
+/// cosmetic-aura rule). Used by both the chat bubble and the shop card preview.
+CosmeticAura? cosmeticAuraFor(String id, {bool isLight = false}) =>
+    (isLight ? _cosmeticAurasLight[id] : null) ?? _cosmeticAuras[id];
 
 const String _frostSnowflakeSvg =
     "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
@@ -1176,13 +1227,12 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   ),
 };
 
-/// Light-mode aura overrides. The PWA only ships an explicit light rule for GOLD
-/// (`body.light-mode … .cosmetic-aura-gold`, styles-themes-responsive.css:923-931);
-/// for the other auras (neon/rainbow/phoenix/cosmic/frost/hologram) there is no
-/// light override, so a bright dark ring would bleed onto the light surface —
-/// here we DERIVE a readable light tone (lower ring/glow alpha, the same hue) so
-/// the aura still reads without overpowering the bubble. Auras absent from this
-/// map fall back to the dark entry (see [resolveCosmeticAuras]).
+/// Light-mode aura overrides. The PWA ships an explicit light rule ONLY for
+/// GOLD (`body.light-mode … .cosmetic-aura-gold`, styles-themes-responsive.css:
+/// 923-931). Every other aura (neon/rainbow/phoenix/cosmic/frost/hologram) has
+/// NO light override in the CSS and keeps its dark values in light mode —
+/// ground-truth parity forbids inventing muted variants for them. Auras absent
+/// from this map fall back to the dark entry (see [cosmeticAuraFor]).
 final Map<String, CosmeticAura> _cosmeticAurasLight = {
   // gold — explicit PWA light values. IRC: inset .3, glow 12px .12, border
   // #b8960a, bg .06→.02. Bubble: inset .5, glow 10px .15, fill .18→.06.
@@ -1200,88 +1250,7 @@ final Map<String, CosmeticAura> _cosmeticAurasLight = {
     bubbleGradient: [Color(0x2EB48C00), Color(0x0FB48C00)], // .18→.06
     bubblePaintsGradient: true,
   ),
-  // neon — derived: softer cyan ring (.35) + dimmer glow, darker border so it
-  // reads on white. Bubble box-shadow-only (no fill), like dark.
-  'cosmetic-aura-neon': const CosmeticAura(
-    id: 'cosmetic-aura-neon',
-    insetColor: Color(0x59008CA8), // muted cyan ring ~.35
-    insetRing: true,
-    glowColor: Color(0x33008CA8),
-    glowBlur: 16,
-    borderAccent: Color(0xFF0095B3),
-    gradient: [Color(0x14008CA8), Color(0x08008CA8)],
-  ),
-  // rainbow — prism ring reads fine on light; just soften the purple glow.
-  'cosmetic-aura-rainbow': const CosmeticAura(
-    id: 'cosmetic-aura-rainbow',
-    glowColor: Color(0x335A2FB0), // softer purple
-    glowBlur: 14,
-    prismRing: true,
-  ),
-  // frost — derived: a darker icy ring/border + a lighter wash so frosted edges
-  // and the bg read on a light surface.
-  'cosmetic-frost': CosmeticAura(
-    id: 'cosmetic-frost',
-    insetColor: const Color(0x665B9FC8), // muted blue ring
-    insetRing: true,
-    glowColor: const Color(0x335B9FC8),
-    glowBlur: 10,
-    background: const Color(0x1F7FB8D8), // lighter icy wash
-    watermark: StyleWatermark.svg(_frostSnowflakeSvgLight, const Size(18, 18)),
-    edgeWatermark: true,
-  ),
-  // phoenix — derived: darker orange ring/border, dimmer glow.
-  'cosmetic-aura-phoenix': const CosmeticAura(
-    id: 'cosmetic-aura-phoenix',
-    insetColor: Color(0x80C25000), // muted orange ~.5
-    insetRing: true,
-    glowColor: Color(0x40C24700),
-    glowBlur: 22,
-    borderAccent: Color(0xFFC24700),
-    gradient: [Color(0x12C25000), Color(0x08B33000)],
-  ),
-  // cosmic — derived: darker purple ring/border, dimmer glow; keep the starfield.
-  'cosmetic-aura-cosmic': CosmeticAura(
-    id: 'cosmetic-aura-cosmic',
-    insetColor: const Color(0x805A3FB0), // muted purple ~.5
-    insetRing: true,
-    glowColor: const Color(0x405A3FB0),
-    glowBlur: 22,
-    borderAccent: const Color(0xFF5A3FB0),
-    gradient: const [Color(0x1F46308C), Color(0x0F2A2350)],
-    watermark: StyleWatermark.svg(_cosmicStarfieldSvgLight, const Size(60, 60)),
-  ),
-  // hologram — derived: a darker inset so the white-sheen iridescence stays
-  // visible over a light bubble; the sheen/gradient itself is unchanged.
-  'cosmetic-bubble-hologram': const CosmeticAura(
-    id: 'cosmetic-bubble-hologram',
-    insetColor: Color(0x66607090), // muted slate ring (was white .5)
-    insetRing: true,
-    glowColor: Color(0x668097C8),
-    glowBlur: 18,
-    hologram: true,
-  ),
 };
-
-/// Light-mode variants of the tiled aura SVGs (darker fills so the texture
-/// reads on a light surface — the PWA has no light rule for these auras, so the
-/// tone is derived).
-const String _frostSnowflakeSvgLight =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
-    "<g fill='none' stroke='#3f7fa8' stroke-opacity='0.5' stroke-width='1' "
-    "stroke-linecap='round'>"
-    "<path d='M9 2.5v13M2.5 9h13M4.4 4.4l9.2 9.2M13.6 4.4 4.4 13.6'/>"
-    "<path d='M9 4.5 7.5 6M9 4.5 10.5 6M9 13.5 7.5 12M9 13.5 10.5 12M4.5 9 6 "
-    "7.5M4.5 9 6 10.5M13.5 9 12 7.5M13.5 9 12 10.5'/></g></svg>";
-
-const String _cosmicStarfieldSvgLight =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
-    "<g fill='#5a3fb0'><circle cx='10' cy='12' r='1' fill-opacity='0.45'/>"
-    "<circle cx='44' cy='8' r='0.8' fill-opacity='0.4'/>"
-    "<circle cx='52' cy='34' r='1.2' fill-opacity='0.5'/>"
-    "<circle cx='22' cy='44' r='0.9' fill-opacity='0.4'/>"
-    "<circle cx='33' cy='22' r='0.7' fill-opacity='0.35'/>"
-    "<circle cx='15' cy='50' r='0.6' fill-opacity='0.3'/></g></svg>";
 
 // =============================================================================
 // Rendering widgets for the watermark / aura textures.
@@ -1540,6 +1509,7 @@ class CosmeticOverlayPainter extends CustomPainter {
     required this.aura,
     required this.radius,
     this.bubble = true,
+    this.styleActive = false,
   });
 
   final CosmeticAura aura;
@@ -1548,6 +1518,13 @@ class CosmeticOverlayPainter extends CustomPainter {
   /// Whether this overlay is painted in bubble layout (selects [CosmeticAura.
   /// bubbleInsetColor]). The prism ring / hologram sheen are layout-agnostic.
   final bool bubble;
+
+  /// True when the message has an active `style-…` message style. The PWA
+  /// gates the hologram iridescent fill + sheen on `.message:not([class*=
+  /// "style-"]).cosmetic-bubble-hologram` (styles-features.css:1203-1211), so a
+  /// styled message keeps only the box-shadow ring. Callers (message_row /
+  /// previews) pass the active-style flag; the shop demo has no style.
+  final bool styleActive;
 
   static const List<Color> _prism = [
     Color(0xFFFF2D2D),
@@ -1565,15 +1542,22 @@ class CosmeticOverlayPainter extends CustomPainter {
     final rect = Offset.zero & size;
     final rrect = radius.toRRect(rect);
     if (aura.prismRing) {
-      // 3px conic-gradient ring masked to the border.
-      final shader = const SweepGradient(colors: _prism).createShader(rect);
+      // 3px conic-gradient ring masked to the border. CSS `conic-gradient(from
+      // 0deg …)` starts at 12 o'clock; SweepGradient starts at the +x axis
+      // (3 o'clock), so rotate back a quarter turn to put red at the top.
+      final shader = const SweepGradient(
+        colors: _prism,
+        transform: GradientRotation(-math.pi / 2),
+      ).createShader(rect);
       final ring = Paint()
         ..shader = shader
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3;
       canvas.drawRRect(rrect.deflate(1.5), ring);
     }
-    if (aura.hologram) {
+    // Hologram fill + sheen are background-image layers the PWA drops when a
+    // message style is active (`:not([class*="style-"])`); the ring stays.
+    if (aura.hologram && !styleActive) {
       // 135deg multi-colour gradient + a 115deg white sheen (screen blend).
       final base = Paint()
         ..shader = const LinearGradient(
@@ -1643,6 +1627,7 @@ class CosmeticOverlayPainter extends CustomPainter {
       old.aura.id != aura.id ||
       old.radius != radius ||
       old.bubble != bubble ||
+      old.styleActive != styleActive ||
       old.aura.insetColor != aura.insetColor ||
       old.aura.bubbleInsetColor != aura.bubbleInsetColor ||
       old.aura.insetWidth != aura.insetWidth ||
