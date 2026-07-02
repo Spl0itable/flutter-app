@@ -1639,8 +1639,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return GestureDetector(
       onLongPress: () {
         // The PWA buzzes (nymHapticTap = 30ms vibrate) as the 500ms reader
-        // long-press fires (groups.js:2759-2763, 2806-2810).
-        HapticFeedback.lightImpact();
+        // long-press fires (groups.js:2759-2763, 2806-2810). A real 30ms
+        // motor pulse reads as a solid tap — mediumImpact, not the barely
+        // perceptible lightImpact.
+        HapticFeedback.mediumImpact();
         _showSeenBy(context);
       },
       child: Padding(
@@ -1754,7 +1756,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // 955-977). Re-reading state confirms the add went through (a rate-limited
     // toggle skips the local update and stays silent, reactions.js:946).
     if (!wasReacted && _selfReactedLocally(r.emoji)) {
-      HapticFeedback.lightImpact();
+      HapticFeedback.mediumImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, r.emoji);
     }
@@ -1770,7 +1772,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
     // Long-press on a reaction badge buzzes before the reactors modal opens
     // (`nymHapticTap` = a 30ms vibrate, reactions.js:526).
-    HapticFeedback.lightImpact();
+    HapticFeedback.mediumImpact();
     // The real reactor map (`reactorsFor` → pubkey → nym), each row carrying its
     // avatar picture so the modal loads faces (mirrors `showReactorsModal`).
     final app = ref.read(appStateProvider);
@@ -1803,7 +1805,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   void _onMessageLongPress(BuildContext context, Offset at) {
     // The PWA buzzes as the quick-react popup is built (`nymHapticTap` = a
     // 30ms vibrate, ui-context.js:1279); a raw long-press is otherwise silent.
-    HapticFeedback.lightImpact();
+    HapticFeedback.mediumImpact();
     // The popup centers on the PRESS POINT (clientX/clientY), 55px above the
     // finger (ui-context.js:1330-1347) — NOT on the message rect. A zero-size
     // anchor at the touch point reproduces `left = clientX - w/2, top =
@@ -1848,7 +1850,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Buzz + burst with the optimistic local add, BEFORE any signing/publish
     // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977).
     if (!already && _selfReactedLocally(emoji)) {
-      HapticFeedback.lightImpact();
+      HapticFeedback.mediumImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, emoji);
     }
@@ -1898,7 +1900,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         _quickReact(context, settings.swipeReactEmoji);
         return;
       case 'zap':
-        if (message.isOwn || message.pubkey.isEmpty) return;
+        if (message.pubkey.isEmpty) return;
+        // Zapping your own message prints a system notice rather than
+        // silently no-opping (messages.js:2090-2093).
+        if (message.isOwn) {
+          ref
+              .read(appStateProvider.notifier)
+              .addSystemMessage('Cannot zap your own message');
+          return;
+        }
         _zapMessage(context, baseNym);
         return;
       case 'slap':
@@ -2218,67 +2228,81 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final r = widget.reaction;
-    return GestureDetector(
-      onTap: () => widget.onTap(_rect(context)),
-      onLongPress: () => widget.onLongPress(_rect(context)),
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.95 : 1.0,
-        duration: const Duration(milliseconds: 120),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: r.userReacted
-                ? c.primaryA(0.12)
-                : Colors.white.withValues(alpha: 0.05),
-            borderRadius: const BorderRadius.all(Radius.circular(20)),
-            border: Border.all(
-              color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+    return RawGestureDetector(
+      // The PWA cancels the badge's pending 500ms reactors-modal hold on the
+      // FIRST `touchmove` (reactions.js:543-549) — the same tight pre-fire
+      // slop as the message quick-react hold — so a slow scroll started on a
+      // badge never pops the modal. A plain `onLongPress` would tolerate the
+      // framework's ~18px kTouchSlop drift instead.
+      gestures: <Type, GestureRecognizerFactory>{
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (rec) => rec
+            ..onLongPressStart = (_) => widget.onLongPress(_rect(context)),
+        ),
+      },
+      child: GestureDetector(
+        onTap: () => widget.onTap(_rect(context)),
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
+        child: AnimatedScale(
+          scale: _pressed ? 0.95 : 1.0,
+          duration: const Duration(milliseconds: 120),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: r.userReacted
+                  ? c.primaryA(0.12)
+                  : Colors.white.withValues(alpha: 0.05),
+              borderRadius: const BorderRadius.all(Radius.circular(20)),
+              border: Border.all(
+                color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+              ),
+              boxShadow: r.userReacted
+                  ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
+                  : null,
             ),
-            boxShadow: r.userReacted
-                ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
-                : null,
+            // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
+            // stays `--text` even when user-reacted (only bg/border/glow change —
+            // `styles-chat.css:439-443`). The emoji goes through the PWA's
+            // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
+            // `:shortcode:` reaction can render as its custom-emoji image, at the
+            // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
+            // (styles-chat.css:854-859, margin 0). The pill lays out as
+            // `display:flex; align-items:center; gap:3px` — with an image the
+            // count is a separate flex item 3px away; with plain text the PWA's
+            // text nodes merge into one `"emoji count"` run, so render that as a
+            // single Text.
+            child: _rxWholeToken.hasMatch(r.emoji)
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InlineEmojiText(
+                        text: r.emoji,
+                        style: TextStyle(color: c.text, fontSize: 12),
+                        wholeStringOnly: true,
+                        emojiSize: 12 * 1.45,
+                        emojiMargin: EdgeInsets.zero,
+                        // The badge pill is `display: flex; align-items: center`
+                        // (styles-chat.css:414-426), so the img is a flex-
+                        // centered item — `.custom-emoji-reaction`'s
+                        // `vertical-align` is inert here.
+                        emojiAlignment: PlaceholderAlignment.middle,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        abbreviateNumber(r.count),
+                        style: TextStyle(color: c.text, fontSize: 12),
+                      ),
+                    ],
+                  )
+                : Text(
+                    '${r.emoji} ${abbreviateNumber(r.count)}',
+                    style: TextStyle(color: c.text, fontSize: 12),
+                  ),
           ),
-          // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
-          // stays `--text` even when user-reacted (only bg/border/glow change —
-          // `styles-chat.css:439-443`). The emoji goes through the PWA's
-          // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
-          // `:shortcode:` reaction can render as its custom-emoji image, at the
-          // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
-          // (styles-chat.css:854-859, margin 0). The pill lays out as
-          // `display:flex; align-items:center; gap:3px` — with an image the
-          // count is a separate flex item 3px away; with plain text the PWA's
-          // text nodes merge into one `"emoji count"` run, so render that as a
-          // single Text.
-          child: _rxWholeToken.hasMatch(r.emoji)
-              ? Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    InlineEmojiText(
-                      text: r.emoji,
-                      style: TextStyle(color: c.text, fontSize: 12),
-                      wholeStringOnly: true,
-                      emojiSize: 12 * 1.45,
-                      emojiMargin: EdgeInsets.zero,
-                      // The badge pill is `display: flex; align-items: center`
-                      // (styles-chat.css:414-426), so the img is a flex-
-                      // centered item — `.custom-emoji-reaction`'s
-                      // `vertical-align` is inert here.
-                      emojiAlignment: PlaceholderAlignment.middle,
-                    ),
-                    const SizedBox(width: 3),
-                    Text(
-                      abbreviateNumber(r.count),
-                      style: TextStyle(color: c.text, fontSize: 12),
-                    ),
-                  ],
-                )
-              : Text(
-                  '${r.emoji} ${abbreviateNumber(r.count)}',
-                  style: TextStyle(color: c.text, fontSize: 12),
-                ),
         ),
       ),
     );
@@ -3773,6 +3797,7 @@ class _SwipeToActState extends State<_SwipeToAct>
   bool _thresholdFired = false; // threshold haptic latch (re-arms below)
   bool _indicatorLit = false; // `.visible` — frozen at release for the linger
   double _startX = 0; // global x of the touch-down (for EDGE_ZONE)
+  double _startY = 0; // global y of the touch-down (for the axis test)
 
   @override
   void initState() {
@@ -3810,8 +3835,9 @@ class _SwipeToActState extends State<_SwipeToAct>
     _dir = 0;
     _action = 'none';
     _travel = 0;
-    // DragStartBehavior.down → this IS the touch-down point (PWA startX).
+    // DragStartBehavior.down → this IS the touch-down point (PWA startX/startY).
     _startX = d.globalPosition.dx;
+    _startY = d.globalPosition.dy;
     _settle.stop();
     if (_dx != 0) _setDx(0);
   }
@@ -3825,6 +3851,12 @@ class _SwipeToActState extends State<_SwipeToAct>
     _travel += d.delta.dx;
     if (!_active) {
       if (_travel.abs() <= _swipeStart) return;
+      // Axis-dominance test: the PWA only claims when horizontal travel
+      // dominates vertical by 1.5x — `absDx > dy * 1.5` — re-evaluated on
+      // every move until claimed (messages.js:2194), so a diagonal drag is
+      // left to the scroller rather than starting a swipe.
+      final dy = (d.globalPosition.dy - _startY).abs();
+      if (_travel.abs() <= dy * 1.5) return;
       // Direction is locked HERE and never re-derived — dragging back across
       // the origin cannot flip the indicator/action (messages.js:2194-2202).
       final dir = _travel < 0 ? -1 : 1;
@@ -3854,7 +3886,7 @@ class _SwipeToActState extends State<_SwipeToAct>
     if (past && !_thresholdFired) {
       // Threshold haptic — `nymHapticTap` = a 30ms vibrate
       // (messages.js:2239-2241, inline-bindings.js:106-115).
-      HapticFeedback.lightImpact();
+      HapticFeedback.mediumImpact();
       _thresholdFired = true;
     } else if (!past) {
       _thresholdFired = false; // re-arms if the finger retreats (:2242-2244)
