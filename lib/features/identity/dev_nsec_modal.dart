@@ -134,13 +134,16 @@ class _DevNsecModalState extends State<DevNsecModal> {
                                   TextStyle(color: c.textDim, fontSize: 11),
                             ),
                             const SizedBox(height: 8),
-                            TextField(
-                              controller: _nsec,
-                              obscureText: true,
-                              style:
-                                  TextStyle(color: c.textBright, fontSize: 15),
-                              decoration:
-                                  ModalChrome.inputDecoration(c, 'nsec1...'),
+                            ModalChrome.focusRing(
+                              c,
+                              child: TextField(
+                                controller: _nsec,
+                                obscureText: true,
+                                style: TextStyle(
+                                    color: c.textBright, fontSize: 15),
+                                decoration:
+                                    ModalChrome.inputDecoration(c, 'nsec1...'),
+                              ),
                             ),
                             if (_error) ...[
                               const SizedBox(height: 6),

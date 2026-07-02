@@ -13,6 +13,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../models/user.dart';
 import 'action_rate_limit.dart';
 import 'command_registry.dart';
+import 'help_output.dart';
 
 /// The effects a command can request. The controller supplies these; the
 /// handler never reaches into app_state directly (it is not an owner of it).
@@ -205,9 +206,12 @@ class CommandDispatcher {
   void _dispatch(CommandSpec spec, String args) {
     switch (spec.id) {
       case 'help':
-        // Help renders the categorized palette (handled by the UI palette);
-        // the system-message form is informational here.
-        engine.systemMessage('Available commands');
+        // `showHelp()` (commands.js:522-546): the full categorized listing —
+        // title, per-category headers, "/name, /alias — desc" rows, and the
+        // five footer lines — posted as a system message. The styled
+        // `.help-output` rendering is [HelpOutputBlock] (help_output.dart);
+        // this emits the identical content through the plain-text sink.
+        engine.systemMessage(buildHelpMessageText());
       case 'join':
         if (args.isEmpty) {
           engine.systemMessage(

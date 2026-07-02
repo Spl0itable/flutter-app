@@ -130,6 +130,9 @@ class _Card extends StatelessWidget {
     final size = _baseTextSize(context);
     // `.link-preview` is a horizontal flex card (`styles-features.css:4348`):
     // a 120px left thumbnail + a right text column, max-width 400, radius 8.
+    // At ≤768px the card spans the full message width and the thumbnail
+    // shrinks to 80px (`styles-themes-responsive.css:1531-1539`).
+    final narrow = MediaQuery.of(context).size.width <= 768;
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: InkWell(
@@ -141,7 +144,8 @@ class _Card extends StatelessWidget {
         },
         borderRadius: NymRadius.rsm,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 400),
+          constraints:
+              BoxConstraints(maxWidth: narrow ? double.infinity : 400),
           child: Container(
             decoration: BoxDecoration(
               color: Colors.white.withValues(alpha: 0.03),
@@ -156,7 +160,8 @@ class _Card extends StatelessWidget {
                 children: [
                   if (data.image != null)
                     SizedBox(
-                      width: 120,
+                      // `.link-preview-image { width: 120px }`, 80px at ≤768px.
+                      width: narrow ? 80 : 120,
                       child: CachedNetworkImage(
                         imageUrl: api.mediaProxyUrl(data.image!),
                         fit: BoxFit.cover,

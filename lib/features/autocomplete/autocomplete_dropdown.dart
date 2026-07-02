@@ -166,13 +166,23 @@ class _AutocompleteDropdownState extends State<AutocompleteDropdown> {
       margin: const EdgeInsets.only(bottom: 8),
       padding: isKaomoji ? const EdgeInsets.all(6) : null,
       decoration: BoxDecoration(
-        // `.autocomplete-dropdown`: bg-tertiary, glass border, top-rounded. The
-        // kaomoji palette is a `.command-palette`, whose fill flips to white@0.92
-        // in light mode (themes-responsive.css:1155-1158) — bg-tertiary (#f0f0ed)
-        // does not, so use the command-palette fill there.
-        color: isKaomoji
-            ? (c.isLight ? const Color(0xEBFFFFFF) : const Color(0xE6141423))
-            : c.bgTertiary,
+        // Fill. solid-ui (the DEFAULT — `applyTransparency(... === true)`,
+        // app.js:643) repaints BOTH surfaces with the opaque `--glass-bg`
+        // (#14141e dark / #ffffff light): `body.solid-ui[.light-mode]
+        // .autocomplete-dropdown/.emoji-autocomplete/.command-palette`
+        // (themes-responsive.css:1555-1565,1593-1627). NymColors carries no
+        // solid flag, but solid-ui is the only mode whose --glass-bg is fully
+        // opaque, so detect it from the resolved token. In glass mode the
+        // base fills apply: `.autocomplete-dropdown`/`.emoji-autocomplete` use
+        // bg-tertiary (styles-components.css:718-724); the kaomoji palette is
+        // a `.command-palette` — rgba(20,20,35,0.9) dark
+        // (styles-components.css:849-854), white@0.92 light
+        // (themes-responsive.css:1155-1158).
+        color: c.glassBg.a == 1.0
+            ? c.glassBg
+            : isKaomoji
+                ? (c.isLight ? const Color(0xEBFFFFFF) : const Color(0xE6141423))
+                : c.bgTertiary,
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
         // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5) dark; light mode overrides to

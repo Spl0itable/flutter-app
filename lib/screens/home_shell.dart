@@ -289,23 +289,25 @@ class HomeShellState extends ConsumerState<HomeShell>
           child: _content(context, useColumns, compact: true),
         ),
 
-        // Dim backdrop (`.mobile-overlay`). With solid-ui (default ON) the alpha
-        // is mode-dependent: dark 0.6, light 0.35
-        // (styles-themes-responsive.css:1638-1646). Tap to close.
-        IgnorePointer(
-          ignoring: !_drawerOpen,
-          child: AnimatedOpacity(
-            duration: NymMotion.slide,
-            opacity: _drawerOpen ? 1 : 0,
-            child: GestureDetector(
-              onTap: () => setState(() => _drawerOpen = false),
-              child: Container(
-                color: Colors.black
-                    .withValues(alpha: context.nym.isLight ? 0.35 : 0.6),
+        // Dim backdrop (`.mobile-overlay`): rgba(0,0,0,0.6) that snaps between
+        // display:none/block with NO fade (styles-shell.css:1-14). Only with
+        // solid-ui (default ON — Transparency off) does light mode drop the
+        // alpha to 0.35 (`body.solid-ui.light-mode .mobile-overlay`,
+        // styles-themes-responsive.css:1638-1646); with Transparency enabled
+        // it stays 0.6 in both modes. Tap to close.
+        if (_drawerOpen)
+          GestureDetector(
+            onTap: () => setState(() => _drawerOpen = false),
+            child: Container(
+              color: Colors.black.withValues(
+                alpha: ref.watch(settingsProvider
+                            .select((s) => s.solidUi)) &&
+                        context.nym.isLight
+                    ? 0.35
+                    : 0.6,
               ),
             ),
           ),
-        ),
 
         // Off-canvas drawer: translateX(-100%) → 0 over 150ms linear.
         AnimatedSlide(

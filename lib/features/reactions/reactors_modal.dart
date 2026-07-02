@@ -126,6 +126,10 @@ class ReactorsModal extends ConsumerWidget {
                           wholeStringOnly: true,
                           emojiSize: 40 * 1.45,
                           emojiMargin: EdgeInsets.zero,
+                          // `.reactors-modal-emoji` is `inline-flex;
+                          // align-items: center` (styles-chat.css:540-545), so
+                          // the img is flex-centered — `vertical-align` inert.
+                          emojiAlignment: PlaceholderAlignment.middle,
                         ),
                         const SizedBox(width: 6),
                         Text(

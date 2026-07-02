@@ -25,6 +25,7 @@ import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
+import '../../features/groups/group_logic.dart';
 import '../../features/messages/format/message_content.dart'
     show InlineEmojiText, proxiedMedia;
 import '../../features/messages/inline_network_image.dart';
@@ -34,9 +35,13 @@ import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
 import '../../features/zaps/zap_modal.dart';
+import '../../models/group.dart' show GroupControlType;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../context_menu/interaction_hooks.dart';
+import 'message_row.dart'
+    show GroupInfoMember, encodeGroupInfoSystemMessage;
 
 /// The message composer (`.input-container` + `.message-input` + `.input-buttons`,
 /// docs/specs/02 §5.5). A multi-line input with a toolbar of image/file/emoji/GIF
@@ -113,6 +118,14 @@ class _ComposerState extends ConsumerState<Composer> {
   /// styles-chat.css:1737-1748). It follows the same `_acAnchor` leader as the
   /// autocomplete (a single leader supports multiple followers).
   final _popoutPortal = OverlayPortalController();
+
+  /// Hosts the floating quote/edit preview chip. The PWA's `.quote-preview` /
+  /// `.edit-preview` are `position:absolute; bottom:100%` (styles-chat.css:
+  /// 1412-1425 / 1496-1511): the chip OVERLAYS the message area above the
+  /// input without growing the composer bar. Shown permanently (from
+  /// [initState]); the overlay builder renders nothing while no chip is
+  /// pending.
+  final _chipPortal = OverlayPortalController();
 
   /// Measures the message-input box so the autocomplete dropdown spans the
   /// INPUT width (`.autocomplete-dropdown{left:0;right:0}` = `.input-wrapper`),
@@ -263,6 +276,9 @@ class _ComposerState extends ConsumerState<Composer> {
             onSystemMessage: _onSystemMessage,
             hooks: _buildCommandHooks(),
           );
+      // Mount the chip portal once; [_chipOverlay] renders nothing until a
+      // quote/edit is actually pending.
+      _chipPortal.show();
     });
   }
 
@@ -322,6 +338,9 @@ class _ComposerState extends ConsumerState<Composer> {
           _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
       ban: (pubkey) =>
           _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
+      // `/unban @nym` → lift a group ban, owner-only (`cmdUnbanFromGroup` →
+      // `unbanFromGroup`, groups.js:1926-1968).
+      unban: _unbanFromCurrentGroup,
       addMod: (pubkey) =>
           _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
       removeMod: (pubkey) =>
@@ -353,29 +372,90 @@ class _ComposerState extends ConsumerState<Composer> {
         ref.read(nostrControllerProvider).addGroupMembers(view.id, [target.pubkey]));
   }
 
-  /// Emits a `/groupinfo` summary (owner, mods, member count) as a system line.
+  /// `/unban @nym` — a port of the PWA's owner-only `unbanFromGroup`
+  /// (groups.js:1926-1968): gate on ownership ("Only the group owner can unban
+  /// users."), require the target to actually be banned ("That user is not
+  /// banned."), then drop the pubkey from `group.banned` and append the
+  /// `{type:'unban'}` mod-log entry via the shared control-apply, confirming
+  /// with the PWA's system line. The gift-wrapped `group-unban` rumor that
+  /// notifies the unbanned user (tags `p`/`g`/`subject`/`type`/`unban`/`x`)
+  /// needs an outbound publish path on [NostrController] (`unbanFromGroup`),
+  /// which doesn't exist yet — see the handoff note.
+  void _unbanFromCurrentGroup(String pubkey) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final appState = ref.read(appStateProvider.notifier);
+    final app = ref.read(appStateProvider);
+    final group = appState.groupById(view.id);
+    if (group == null) return;
+    if (!GroupLogic.isOwner(group, app.selfPubkey)) {
+      _onSystemMessage('Only the group owner can unban users.');
+      return;
+    }
+    if (!group.banned.contains(pubkey)) {
+      _onSystemMessage('That user is not banned.');
+      return;
+    }
+    appState.applyGroupControl(
+      groupId: view.id,
+      type: GroupControlType.unban,
+      tags: [
+        ['unban', pubkey],
+      ],
+      senderPubkey: app.selfPubkey,
+      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      eventId: GroupLogic.generateGroupId(),
+    );
+    // Resolve the target's profile if unknown (the PWA's fetchProfileDirect).
+    ref.read(nostrControllerProvider).ensureProfiles([pubkey]);
+    final nym = ref.read(usersProvider)[pubkey]?.nym ??
+        'anon#${pubkey.substring(pubkey.length - 4)}';
+    _onSystemMessage('@$nym was unbanned. They can be re-invited.');
+  }
+
+  /// `/groupinfo` — the PWA's `cmdGroupInfo` (groups.js:3487-3525): sort the
+  /// members owner-first, then mods, then everyone else (each block
+  /// alphabetized by nym), label `owner`/`mod`/`you`, and emit the structured
+  /// `.group-info` block as a system row — rendered by `MessageRow` with the
+  /// 22px avatar member rows — prefetching unknown profiles like the PWA's
+  /// `ensureListProfiles`.
   void _showGroupInfo() {
     final view = ref.read(currentViewProvider);
     if (view.kind != ViewKind.group) return;
     final group = ref.read(appStateProvider.notifier).groupById(view.id);
     if (group == null) return;
+    final app = ref.read(appStateProvider);
     final users = ref.read(usersProvider);
-    String nymOf(String pk) {
-      final u = users[pk];
-      return u != null
-          ? stripPubkeySuffix(u.nym)
-          : 'nym#${pk.substring(pk.length - 4)}';
-    }
-
-    final owner =
-        group.createdBy != null ? nymOf(group.createdBy!) : 'unknown';
-    final lines = <String>[
-      'Group: ${group.name.isEmpty ? '(unnamed)' : group.name}',
-      'Owner: $owner',
-      if (group.mods.isNotEmpty) 'Mods: ${group.mods.map(nymOf).join(', ')}',
-      'Members: ${group.members.length}',
+    final ownerPk = group.createdBy;
+    final mods = group.mods;
+    String nymOf(String pk) => users[pk]?.nym ?? '';
+    int rank(String pk) => pk == ownerPk ? 0 : (mods.contains(pk) ? 1 : 2);
+    final sorted = [...group.members]..sort((a, b) {
+        final ra = rank(a), rb = rank(b);
+        if (ra != rb) return ra - rb;
+        return nymOf(a).toLowerCase().compareTo(nymOf(b).toLowerCase());
+      });
+    final members = <GroupInfoMember>[
+      for (final pk in sorted)
+        (
+          pubkey: pk,
+          labels: [
+            if (pk == ownerPk)
+              'owner'
+            else if (mods.contains(pk))
+              'mod',
+            if (pk == app.selfPubkey) 'you',
+          ],
+        ),
     ];
-    _onSystemMessage(lines.join('\n'));
+    ref.read(nostrControllerProvider).ensureProfiles(sorted);
+    // Straight to the in-list system pill — no SnackBar echo of the payload.
+    ref.read(appStateProvider.notifier).addSystemMessage(
+        encodeGroupInfoSystemMessage((
+      name: group.name,
+      count: group.members.length,
+      members: members,
+    )));
   }
 
   void _onFocusChanged() {
@@ -504,11 +584,11 @@ class _ComposerState extends ConsumerState<Composer> {
     _selectedIndex = 0;
 
     // `.composer-popout`: float the input into an elevated box once the draft
-    // exceeds ~1.5 lines (ui-context.js:1738). Approximate "extent" by newline
-    // count + a rough wrap estimate so we don't need a layout pass. The box
-    // lives in an OverlayPortal so it overlays the messages (B4) rather than
-    // growing the bottom bar — toggle the portal with the flag.
-    _popout = _estimatedLineCount() > 1;
+    // exceeds ~1.5 lines (ui-context.js:1738), MEASURED at the field's real
+    // width + font size (see [_draftWantsPopout]). The box lives in an
+    // OverlayPortal so it overlays the messages (B4) rather than growing the
+    // bottom bar — toggle the portal with the flag.
+    _popout = _draftWantsPopout();
     _syncPopoutPortal();
 
     if (trigger.kind == TriggerKind.command) {
@@ -557,16 +637,45 @@ class _ComposerState extends ConsumerState<Composer> {
     }
   }
 
-  /// Cheap line-count estimate for the popout threshold: explicit newlines plus
-  /// a per-line wrap estimate (~36 chars/line is a conservative composer width).
-  int _estimatedLineCount() {
-    final text = _controller.text;
-    if (text.isEmpty) return 0;
-    var lines = 0;
-    for (final line in text.split('\n')) {
-      lines += 1 + (line.length ~/ 36);
+  /// `.message-input` font: `var(--user-text-size)` (the Settings text-size
+  /// slider, styles-chat.css:1670), pinned to 16px at the ≤768 phone
+  /// breakpoint (`font-size: 16px !important`, styles-themes-responsive.css:
+  /// 270-275 — the iOS anti-zoom override).
+  double _inputFontSize() {
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return 16;
     }
-    return lines;
+    return ref.read(settingsProvider).textSize.toDouble();
+  }
+
+  /// Whether the draft wraps past ~1.5 visual lines at the input's REAL width
+  /// — the PWA's popout rule (`autoResizeTextarea`, ui-context.js:1725-1743:
+  /// `expand = (scrollHeight - padV) > lineHeight * 1.5`). Lays the draft out
+  /// with a [TextPainter] at the field's content width (the field minus its
+  /// 16px paddings / the 38px translate-button inset) and compares the laid-out
+  /// height against 1.5 of the SAME painter's line height, so the threshold
+  /// tracks any field width and any user text size instead of a hard-coded
+  /// chars-per-line guess.
+  bool _draftWantsPopout() {
+    final text = _controller.text;
+    if (text.isEmpty) return false;
+    final box = _inputKey.currentContext?.findRenderObject() as RenderBox?;
+    // Not laid out yet (first frame): keep the current state.
+    if (box == null || !box.hasSize || box.size.width <= 0) return _popout;
+    final fontSize = _inputFontSize();
+    // `.message-input { padding: 10px 16px }` + 1px borders; with text the
+    // right inset is the 38px translate-button reserve (see [_textField]).
+    final hasText = text.trim().isNotEmpty;
+    final contentWidth =
+        box.size.width - 16 - (hasText ? 38 : 16) - 2;
+    if (contentWidth <= 0) return _popout;
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: TextStyle(fontSize: fontSize)),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: contentWidth);
+    final expand = painter.height > painter.preferredLineHeight * 1.5;
+    painter.dispose();
+    return expand;
   }
 
   /// Whether the active view is the private chat with the verified Nymbot
@@ -1140,7 +1249,9 @@ class _ComposerState extends ConsumerState<Composer> {
       ref.read(pendingEditProvider.notifier).consume();
     });
 
-    final input = _inputWithChips(context, sendEnabled);
+    // The quote/edit chip no longer sits in-flow — it floats above the input
+    // via [_chipOverlay] (`bottom:100%`), so the input IS the composer body.
+    final input = _input(context, sendEnabled);
     // `.input-container` is `padding: 12px 16px` (desktop/tablet); the phone
     // breakpoint (≤768) collapses it to a flat `padding: 10px`
     // (styles-themes-responsive.css:221/304). `compact` spans the whole ≤1024
@@ -1187,10 +1298,14 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// The input column with the quote/edit preview chip stacked above it
-  /// (`.quote-preview` / `.edit-preview`, `bottom:100%`). The chip slides in
-  /// (0.2s, dy 8→0) and the column height animates so the input shifts down.
-  Widget _inputWithChips(BuildContext context, bool inputEnabled) {
+  /// The floating quote/edit preview chip (`.quote-preview` / `.edit-preview`:
+  /// `position:absolute; bottom:100%` with `margin-bottom:8px`, styles-chat.css
+  /// :1412-1425 / 1496-1511): anchored ABOVE the input, overlaying the message
+  /// area — the composer bar does NOT grow — and sliding in per
+  /// `quoteSlideIn` (0.2s ease-out, opacity 0→1 / translateY 8px→0). With the
+  /// popout active the chip lifts past the floating field's overhang, matching
+  /// the autocomplete's `--ac-offset` stack (dropdown above chip above field).
+  Widget _chipOverlay(BuildContext context) {
     final chip = _pendingEdit != null
         ? _EditPreviewChip(
             text: _quotePreviewText(_pendingEdit!.content),
@@ -1203,26 +1318,37 @@ class _ComposerState extends ConsumerState<Composer> {
                 onClose: _clearQuote,
               )
             : null);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedSize(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          alignment: Alignment.bottomLeft,
-          child: chip == null
-              ? const SizedBox(height: 0)
-              : Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  // Keyed so the autocomplete dropdown can clear the chip height
-                  // (`--ac-offset`, 04-F2). Measures the chip alone (the +8 gap
-                  // is added in the offset, matching the PWA's `previewH + 8`).
-                  child: KeyedSubtree(key: _chipKey, child: chip),
-                ),
+    if (chip == null) return const SizedBox.shrink();
+    final overhang = _popout
+        ? math.max(0.0, _boxHeight(_popoutFieldKey) - _composerRowBase)
+        : 0.0;
+    return CompositedTransformFollower(
+      link: _acAnchor,
+      targetAnchor: Alignment.topLeft,
+      followerAnchor: Alignment.bottomLeft,
+      // `margin-bottom: 8px` between the chip and the field (+ the popout
+      // overhang when the field floats).
+      offset: Offset(0, -(overhang + 8)),
+      showWhenUnlinked: false,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(
+            width: _anchorWidth(context),
+            // Re-mounts (and so replays the slide-in) when the chip KIND
+            // changes — the PWA recreates the element on each
+            // setQuoteReply/startEditMessage.
+            child: _ChipSlideIn(
+              key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
+              // Keyed so the autocomplete dropdown can clear the chip height
+              // (`--ac-offset`, 04-F2). Measures the chip alone (the +8 gap
+              // is added in the offset, matching the PWA's `previewH + 8`).
+              child: KeyedSubtree(key: _chipKey, child: chip),
+            ),
+          ),
         ),
-        _input(context, inputEnabled),
-      ],
+      ),
     );
   }
 
@@ -1337,14 +1463,22 @@ class _ComposerState extends ConsumerState<Composer> {
       child: OverlayPortal(
         controller: _popoutPortal,
         overlayChildBuilder: (ctx) => _popoutOverlay(ctx, focus),
+        // The chip portal nests between the popout field (behind) and the
+        // autocomplete (topmost), so the dropdown paints over the chip and the
+        // chip over the floating field — the PWA's `--ac-offset` stack.
         child: OverlayPortal(
-          controller: _acPortal,
-          overlayChildBuilder: _overlayChild,
-          // In-flow we reserve only the base row height while the field floats;
-          // flat (non-popout) the field stays in place.
-          child: _popout
-              ? const SizedBox(height: _composerRowBase, width: double.infinity)
-              : focus,
+          controller: _chipPortal,
+          overlayChildBuilder: _chipOverlay,
+          child: OverlayPortal(
+            controller: _acPortal,
+            overlayChildBuilder: _overlayChild,
+            // In-flow we reserve only the base row height while the field
+            // floats; flat (non-popout) the field stays in place.
+            child: _popout
+                ? const SizedBox(
+                    height: _composerRowBase, width: double.infinity)
+                : focus,
+          ),
         ),
       ),
     );
@@ -1469,6 +1603,18 @@ class _ComposerState extends ConsumerState<Composer> {
     final c = context.nym;
     final hasText = _controller.text.trim().isNotEmpty;
     final focused = _focus.hasFocus;
+    // `.message-input { font-size: var(--user-text-size) }` — the input font
+    // tracks the Settings text-size slider (styles-chat.css:1670); the ≤768
+    // phone breakpoint pins it to 16px (`font-size: 16px !important`,
+    // styles-themes-responsive.css:270-275). Watch so a slider change
+    // re-renders the field live.
+    ref.watch(settingsProvider.select((s) => s.textSize));
+    final fontSize = _inputFontSize();
+    // Flat-field growth cap: `.message-input { max-height: 160px }` with its
+    // 10px vertical paddings → ~140px of text, at the PWA's effective
+    // `fontSize * 1.4` line height (`autoResizeTextarea`'s fallback). The
+    // popout keeps its own `min(40vh, 360)` cap below.
+    final flatMaxLines = math.max(1, 140 ~/ (fontSize * 1.4));
     // `.composer-popout .message-input`: elevated rounded box vs the flat field.
     // `.message-input` flat fill is white@0.05 → white@0.07 on focus (dark); in
     // light mode `body.light-mode div.message-input` flips to black@0.04 →
@@ -1509,7 +1655,7 @@ class _ComposerState extends ConsumerState<Composer> {
       // on the SAME [inputEnabled] (= the SEND `sendEnabled`) so the field is
       // typable iff SEND is — never inert while SEND is live, nor vice-versa.
       enabled: inputEnabled,
-      maxLines: _popout ? 12 : 5,
+      maxLines: _popout ? 12 : flatMaxLines,
       minLines: 1,
       textInputAction: TextInputAction.newline,
       onChanged: (_) {
@@ -1525,7 +1671,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // — `color:#ffffff !important` / `body.light-mode … color:#000000`
         // (styles-themes-responsive.css:578-593), NOT the accent `--text`.
         color: c.isLight ? Colors.black : Colors.white,
-        fontSize: widget.compact ? 16 : 15,
+        fontSize: fontSize,
       ),
       cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
@@ -1537,7 +1683,7 @@ class _ComposerState extends ConsumerState<Composer> {
             // black@0.4 (`body.light-mode …`, styles-themes-responsive.css:58).
             color: (c.isLight ? Colors.black : Colors.white)
                 .withValues(alpha: 0.4),
-            fontSize: widget.compact ? 16 : 15),
+            fontSize: fontSize),
         filled: true,
         fillColor: fill,
         // The translate button only exists when there's text (A9), so only then
@@ -2335,6 +2481,50 @@ class _PreviewChip extends StatelessWidget {
   }
 }
 
+/// `@keyframes quoteSlideIn` (styles-chat.css:1428-1439): opacity 0→1 +
+/// translateY 8px→0 over 0.2s ease-out, replayed whenever the chip (re)mounts
+/// — the PWA recreates the preview element on every setQuoteReply /
+/// startEditMessage, so each new chip animates in.
+class _ChipSlideIn extends StatefulWidget {
+  const _ChipSlideIn({super.key, required this.child});
+  final Widget child;
+
+  @override
+  State<_ChipSlideIn> createState() => _ChipSlideInState();
+}
+
+class _ChipSlideInState extends State<_ChipSlideIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..forward();
+  late final CurvedAnimation _t =
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+
+  @override
+  void dispose() {
+    _t.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _t,
+      child: AnimatedBuilder(
+        animation: _t,
+        builder: (context, child) => Transform.translate(
+          offset: Offset(0, 8 * (1 - _t.value)),
+          child: child,
+        ),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 /// `.quote-preview`: author (primary 12/w600 with a muted `#suffix`) over the
 /// truncated quoted text (dim 12, ellipsis).
 class _QuotePreviewChip extends StatelessWidget {
@@ -2903,19 +3093,26 @@ class EmojiSentinelController extends TextEditingController {
         continue;
       }
       flushText();
+      // `div.message-input .custom-emoji { vertical-align: -0.3em }`
+      // (styles-chat.css:1703-1708): baseline-aligned with the image bottom
+      // 0.3em below the alphabetic baseline.
       children.add(WidgetSpan(
-        alignment: PlaceholderAlignment.middle,
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 1),
-          child: InlineNetworkImage(
-            url: proxiedMedia(url, emoji: true),
-            width: side,
-            height: side,
-            fit: BoxFit.contain,
-            // Same disk-cache + SVG handling + retry + literal-fallback as the
-            // rendered message emoji (message_content.dart `CustomEmojiNode`).
-            retryOnError: true,
-            errorChild: Text(':$code:', style: baseStyle),
+          child: EmojiBaselineDrop(
+            drop: (baseStyle.fontSize ?? 14) * 0.3,
+            child: InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
+              width: side,
+              height: side,
+              fit: BoxFit.contain,
+              // Same disk-cache + SVG handling + retry + literal-fallback as the
+              // rendered message emoji (message_content.dart `CustomEmojiNode`).
+              retryOnError: true,
+              errorChild: Text(':$code:', style: baseStyle),
+            ),
           ),
         ),
       ));

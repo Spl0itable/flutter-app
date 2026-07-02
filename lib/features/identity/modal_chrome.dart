@@ -32,24 +32,35 @@ class ModalChrome {
         color: c.bgSecondary,
         borderRadius: NymRadius.rxl,
         border: Border.all(color: c.glassBorder),
-        boxShadow: [
-          // shadow-lg
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
-            blurRadius: 32,
-            offset: const Offset(0, 8),
-          ),
-          // shadow-glow (primary/0.1)
-          BoxShadow(
-            color: c.primary.withValues(alpha: 0.1),
-            blurRadius: 20,
-          ),
-          // 0 0 0 1px white/0.05 ring
-          BoxShadow(
-            color: Colors.white.withValues(alpha: 0.05),
-            spreadRadius: 1,
-          ),
-        ],
+        // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+        // rgba(0,0,0,0.12) }` — a single soft shadow, no glow/white ring
+        // (styles-themes-responsive.css:1050-1052).
+        boxShadow: c.isLight
+            ? const [
+                BoxShadow(
+                  color: Color(0x1F000000), // black @ 0.12
+                  blurRadius: 40,
+                  offset: Offset(0, 8),
+                ),
+              ]
+            : [
+                // shadow-lg
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 8),
+                ),
+                // shadow-glow (primary/0.1)
+                BoxShadow(
+                  color: c.primary.withValues(alpha: 0.1),
+                  blurRadius: 20,
+                ),
+                // 0 0 0 1px white/0.05 ring
+                BoxShadow(
+                  color: Colors.white.withValues(alpha: 0.05),
+                  spreadRadius: 1,
+                ),
+              ],
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
@@ -168,10 +179,15 @@ class ModalChrome {
     );
   }
 
-  /// The `.form-input` decoration: white/0.05 fill, glass border, radius 12,
-  /// padding 11/14, with the focus glow approximated by a thicker primary/0.3
-  /// border on focus (Flutter has no multi-layer input shadow).
+  /// The `.form-input` decoration (styles-components.css:229-255): white/0.05
+  /// fill, glass border, radius 12, padding 11/14; focus keeps a 1px border at
+  /// primary/0.3 and lifts the fill to white/0.07. Light mode forces bg
+  /// black/0.04 + border black/0.1 `!important` (no focus lift), while the
+  /// light `:focus` rule still wins the border back to primary/0.3
+  /// (styles-themes-responsive.css:561-568, 1087-1092). Wrap the field in
+  /// [focusRing] for the outer `0 0 0 3px` glow.
   static InputDecoration inputDecoration(NymColors c, String hint) {
+    final baseBorder = c.isLight ? const Color(0x1A000000) : c.glassBorder;
     return InputDecoration(
       isDense: true,
       hintText: hint.isEmpty ? null : hint,
@@ -179,20 +195,35 @@ class ModalChrome {
       contentPadding:
           const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       filled: true,
-      fillColor: Colors.white.withValues(alpha: 0.05),
+      // Dark: white@.05 → .07 on focus; light: black@.04 `!important`, so the
+      // focus bump never applies.
+      fillColor: WidgetStateColor.resolveWith(
+        (states) => c.isLight
+            ? const Color(0x0A000000)
+            : Colors.white.withValues(
+                alpha: states.contains(WidgetState.focused) ? 0.07 : 0.05),
+      ),
       border: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.glassBorder),
+        borderSide: BorderSide(color: baseBorder),
       ),
       enabledBorder: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.glassBorder),
+        borderSide: BorderSide(color: baseBorder),
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.primaryA(0.3), width: 2),
+        borderSide: BorderSide(color: c.primaryA(0.3)),
       ),
     );
+  }
+
+  /// Wraps a `.form-input`/`.form-select` field with the `:focus` outer glow
+  /// ring — `box-shadow: 0 0 0 3px primary/0.06` (light mode: primary/0.1;
+  /// styles-components.css:253, styles-themes-responsive.css:1087-1092). A
+  /// hard-edged ring (spread 3, no blur), toggled by descendant focus.
+  static Widget focusRing(NymColors c, {required Widget child}) {
+    return _FocusRing(c: c, child: child);
   }
 
   /// A plain centered "or" divider (`.nm-h-25`): 12px text-dim, margin 16 0, NO
@@ -214,6 +245,46 @@ class ModalChrome {
         final uri = Uri.parse('https://web.nymchat.app/$path');
         launchUrl(uri, mode: LaunchMode.externalApplication);
       };
+  }
+}
+
+/// The `.form-input:focus` glow ring host: watches descendant focus (the
+/// wrapped TextField / dropdown) and paints `0 0 0 3px primary/0.06` (light
+/// `primary/0.1`) around it while focused.
+class _FocusRing extends StatefulWidget {
+  const _FocusRing({required this.c, required this.child});
+  final NymColors c;
+  final Widget child;
+
+  @override
+  State<_FocusRing> createState() => _FocusRingState();
+}
+
+class _FocusRingState extends State<_FocusRing> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    return Focus(
+      skipTraversal: true,
+      includeSemantics: false,
+      onFocusChange: (f) => setState(() => _focused = f),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: NymRadius.rsm,
+          boxShadow: _focused
+              ? [
+                  BoxShadow(
+                    color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                    spreadRadius: 3,
+                  ),
+                ]
+              : null,
+        ),
+        child: widget.child,
+      ),
+    );
   }
 }
 

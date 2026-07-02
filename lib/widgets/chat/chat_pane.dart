@@ -5,6 +5,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
+import '../../features/emoji/emoji_prefetch.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/p2p/p2p_transfers_modal.dart';
@@ -74,6 +75,16 @@ class ChatPane extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Custom-emoji image prefetch (emoji.js `_prefetchCustomEmojiImages`,
+    // :52-97): the PWA schedules a deferred warm-up from `registerCustomEmoji`
+    // / `_storeEmojiPack`; here the live provider's state change is the same
+    // signal (plus one kick for the already-hydrated cache). The container —
+    // not `ref` — is captured so the 3s-deferred run can't touch a disposed
+    // widget ref.
+    final container = ProviderScope.containerOf(context, listen: false);
+    ref.listen(liveCustomEmojiProvider,
+        (_, __) => scheduleCustomEmojiPrefetch(container));
+    kickCustomEmojiPrefetch(container);
     return Container(
       // `.main-content` is TRANSPARENT (styles-shell.css:730 — no background) so
       // the fixed `#wallpaperLayer` (mounted behind this pane in `home_shell`)
@@ -1291,10 +1302,12 @@ class _HeaderPillState extends State<_HeaderPill> {
 }
 
 /// `.mobile-menu-toggle` / `.mobile-notif-toggle` in `.mobile-header-actions`
-/// (gap F14): these are plain `.icon-btn`-class buttons — bg white@0.05 (dark) /
-/// black@0.03 (light), 1px glass/black@0.1 border, **radius xs (8)**, color
-/// `--text`/`--primary`, padding `7px 14px`, icon 20. (NOT a fixed 40×40
-/// square, NOT rgba(20,20,35,0.8), NOT radius-sm — those were inventions.)
+/// (gap F14). index.html:663/670 gives these buttons ONLY their own class (no
+/// `icon-btn`), so `styles-components.css:688-703` applies in full: a fixed
+/// 40×40 square (padding 0), bg rgba(20,20,35,0.8), 1px `--glass-border`,
+/// **border-radius var(--radius-sm) = 12**, glyph `--primary` at 20px. Light
+/// mode (`styles-themes-responsive.css:1220-1224`) flips the fill to
+/// white@0.85 and the border to black@0.08 — the glyph stays `--primary`.
 /// Optional unread [badge] overlay.
 class _MobileToggle extends StatelessWidget {
   const _MobileToggle({
@@ -1311,20 +1324,26 @@ class _MobileToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final style = _iconBtnStyle(c, false);
     final box = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      width: 40,
+      height: 40,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: style.fill,
-        borderRadius: NymRadius.rxs,
-        border: Border.all(color: style.border),
+        color: c.isLight
+            ? const Color(0xD9FFFFFF) // rgba(255,255,255,0.85)
+            : const Color(0xCC141423), // rgba(20,20,35,0.8)
+        borderRadius: NymRadius.rsm,
+        border: Border.all(
+          color: c.isLight
+              ? Colors.black.withValues(alpha: 0.08)
+              : c.glassBorder,
+        ),
       ),
-      child: NymSvgIcon(svg, size: 20, color: style.foreground),
+      child: NymSvgIcon(svg, size: 20, color: c.primary),
     );
     final child = InkWell(
       onTap: onTap,
-      borderRadius: NymRadius.rxs,
+      borderRadius: NymRadius.rsm,
       child: badge > 0 ? _withBadge(box, badge) : box,
     );
     return tooltip != null ? Tooltip(message: tooltip!, child: child) : child;

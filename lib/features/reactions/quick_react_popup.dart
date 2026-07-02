@@ -286,6 +286,9 @@ class _EmojiButtonState extends State<_EmojiButton> {
               wholeStringOnly: true,
               emojiSize: 30,
               emojiMargin: EdgeInsets.zero,
+              // `.quick-react-emoji .custom-emoji { vertical-align: middle }`
+              // (styles-features.css:2747-2752).
+              emojiAlignment: PlaceholderAlignment.middle,
             ),
           ),
         ),

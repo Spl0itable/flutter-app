@@ -187,11 +187,14 @@ class _TypingDotsState extends State<_TypingDots>
   }
 
   /// One dot's bounce factor (0..1) at phase [t] (0..1), peaking at the 30% mark
-  /// and resting (0) from 60% to 100% — a triangular approximation of the CSS
-  /// keyframes (0%,60%,100% → rest; 30% → peak).
+  /// and resting (0) from 60% to 100% — the CSS keyframes (0%,60%,100% → rest;
+  /// 30% → peak) with the declared `ease-in-out` timing applied WITHIN each
+  /// keyframe segment (`animation: typingBounce 1.2s ease-in-out`,
+  /// styles-features.css:4278): slow-fast-slow up, slow-fast-slow down.
+  /// [Curves.easeInOut] is cubic-bezier(0.42,0,0.58,1) = CSS `ease-in-out`.
   double _bounce(double t) {
-    if (t < 0.3) return t / 0.3;
-    if (t < 0.6) return 1 - (t - 0.3) / 0.3;
+    if (t < 0.3) return Curves.easeInOut.transform(t / 0.3);
+    if (t < 0.6) return 1 - Curves.easeInOut.transform((t - 0.3) / 0.3);
     return 0;
   }
 

@@ -193,7 +193,7 @@ class MessageContent extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < blocks.length; i++) ...[
-          if (i > 0) const SizedBox(height: 4),
+          if (i > 0) SizedBox(height: _blockGap(blocks[i - 1], blocks[i])),
           _block(context, c, blocks[i], color, size,
               emojiOnly: emojiOnly,
               onChannelRef: onChannelRef,
@@ -311,6 +311,24 @@ class MessageContent extends ConsumerWidget {
         return _MediaGallery(items: items, blur: blurImages);
     }
   }
+}
+
+/// The PWA vertical margin a block carries: media, code and quote blocks all
+/// have `margin: 10px 0` (`.message-content img` styles-chat.css:941-950,
+/// `.video-container` :980-985, `.message-gallery` :987-994, `pre` :1094-1099,
+/// `blockquote` :1270-1275); plain text lines keep the 4px line gap.
+double _blockMargin(FormatBlock block) => switch (block) {
+      MediaBlock() || CodeBlock() || QuoteBlock() => 10,
+      ParagraphBlock() || HeadingBlock() => 4,
+    };
+
+/// Vertical gap between two adjacent blocks. CSS sibling margins collapse to
+/// the LARGER of the two, so any pair involving a media/code/quote block sits
+/// 10px apart while text-text pairs keep the 4px line gap.
+double _blockGap(FormatBlock a, FormatBlock b) {
+  final ma = _blockMargin(a);
+  final mb = _blockMargin(b);
+  return ma > mb ? ma : mb;
 }
 
 /// One emoji "unit" (the PWA's `_EMOJI_UNIT`, `messages.js:8`): a flag pair, a
@@ -454,12 +472,16 @@ class _RichInline extends StatelessWidget {
         //  border-radius:5px; font-family:mono; color: var(--secondary);
         //  font-size:0.9em }` (styles-chat.css:1084-1092) — a rounded inline
         //  pill, so a WidgetSpan carries the padding + radius the CSS needs.
+        //  Light mode flips the fill to `rgba(0,0,0,0.06)` (`body.light-mode
+        //  .message-content code`, styles-themes-responsive.css:632-634).
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.06),
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.06)
+                  : Colors.white.withValues(alpha: 0.06),
               borderRadius: BorderRadius.circular(5),
             ),
             child: Text(
@@ -516,26 +538,36 @@ class _RichInline extends StatelessWidget {
         // (styles-chat.css:839-852). The HTML `width=30` attr is overridden by
         // the CSS, so inline is `1.75em` (≈26px at 15), not 22px.
         final side = emojiOnly ? size * 2.75 : size * 1.75;
+        // Many NIP-30 custom emoji are SVG (and some hosts serve formats the
+        // raster decoder can't handle); InlineNetworkImage renders SVG via
+        // flutter_svg and otherwise falls back to the `:shortcode:` text so a
+        // broken/undecodable emoji never throws. (BUG: custom emoji + decode.)
+        final image = InlineNetworkImage(
+          url: proxiedMedia(url, emoji: true),
+          width: side,
+          height: side,
+          fit: BoxFit.contain,
+          // Disk-cached (CachedNetworkImage): body emoji are sparse — only a
+          // few per visible message — so they don't storm the cache DB, and
+          // the disk cache lets them persist across restarts. (The high-volume
+          // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
+          retryOnError: true,
+          errorChild: Text(':$shortcode:', style: base),
+        );
+        // `.custom-emoji { vertical-align: -0.375em }` (styles-chat.css:843):
+        // baseline-aligned with the image bottom 0.375em below the alphabetic
+        // baseline. `.emoji-only .custom-emoji` overrides to `vertical-align:
+        // middle` (:848-852).
         return WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
+          alignment: emojiOnly
+              ? PlaceholderAlignment.middle
+              : PlaceholderAlignment.baseline,
+          baseline: emojiOnly ? null : TextBaseline.alphabetic,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 1),
-            // Many NIP-30 custom emoji are SVG (and some hosts serve formats the
-            // raster decoder can't handle); InlineNetworkImage renders SVG via
-            // flutter_svg and otherwise falls back to the `:shortcode:` text so a
-            // broken/undecodable emoji never throws. (BUG: custom emoji + decode.)
-            child: InlineNetworkImage(
-              url: proxiedMedia(url, emoji: true),
-              width: side,
-              height: side,
-              fit: BoxFit.contain,
-              // Disk-cached (CachedNetworkImage): body emoji are sparse — only a
-              // few per visible message — so they don't storm the cache DB, and
-              // the disk cache lets them persist across restarts. (The high-volume
-              // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
-              retryOnError: true,
-              errorChild: Text(':$shortcode:', style: base),
-            ),
+            child: emojiOnly
+                ? image
+                : EmojiBaselineDrop(drop: size * 0.375, child: image),
           ),
         );
       case ChannelLinkChip(:final ref, :final label):
@@ -600,23 +632,25 @@ class _MentionChip extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
+    // `.nm-mention { color: var(--secondary) }` (no-inline.css:198) — the chip
+    // inherits the body weight (NO bold), in both themes.
     final text = Text.rich(
       TextSpan(
         children: [
           TextSpan(
             text: node.base,
             style: TextStyle(
-              color: c.primary,
+              color: c.secondary,
               fontSize: size,
-              fontWeight: FontWeight.w600,
             ),
           ),
           if (node.suffix != null)
-            // `.nym-suffix`: opacity 0.7, 0.9em, weight 100 (inherits primary).
+            // `.nym-suffix`: opacity 0.7, 0.9em, weight 100 (styles-chat.css:
+            // 706-710; inherits the mention's secondary).
             TextSpan(
               text: '#${node.suffix}',
               style: TextStyle(
-                color: c.primaryA(0.7),
+                color: c.secondaryA(0.7),
                 fontSize: size * 0.9,
                 fontWeight: FontWeight.w100,
               ),
@@ -1117,9 +1151,11 @@ class _CodeBox extends StatelessWidget {
     // Tokenize for syntax coloring (NymHighlight). An unknown/absent language
     // yields a single `none` run, so the body is plain bright monospace exactly
     // as before — only recognized languages get the VS-Code token colors.
+    // `pre code { font-size: inherit }` (styles-chat.css:1107-1112): code
+    // glyphs render at the full base size, not 0.9em/size-1.
     final base = TextStyle(
       color: c.textBright,
-      fontSize: size - 1,
+      fontSize: size,
       fontFamily: 'monospace',
       height: 1.4,
     );
@@ -1140,63 +1176,68 @@ class _CodeBox extends StatelessWidget {
           ),
       ],
     );
-    // `pre` radius is `--radius-sm` (=12), wrapper `padding-top:22px`
-    // (styles-chat.css:1097, 1141-1143). The lang label + Copy pill are
-    // absolutely positioned (top-left / top-right), so we Stack them over the
-    // top-padded code body.
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.glassBorder),
-      ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 22, 10, 10),
+    // `.code-block-wrapper { position:relative; padding-top:22px }`
+    // (styles-chat.css:1141-1143) hosts the lang label / Copy pill in a 22px
+    // strip ABOVE the `pre` box; the `pre` itself carries the fill
+    // (white@0.04 dark / black@0.04 light, styles-chat.css:1094-1095 +
+    // styles-themes-responsive.css:636-638), the 1px glass border, radius
+    // `--radius-sm` (=12) and its own `padding: 12px` — so code text starts
+    // 22+12px from the wrapper top and is inset 12px on the other sides.
+    return Stack(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 22),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: c.insetFill,
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: c.glassBorder),
+            ),
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Text.rich(codeSpan),
             ),
           ),
-          // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`.
-          if (lang != null && lang!.isNotEmpty)
-            Positioned(
-              top: 4,
-              left: 8,
-              child: Text(
-                lang!.toUpperCase(),
-                style: TextStyle(
-                  color: c.text.withValues(alpha: 0.55),
-                  fontSize: size * 0.7,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          // `.code-copy-btn`: top:6 right:6, primary@0.15 bg / primary@0.3
-          // border / radius-xs(8), "Copy" text 0.75em in `--primary`.
+        ),
+        // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`,
+        // letter-spacing 0.05em (styles-chat.css:1145-1156).
+        if (lang != null && lang!.isNotEmpty)
           Positioned(
-            top: 6,
-            right: 6,
-            child: GestureDetector(
-              onTap: () => Clipboard.setData(ClipboardData(text: code)),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: c.primaryA(0.15),
-                  borderRadius: NymRadius.rxs,
-                  border: Border.all(color: c.primaryA(0.3)),
-                ),
-                child: Text(
-                  'Copy',
-                  style: TextStyle(color: c.primary, fontSize: size * 0.75),
-                ),
+            top: 4,
+            left: 8,
+            child: Text(
+              lang!.toUpperCase(),
+              style: TextStyle(
+                color: c.text.withValues(alpha: 0.55),
+                fontSize: size * 0.7,
+                letterSpacing: size * 0.7 * 0.05,
               ),
             ),
           ),
-        ],
-      ),
+        // `.code-copy-btn`: top:6 right:6, primary@0.15 bg / primary@0.3
+        // border / radius-xs(8), "Copy" text 0.75em in `--primary`.
+        Positioned(
+          top: 6,
+          right: 6,
+          child: GestureDetector(
+            onTap: () => Clipboard.setData(ClipboardData(text: code)),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: c.primaryA(0.15),
+                borderRadius: NymRadius.rxs,
+                border: Border.all(color: c.primaryA(0.3)),
+              ),
+              child: Text(
+                'Copy',
+                style: TextStyle(color: c.primary, fontSize: size * 0.75),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1472,10 +1513,11 @@ class _QuoteBox extends ConsumerWidget {
         topLevel && _quoteTextLength(block) > truncateThreshold(context)
             ? _Collapsible(child: inner)
             : inner;
-    // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
-    // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
+    // `blockquote`: border-left 3px primary@0.4, padding-left 12 ONLY (no
+    // vertical/right padding), bg secondary@0.1, radius `0 8 8 0`
+    // (styles-chat.css:1270-1283).
     final box = Container(
-      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+      padding: const EdgeInsets.only(left: 12),
       decoration: BoxDecoration(
         color: c.secondaryA(0.1),
         border: Border(left: BorderSide(color: c.primaryA(0.4), width: 3)),
@@ -1699,10 +1741,13 @@ class _MediaTile extends StatelessWidget {
       url: proxiedMedia(item.url),
       fit: BoxFit.cover,
       width: maxSize,
+      // `.msg-img:not(.img-loaded)`: a 300px-wide 4:3 slot with a white@0.03
+      // wash while the image decodes (styles-chat.css:952-958; no light-mode
+      // override).
       placeholder: Container(
         width: maxSize,
-        height: maxSize,
-        color: Colors.white.withValues(alpha: 0.05),
+        height: maxSize * 3 / 4,
+        color: Colors.white.withValues(alpha: 0.03),
       ),
       errorChild: Container(
         width: maxSize,
@@ -1758,7 +1803,9 @@ class _FullscreenImageViewer extends StatefulWidget {
     return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder<void>(
         opaque: false,
-        barrierColor: Colors.black.withValues(alpha: 0.92),
+        // `.image-modal { background: rgba(0,0,0,0.85) }`
+        // (styles-components.css:570-577).
+        barrierColor: Colors.black.withValues(alpha: 0.85),
         pageBuilder: (_, __, ___) =>
             _FullscreenImageViewer(urls: urls, initialIndex: index),
       ),
@@ -1775,14 +1822,26 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
   void _step(int delta) => setState(() =>
       _index = (_index + delta + widget.urls.length) % widget.urls.length);
 
+  /// `downloadModalMedia` (app.js:2264-2302): the PWA blob-downloads the modal
+  /// image, falling back to `window.open(src, '_blank')`. Natively we hand the
+  /// image URL to the platform (browser/downloader) — the same
+  /// open-externally path the video fullscreen uses.
+  Future<void> _download() async {
+    final uri = Uri.tryParse(widget.urls[_index]);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final c = context.nym;
+    final screen = MediaQuery.of(context).size;
     final multi = widget.urls.length > 1;
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(
         children: [
-          // Tap the backdrop to dismiss.
+          // Tap the backdrop to dismiss (`data-action="closeImageModal"`).
           Positioned.fill(
             child: GestureDetector(
               onTap: () => Navigator.of(context).maybePop(),
@@ -1794,26 +1853,56 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
             child: InteractiveViewer(
               minScale: 1,
               maxScale: 5,
-              child: Image.network(
-                proxiedMedia(widget.urls[_index]),
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image,
-                    color: Colors.white54, size: 48),
+              // `.image-modal img`: max 90% × 90%, 1px glass border,
+              // radius `--radius-md` (=16), `--shadow-lg` = 0 8px 32px
+              // rgba(0,0,0,0.5) (styles-components.css:587-596).
+              child: Container(
+                constraints: BoxConstraints(
+                  maxWidth: screen.width * 0.9,
+                  maxHeight: screen.height * 0.9,
+                ),
+                decoration: BoxDecoration(
+                  border: Border.all(color: c.glassBorder),
+                  borderRadius: NymRadius.rmd,
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x80000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32,
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Image.network(
+                  proxiedMedia(widget.urls[_index]),
+                  fit: BoxFit.contain,
+                  errorBuilder: (_, __, ___) => const Icon(Icons.broken_image,
+                      color: Colors.white54, size: 48),
+                ),
               ),
             ),
           ),
           if (multi) ...[
+            // `.image-modal-nav`: 44px glass circles at 20px insets, ‹ ›
+            // glyphs at 32px with a 4px bottom pad, vertically centered
+            // (styles-components.css:645-678).
             Positioned(
-              left: 4,
+              left: 20,
               top: 0,
               bottom: 0,
-              child: Center(child: _btn(Icons.chevron_left, () => _step(-1))),
+              child: Center(
+                child: _chip('‹', 44, 32, () => _step(-1),
+                    padding: const EdgeInsets.only(bottom: 4)),
+              ),
             ),
             Positioned(
-              right: 4,
+              right: 20,
               top: 0,
               bottom: 0,
-              child: Center(child: _btn(Icons.chevron_right, () => _step(1))),
+              child: Center(
+                child: _chip('›', 44, 32, () => _step(1),
+                    padding: const EdgeInsets.only(bottom: 4)),
+              ),
             ),
             Positioned(
               bottom: 28,
@@ -1826,11 +1915,21 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
               ),
             ),
           ],
+          // `.image-modal-download`: a 40px glass circle at top:20 right:70
+          // with a ⤓ glyph at 22px (styles-components.css:627-644).
           Positioned(
-            top: 4,
-            right: 4,
+            top: 20,
+            right: 70,
+            child: SafeArea(child: _chip('⤓', 40, 22, _download)),
+          ),
+          // `.image-modal-close`: a 40px glass circle at top:20 right:20 with
+          // a × glyph at 24px (styles-components.css:602-620).
+          Positioned(
+            top: 20,
+            right: 20,
             child: SafeArea(
-              child: _btn(Icons.close, () => Navigator.of(context).maybePop()),
+              child:
+                  _chip('×', 40, 24, () => Navigator.of(context).maybePop()),
             ),
           ),
         ],
@@ -1838,12 +1937,30 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
     );
   }
 
-  Widget _btn(IconData icon, VoidCallback onTap) => Material(
-        color: Colors.black54,
-        shape: const CircleBorder(),
-        child:
-            IconButton(icon: Icon(icon, color: Colors.white), onPressed: onTap),
-      );
+  /// A `.image-modal-close`/`-download`/`-nav` glass circle: rgba(20,20,35,0.8)
+  /// fill, 1px glass border, `--text` glyph, centered.
+  Widget _chip(String glyph, double side, double fontSize, VoidCallback onTap,
+      {EdgeInsets padding = EdgeInsets.zero}) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: side,
+        height: side,
+        padding: padding,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: const Color(0xCC141423),
+          shape: BoxShape.circle,
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: Text(
+          glyph,
+          style: TextStyle(color: c.text, fontSize: fontSize, height: 1),
+        ),
+      ),
+    );
+  }
 }
 
 /// Wraps an image in a gaussian blur revealed on tap (`.blurred`,
@@ -1870,10 +1987,12 @@ class _BlurRevealState extends State<_BlurReveal> {
         child: widget.child,
       );
     }
+    // `img.blurred { filter: blur(20px) }` (styles-components.css:1628-1631);
+    // the hover blur(10px) lightening is desktop-hover-only and omitted here.
     return GestureDetector(
       onTap: () => setState(() => _revealed = true),
       child: ImageFiltered(
-        imageFilter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        imageFilter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: widget.child,
       ),
     );
@@ -1909,6 +2028,8 @@ class InlineEmojiText extends ConsumerWidget {
     this.emojiSize,
     this.wholeStringOnly = false,
     this.emojiMargin = const EdgeInsets.symmetric(horizontal: 1),
+    this.emojiAlignment,
+    this.emojiBaselineDropEm,
     this.maxLines,
     this.overflow,
     this.textAlign,
@@ -1932,6 +2053,25 @@ class InlineEmojiText extends ConsumerWidget {
   /// `.quick-react-emoji .custom-emoji`) override it to 0.
   final EdgeInsets emojiMargin;
 
+  /// Override for surfaces whose CSS is NOT the inline baseline-shift: pass
+  /// [PlaceholderAlignment.middle] where the PWA says `vertical-align: middle`
+  /// or centers the image as a flex item (`.reaction-badge`/
+  /// `.reactors-modal-emoji` are `display:(inline-)flex; align-items:center`,
+  /// `.quick-react-emoji .custom-emoji` is `vertical-align: middle`), or
+  /// [PlaceholderAlignment.top] for the burst's `vertical-align: top`
+  /// (styles-features.css:369-374). When null the image is baseline-aligned
+  /// with its bottom [emojiBaselineDropEm] ems below the text baseline — the
+  /// PWA's `vertical-align: -Nem`.
+  final PlaceholderAlignment? emojiAlignment;
+
+  /// Ems (of [style]'s font size, the img's inherited `em`) the image bottom
+  /// sits below the alphabetic baseline. Defaults per the PWA class each mode
+  /// maps to: `.custom-emoji { vertical-align: -0.375em }` for the default
+  /// mode (styles-chat.css:843), `.custom-emoji-reaction { vertical-align:
+  /// -0.25em }` for [wholeStringOnly] (:857). Ignored when [emojiAlignment]
+  /// is set.
+  final double? emojiBaselineDropEm;
+
   final int? maxLines;
   final TextOverflow? overflow;
   final TextAlign? textAlign;
@@ -1953,22 +2093,34 @@ class InlineEmojiText extends ConsumerWidget {
         overflow: overflow,
         textAlign: textAlign);
 
-    InlineSpan emojiSpan(String code, String url) => WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Padding(
-            padding: emojiMargin,
-            child: InlineNetworkImage(
-              url: proxiedMedia(url, emoji: true),
-              width: side,
-              height: side,
-              fit: BoxFit.contain,
-              // Disk-cached (sparse: a reaction badge / a notification line
-              // shows one emoji). Only the picker grid uses memoryOnly.
-              retryOnError: true,
-              errorChild: Text(':$code:', style: style),
-            ),
-          ),
-        );
+    // `vertical-align: -Nem` per the mode's PWA class (see
+    // [emojiBaselineDropEm]) unless the surface overrides [emojiAlignment].
+    final dropPx = (style.fontSize ?? 14) *
+        (emojiBaselineDropEm ?? (wholeStringOnly ? 0.25 : 0.375));
+
+    InlineSpan emojiSpan(String code, String url) {
+      final image = InlineNetworkImage(
+        url: proxiedMedia(url, emoji: true),
+        width: side,
+        height: side,
+        fit: BoxFit.contain,
+        // Disk-cached (sparse: a reaction badge / a notification line
+        // shows one emoji). Only the picker grid uses memoryOnly.
+        retryOnError: true,
+        errorChild: Text(':$code:', style: style),
+      );
+      final align = emojiAlignment;
+      return WidgetSpan(
+        alignment: align ?? PlaceholderAlignment.baseline,
+        baseline: align == null ? TextBaseline.alphabetic : null,
+        child: Padding(
+          padding: emojiMargin,
+          child: align == null
+              ? EmojiBaselineDrop(drop: dropPx, child: image)
+              : image,
+        ),
+      );
+    }
 
     if (wholeStringOnly) {
       // `renderReactionEmoji`: an image ONLY when the whole text is a known
@@ -2032,15 +2184,15 @@ const double _kTruncateHeight = 300;
 /// candidate; the collapse itself is height-based, so the toggle is dropped once
 /// the body is measured to already fit 300px (PWA: `scrollHeight <= clientHeight
 /// + 2` → remove the button + expand).
-class _Collapsible extends StatefulWidget {
+class _Collapsible extends ConsumerStatefulWidget {
   const _Collapsible({required this.child});
   final Widget child;
 
   @override
-  State<_Collapsible> createState() => _CollapsibleState();
+  ConsumerState<_Collapsible> createState() => _CollapsibleState();
 }
 
-class _CollapsibleState extends State<_Collapsible> {
+class _CollapsibleState extends ConsumerState<_Collapsible> {
   bool _expanded = false;
 
   /// The body's natural (unclamped) height, learned after the first layout.
@@ -2058,6 +2210,8 @@ class _CollapsibleState extends State<_Collapsible> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `body.chat-bubbles` restyles the toggle (divider + tighter padding).
+    final bubbles = ref.watch(settingsProvider).useBubbles;
     // Content already fits 300px → no clamp, no button (PWA drops the toggle).
     final fits = _fullHeight != null && _fullHeight! <= _kTruncateHeight + 2;
     final collapsed = !fits && !_expanded;
@@ -2073,17 +2227,36 @@ class _CollapsibleState extends State<_Collapsible> {
             child: widget.child,
           ),
         ),
-        // `.read-more-btn { display:block; width:100%; color:--primary; font-
-        // size:12px; padding:4px 0 }`. Shown only while the body overflows 300px.
+        // `.read-more-btn`: a full-width <button> (label centered), `--primary`
+        // 12px, `padding:4px 0; margin-top:2px` (styles-chat.css:804-816).
+        // `body.chat-bubbles` adds explicit centering, `padding:6px 0 4px`,
+        // `margin-top:0` and a 1px top divider — white@0.08 dark / black@0.06
+        // light (styles-chat.css:817-822 + styles-themes-responsive.css:48-50).
+        // Shown only while the body overflows 300px.
         if (!fits)
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => setState(() => _expanded = !_expanded),
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 4),
+              margin: bubbles ? null : const EdgeInsets.only(top: 2),
+              padding: bubbles
+                  ? const EdgeInsets.only(top: 6, bottom: 4)
+                  : const EdgeInsets.symmetric(vertical: 4),
+              decoration: bubbles
+                  ? BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                          color: c.isLight
+                              ? Colors.black.withValues(alpha: 0.06)
+                              : Colors.white.withValues(alpha: 0.08),
+                        ),
+                      ),
+                    )
+                  : null,
               child: Text(
                 _expanded ? 'Show less' : 'Read more',
+                textAlign: TextAlign.center,
                 style: TextStyle(color: c.primary, fontSize: 12),
               ),
             ),

@@ -25,6 +25,7 @@ import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 
@@ -136,6 +137,45 @@ class InlineNetworkImage extends StatefulWidget {
       }
     }
     return _Decoded.raster(bytes);
+  }
+
+  /// Warms the caches for an already-proxied [url] — the Flutter counterpart of
+  /// the PWA's custom-emoji prefetch (`img.src = getProxiedEmojiUrl(url)`,
+  /// emoji.js `_runEmojiPrefetch`:83-95), which warms the shared browser HTTP
+  /// cache. Flutter has no shared HTTP cache, so this warms BOTH loaders an
+  /// emoji can render through: the in-memory [_decode] cache (SVGs + every
+  /// [memoryOnly] surface, i.e. the picker grid) and — for rasters — the
+  /// `cached_network_image` disk/framework cache the other emoji surfaces use.
+  /// The returned future settles when the warm-up does, so a prefetch batch can
+  /// run SEQUENTIALLY (an all-at-once batch is exactly the
+  /// flutter_cache_manager sqflite lock storm described on [memoryOnly]).
+  /// Never throws.
+  static Future<void> prefetch(String url) async {
+    if (url.isEmpty) return;
+    _Decoded? decoded;
+    try {
+      decoded = await _decode(url);
+    } catch (_) {
+      return;
+    }
+    // SVGs (and anything undecodable) only ever render through [_decode]; the
+    // compiled picture cached above IS the warm state.
+    if (decoded == null || decoded.raster == null) return;
+    final completer = Completer<void>();
+    final stream =
+        CachedNetworkImageProvider(url).resolve(ImageConfiguration.empty);
+    late final ImageStreamListener listener;
+    void done() {
+      stream.removeListener(listener);
+      if (!completer.isCompleted) completer.complete();
+    }
+
+    listener = ImageStreamListener(
+      (_, __) => done(),
+      onError: (_, __) => done(),
+    );
+    stream.addListener(listener);
+    await completer.future;
   }
 
   /// True when [bytes] begin with an SVG/XML document head (guards the parser
@@ -266,6 +306,45 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
       errorWidget: (ctx, _, __) => _fallback(ctx),
     );
   }
+}
+
+/// Gives a baseline-less child (a custom-emoji image) an alphabetic baseline
+/// [drop] logical px above its bottom edge. Inside a
+/// `PlaceholderAlignment.baseline` [WidgetSpan] this reproduces the PWA's
+/// `vertical-align: -Nem` on inline `img.custom-emoji` (styles-chat.css:843
+/// `-0.375em`, :857 `-0.25em`, :1707 `-0.3em`): the image bottom sits [drop]
+/// below the text baseline, contributing `height - drop` of ascent and [drop]
+/// of descent to the line box — exactly the CSS inline-block behaviour.
+class EmojiBaselineDrop extends SingleChildRenderObjectWidget {
+  const EmojiBaselineDrop({super.key, required this.drop, super.child});
+
+  /// Distance (px) the child's bottom edge sits below the reported baseline.
+  final double drop;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderEmojiBaselineDrop(drop);
+
+  @override
+  void updateRenderObject(
+      BuildContext context, covariant _RenderEmojiBaselineDrop renderObject) {
+    renderObject.drop = drop;
+  }
+}
+
+class _RenderEmojiBaselineDrop extends RenderProxyBox {
+  _RenderEmojiBaselineDrop(this._drop);
+
+  double _drop;
+  set drop(double value) {
+    if (value == _drop) return;
+    _drop = value;
+    markNeedsLayout();
+  }
+
+  @override
+  double? computeDistanceToActualBaseline(TextBaseline baseline) =>
+      size.height - _drop;
 }
 
 /// Paints a pre-compiled SVG [ui.Picture] (sized to its intrinsic viewport; the

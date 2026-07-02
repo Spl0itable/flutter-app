@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +26,7 @@ import '../../features/zaps/zap_badge.dart';
 import '../../features/zaps/zap_modal.dart';
 import '../../models/message.dart';
 import '../../models/settings.dart';
+import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -108,6 +110,72 @@ String formatRelativeTime(DateTime t, {DateTime? now}) {
   ];
   final mo = months[t.month - 1];
   return t.year == ref.year ? '$mo ${t.day}' : '$mo ${t.day}, ${t.year}';
+}
+
+/// Sentinel prefix marking a `/groupinfo` rich system row. The PWA renders
+/// `cmdGroupInfo` as an HTML `.group-info` block INSIDE a system pill
+/// (`displaySystemMessage(html, 'system', {html:true})`, groups.js:3487-3525);
+/// here the composer encodes the structured payload into the system message's
+/// content via [encodeGroupInfoSystemMessage] and [MessageRow] decodes +
+/// renders the block (title / count / avatar member rows / owner-mod-you
+/// labels, styles-components.css:1050-1089).
+const String kGroupInfoSystemPrefix = '\u0000group-info\u0000';
+
+/// One `/groupinfo` member row: the pubkey plus its role labels
+/// (`owner`/`mod`/`you`), already ordered owner → mods → members (each block
+/// alphabetized) like `cmdGroupInfo`'s sort.
+typedef GroupInfoMember = ({String pubkey, List<String> labels});
+
+/// The decoded `/groupinfo` payload (group name, member count, ordered rows).
+typedef GroupInfoPayload = ({
+  String name,
+  int count,
+  List<GroupInfoMember> members,
+});
+
+/// Encodes a `/groupinfo` payload into a system-message content string (see
+/// [kGroupInfoSystemPrefix]).
+String encodeGroupInfoSystemMessage(GroupInfoPayload info) {
+  return kGroupInfoSystemPrefix +
+      jsonEncode({
+        'name': info.name,
+        'count': info.count,
+        'members': [
+          for (final m in info.members)
+            {'pk': m.pubkey, 'labels': m.labels},
+        ],
+      });
+}
+
+/// Decodes a system-message content string produced by
+/// [encodeGroupInfoSystemMessage]; null for any other content.
+GroupInfoPayload? decodeGroupInfoSystemMessage(String content) {
+  if (!content.startsWith(kGroupInfoSystemPrefix)) return null;
+  try {
+    final decoded =
+        jsonDecode(content.substring(kGroupInfoSystemPrefix.length));
+    if (decoded is! Map) return null;
+    final rawMembers = decoded['members'];
+    return (
+      name: (decoded['name'] as String?) ?? '',
+      count: (decoded['count'] as num?)?.toInt() ?? 0,
+      members: <GroupInfoMember>[
+        if (rawMembers is List)
+          for (final m in rawMembers)
+            if (m is Map && m['pk'] is String)
+              (
+                pubkey: m['pk'] as String,
+                labels: <String>[
+                  if (m['labels'] is List)
+                    for (final l in m['labels'] as List)
+                      if (l is String) l,
+                ],
+              ),
+      ],
+    );
+  } catch (_) {
+    return null;
+  }
 }
 
 /// Abbreviates a count for badges/footers (a 1:1 port of `abbreviateNumber`,
@@ -197,6 +265,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   bool _showTranslation = false;
   String? _translateLangOverride;
 
+  /// Desktop row hover (`@media(hover:hover) .message:hover`, styles-chat.css
+  /// :124-132): drives the IRC row hover tint and the `.msg-hover-buttons`
+  /// opacity. Only ever set on hover-capable (non-touch) platforms.
+  bool _hovered = false;
+
   /// Refreshes the in-bubble relative time ("2m ago") on a cadence, mirroring
   /// `_ensureBubbleRelativeTimer` / `_refreshBubbleRelativeTimes`
   /// (`messages.js:1051,3347`).
@@ -252,6 +325,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   bool get _hasZaps {
     final z = ref.watch(zapsProvider)[message.id];
     return z != null && z.totalSats > 0;
+  }
+
+  /// Whether the `.msg-hover-buttons` pair renders for this message: only above
+  /// the mobile breakpoint (`isMobile = innerWidth <= 768`, messages.js:768)
+  /// and only for messages with a usable reaction id (`isValidEventId`: a PM's
+  /// `nymMessageId`, else a canonical 64-hex event id — messages.js:764-767).
+  bool _hoverButtonsEligible(BuildContext context) {
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return false;
+    }
+    if (message.isPM && (message.nymMessageId?.isNotEmpty ?? false)) {
+      return true;
+    }
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false)
+        .hasMatch(message.id);
   }
 
   /// Starts (once) a low-frequency timer that re-renders the in-bubble relative
@@ -446,6 +534,53 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isMeAction) return _buildActionMessage(context);
     Widget row =
         settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    // Hover-capable (non-touch) devices: track `.message:hover` for the IRC row
+    // tint (read by [_buildIrc]) and overlay the `.msg-hover-buttons` pair —
+    // quick-react + translate — at the row's top-right (`right:10; top:5`,
+    // styles-chat.css:357-364; the buttons resolve against the positioned
+    // `.message` row since `.message-content` is static). The buttons render
+    // only above the mobile breakpoint and for messages with a usable reaction
+    // id (`isValidEventId && !isMobile`, messages.js:764-779); they fade with
+    // the row hover (opacity 0→1 over --transition).
+    final p = Theme.of(context).platform;
+    final touchPlatform =
+        p == TargetPlatform.android || p == TargetPlatform.iOS;
+    if (!touchPlatform) {
+      final withButtons = _hoverButtonsEligible(context);
+      Widget hoverChild = row;
+      if (withButtons) {
+        hoverChild = Stack(
+          clipBehavior: Clip.none,
+          children: [
+            row,
+            Positioned(
+              top: 5,
+              right: 10,
+              child: IgnorePointer(
+                ignoring: !_hovered,
+                child: AnimatedOpacity(
+                  opacity: _hovered ? 1 : 0,
+                  duration: NymMotion.transition,
+                  curve: NymMotion.curve,
+                  child: _MsgHoverButtons(
+                    onReact: widget.onReactionPicker == null
+                        ? null
+                        : () => widget.onReactionPicker!.call(message),
+                    onTranslate: () =>
+                        setState(() => _showTranslation = true),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+      row = MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: hoverChild,
+      );
+    }
     // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
     // current conversation is dimmed (`messages.js:652-656`). Own messages are
     // never flooded.
@@ -485,21 +620,28 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ),
     );
     final action = message.systemAction;
-    // The pill body: just the text, or text + an inline action button (the
-    // `.spam-false-positive-btn` of messages.js:645).
-    final Widget pillChild = action == null
-        ? text
-        : Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              text,
-              const SizedBox(height: 8),
-              _SystemActionButton(
-                label: action.label,
-                onTap: () => _runSystemAction(context, action),
-              ),
-            ],
-          );
+    // A `/groupinfo` row carries a structured payload instead of plain text —
+    // render the PWA's `.group-info` block inside the pill (groups.js:3520-3523
+    // emits it via `displaySystemMessage(html, 'system', {html:true})`).
+    final groupInfo =
+        isAction ? null : decodeGroupInfoSystemMessage(message.content);
+    // The pill body: the group-info block, just the text, or text + an inline
+    // action button (the `.spam-false-positive-btn` of messages.js:645).
+    final Widget pillChild = groupInfo != null
+        ? _groupInfoBlock(context, groupInfo, size)
+        : action == null
+            ? text
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  text,
+                  const SizedBox(height: 8),
+                  _SystemActionButton(
+                    label: action.label,
+                    onTap: () => _runSystemAction(context, action),
+                  ),
+                ],
+              );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
@@ -515,6 +657,117 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 child: pillChild,
               ),
       ),
+    );
+  }
+
+  /// The `/groupinfo` `.group-info` block (styles-components.css:1050-1089 +
+  /// groups.js:3487-3525): a `Group: "name"` title (w600, 2px below-gap), a
+  /// `Members (N)` count line (12px text-dim, 6px gap), then one row per
+  /// member — 22px avatar, base nym + muted `#suffix`, flair badges, and a
+  /// 10px primary@0.8 `owner`/`mod`/`you` label — the rows 5px apart
+  /// (`.group-info-members { gap: 5px }`). Nyms/avatars resolve live from
+  /// `usersProvider` so late-arriving profiles fill in (the PWA's
+  /// `ensureListProfiles`).
+  Widget _groupInfoBlock(
+      BuildContext context, GroupInfoPayload info, double size) {
+    final c = context.nym;
+    final users = ref.watch(usersProvider);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // `.group-info-title { font-weight: 600; margin-bottom: 2px }` —
+        // inherits the pill's text-dim + `textSize − 3`.
+        Text(
+          'Group: "${info.name}"',
+          style: TextStyle(
+            color: c.textDim,
+            fontSize: size,
+            fontWeight: FontWeight.w600,
+            height: 1.3,
+          ),
+        ),
+        const SizedBox(height: 2),
+        // `.group-info-count { color: --text-dim; font-size: 12px;
+        // margin-bottom: 6px }`.
+        Text(
+          'Members (${info.count})',
+          style: TextStyle(color: c.textDim, fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        for (var i = 0; i < info.members.length; i++) ...[
+          if (i > 0) const SizedBox(height: 5),
+          _groupInfoMemberRow(context, users, info.members[i], size),
+        ],
+      ],
+    );
+  }
+
+  /// One `.group-info-member` row: 22px `.avatar-message`, then the
+  /// `.group-info-nym` (base nym + `.nym-suffix` + flair) and the optional
+  /// `.group-info-label`, 6px apart.
+  Widget _groupInfoMemberRow(
+    BuildContext context,
+    Map<String, User> users,
+    GroupInfoMember member,
+    double size,
+  ) {
+    final c = context.nym;
+    final pk = member.pubkey;
+    final nym = users[pk]?.nym;
+    final baseNym = (nym != null && nym.isNotEmpty)
+        ? stripPubkeySuffix(nym)
+        : 'anon';
+    final suffix = getPubkeySuffix(pk);
+    final nymStyle = TextStyle(color: c.textDim, fontSize: size, height: 1.3);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        NymAvatar(
+          seed: pk,
+          size: 22,
+          imageUrl: users[pk]?.profile?.picture,
+        ),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: baseNym, style: nymStyle),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: '#$suffix',
+                  // `.nym-suffix`: opacity 0.7, 0.9em, weight 100.
+                  style: nymStyle.copyWith(
+                    color: c.textDim.withValues(alpha: 0.7),
+                    fontSize: size * 0.9,
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        // Flair / supporter badges follow the nym (`getFlairForUser`); the
+        // in-chat `.flair-badge` is 20px.
+        CosmeticNymBadges(
+          cosmetics: ref.watch(userCosmeticsProvider(pk)),
+          flairSize: 20,
+          supporterHeight: 20,
+        ),
+        if (member.labels.isNotEmpty) ...[
+          const SizedBox(width: 6),
+          // `.group-info-label { font-size: 10px; color: --primary;
+          // opacity: 0.8 }`.
+          Text(
+            member.labels.join(', '),
+            style: TextStyle(
+              color: c.primary.withValues(alpha: 0.8),
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -680,6 +933,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       bg = c.secondaryA(0.06);
       barColor = c.secondary;
     }
+    // `@media(hover:hover) .message:hover { background: rgba(255,255,255,0.03) }`
+    // (styles-chat.css:124-127) — it sits AFTER `.message.self`/`.mentioned` in
+    // the sheet, so the hover tint REPLACES those fills while hovered. A PM row
+    // hovers magenta (`.message.pm:hover`, :105-107, higher specificity); light
+    // mode flips everything to black@0.03 (`body.light-mode .message:hover`,
+    // styles-themes-responsive.css:555-559, loaded last). Bubble mode paints no
+    // hover tint (`body.chat-bubbles .message:hover { background: none }`).
+    // Aura/style backgrounds below still win (styles-features.css loads later).
+    if (_hovered) {
+      bg = c.isLight
+          ? Colors.black.withValues(alpha: 0.03)
+          : (message.isPM
+              ? const Color(0x0AFF00FF) // rgba(255,0,255,0.04)
+              : Colors.white.withValues(alpha: 0.03));
+    }
     // A 135deg gradient painted on the IRC row (supporter's gold wash + the
     // gold/neon/phoenix/cosmic aura gradients). Takes precedence over the flat
     // [bg] in the row decoration below.
@@ -745,16 +1013,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // `data-action="showFullTimestamp"`: tapping the clock shows the
-                // full date+time popup (messages.js:936-938, showTimestampPopup).
-                Tooltip(
-                  message: formatFullTimestamp(message.dateTime,
+                // `data-action="showFullTimestamp"`: tapping the clock opens
+                // the styled `.timestamp-popup` (messages.js:936-938,
+                // showTimestampPopup); hovering tints it `--primary` and shows
+                // the glass `.message-time:hover::after` tooltip.
+                _TimestampText(
+                  label: formatTime(message.dateTime, settings.timeFormat),
+                  fullTimestamp: formatFullTimestamp(message.dateTime,
                       settings.timeFormat, settings.dateFormat),
-                  triggerMode: TooltipTriggerMode.tap,
-                  child: Text(
-                    formatTime(message.dateTime, settings.timeFormat),
-                    style: TextStyle(color: c.textDim, fontSize: 12),
-                  ),
+                  fontSize: 12,
                 ),
                 // `.crypto-lock-irc`: the verification lock sits inside
                 // `.message-time` after the clock (PM/group only).
@@ -1056,21 +1323,24 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               if (message.isEdited)
                 Text(
                   '(edited) ',
+                  // `.edited-indicator` base (styles-chat.css:1549-1554): 10px
+                  // italic text-dim AT OPACITY 0.7 — the in-bubble variant
+                  // (`.bubble-time-inner .edited-indicator`) inherits it.
                   style: TextStyle(
-                      color: c.textDim,
+                      color: c.textDim.withValues(alpha: 0.7),
                       fontSize: 10,
                       fontStyle: FontStyle.italic),
                 ),
               // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-              // Tapping it shows the full date+time popup (showTimestampPopup).
-              Tooltip(
-                message: formatFullTimestamp(
+              // Tapping it opens the styled `.timestamp-popup`
+              // (showTimestampPopup); hover tints it `--primary`
+              // (`.clickable-timestamp:hover`).
+              _TimestampText(
+                label: formatRelativeTime(message.dateTime),
+                fullTimestamp: formatFullTimestamp(
                     message.dateTime, settings.timeFormat, settings.dateFormat),
-                triggerMode: TooltipTriggerMode.tap,
-                child: Text(
-                  formatRelativeTime(message.dateTime),
-                  style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
-                ),
+                fontSize: 10,
+                height: 1,
               ),
               // `.crypto-lock-bubble`: the verification lock follows the in-bubble
               // time (PM/group only).
@@ -1992,6 +2262,11 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
                       wholeStringOnly: true,
                       emojiSize: 12 * 1.45,
                       emojiMargin: EdgeInsets.zero,
+                      // The badge pill is `display: flex; align-items: center`
+                      // (styles-chat.css:414-426), so the img is a flex-
+                      // centered item — `.custom-emoji-reaction`'s
+                      // `vertical-align` is inert here.
+                      emojiAlignment: PlaceholderAlignment.middle,
                     ),
                     const SizedBox(width: 3),
                     Text(
@@ -2257,12 +2532,296 @@ class _ScrollFlashOverlayState extends State<_ScrollFlashOverlay>
   }
 }
 
+/// `.msg-hover-buttons` (styles-chat.css:357-402, messages.js:771-779): the
+/// two quick-action buttons shown at a message's top-right while the row is
+/// hovered on a hover-capable device — a smiley reaction-picker button
+/// (`reactionShowPicker`) and a translate button (`translateHoverMessage`),
+/// 4px apart. The host fades the pair with the row hover.
+class _MsgHoverButtons extends StatelessWidget {
+  const _MsgHoverButtons({required this.onReact, required this.onTranslate});
+
+  /// Opens the full reaction picker; null (no picker host) leaves the button
+  /// rendered but inert, like a PWA row whose picker action can't resolve.
+  final VoidCallback? onReact;
+  final VoidCallback onTranslate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // `.reaction-btn` — the 20×20 smiley-plus glyph (same path as the
+        // add-reaction pill's icon).
+        _HoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
+        const SizedBox(width: 4), // `.msg-hover-buttons { gap: 4px }`
+        // `.translate-msg-btn` (`title="Translate"`).
+        _HoverActionButton(
+          svg: NymIcons.translate,
+          onTap: onTranslate,
+          tooltip: 'Translate',
+        ),
+      ],
+    );
+  }
+}
+
+/// One `.reaction-btn` / `.translate-msg-btn` (styles-chat.css:366-402): bg
+/// rgba(20,20,35,0.8), 1px `--glass-border`, radius-xs, padding 4px 8px,
+/// 16px glyph filled `--text`; hover → bg white@0.08 + border primary@0.3.
+/// Light mode flips the rest fill to white@0.85 with a black@0.08 border
+/// (styles-themes-responsive.css:1184-1187).
+class _HoverActionButton extends StatefulWidget {
+  const _HoverActionButton({
+    required this.svg,
+    required this.onTap,
+    this.tooltip,
+  });
+  final String svg;
+  final VoidCallback? onTap;
+  final String? tooltip;
+
+  @override
+  State<_HoverActionButton> createState() => _HoverActionButtonState();
+}
+
+class _HoverActionButtonState extends State<_HoverActionButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final restFill = c.isLight
+        ? const Color(0xD9FFFFFF) // rgba(255,255,255,0.85)
+        : const Color(0xCC141423); // rgba(20,20,35,0.8)
+    final restBorder = c.isLight
+        ? Colors.black.withValues(alpha: 0.08)
+        : c.glassBorder;
+    final btn = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color:
+                _hover ? Colors.white.withValues(alpha: 0.08) : restFill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+                color: _hover ? c.primaryA(0.3) : restBorder),
+          ),
+          child: NymSvgIcon(widget.svg, size: 16, color: c.text),
+        ),
+      ),
+    );
+    return widget.tooltip != null
+        ? Tooltip(message: widget.tooltip!, child: btn)
+        : btn;
+  }
+}
+
+/// The tappable message timestamp (`.clickable-timestamp`, messages.js:936-938).
+/// Hover tints it `--primary` over 120ms (`.clickable-timestamp:hover`,
+/// styles-chat.css:596-604) and shows the glass full-timestamp tooltip
+/// (`.message-time:hover::after`, styles-components.css:1637-1657: bg
+/// rgba(20,20,35,0.9) dark / white@0.92 light, glass / black@0.08 border,
+/// radius-xs, padding 5px 10px, 11px, shadow-sm, 6px above). Tapping opens the
+/// anchored `.timestamp-popup` (`showTimestampPopup`, messages.js:3367-3390):
+/// a `.reactors-modal`-chromed panel whose `.timestamp-popup-body` is 13px
+/// `--text` at 10px 14px, nowrap — right-aligned to the timestamp and flipped
+/// above/below by available head-room, dismissed on the next tap.
+class _TimestampText extends StatefulWidget {
+  const _TimestampText({
+    required this.label,
+    required this.fullTimestamp,
+    required this.fontSize,
+    this.height,
+  });
+
+  final String label;
+  final String fullTimestamp;
+  final double fontSize;
+  final double? height;
+
+  @override
+  State<_TimestampText> createState() => _TimestampTextState();
+}
+
+class _TimestampTextState extends State<_TimestampText> {
+  bool _hover = false;
+  OverlayEntry? _popup;
+
+  @override
+  void dispose() {
+    _popup?.remove();
+    _popup = null;
+    super.dispose();
+  }
+
+  void _closePopup() {
+    _popup?.remove();
+    _popup = null;
+  }
+
+  /// `showTimestampPopup` placement (messages.js:3377-3384): right-aligned to
+  /// the timestamp (`right = max(4, innerWidth - rect.right)`), 6px ABOVE it
+  /// when there is head-room (`rect.top > approxHeight(90) + 20`), else 6px
+  /// below. The PWA closes it on outside click / scroll; here the full-screen
+  /// barrier closes it on the next tap or drag.
+  void _openPopup() {
+    _closePopup();
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    final overlay = Overlay.of(context);
+    final screen = MediaQuery.of(context).size;
+    final right =
+        (screen.width - rect.right).clamp(4.0, double.infinity);
+    final above = rect.top > 110;
+    final entry = OverlayEntry(
+      builder: (ctx) {
+        final c = ctx.nym;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closePopup,
+                onPanStart: (_) => _closePopup(),
+              ),
+            ),
+            Positioned(
+              right: right,
+              top: above ? null : rect.bottom + 6,
+              bottom: above ? screen.height - rect.top + 6 : null,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  // `.reactors-modal { min-width:160; max-width:240 }`.
+                  constraints:
+                      const BoxConstraints(minWidth: 160, maxWidth: 240),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: c.bgSecondary,
+                    borderRadius: NymRadius.rmd,
+                    border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.08)
+                          : c.glassBorder,
+                    ),
+                    // dark: shadow-lg + shadow-glow + a 1px white@0.05 ring;
+                    // light: `0 8px 32px rgba(0,0,0,0.12)`.
+                    boxShadow: c.isLight
+                        ? const [
+                            BoxShadow(
+                                color: Color(0x1F000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                          ]
+                        : [
+                            const BoxShadow(
+                                color: Color(0x80000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                            BoxShadow(
+                                color: c.primaryA(0.1), blurRadius: 20),
+                            const BoxShadow(
+                                color: Color(0x0DFFFFFF), spreadRadius: 1),
+                          ],
+                  ),
+                  // `.timestamp-popup-body`: 13px --text, nowrap.
+                  child: Text(
+                    widget.fullTimestamp,
+                    softWrap: false,
+                    style: TextStyle(color: c.text, fontSize: 13),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    _popup = entry;
+    overlay.insert(entry);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _openPopup,
+        child: Tooltip(
+          message: widget.fullTimestamp,
+          // Hover-only (mouse): tap opens the styled popup instead, and
+          // long-press belongs to the message quick-react hold.
+          triggerMode: TooltipTriggerMode.manual,
+          waitDuration: Duration.zero,
+          preferBelow: false,
+          verticalOffset: 14,
+          padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: c.isLight
+                ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
+                : const Color(0xE6141423), // rgba(20,20,35,0.9)
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.08)
+                  : c.glassBorder,
+            ),
+            // `--shadow-sm: 0 2px 8px rgba(0,0,0,0.3)`.
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x4D000000),
+                  offset: Offset(0, 2),
+                  blurRadius: 8),
+            ],
+          ),
+          // The ::after inherits `.message-time`'s text-dim (dark); light
+          // pins `color: var(--text)`.
+          textStyle: TextStyle(
+              fontSize: 11, color: c.isLight ? c.text : c.textDim),
+          child: AnimatedDefaultTextStyle(
+            // `.clickable-timestamp { transition: color 120ms ease }`.
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.ease,
+            style: TextStyle(
+              color: _hover ? c.primary : c.textDim,
+              fontSize: widget.fontSize,
+              height: widget.height,
+            ),
+            child: Text(widget.label),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// The in-message P2P file-offer card (`.file-offer`, `messages.js:851-917`,
 /// `styles-features.css:2087-2290`). Header = category-coloured doc icon + name
 /// + meta (`size • type • Torrent?`); status block flips between
 /// seeding/unseeded (own) and Download / inline-progress / "No longer available"
 /// (peer). Driven live by [P2PService] (a [ChangeNotifier]) keyed by offerId.
-class FileOfferCard extends StatelessWidget {
+///
+/// Stateful because the PWA's DOM persists across status flips: a peer card
+/// rendered while the offer was still seeded KEEPS its `.file-offer-btn`, so
+/// when the offer goes unseeded mid-view the existing button flips to
+/// "Unavailable" with `.unavailable` (`updateFileOfferUI`, p2p.js:858-874);
+/// only a fresh render of an already-unseeded offer shows the bare
+/// `.file-offer-unseeded` dot row (messages.js:876-882).
+class FileOfferCard extends StatefulWidget {
   const FileOfferCard({
     super.key,
     required this.offer,
@@ -2284,6 +2843,21 @@ class FileOfferCard extends StatelessWidget {
   /// Both null (PM/group/no channel) → no tag. F06-B3.
   final String? seedGeohash;
   final String? seedChannelName;
+
+  @override
+  State<FileOfferCard> createState() => _FileOfferCardState();
+}
+
+class _FileOfferCardState extends State<FileOfferCard> {
+  FileOffer get offer => widget.offer;
+  bool get isOwn => widget.isOwn;
+  P2PService get service => widget.service;
+
+  /// True once this mounted card has rendered the offer in a SEEDED state —
+  /// the analogue of the PWA card whose actions div already exists when the
+  /// unseeded status arrives (`updateFileOfferUI` mutates the button in place
+  /// rather than swapping to the dot row).
+  bool _sawSeeded = false;
 
   /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
   /// The PWA uses ONE generic file glyph and only re-tints the stroke per
@@ -2323,11 +2897,17 @@ class FileOfferCard extends StatelessWidget {
         for (final t in service.transfers) {
           if (t.offerId == offer.offerId) transfer = t;
         }
+        // Latch the "rendered while seeded" state (the PWA card whose actions
+        // div pre-exists an unseeded flip). Internal flag only — the same
+        // build reads it, so no setState needed.
+        if (!unseeded) _sawSeeded = true;
 
         return Container(
-          constraints: const BoxConstraints(maxWidth: 320),
+          // `.file-offer { max-width: 350px; margin: 8px 0 }`
+          // (styles-features.css:2048-2055).
+          constraints: const BoxConstraints(maxWidth: 350),
+          margin: const EdgeInsets.symmetric(vertical: 8),
           // `.file-offer { padding: 14px; border-radius: var(--radius-md)=16 }`
-          // (styles-features.css:2051-2052).
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.04),
@@ -2384,7 +2964,6 @@ class FileOfferCard extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
               _status(context, c, unseeded: unseeded, transfer: transfer),
             ],
           ),
@@ -2399,145 +2978,294 @@ class FileOfferCard extends StatelessWidget {
     required bool unseeded,
     required P2PTransfer? transfer,
   }) {
-    // Own offer: seeding (green dot + Stop) or no-longer-seeding (grey dot).
+    // Own offer: seeding (pulsing primary dot + Stop) or no-longer-seeding.
     if (isOwn) {
       if (unseeded) {
-        return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer seeding',
-            dim: true);
+        return _dotRow(c, 'No longer seeding');
       }
-      return Row(
-        children: [
-          _dot(c.primary),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text('Seeding - available for download',
-                style: TextStyle(color: c.primary, fontSize: 11)),
-          ),
-          _StopBtn(
-              onTap: () => service.stopSeeding(offer.offerId,
-                  geohash: seedGeohash, channelName: seedChannelName)),
-        ],
+      // `.file-offer-seeding`: gap 6, --primary 11px, margin-top 8; the dot
+      // pulses opacity 1↔0.5 on a 1.5s loop (`animation: pulse 1.5s infinite`,
+      // styles-features.css:2204-2226).
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            _SeedingDot(color: c.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text('Seeding - available for download',
+                  style: TextStyle(color: c.primary, fontSize: 11)),
+            ),
+            _StopBtn(
+                onTap: () => service.stopSeeding(offer.offerId,
+                    geohash: widget.seedGeohash,
+                    channelName: widget.seedChannelName)),
+          ],
+        ),
       );
     }
-    // Peer offer, no longer available.
-    if (unseeded) {
-      return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer available',
-          dim: true);
+    // Peer offer first rendered ALREADY unseeded → the bare dot row
+    // (messages.js:876-882). A card that saw the offer seeded keeps its
+    // button and flips it to "Unavailable" below (`updateFileOfferUI`).
+    if (unseeded && !_sawSeeded) {
+      return _dotRow(c, 'No longer available');
     }
-    // Active transfer → inline progress bar.
-    if (transfer != null && transfer.status != P2PStatus.complete) {
-      final pct = transfer.progress;
-      final failed = transfer.status == P2PStatus.error;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (failed)
-            _OfferBtn(
-              label: 'Retry',
-              color: c.primary,
-              onTap: () => service.requestFile(offer.offerId),
-            )
-          else ...[
-            // `.file-offer-progress-bar`: 5px track white@0.05, radius 10;
-            // `.file-offer-progress-fill`: `linear-gradient(90deg, secondary,
-            // primary)`, radius 10 (styles-features.css:2139-2152). A
-            // LinearProgressIndicator can't gradient, so paint a Stack +
-            // FractionallySizedBox like p2p_transfers_modal `_TransferRow`.
-            ClipRRect(
-              borderRadius: const BorderRadius.all(Radius.circular(10)),
-              child: SizedBox(
-                height: 5,
-                child: Stack(
-                  children: [
-                    Container(color: Colors.white.withValues(alpha: 0.05)),
-                    FractionallySizedBox(
-                      widthFactor: (pct / 100).clamp(0.0, 1.0),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          borderRadius:
-                              const BorderRadius.all(Radius.circular(10)),
-                          gradient: LinearGradient(
-                            colors: [c.secondary, c.primary],
-                          ),
+
+    // Peer offer: the `.file-offer-btn` stays visible through the WHOLE
+    // lifecycle (p2p.js:238-247, 632-646, 858-874) —
+    //   rest      → "Download" / "Download (Torrent)"
+    //   request   → "Connecting..." + `.downloading` (secondary border/text,
+    //               inert) with the progress block appearing BELOW it
+    //   complete  → "Downloaded" (base tint restored, inert); the progress
+    //               block (with its final status line) STAYS
+    //   error     → "Retry" (base tint, re-requests); progress line = message
+    //   unseeded  → "Unavailable" + `.unavailable` (opacity 0.4, text-dim)
+    final active = transfer != null &&
+        (transfer.status == P2PStatus.connecting ||
+            transfer.status == P2PStatus.transferring);
+    // Base tint: primary, or secondary for `.torrent-btn`.
+    final base = offer.isTorrent ? c.secondary : c.primary;
+    final Widget button;
+    if (unseeded) {
+      button = _OfferBtn(
+        label: 'Unavailable',
+        textColor: c.textDim,
+        borderColor: c.textDim,
+        fillColor: base.withValues(alpha: 0.08),
+        opacity: 0.4,
+        onTap: null,
+      );
+    } else if (active) {
+      // `.file-offer-btn.downloading`: border + text --secondary (the fill
+      // keeps the base class tint), default cursor.
+      button = _OfferBtn(
+        label: 'Connecting...',
+        textColor: c.secondary,
+        borderColor: c.secondary,
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.complete) {
+      button = _OfferBtn(
+        label: 'Downloaded',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.error) {
+      button = _OfferBtn(
+        label: 'Retry',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    } else {
+      button = _OfferBtn(
+        label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // `.file-offer-actions { margin-top: 10px }`.
+        Padding(padding: const EdgeInsets.only(top: 10), child: button),
+        // `.file-offer-progress { margin-top: 10px }` — revealed on request
+        // and never re-hidden (its final status line stays after completion).
+        if (transfer != null) ...[
+          const SizedBox(height: 10),
+          // `.file-offer-progress-bar`: 5px track white@0.05, radius 10;
+          // `.file-offer-progress-fill`: `linear-gradient(90deg, secondary,
+          // primary)`, radius 10 (styles-features.css:2139-2152). A
+          // LinearProgressIndicator can't gradient, so paint a Stack +
+          // FractionallySizedBox like p2p_transfers_modal `_TransferRow`.
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: SizedBox(
+              height: 5,
+              child: Stack(
+                children: [
+                  Container(color: Colors.white.withValues(alpha: 0.05)),
+                  FractionallySizedBox(
+                    widthFactor: (transfer.progress / 100).clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius:
+                            const BorderRadius.all(Radius.circular(10)),
+                        gradient: LinearGradient(
+                          colors: [c.secondary, c.primary],
                         ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              transfer.message ?? 'Connecting...',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: c.textDim, fontSize: 11),
-            ),
-          ],
+          ),
+          // `.file-offer-progress-text`: centered text-dim 11px, 4px below.
+          // Mid-transfer it reads `<pct>% • <speed>/s` (updateTransferProgress,
+          // p2p.js:606-622: pct at 1 decimal, speed = bytesReceived/elapsed);
+          // any other status shows the last status message.
+          const SizedBox(height: 4),
+          Text(
+            _progressText(transfer),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
         ],
-      );
-    }
-    if (transfer != null && transfer.status == P2PStatus.complete) {
-      // The PWA reverts the completed button to the primary-tinted
-      // `.file-offer-btn` (NOT a special secondary colour; p2p.js:641).
-      return _OfferBtn(label: 'Downloaded', color: c.primary, onTap: null);
-    }
-    // Available → Download / Download (Torrent).
-    return _OfferBtn(
-      label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
-      color: offer.isTorrent ? c.secondary : c.primary,
-      onTap: () => service.requestFile(offer.offerId),
+      ],
     );
   }
 
-  Widget _dot(Color color) => Container(
-        width: 8,
-        height: 8,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      );
+  /// The `.file-offer-progress-text` line: `"<pct>% • <speed>/s"` while
+  /// chunks flow (`updateTransferProgress`), else the transfer's last status
+  /// message (`updateTransferStatus`), defaulting to "Connecting...".
+  String _progressText(P2PTransfer transfer) {
+    if (transfer.status == P2PStatus.transferring) {
+      final elapsed = (DateTime.now().millisecondsSinceEpoch -
+              transfer.startTime) /
+          1000;
+      final speed = elapsed > 0
+          ? (transfer.bytesReceived / elapsed).round()
+          : 0;
+      return '${transfer.progress.toStringAsFixed(1)}% • '
+          '${formatFileSize(speed)}/s';
+    }
+    return transfer.message ?? 'Connecting...';
+  }
 
-  Widget _dotRow(NymColors c, Color dotColor, String label,
-      {bool dim = false}) {
-    return Opacity(
-      opacity: dim ? 0.7 : 1,
-      child: Row(
-        children: [
-          _dot(dotColor),
-          const SizedBox(width: 6),
-          Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
-        ],
+  /// `.file-offer-unseeded` (styles-features.css:2228-2244): text-dim 11px row
+  /// at opacity 0.7, 8px below the header, led by an 8px danger dot at
+  /// opacity 0.6.
+  Widget _dotRow(NymColors c, String label) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Opacity(
+        opacity: 0.7,
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: c.danger.withValues(alpha: 0.6),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// `.file-offer-btn` — a full-width tinted action pill (Download / Retry /
-/// Downloaded). A null [onTap] renders a disabled (terminal) state.
-class _OfferBtn extends StatelessWidget {
-  const _OfferBtn({required this.label, required this.color, this.onTap});
-  final String label;
+/// `.file-offer-seeding-dot` — an 8px `--primary` dot pulsing opacity 1↔0.5 on
+/// a 1.5s loop (`animation: pulse 1.5s infinite`, keyframes at
+/// styles-features.css:2214-2226; default `ease` timing per segment).
+class _SeedingDot extends StatefulWidget {
+  const _SeedingDot({required this.color});
   final Color color;
+
+  @override
+  State<_SeedingDot> createState() => _SeedingDotState();
+}
+
+class _SeedingDotState extends State<_SeedingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+  )..repeat();
+
+  // `@keyframes pulse { 0%,100% → 1; 50% → 0.5 }` with CSS `ease` per segment.
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 1.0, end: 0.5).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 0.5, end: 1.0).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+  ]).animate(_ctrl);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          color: widget.color,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+/// `.file-offer-btn` — a full-width action pill (Download / Connecting... /
+/// Downloaded / Retry / Unavailable): 12px w500 label, 8px 12px padding,
+/// radius-xs (styles-features.css:2106-2118), tinted per state. A null [onTap]
+/// renders an inert state (the PWA nulls `onclick` + default cursor).
+class _OfferBtn extends StatelessWidget {
+  const _OfferBtn({
+    required this.label,
+    required this.textColor,
+    required this.borderColor,
+    required this.fillColor,
+    this.opacity = 1,
+    this.onTap,
+  });
+  final String label;
+  final Color textColor;
+  final Color borderColor;
+  final Color fillColor;
+
+  /// `.file-offer-btn.unavailable { opacity: 0.4 }`.
+  final double opacity;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          border: Border.all(color: color.withValues(alpha: 0.25)),
-          // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
-          borderRadius: const BorderRadius.all(Radius.circular(8)),
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: color,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
+      child: Opacity(
+        opacity: opacity,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+          decoration: BoxDecoration(
+            color: fillColor,
+            border: Border.all(color: borderColor),
+            // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
+            borderRadius: const BorderRadius.all(Radius.circular(8)),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: textColor,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ),

@@ -480,7 +480,7 @@ class _MarkReadBtnState extends State<_MarkReadBtn> {
   }
 }
 
-class _NotificationRow extends ConsumerWidget {
+class _NotificationRow extends ConsumerStatefulWidget {
   const _NotificationRow({
     required this.entry,
     required this.viewed,
@@ -544,8 +544,17 @@ class _NotificationRow extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_NotificationRow> createState() => _NotificationRowState();
+}
+
+class _NotificationRowState extends ConsumerState<_NotificationRow> {
+  /// `.notification-item:hover` — white@0.05 fill.
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
+    final entry = widget.entry;
     // The avatar + decorated author render from the SENDER pubkey (the PWA modal
     // keys both off `n.senderPubkey || channelInfo.pubkey`, notifications.js:496)
     // — so a group message shows the sender's avatar + nym with `in <Group>` as
@@ -557,83 +566,110 @@ class _NotificationRow extends ConsumerWidget {
         ? sender
         : (_isPubkey(route) ? route : '');
     final hasPubkey = pubkey.isNotEmpty;
-    final label = _contextLabel();
+    final label = widget._contextLabel();
     // Real profile picture for the sender avatar (Rule 4).
     final picture =
         hasPubkey ? ref.watch(usersProvider)[pubkey]?.profile?.picture : null;
-    final body = _displayBody();
+    final body = widget._displayBody();
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
-        onTap: onTap,
+        onTap: widget.onTap,
         behavior: HitTestBehavior.opaque,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          // Edge rules live OUTSIDE the rounded fill (BoxDecoration can't mix a
+          // non-uniform Border with a radius): EVERY row keeps the 1px
+          // white@0.04 bottom hairline (none on :last-child), and an unread
+          // row ADDS the 2px primary left rule — `.notification-item-unread`
+          // sets only border-left, so the separator stays.
           decoration: BoxDecoration(
-            // .notification-item-unread: cyan@6% wash + 2px primary left rule.
-            // (The wash hex is fixed `0,255,255` — NOT the theme primary.)
-            color: viewed ? null : const Color.fromRGBO(0, 255, 255, 0.06),
-            border: viewed
-                ? (isLast
-                    ? null
-                    : Border(
-                        bottom: BorderSide(
-                            color: Colors.white.withValues(alpha: 0.04))))
-                : Border(left: BorderSide(color: c.primary, width: 2)),
+            border: Border(
+              left: widget.viewed
+                  ? BorderSide.none
+                  : BorderSide(color: c.primary, width: 2),
+              bottom: widget.isLast
+                  ? BorderSide.none
+                  : BorderSide(color: Colors.white.withValues(alpha: 0.04)),
+            ),
           ),
-          // .notification-item-header: gap 6, align flex-start.
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (hasPubkey) ...[
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: NymAvatar(seed: pubkey, size: 28, imageUrl: picture),
-                ),
-                const SizedBox(width: 6),
-              ],
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // .notification-item-author: `<base#suffix>` in primary, w600.
-                    // The angle brackets are literal (`.nym-bracket`, inherits the
-                    // primary author color).
-                    _Author(entry: entry, pubkey: pubkey),
-                    const SizedBox(height: 2),
-                    // .notification-item-body: text 13, line-height 1.4, 2-line
-                    // clamp. Routed through [InlineEmojiText] so a `:shortcode:`
-                    // in the previewed message / reaction renders as its custom-
-                    // emoji image instead of literal text
-                    // (`renderCustomEmojiInEscapedText`, notifications.js:554);
-                    // image is the base `.custom-emoji` 1.75em of 13px (the
-                    // InlineEmojiText default).
-                    InlineEmojiText(
-                      text: body,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          TextStyle(color: c.text, fontSize: 13, height: 1.4),
-                    ),
-                    const SizedBox(height: 2),
-                    // .notification-item-footer: context label + time (both 11px dim).
-                    Row(
-                      children: [
-                        if (label != null) ...[
-                          Text(label,
-                              style:
-                                  TextStyle(color: c.textDim, fontSize: 11)),
-                          const SizedBox(width: 6),
+          child: AnimatedContainer(
+            // transition: background var(--transition) = 0.25s cubic-bezier.
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              // Hover fill white@0.05 — it outranks the unread cyan@6% wash
+              // (`.notification-item:hover` is class+pseudo-class, more
+              // specific than `.notification-item-unread`), so a hovered
+              // unread row shows the white fill while keeping its left rule.
+              // (The wash hex is fixed `0,255,255` — NOT the theme primary.)
+              // No light-theme overrides exist for any of these.
+              color: _hover
+                  ? Colors.white.withValues(alpha: 0.05)
+                  : (widget.viewed
+                      ? Colors.transparent
+                      : const Color.fromRGBO(0, 255, 255, 0.06)),
+              // border-radius: var(--radius-xs) = 8 rounds the fill.
+              borderRadius: NymRadius.rxs,
+            ),
+            // .notification-item-header: gap 6, align flex-start.
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (hasPubkey) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: NymAvatar(seed: pubkey, size: 28, imageUrl: picture),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // .notification-item-author: `<base#suffix>` in primary,
+                      // w600. The angle brackets are literal (`.nym-bracket`,
+                      // inherits the primary author color).
+                      _Author(entry: entry, pubkey: pubkey),
+                      const SizedBox(height: 2),
+                      // .notification-item-body: text 13, line-height 1.4,
+                      // 2-line clamp. Routed through [InlineEmojiText] so a
+                      // `:shortcode:` in the previewed message / reaction
+                      // renders as its custom-emoji image instead of literal
+                      // text (`renderCustomEmojiInEscapedText`,
+                      // notifications.js:554); image is the base
+                      // `.custom-emoji` 1.75em of 13px (the InlineEmojiText
+                      // default).
+                      InlineEmojiText(
+                        text: body,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            TextStyle(color: c.text, fontSize: 13, height: 1.4),
+                      ),
+                      const SizedBox(height: 2),
+                      // .notification-item-footer: context label + time (both
+                      // 11px dim).
+                      Row(
+                        children: [
+                          if (label != null) ...[
+                            Text(label,
+                                style:
+                                    TextStyle(color: c.textDim, fontSize: 11)),
+                            const SizedBox(width: 6),
+                          ],
+                          Text(widget._formatTime(entry.ts),
+                              style: TextStyle(color: c.textDim, fontSize: 11)),
                         ],
-                        Text(_formatTime(entry.ts),
-                            style: TextStyle(color: c.textDim, fontSize: 11)),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

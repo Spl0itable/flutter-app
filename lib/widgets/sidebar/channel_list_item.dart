@@ -139,8 +139,9 @@ class ChannelListItem extends ConsumerWidget {
                     // pill. `.std-badge` / `.geohash-badge` are DEAD CSS —
                     // never emitted by channels.js/pms.js/groups.js. Geohash
                     // vs standard channels are distinguished by the name only.
+                    // `.channel-badges { margin-left: 5px }` sets the gap.
                     if (unread > 0) ...[
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 5),
                       _UnreadPill(count: unread),
                     ],
                   ],

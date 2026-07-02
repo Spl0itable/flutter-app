@@ -2422,8 +2422,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           ),
                   ),
                   const SizedBox(width: 8),
-                  // `.icon-btn` (Remove/Unblock/Unhide) is uppercase.
-                  NymOutlineButton(
+                  // `.unblock-btn`/`.remove-keyword-btn`: small red pill,
+                  // label as written ('Remove'/'Unblock'/'Unhide').
+                  DangerPillButton(
                     label: buttonLabel,
                     onPressed: () => onRemove(items[i]),
                   ),

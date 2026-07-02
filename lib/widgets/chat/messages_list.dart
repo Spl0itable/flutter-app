@@ -154,6 +154,9 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     final messages = ref.watch(messagesForCurrentViewProvider);
     final reactions = ref.watch(reactionsProvider);
     final polls = ref.watch(pollsForCurrentViewProvider);
+    // The history-edge notice is channel-only (the PWA's PM back-pager never
+    // prepends one).
+    final isChannel = app.view.kind == ViewKind.channel;
 
     // `.messages-container`: bg rgba(0,0,0,0.15) dark; light-mode flips it to
     // rgba(255,255,255,0.3) (a light wash over the page), so it must be
@@ -268,17 +271,45 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     itemPositionsListener: _positionsListener,
                     reverse: true,
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-                    itemCount: units.length,
+                    // Channel views carry one extra unit ABOVE the oldest
+                    // message: the `.channel-history-limit` pill ("You've
+                    // reached the edge of this channel's history."), which the
+                    // PWA prepends once back-paging reaches the start of stored
+                    // history (`loadOlderChannelMessages`, messages.js:
+                    // 3175-3180). Here the whole stored history is rendered, so
+                    // the lazily-built top item IS that boundary — it only
+                    // appears once the user scrolls back to it. PM/group views
+                    // have no such notice (`loadOlderPMMessages` never adds
+                    // one).
+                    itemCount: units.length + (isChannel ? 1 : 0),
                     itemBuilder: (context, revIndex) {
-                      final unit = units[units.length - 1 - revIndex];
-                      if (unit is _PollUnit) {
-                        return PollCard(poll: unit.poll, settings: settings);
+                      if (revIndex == units.length) {
+                        return _ChannelHistoryEdgeNotice(
+                            textSize: settings.textSize.toDouble());
                       }
-                      return MessageGroup(
-                        entries: (unit as _GroupUnit).entries,
-                        settings: settings,
-                        onReactionPicker: (msg) =>
-                            showReactionPicker(context, ref, msg),
+                      final forward = units.length - 1 - revIndex;
+                      final unit = units[forward];
+                      final Widget child;
+                      if (unit is _PollUnit) {
+                        child = PollCard(poll: unit.poll, settings: settings);
+                      } else {
+                        child = MessageGroup(
+                          entries: (unit as _GroupUnit).entries,
+                          settings: settings,
+                          onReactionPicker: (msg) =>
+                              showReactionPicker(context, ref, msg),
+                        );
+                      }
+                      // `.messages-list { gap: 3px }` (styles-chat.css:1-7):
+                      // a 3px flex gap between EVERY adjacent pair of list
+                      // children (rows, group wrappers, pills, polls), on top
+                      // of each row's own padding/margins. Driven from the top
+                      // edge; the list's very first child (the oldest unit, or
+                      // the history notice above it) opens no gap.
+                      return Padding(
+                        padding: EdgeInsets.only(
+                            top: (forward > 0 || isChannel) ? 3 : 0),
+                        child: child,
                       );
                     },
                   ),
@@ -413,6 +444,55 @@ class _EmptyOrLoadingState extends State<_EmptyOrLoading> {
           widget.emptyNote,
           textAlign: TextAlign.center,
           style: TextStyle(color: c.textDim, fontSize: 13),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `.system-message.channel-history-limit` pill (`styles-chat.css:
+/// 1349-1355` on the `.system-message` base at `:1334-1348`): a centered
+/// fit-content pill marking the start of stored channel history — "You've
+/// reached the edge of this channel's history." Softer chrome than a normal
+/// system pill (border white@0.05, bg white@0.02 — same literals in both
+/// themes; no light override exists), padding 12px 20px, radius 20, margin
+/// 10px auto, italic `--text-dim` at `textSize − 3`, weight 450.
+class _ChannelHistoryEdgeNotice extends StatelessWidget {
+  const _ChannelHistoryEdgeNotice({required this.textSize});
+
+  /// The user text-size setting (`--user-text-size`); the pill renders 3px
+  /// smaller (`font-size: calc(var(--user-text-size) - 3px)`).
+  final double textSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Padding(
+      // `.system-message { margin: 10px auto }`.
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Container(
+          // `.channel-history-limit { padding: 12px 20px }` (overrides the
+          // base pill's 8px 16px).
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.02),
+            border:
+                Border.all(color: Colors.white.withValues(alpha: 0.05)),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: Text(
+            "You've reached the edge of this channel's history.",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: textSize - 3,
+              fontStyle: FontStyle.italic,
+              // `.system-message { font-weight: 450 }` (w500 nearest).
+              fontWeight: FontWeight.w500,
+              height: 1.3,
+            ),
+          ),
         ),
       ),
     );

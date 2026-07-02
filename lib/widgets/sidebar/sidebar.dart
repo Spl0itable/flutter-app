@@ -9,6 +9,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/groups/group_logic.dart';
@@ -120,6 +121,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
   bool _loaded = false;
 
+  // `.nym-display:hover` (styles-shell.css:69-73) — mouse hover over the
+  // identity box.
+  bool _nymHover = false;
+
+  // Drives the `.sidebar` scrollbar (thumb fades in while scrolling/hovering).
+  final ScrollController _scroll = ScrollController();
+
   // `.sidebar-skeleton` safety clear: the PWA drops any shimmer rows that
   // never got cleared by real content after 8s (`_sidebarSkelTimer`,
   // init.js:105). Until then, each empty list shows its skeleton rows.
@@ -140,6 +148,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
   @override
   void dispose() {
     _skelTimer?.cancel();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -656,16 +665,39 @@ class _SidebarState extends ConsumerState<Sidebar> {
       child: SafeArea(
         right: false,
         // `.sidebar { overflow-y:auto }`: the whole column is one scroll
-        // container, header + actions + sections (gap F7).
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            _header(context, app.selfNym),
-            if (widget.compact)
-              _SidebarActions(onItemSelected: widget.onItemSelected),
-            for (final s in _order) sectionFor(s),
-            const SizedBox(height: 12),
-          ],
+        // container, header + actions + sections (gap F7). The PWA draws a
+        // 6px scrollbar whose thumb is transparent at rest and fades in while
+        // scrolling/hovering: white@0.12 → 0.2 on hover (light: black@0.12 →
+        // 0.2), radius 10, transparent track (styles-components.css:2190-2221;
+        // styles-themes-responsive.css:1095-1106).
+        child: ScrollbarTheme(
+          data: ScrollbarThemeData(
+            thickness: const WidgetStatePropertyAll(6),
+            radius: const Radius.circular(10),
+            trackColor: const WidgetStatePropertyAll(Colors.transparent),
+            trackBorderColor: const WidgetStatePropertyAll(Colors.transparent),
+            thumbColor: WidgetStateProperty.resolveWith(
+              (states) {
+                final base = c.isLight ? Colors.black : Colors.white;
+                return base.withValues(
+                    alpha: states.contains(WidgetState.hovered) ? 0.2 : 0.12);
+              },
+            ),
+          ),
+          child: Scrollbar(
+            controller: _scroll,
+            child: ListView(
+              controller: _scroll,
+              padding: EdgeInsets.zero,
+              children: [
+                _header(context, app.selfNym),
+                if (widget.compact)
+                  _SidebarActions(onItemSelected: widget.onItemSelected),
+                for (final s in _order) sectionFor(s),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -697,14 +729,18 @@ class _SidebarState extends ConsumerState<Sidebar> {
     // `.sidebar-header`: padding 20/16, bottom hairline. bg is black@0.15
     // (dark) and `body.light-mode .sidebar-header` → white@0.3
     // (styles-themes-responsive.css:1226) so it reads as a light wash, not a
-    // dark scrim, in light mode.
+    // dark scrim, in light mode. On compact (<=1024) layouts the PWA zeroes
+    // the bottom border (`.sidebar-header { border-bottom: 0px }`,
+    // styles-themes-responsive.css:194-196, 457-459).
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
       decoration: BoxDecoration(
         color: c.isLight
             ? Colors.white.withValues(alpha: 0.3)
             : Colors.black.withValues(alpha: 0.15),
-        border: Border(bottom: BorderSide(color: c.glassBorder)),
+        border: widget.compact
+            ? null
+            : Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: _PanicHoldDetector(
         onTap: () => NickEditModal.open(context),
@@ -715,14 +751,32 @@ class _SidebarState extends ConsumerState<Sidebar> {
             // (cosmetic in app mode where the ASCII logo above is hidden).
             const SizedBox(height: 15),
             // `.nym-display`: padding 10/14, bg white@0.04 (light-mode →
-            // black@0.04), glass border, radius-sm.
-            Container(
+            // black@0.04), glass border, radius-sm. `:hover` → bg white@0.07,
+            // border primary@0.3, glow 0 0 15px primary@0.08 (styles-shell
+            // .css:69-73); light mode overrides only the bg to black@0.07 —
+            // its higher-specificity rest rule keeps the black@0.08 border
+            // (styles-themes-responsive.css:1242-1249) while the glow applies.
+            MouseRegion(
+              onEnter: (_) => setState(() => _nymHover = true),
+              onExit: (_) => setState(() => _nymHover = false),
+              child: Container(
               key: TutorialTargets.keyFor(TutorialTarget.nymDisplay),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
-                color: c.insetFill,
-                border: Border.all(color: c.glassBorder),
+                color: _nymHover
+                    ? (c.isLight
+                        ? Colors.black.withValues(alpha: 0.07)
+                        : Colors.white.withValues(alpha: 0.07))
+                    : c.insetFill,
+                border: Border.all(
+                  color: _nymHover && !c.isLight
+                      ? c.primaryA(0.3)
+                      : c.glassBorder,
+                ),
                 borderRadius: NymRadius.rsm,
+                boxShadow: _nymHover
+                    ? [BoxShadow(color: c.primaryA(0.08), blurRadius: 15)]
+                    : null,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -756,20 +810,15 @@ class _SidebarState extends ConsumerState<Sidebar> {
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(
-                          nym,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: c.secondary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        child: _NymValueText(
+                          nym: nym,
+                          pubkey: ref.read(appStateProvider).selfPubkey,
                         ),
                       ),
                     ],
                   ),
                 ],
+              ),
               ),
             ),
             // `.status-indicator` (index.html:434-437) is a SIBLING of
@@ -895,6 +944,66 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
   }
 }
 
+/// `^[0-9a-f]{64}$` pubkey check (`formatNymWithPubkey`, users.js:263).
+final RegExp _hex64Re = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+
+/// Trailing `#xxxx` capture (`formatNymWithPubkey`, users.js:268).
+final RegExp _nymSuffix4Re = RegExp(r'#([0-9a-f]{4})$', caseSensitive: false);
+
+/// `.nym-value` (styles-shell.css:91-103): the header nym, 15px `--secondary`
+/// weight 600 — with the `#suffix` split into a `.nym-suffix` span colored
+/// `--text-dim` (`formatNymWithPubkey`, users.js:263-273: base = nym minus any
+/// trailing `#xxxx`; suffix = the pubkey's last 4 hex chars, falling back to
+/// the nym's own `#xxxx`, then to `pubkey.slice(-4)` / `????`).
+class _NymValueText extends StatelessWidget {
+  const _NymValueText({required this.nym, required this.pubkey});
+
+  final String nym;
+  final String pubkey;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final String base;
+    final String suffix;
+    if (_hex64Re.hasMatch(pubkey)) {
+      base = stripPubkeySuffix(nym);
+      suffix = getPubkeySuffix(pubkey);
+    } else {
+      final m = _nymSuffix4Re.firstMatch(nym);
+      if (m != null) {
+        base = nym.substring(0, nym.length - 5);
+        suffix = m.group(1)!;
+      } else {
+        base = nym;
+        suffix = pubkey.length >= 4
+            ? pubkey.substring(pubkey.length - 4)
+            : '????';
+      }
+    }
+    return Text.rich(
+      TextSpan(
+        children: [
+          TextSpan(text: base),
+          // `.nym-value .nym-suffix { color: var(--text-dim) }` — same size
+          // and weight, only the colour dims.
+          TextSpan(
+            text: '#$suffix',
+            style: TextStyle(color: c.textDim),
+          ),
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        color: c.secondary,
+        fontSize: 15,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}
+
 /// `.status-indicator` (index.html:434-437, styles-shell.css:105-119): the
 /// connection-status row that sits in `.sidebar-header` directly below
 /// `.nym-display` (a sibling of it, NOT nested inside). inline-flex, gap 5,
@@ -904,9 +1013,9 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
 /// `.status-dot` is a plain 8px circle whose colour `updateConnectionStatus`
 /// (relays.js:3886) sets inline from the live pool count:
 /// `--primary` Connected / `--warning` Connecting / `--danger` Disconnected.
-/// The label is `Connected (N relays)` when any relay is connected, else
-/// `Disconnected` (relays.js:3905-3936). [connectedCount] mirrors the PWA's
-/// `poolConnectedRelays.length`.
+/// In the default proxy/pool mode the label is `Connected (N relays)` when any
+/// relay is connected, else `Connecting...` (relays.js:3905-3914).
+/// [connectedCount] mirrors the PWA's `poolConnectedRelays.length`.
 class _ConnectionStatusIndicator extends StatelessWidget {
   const _ConnectionStatusIndicator({required this.connectedCount});
 
@@ -916,13 +1025,14 @@ class _ConnectionStatusIndicator extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = context.nym;
     final connected = connectedCount > 0;
-    // PWA: `Connected (N relays)` (primary dot) else `Disconnected` (danger
-    // dot). The `Connecting...`/`--warning` state is a transient custom message
-    // the relay layer pushes; the count-driven branch only resolves to
-    // Connected/Disconnected, so we mirror that here.
+    // PWA pool branch (relays.js:3905-3914): in the default proxy/pool mode
+    // (`useRelayProxy = !!apiHost`, app.js:487) an open pool with connected
+    // relays shows `Connected (N relays)` (primary dot); otherwise
+    // `Connecting...` with the `--warning` dot. The `Disconnected`/`--danger`
+    // state only exists in the non-proxy branch, which never runs by default.
     final label =
-        connected ? 'Connected ($connectedCount relays)' : 'Disconnected';
-    final dotColor = connected ? c.primary : c.danger;
+        connected ? 'Connected ($connectedCount relays)' : 'Connecting...';
+    final dotColor = connected ? c.primary : c.warning;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
@@ -984,6 +1094,8 @@ class _SidebarActions extends ConsumerWidget {
               ShopModal.open(context);
             },
           ),
+          // `.sidebar-actions { gap: 6px }`.
+          const SizedBox(width: 6),
           _ActionButton(
             svg: NymIcons.settings,
             label: 'Settings',
@@ -992,6 +1104,7 @@ class _SidebarActions extends ConsumerWidget {
               SettingsScreen.open(context);
             },
           ),
+          const SizedBox(width: 6),
           _ActionButton(
             svg: NymIcons.info,
             label: 'About',
@@ -1000,6 +1113,7 @@ class _SidebarActions extends ConsumerWidget {
               AboutScreen.open(context);
             },
           ),
+          const SizedBox(width: 6),
           _ActionButton(
             svg: NymIcons.logout,
             label: 'Logout',
@@ -1027,7 +1141,13 @@ class _SidebarActions extends ConsumerWidget {
   }
 }
 
-class _ActionButton extends StatelessWidget {
+/// A `.sidebar-actions` `.icon-btn` (styles-shell.css:912-935 + 501-535):
+/// bg white@0.05, 1px `--glass-border` border, radius-xs, `--text` icon+label,
+/// uppercase 9px label (letter-spacing 0.02em). Hover → primary@0.12 fill,
+/// `--primary` text, primary@0.3 border, 0 0 15px primary@0.1 glow. Light mode
+/// (styles-themes-responsive.css:595-605): bg black@0.03, border black@0.1,
+/// `--primary` text; hover → bg black@0.06, border `--primary`.
+class _ActionButton extends StatefulWidget {
   const _ActionButton({
     required this.svg,
     required this.label,
@@ -1039,28 +1159,70 @@ class _ActionButton extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_ActionButton> createState() => _ActionButtonState();
+}
+
+class _ActionButtonState extends State<_ActionButton> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // Resting: `.icon-btn` white@0.05 / glass border / --text; light-mode
+    // overrides to black@0.03 / black@0.1 / --primary.
+    final Color fill;
+    final Color borderColor;
+    final Color fg;
+    if (c.isLight) {
+      fill = Colors.black.withValues(alpha: _hover ? 0.06 : 0.03);
+      borderColor =
+          _hover ? c.primary : Colors.black.withValues(alpha: 0.1);
+      fg = c.primary;
+    } else {
+      fill = _hover ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05);
+      borderColor = _hover ? c.primaryA(0.3) : c.glassBorder;
+      fg = _hover ? c.primary : c.text;
+    }
     return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: NymRadius.rxs,
-        // `.sidebar-actions .icon-btn`: padding 6/4, gap 3, 9px label.
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-          child: Column(
-            children: [
-              NymSvgIcon(svg, size: 16, color: c.text),
-              const SizedBox(height: 3),
-              Text(
-                label,
-                style: TextStyle(
-                  color: c.text,
-                  fontSize: 9,
-                  fontWeight: FontWeight.w500,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: NymRadius.rxs,
+          // `.sidebar-actions .icon-btn`: padding 6/4, gap 3, 9px label.
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+            decoration: BoxDecoration(
+              color: fill,
+              border: Border.all(color: borderColor),
+              borderRadius: NymRadius.rxs,
+              // `.icon-btn:hover` glow (dark only; the light-mode override
+              // sets no shadow of its own but the base hover rule still
+              // applies — keep it in both modes like the cascade does).
+              boxShadow: _hover
+                  ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 15)]
+                  : null,
+            ),
+            child: Column(
+              children: [
+                NymSvgIcon(widget.svg, size: 16, color: fg),
+                const SizedBox(height: 3),
+                Text(
+                  // `.icon-btn { text-transform: uppercase }` → FLAIR/SETTINGS/…
+                  widget.label.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 9,
+                    fontWeight: FontWeight.w500,
+                    // `.btn-label { letter-spacing: 0.02em }` (of 9px).
+                    letterSpacing: 9 * 0.02,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -1250,7 +1412,7 @@ class _ReorderArrows extends StatelessWidget {
   }
 }
 
-class _ReorderBtn extends StatelessWidget {
+class _ReorderBtn extends StatefulWidget {
   const _ReorderBtn({
     required this.svg,
     required this.enabled,
@@ -1261,24 +1423,43 @@ class _ReorderBtn extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_ReorderBtn> createState() => _ReorderBtnState();
+}
+
+class _ReorderBtnState extends State<_ReorderBtn> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `:hover:not(:disabled)` (styles-shell.css:180-183): bg `--primary`,
+    // glyph #fff.
+    final hovered = _hover && widget.enabled;
     return Opacity(
-      opacity: enabled ? 1 : 0.25,
-      child: InkWell(
-        onTap: enabled ? onTap : null,
-        borderRadius: NymRadius.rxs,
-        child: Container(
-          width: 18,
-          height: 18,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            // `.section-reorder-btn` bg white@0.08 → mode-aware so the reorder
-            // buttons stay visible in light mode.
-            color: c.hoverOverlay,
-            borderRadius: NymRadius.rxs,
+      opacity: widget.enabled ? 1 : 0.25,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: InkWell(
+          onTap: widget.enabled ? widget.onTap : null,
+          borderRadius: NymRadius.rxs,
+          child: Container(
+            width: 18,
+            height: 18,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              // `.section-reorder-btn` bg white@0.08 → mode-aware so the
+              // reorder buttons stay visible in light mode.
+              color: hovered ? c.primary : c.hoverOverlay,
+              borderRadius: NymRadius.rxs,
+            ),
+            // 12px stroke-width-3 chevron (index.html:466-472).
+            child: NymSvgIcon(
+              widget.svg,
+              size: 12,
+              color: hovered ? Colors.white : c.text,
+            ),
           ),
-          child: NymSvgIcon(svg, size: 14, color: c.text),
         ),
       ),
     );
@@ -1677,7 +1858,7 @@ class _GroupUnreadPill extends StatelessWidget {
 /// subsequent expand step when [stepMore]); 0 → "SHOW LESS". The PWA labels the
 /// first expand "View N more…" and each further 500-row step "Show N more…"
 /// (users.js:1707/1715/1722).
-class _ViewMoreButton extends StatelessWidget {
+class _ViewMoreButton extends StatefulWidget {
   const _ViewMoreButton({
     required this.more,
     required this.onTap,
@@ -1690,34 +1871,50 @@ class _ViewMoreButton extends StatelessWidget {
   final bool stepMore;
 
   @override
+  State<_ViewMoreButton> createState() => _ViewMoreButtonState();
+}
+
+class _ViewMoreButtonState extends State<_ViewMoreButton> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final label = more > 0
-        ? '${stepMore ? 'SHOW' : 'VIEW'} ${_abbreviateNumber(more)} MORE…'
+    final label = widget.more > 0
+        ? '${widget.stepMore ? 'SHOW' : 'VIEW'} '
+            '${_abbreviateNumber(widget.more)} MORE…'
         : 'SHOW LESS';
     return Padding(
       // `margin: 6px 10px`.
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: NymRadius.rxs,
-        child: Container(
-          width: double.infinity,
-          // `padding: 8px 12px`.
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            borderRadius: NymRadius.rxs,
-            border: Border.all(color: c.glassBorder),
-          ),
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            // 11px, uppercase, letter-spacing 1, weight 500, --text-dim.
-            style: TextStyle(
-              color: c.textDim,
-              fontSize: 11,
-              letterSpacing: 1,
-              fontWeight: FontWeight.w500,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: InkWell(
+          onTap: widget.onTap,
+          borderRadius: NymRadius.rxs,
+          child: Container(
+            width: double.infinity,
+            // `padding: 8px 12px`.
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              borderRadius: NymRadius.rxs,
+              // `:hover` (styles-shell.css:300-304): border primary@0.3,
+              // bg primary@0.08, text `--text`.
+              color: _hover ? c.primaryA(0.08) : null,
+              border:
+                  Border.all(color: _hover ? c.primaryA(0.3) : c.glassBorder),
+            ),
+            child: Text(
+              label,
+              textAlign: TextAlign.center,
+              // 11px, uppercase, letter-spacing 1, weight 500, --text-dim.
+              style: TextStyle(
+                color: _hover ? c.text : c.textDim,
+                fontSize: 11,
+                letterSpacing: 1,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ),
@@ -1828,10 +2025,19 @@ class _SearchField extends StatefulWidget {
 
 class _SearchFieldState extends State<_SearchField> {
   final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    // Repaint the fill + focus ring on focus changes.
+    _focusNode.addListener(() => setState(() {}));
+  }
 
   @override
   void dispose() {
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -1839,45 +2045,75 @@ class _SearchFieldState extends State<_SearchField> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final hasValue = _controller.text.isNotEmpty;
-    return TextField(
-      controller: _controller,
-      autofocus: true,
-      style: TextStyle(color: c.textBright, fontSize: 12),
-      cursorColor: c.isLight ? Colors.black : Colors.white,
-      onChanged: (v) {
-        widget.onChanged(v);
-        setState(() {}); // toggle the clear ✕ visibility
-      },
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: widget.hint,
-        hintStyle: TextStyle(color: c.textDim, fontSize: 12),
-        // `padding: 8px 28px 8px 12px` (right room for the ✕).
-        contentPadding: const EdgeInsets.fromLTRB(12, 8, 28, 8),
-        filled: true,
-        // `.search-input` bg white@0.05 → `body.light-mode .search-input`
-        // black@0.04. Mode-aware so it reads in light mode.
-        fillColor: c.insetFill,
-        suffixIcon: hasValue
-            ? _SearchClear(onTap: () {
-                _controller.clear();
-                widget.onChanged('');
-                setState(() {});
-              })
+    final focused = _focusNode.hasFocus;
+    // `.search-input` rests on white@0.05 and brightens to white@0.08 on
+    // `:focus` (styles-shell.css:240-253, 278-282). In light mode the global
+    // `body.light-mode input { background: rgba(0,0,0,0.04) !important }`
+    // (styles-themes-responsive.css:571-579) pins the fill — even focused.
+    final Color fill = c.isLight
+        ? Colors.black.withValues(alpha: 0.04)
+        : Colors.white.withValues(alpha: focused ? 0.08 : 0.05);
+    // Resting border: `--glass-border` (dark) / the light-mode input override
+    // `border-color: rgba(0,0,0,0.1) !important`.
+    final Color restBorder =
+        c.isLight ? Colors.black.withValues(alpha: 0.1) : c.glassBorder;
+    // `:focus` also draws a 3px outer ring: `box-shadow: 0 0 0 3px
+    // primary@0.06` (light-mode focus ring is primary@0.1,
+    // styles-themes-responsive.css:1085-1093).
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: NymRadius.rxs,
+        boxShadow: focused
+            ? [
+                BoxShadow(
+                  color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                  spreadRadius: 3,
+                ),
+              ]
             : null,
-        suffixIconConstraints:
-            const BoxConstraints(minWidth: 28, minHeight: 0),
-        border: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.primaryA(0.30)),
+      ),
+      child: TextField(
+        controller: _controller,
+        focusNode: _focusNode,
+        autofocus: true,
+        // The global `input { color: #ffffff !important }` rule forces pure
+        // white in dark mode; `body.light-mode .search-input` resolves to
+        // `var(--text)` (styles-themes-responsive.css:571-593, 1063-1068).
+        style: TextStyle(color: c.isLight ? c.text : Colors.white, fontSize: 12),
+        cursorColor: c.isLight ? Colors.black : Colors.white,
+        onChanged: (v) {
+          widget.onChanged(v);
+          setState(() {}); // toggle the clear ✕ visibility
+        },
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: widget.hint,
+          hintStyle: TextStyle(color: c.textDim, fontSize: 12),
+          // `padding: 8px 28px 8px 12px` (right room for the ✕).
+          contentPadding: const EdgeInsets.fromLTRB(12, 8, 28, 8),
+          filled: true,
+          fillColor: fill,
+          suffixIcon: hasValue
+              ? _SearchClear(onTap: () {
+                  _controller.clear();
+                  widget.onChanged('');
+                  setState(() {});
+                })
+              : null,
+          suffixIconConstraints:
+              const BoxConstraints(minWidth: 28, minHeight: 0),
+          border: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: restBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: restBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.primaryA(0.30)),
+          ),
         ),
       ),
     );

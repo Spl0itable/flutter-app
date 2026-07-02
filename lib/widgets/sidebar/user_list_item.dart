@@ -25,7 +25,7 @@ import '../context_menu/profile_badges.dart';
 /// header) — see [showUserContextMenu]. This mirrors the PWA, where a
 /// nyms-list click/contextmenu calls `showContextMenu(..., profileOnly=true)`
 /// (users.js:1513).
-class UserListItem extends ConsumerWidget {
+class UserListItem extends ConsumerStatefulWidget {
   const UserListItem({
     super.key,
     required this.user,
@@ -38,8 +38,20 @@ class UserListItem extends ConsumerWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<UserListItem> createState() => _UserListItemState();
+}
+
+class _UserListItemState extends ConsumerState<UserListItem> {
+  // `@media (hover:hover) .user-item:hover` (styles-shell.css:571-575,
+  // 584-590) — MouseRegion only reacts to mouse pointers, matching the media
+  // query's hover-capable gate.
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
+    final user = widget.user;
+    final textSize = widget.textSize;
     final status = user.effectiveStatus();
     final controller = ref.read(nostrControllerProvider);
     final isDev = controller.isVerifiedDeveloper(user.pubkey);
@@ -51,23 +63,37 @@ class UserListItem extends ConsumerWidget {
     final base = stripPubkeySuffix(user.nym);
     final displayNym = base.length > 20 ? '${base.substring(0, 20)}...' : base;
     final suffix = getPubkeySuffix(user.pubkey);
+    // `:hover` brightens the nym span from `--text-dim` to `--text`.
+    final nymColor = _hover ? c.text : c.textDim;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: GestureDetector(
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onLongPressStart: (d) =>
               showUserContextMenu(context, ref, user, d.globalPosition),
           onSecondaryTapDown: (d) =>
               showUserContextMenu(context, ref, user, d.globalPosition),
           child: InkWell(
-          onTap: onTap,
+          onTap: widget.onTap,
           borderRadius: NymRadius.rxs,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: const BoxDecoration(borderRadius: NymRadius.rxs),
+            decoration: BoxDecoration(
+              // `:hover` fill white@0.04 (light: black@0.04,
+              // styles-themes-responsive.css:1251-1255), radius-xs.
+              color: _hover
+                  ? (c.isLight
+                      ? Colors.black.withValues(alpha: 0.04)
+                      : Colors.white.withValues(alpha: 0.04))
+                  : null,
+              borderRadius: NymRadius.rxs,
+            ),
             child: Row(
               children: [
                 // `.user-avatar-wrap` (20×20, position:relative) with the
@@ -88,7 +114,7 @@ class UserListItem extends ConsumerWidget {
                           // `.nym-suffix`: opacity .7, 0.9em, weight 100.
                           text: '#$suffix',
                           style: TextStyle(
-                            color: c.textDim.withValues(alpha: 0.7),
+                            color: nymColor.withValues(alpha: 0.7),
                             fontSize: (textSize - 3) * 0.9,
                             fontWeight: FontWeight.w100,
                           ),
@@ -98,7 +124,7 @@ class UserListItem extends ConsumerWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: c.textDim,
+                      color: nymColor,
                       fontSize: textSize - 3,
                     ),
                   ),
