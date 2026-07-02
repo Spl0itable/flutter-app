@@ -138,6 +138,24 @@ List<LandingChannelOption> buildLandingChannelOptions(
   return out;
 }
 
+/// The five valid read-receipt/typing-indicator scopes (settings.js:3
+/// `INDICATOR_SCOPES`).
+const List<String> kIndicatorScopes = [
+  'disabled', 'pms', 'groups', 'pms-groups', 'everywhere',
+];
+
+/// Coerces a stored indicator-scope value to a valid scope, mirroring
+/// `_normalizeIndicatorScope` (settings.js:27-32): the legacy boolean strings
+/// `'true'` → `'everywhere'` and `'false'` → `'disabled'`; any other value not
+/// in [kIndicatorScopes] falls back to [fallback].
+String normalizeIndicatorScope(String? value,
+    {String fallback = 'pms-groups'}) {
+  if (value == 'true') return 'everywhere';
+  if (value == 'false') return 'disabled';
+  if (value != null && kIndicatorScopes.contains(value)) return value;
+  return fallback;
+}
+
 /// Validates a settings-transfer recipient pubkey, mirroring shop.js:1767:
 /// must be exactly 64 hex chars, and not the user's own pubkey. Returns the
 /// matching PWA error string, or null when valid.

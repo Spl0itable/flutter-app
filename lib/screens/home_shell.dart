@@ -63,14 +63,14 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// `settings.swipeThreshold` (default 60, options 40-100).
   static const double _sidebarSwipeThreshold = 50;
 
-  /// Accumulated rightward travel of an in-progress left-edge swipe
-  /// (`setupMobileGestures`, ui-context.js:5-32). Reset at each drag start/end.
-  double _edgeSwipeDx = 0;
+  /// The touch pointer being tracked by the edge-swipe listener, or null when
+  /// no touch is armed. The PWA's `swipeStartX` doubles as this flag — it is
+  /// non-null only while a touch that began at `clientX < 50` is down and has
+  /// not yet toggled the drawer (ui-context.js:8-30).
+  int? _edgeSwipePointer;
 
-  /// False once this drag has toggled the drawer (the PWA nulls `swipeStartX`
-  /// after firing so one touch toggles at most once) or, on the open-drawer
-  /// surface, when the touch did not start within 50px of the left edge.
-  bool _edgeSwipeArmed = false;
+  /// Global x of the arming touch-down (the PWA's `swipeStartX`).
+  double _edgeSwipeStartX = 0;
 
   @override
   void initState() {
@@ -146,22 +146,41 @@ class HomeShellState extends ConsumerState<HomeShell>
   }
 
   // --- Left-edge swipe (`setupMobileGestures`, ui-context.js:5-32) ----------
+  // Raw pointer listeners, NOT gesture-arena recognizers: the PWA binds
+  // passive document-level touchstart/touchmove with no axis locking, so the
+  // gesture fires on ANY touch (even a sloppy diagonal one that is also
+  // scrolling the list) and never steals events from what's underneath —
+  // message swipe-left still works inside the edge zone (the message gesture
+  // itself abandons only RIGHT swipes starting there, messages.js:2196-2201).
 
-  void _edgeSwipeStart(bool armed) {
-    _edgeSwipeDx = 0;
-    _edgeSwipeArmed = armed;
+  /// `touchstart`: only a touch landing within 50px of the left edge arms the
+  /// gesture (`if (touch.clientX < 50) this.swipeStartX = touch.clientX`).
+  void _edgePointerDown(PointerDownEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    if (_edgeSwipePointer != null) return;
+    if (e.position.dx >= 50) return;
+    _edgeSwipePointer = e.pointer;
+    _edgeSwipeStartX = e.position.dx;
   }
 
-  void _edgeSwipeUpdate(DragUpdateDetails d) {
-    if (!_edgeSwipeArmed) return;
-    _edgeSwipeDx += d.delta.dx;
-    // `swipeDistance > this.swipeThreshold` → `toggleSidebar()`, then tracking
-    // stops for the rest of the touch (ui-context.js:16-25). Toggle, not open:
-    // the same left-edge right-swipe CLOSES an open drawer.
-    if (_edgeSwipeDx > _sidebarSwipeThreshold) {
-      _edgeSwipeArmed = false;
+  /// `touchmove`: net rightward displacement from the touch-down point
+  /// (`swipeDistance = clientX - swipeStartX`) past the fixed 50px threshold
+  /// calls `toggleSidebar()`, then tracking stops for the rest of the touch
+  /// (ui-context.js:16-25). Toggle, not open: the same left-edge right-swipe
+  /// CLOSES an open drawer.
+  void _edgePointerMove(PointerMoveEvent e) {
+    if (e.pointer != _edgeSwipePointer) return;
+    if (e.position.dx - _edgeSwipeStartX > _sidebarSwipeThreshold) {
+      _edgeSwipePointer = null;
       setState(() => _drawerOpen = !_drawerOpen);
     }
+  }
+
+  /// `touchend`/`touchcancel` → `this.swipeStartX = null` (unconditionally —
+  /// the PWA resets on any touch lift, ui-context.js:27-29).
+  void _edgePointerEnd(PointerEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    _edgeSwipePointer = null;
   }
 
   @override
@@ -254,40 +273,21 @@ class HomeShellState extends ConsumerState<HomeShell>
     // The edge-swipe gesture is phone-only (`if (window.innerWidth <= 768)`,
     // ui-context.js:6).
     final phone = MediaQuery.of(context).size.width <= 768;
-    return Stack(
+    // Left-edge swipe to TOGGLE the drawer (`setupMobileGestures`,
+    // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
+    // a touch starting within 50px of the left edge that travels right past
+    // the fixed 50px threshold calls `toggleSidebar()`. A raw Listener over
+    // the whole shell mirrors the PWA's passive document-level touch
+    // listeners: it never enters the gesture arena, so it cannot lose the
+    // swipe to the vertical scrollable (no axis lock) and never swallows the
+    // gestures underneath it (message swipe-left still works from the edge).
+    // Because it wraps the drawer too, it fires either way and toggles an
+    // open drawer closed, like the PWA's document listener.
+    final stack = Stack(
       children: [
         Positioned.fill(
           child: _content(context, useColumns, compact: true),
         ),
-
-        // Left-edge swipe to TOGGLE the drawer (`setupMobileGestures`,
-        // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
-        // a touch starting within 50px of the left edge that travels right past
-        // the fixed 50px threshold calls `toggleSidebar()`. A 50px-wide strip
-        // mirrors the `clientX < 50` arming; only horizontal drags are claimed,
-        // so vertical scroll + message swipe (which itself defers left-edge
-        // swipes) are unaffected. While the drawer is OPEN the strip sits under
-        // it, so the drawer carries its own handler below (the PWA's document-
-        // level listener fires either way and toggles the drawer closed).
-        if (!_drawerOpen && phone)
-          Positioned(
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: 50,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              // Travel measured from the touch-down point (the PWA's
-              // `swipeDistance = clientX - swipeStartX`), not from where the
-              // recognizer won the arena — otherwise ~18px of slop is silently
-              // added to the 50px threshold.
-              dragStartBehavior: DragStartBehavior.down,
-              onHorizontalDragStart: (_) => _edgeSwipeStart(true),
-              onHorizontalDragUpdate: _edgeSwipeUpdate,
-              onHorizontalDragEnd: (_) => _edgeSwipeArmed = false,
-              onHorizontalDragCancel: () => _edgeSwipeArmed = false,
-            ),
-          ),
 
         // Dim backdrop (`.mobile-overlay`). With solid-ui (default ON) the alpha
         // is mode-dependent: dark 0.6, light 0.35
@@ -317,42 +317,38 @@ class HomeShellState extends ConsumerState<HomeShell>
             height: double.infinity,
             // `.sidebar.open { box-shadow: 10px 0 40px rgba(0,0,0,0.5) }` — a
             // directional (rightward-only) drop shadow, not a Material ambient
-            // elevation (styles-themes-responsive.css:198-201).
-            child: GestureDetector(
-              // While the drawer is open it covers the 50px edge strip, so it
-              // hosts the same toggle gesture: the PWA's document-level
-              // listener arms on any touch starting at `clientX < 50` and a
-              // 50px rightward travel calls `toggleSidebar()` — CLOSING it.
-              dragStartBehavior: DragStartBehavior.down,
-              onHorizontalDragStart: phone
-                  ? (d) => _edgeSwipeStart(d.globalPosition.dx < 50)
-                  : null,
-              onHorizontalDragUpdate: phone ? _edgeSwipeUpdate : null,
-              onHorizontalDragEnd:
-                  phone ? (_) => _edgeSwipeArmed = false : null,
-              onHorizontalDragCancel:
-                  phone ? () => _edgeSwipeArmed = false : null,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  boxShadow: _drawerOpen
-                      ? [
-                          BoxShadow(
-                            offset: const Offset(10, 0),
-                            blurRadius: 40,
-                            color: Colors.black.withValues(alpha: 0.5),
-                          ),
-                        ]
-                      : const [],
-                ),
-                child: Sidebar(
-                  compact: true,
-                  onItemSelected: () => setState(() => _drawerOpen = false),
-                ),
+            // elevation (styles-themes-responsive.css:198-201). The edge-swipe
+            // Listener above wraps the drawer too, so a left-edge right-swipe
+            // over the open drawer toggles it CLOSED, like the PWA's
+            // document-level listener.
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                boxShadow: _drawerOpen
+                    ? [
+                        BoxShadow(
+                          offset: const Offset(10, 0),
+                          blurRadius: 40,
+                          color: Colors.black.withValues(alpha: 0.5),
+                        ),
+                      ]
+                    : const [],
+              ),
+              child: Sidebar(
+                compact: true,
+                onItemSelected: () => setState(() => _drawerOpen = false),
               ),
             ),
           ),
         ),
       ],
+    );
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: phone ? _edgePointerDown : null,
+      onPointerMove: phone ? _edgePointerMove : null,
+      onPointerUp: phone ? _edgePointerEnd : null,
+      onPointerCancel: phone ? _edgePointerEnd : null,
+      child: stack,
     );
   }
 }

@@ -135,7 +135,9 @@ class _QuickMenu extends ConsumerWidget {
     final c = context.nym;
     final transparency = ref
         .watch(settingsProvider.select((s) => s.transparencyEnabled));
-    final curve = CurvedAnimation(parent: animation, curve: Curves.easeOut);
+    // `transition: opacity 0.15s ease, transform 0.15s ease` — CSS `ease`
+    // is cubic-bezier(0.25, 0.1, 0.25, 1) == [Curves.ease].
+    final curve = CurvedAnimation(parent: animation, curve: Curves.ease);
     return AnimatedBuilder(
       animation: curve,
       builder: (context, child) {
@@ -146,9 +148,10 @@ class _QuickMenu extends ConsumerWidget {
             // translateY(-6 → 0)
             offset: Offset(0, -6 * (1 - t)),
             child: Transform.scale(
-              // scale(0.9 → 1), anchored top-left like the CSS transform-origin.
+              // scale(0.9 → 1); no `transform-origin` is set on
+              // `.quick-context-menu`, so the CSS default (50% 50%) applies.
               scale: 0.9 + 0.1 * t,
-              alignment: Alignment.topLeft,
+              alignment: Alignment.center,
               child: child,
             ),
           ),

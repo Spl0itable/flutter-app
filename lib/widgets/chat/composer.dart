@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -2191,6 +2192,20 @@ class _SendButtonState extends State<_SendButton> {
     if (!_anonFired && mounted && _preGlow) setState(() => _preGlow = false);
   }
 
+  /// `mouseleave` → cancel (ui-context.js:1261): dragging a pressed MOUSE
+  /// pointer off the button abandons the 2s hold. Mouse only — the PWA binds
+  /// no `touchmove` cancel, so a touch that wanders keeps the timer running.
+  /// Tracked from the captured pointer stream (a MouseRegion exit is not
+  /// guaranteed mid-drag), against the button's own bounds.
+  void _maybeCancelOnExit(PointerMoveEvent e) {
+    if (e.kind != PointerDeviceKind.mouse || _holdTimer == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    if (!(Offset.zero & box.size).contains(box.globalToLocal(e.position))) {
+      _cancelHold();
+    }
+  }
+
   void _handleTap() {
     // Suppress the click that follows a fired long-press (ui-context.js:1250).
     if (_anonFired || DateTime.now().isBefore(_suppressClickUntil)) return;
@@ -2221,6 +2236,7 @@ class _SendButtonState extends State<_SendButton> {
         onExit: (_) => setState(() => _hover = false),
         child: Listener(
           onPointerDown: (_) => _startHold(),
+          onPointerMove: _maybeCancelOnExit,
           onPointerUp: (_) => _cancelHold(),
           onPointerCancel: (_) => _cancelHold(),
           child: AnimatedContainer(

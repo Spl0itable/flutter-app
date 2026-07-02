@@ -1465,25 +1465,36 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  Future<void> _toggleReaction(BuildContext context, MessageReaction r) async {
+  void _toggleReaction(BuildContext context, MessageReaction r) {
     final controller = ref.read(nostrControllerProvider);
     final view = ref.read(currentViewProvider);
     final kind = inferOriginalKind(message, view: view);
     final wasReacted = r.userReacted;
-    final ok = await controller.toggleReaction(
+    // toggleReaction applies its optimistic local update synchronously (before
+    // its first await); the signing/encryption/publish continues unawaited.
+    unawaited(controller.toggleReaction(
       message.id,
       r.emoji,
       target: reactionTargetFor(message),
       kind: kind,
-    );
-    // Burst on add (not on removal), mirroring `_burstOnBadge` after sendReaction.
-    if (ok && !wasReacted && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap` = a 30ms
-      // vibrate, reactions.js:968).
+    ));
+    // Buzz + burst on add (not removal) the INSTANT the reaction lands in
+    // local state — the PWA fires `nymHapticTap` and `_burstOnBadge` right
+    // after the optimistic add, BEFORE any network publish (reactions.js:
+    // 955-977). Re-reading state confirms the add went through (a rate-limited
+    // toggle skips the local update and stays silent, reactions.js:946).
+    if (!wasReacted && _selfReactedLocally(r.emoji)) {
       HapticFeedback.lightImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, r.emoji);
     }
+  }
+
+  /// True when local state now carries our own [emoji] reaction on this
+  /// message — i.e. `toggleReaction`'s optimistic add actually happened.
+  bool _selfReactedLocally(String emoji) {
+    final list = ref.read(appStateProvider).reactions[message.id] ?? const [];
+    return list.any((x) => x.emoji == emoji && x.userReacted);
   }
 
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
@@ -1552,21 +1563,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  Future<void> _quickReact(BuildContext context, String emoji) async {
+  void _quickReact(BuildContext context, String emoji) {
     final controller = ref.read(nostrControllerProvider);
     final view = ref.read(currentViewProvider);
     final already = reactions.any((r) => r.emoji == emoji && r.userReacted);
     // Record the pick into the shared recents store (reactions.js bump).
     ref.read(recentEmojisProvider.notifier).record(emoji);
-    final ok = await controller.toggleReaction(
+    unawaited(controller.toggleReaction(
       message.id,
       emoji,
       target: reactionTargetFor(message),
       kind: inferOriginalKind(message, view: view),
-    );
-    if (ok && !already && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap` = a 30ms
-      // vibrate, reactions.js:968).
+    ));
+    // Buzz + burst with the optimistic local add, BEFORE any signing/publish
+    // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977).
+    if (!already && _selfReactedLocally(emoji)) {
       HapticFeedback.lightImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, emoji);
@@ -3278,12 +3289,28 @@ class _SwipeToActState extends State<_SwipeToAct>
       // registering it on touch also spares every tap the double-tap
       // disambiguation delay.
       onDoubleTap: touchPlatform ? null : widget.onDoubleTap,
-      onLongPressStart: widget.onLongPressStart,
       onSecondaryTap: widget.onSecondaryTap,
       child: Transform.translate(
         offset: Offset(_dx, 0),
         child: body,
       ),
+    );
+
+    // The 500ms quick-react hold, with the PWA's tight cancel slop: ANY
+    // `touchmove` / a >5px mouse move kills the pending hold
+    // (`MSG_LONG_PRESS_MOVE_THRESHOLD = 5` + the unconditional touchmove
+    // cancel, ui-context.js:1600-1650) — NOT the framework's default ~18px
+    // kTouchSlop drift, which would still pop the menu on a slow scroll.
+    result = RawGestureDetector(
+      behavior: HitTestBehavior.translucent,
+      gestures: <Type, GestureRecognizerFactory>{
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (r) => r..onLongPressStart = widget.onLongPressStart,
+        ),
+      },
+      child: result,
     );
 
     // The swipe claims TOUCH pointers only (the PWA binds touchstart/touchmove
@@ -3311,5 +3338,48 @@ class _SwipeToActState extends State<_SwipeToAct>
       );
     }
     return result;
+  }
+}
+
+/// A [LongPressGestureRecognizer] with the PWA's tighter pre-fire cancel slop
+/// for the message quick-react hold (ui-context.js:1598-1650): the PWA cancels
+/// the pending 500ms timer on ANY `touchmove` and on a mouse move past
+/// `MSG_LONG_PRESS_MOVE_THRESHOLD = 5` px — far tighter than the framework's
+/// default ~18px kTouchSlop drift. Browsers only emit a `touchmove` once the
+/// touch actually moves, so the same 5px displacement reads as "the finger
+/// moved" for touch too (and stays robust against sub-pixel sensor jitter).
+/// Movement AFTER the 500ms deadline no longer matters (the popup is already
+/// up), so the check applies only before the deadline elapses.
+class _TightLongPressGestureRecognizer extends LongPressGestureRecognizer {
+  _TightLongPressGestureRecognizer({super.debugOwner});
+
+  /// `MSG_LONG_PRESS_MOVE_THRESHOLD` (ui-context.js:1600).
+  static const double _moveThreshold = 5;
+
+  Offset _downPosition = Offset.zero;
+  Duration _downTime = Duration.zero;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    if (event.pointer == primaryPointer) {
+      _downPosition = event.position;
+      _downTime = event.timeStamp;
+    }
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent &&
+        event.pointer == primaryPointer &&
+        state == GestureRecognizerState.possible &&
+        event.timeStamp - _downTime < (deadline ?? kLongPressTimeout) &&
+        (event.position - _downPosition).distance > _moveThreshold) {
+      // Same rejection path the built-in pre-accept slop check takes.
+      resolve(GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      return;
+    }
+    super.handleEvent(event);
   }
 }

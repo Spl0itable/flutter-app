@@ -119,6 +119,9 @@ class NymbotService {
         message: json['error']?.toString() ?? 'Insufficient credits',
       );
     }
+    // A 2xx body carrying `error` is a failure too — the PWA treats
+    // `status >= 400 || !data || data.error` identically (pms.js:2484-2487).
+    _throwOnErrorField(json);
 
     // The reply text lives in `reply` (spec §11.2) or, on some paths, inside a
     // returned event's `content` — accept either for robustness.
@@ -147,6 +150,10 @@ class NymbotService {
       'pubkey': pubkey,
       if (auth != null) 'auth': auth,
     });
+    // Never zero-fill from an `{error}` body — the PWA shows
+    // `'Nymbot: ' + (data.error || 'could not check balance')` instead
+    // (`_checkBotCredits`, pms.js:2529-2532).
+    _throwOnErrorField(json);
     return BotBalance.fromJson(json);
   }
 
@@ -414,6 +421,16 @@ class NymbotService {
       throw const NymbotException('Unexpected Nymbot response shape');
     }
     return decoded;
+  }
+
+  /// Rejects a 2xx response whose body carries a worker `error` string. The
+  /// re-encoded body rides along so callers can surface the exact error text
+  /// (like the PWA's `data.error` reads).
+  static void _throwOnErrorField(Map<String, dynamic> json) {
+    final err = json['error'];
+    if (err is String && err.isNotEmpty) {
+      throw NymbotException(err, body: jsonEncode(json));
+    }
   }
 
   /// Pulls the reply text out of the public-command `{event}` envelope.

@@ -302,7 +302,11 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       }
       return meta;
     }
-    if (!state.balanceKnown) return 'checking credits…';
+    if (!state.balanceKnown) {
+      // A failed check with no cached count settles on 'credits unavailable'
+      // (`_refreshBotCreditMeta`, pms.js:2382-2389).
+      return state.balanceUnavailable ? 'credits unavailable' : 'checking credits…';
+    }
     final std = state.balance.balance;
     final pro = state.balance.proBalance;
     return pro > 0
@@ -836,9 +840,11 @@ class _BotThinkSectionState extends State<_BotThinkSection> {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // `summary::before` ▸ marker (rotates 90° when open).
+                  // `summary::before` ▸ marker (rotates 90° when open;
+                  // `--transition`: 0.25s cubic-bezier(0.4,0,0.2,1)).
                   AnimatedRotation(
                     duration: const Duration(milliseconds: 250),
+                    curve: Curves.fastOutSlowIn,
                     turns: _expanded ? 0.25 : 0,
                     child: Text('▸',
                         style: TextStyle(color: c.textDim, fontSize: fs)),
@@ -902,6 +908,19 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// The currently-filtered `?…` suggestions (empty → palette hidden).
   List<BotPMCommand> _suggestions = const [];
 
+  /// Highlighted palette row — reset to the first row on every input change,
+  /// like `showBotCommandPalette` (`commandPaletteIndex = 0`, commands.js:464).
+  int _paletteIndex = 0;
+
+  /// Escape hides the palette until the input text changes again
+  /// (`hideCommandPalette`; the next input event re-shows it,
+  /// ui-context.js:1003-1005).
+  bool _suppressPalette = false;
+
+  /// Last seen input text, so selection-only controller notifications don't
+  /// count as input events (the PWA palette reacts to `input` only).
+  String _lastText = '';
+
   /// Deferred quote-reply chip (`setQuoteReply`): author + stripped text; the
   /// quote is prepended to the outgoing content only at send.
   ({String author, String text})? _pendingQuote;
@@ -935,9 +954,17 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
 
   void _onTextChanged() {
     final text = _controller.text;
+    final textChanged = text != _lastText;
+    _lastText = text;
     final next = text.startsWith('?')
         ? filterBotPMCommands(text)
         : const <BotPMCommand>[];
+    if (textChanged) {
+      // Every input event re-shows the palette (after an Escape) and
+      // re-highlights the first row (showBotCommandPalette).
+      _suppressPalette = false;
+      _paletteIndex = 0;
+    }
     if (!_sameCommands(next, _suggestions)) {
       setState(() => _suggestions = next);
     } else {
@@ -1038,14 +1065,36 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     _focus.requestFocus();
   }
 
-  /// Hardware Enter sends; Shift+Enter inserts a newline (ui-context.js:1007-14).
-  /// Esc cancels a pending quote chip.
+  /// With the `?` palette open: ↑/↓ move the highlight (wrapping), Enter/Tab
+  /// pick the highlighted command, Escape hides the palette until the input
+  /// changes (ui-context.js:992-1005 → navigateCommandPalette/selectCommand).
+  /// Otherwise hardware Enter sends; Shift+Enter inserts a newline
+  /// (ui-context.js:1007-14). Esc cancels a pending quote chip.
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
       return KeyEventResult.ignored;
     }
     final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
         event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (_suggestions.isNotEmpty && !_suppressPalette) {
+      final n = _suggestions.length;
+      if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+        setState(() => _paletteIndex = (_paletteIndex + 1) % n);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
+        setState(() => _paletteIndex = (_paletteIndex - 1 + n) % n);
+        return KeyEventResult.handled;
+      }
+      if (isEnter || event.logicalKey == LogicalKeyboardKey.tab) {
+        _pick(_suggestions[_paletteIndex.clamp(0, n - 1)]);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.escape) {
+        setState(() => _suppressPalette = true);
+        return KeyEventResult.handled;
+      }
+    }
     if (isEnter && !HardwareKeyboard.instance.isShiftPressed) {
       _send();
       return KeyEventResult.handled;
@@ -1173,8 +1222,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            // `#commandPalette` for the bot-PM `?` commands, above the input.
-            if (_suggestions.isNotEmpty) _palette(c),
+            // `#commandPalette` for the bot-PM `?` commands, above the input
+            // (hidden by Escape until the input changes again).
+            if (_suggestions.isNotEmpty && !_suppressPalette) _palette(c),
             compact
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1398,8 +1448,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     );
   }
 
-  /// The `#commandPalette` dropdown: `.command-item` rows (name w600 + desc),
-  /// the first row highlighted (`.command-item.selected`), bgTertiary surface.
+  /// The `#commandPalette` dropdown: `.command-item` rows (name w600 + desc);
+  /// `.command-item.selected` highlights [_paletteIndex] (first row on open,
+  /// then ↑/↓-navigable), bgTertiary surface.
   Widget _palette(NymColors c) {
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
@@ -1430,7 +1481,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         itemCount: _suggestions.length,
         itemBuilder: (_, i) {
           final cmd = _suggestions[i];
-          final selected = i == 0;
+          final selected = i == _paletteIndex;
           return InkWell(
             onTap: () => _pick(cmd),
             child: Container(

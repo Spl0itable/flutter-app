@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -7,10 +8,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/constants/storage_keys.dart';
+import '../../core/crypto/bech32_codec.dart' as bech32;
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/theme/nym_theme.dart';
@@ -20,10 +21,12 @@ import '../../models/settings.dart';
 import '../../services/api/storage_sync.dart';
 import '../notifications/notifications_service.dart';
 import '../../services/location/geolocation.dart';
+import '../../services/storage/secure_store.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../../widgets/common/nym_avatar.dart' show proxiedAvatarUrl;
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_picker.dart';
 import '../messages/format/message_content.dart' show InlineEmojiText;
@@ -145,15 +148,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    final kv = ref.read(keyValueStoreProvider);
     // Snapshot the live settings as the editable draft (09-M1).
     _draft = ref.read(settingsProvider);
+    // Coerce legacy/corrupt indicator-scope values before they reach the two
+    // scope `FormSelect`s (settings.js:27-32 `_normalizeIndicatorScope` +
+    // 1105-1112: 'true' → 'everywhere', 'false' → 'disabled', anything
+    // unknown → the fallback derived from the legacy
+    // `nym_read_receipts_enabled` / `nym_typing_indicators_enabled` booleans).
+    _draft = _draft.copyWith(
+      readReceiptsScope: normalizeIndicatorScope(
+        _draft.readReceiptsScope,
+        fallback: kv.getString(StorageKeys.readReceiptsEnabled) == 'false'
+            ? 'disabled'
+            : 'everywhere',
+      ),
+      typingIndicatorsScope: normalizeIndicatorScope(
+        _draft.typingIndicatorsScope,
+        fallback: kv.getString(StorageKeys.typingIndicatorsEnabled) == 'false'
+            ? 'disabled'
+            : 'everywhere',
+      ),
+    );
     _cachePMsAtOpen = _draft.cachePMs;
     final ctrl0 = ref.read(settingsProvider.notifier);
     _draftKeypair = ctrl0.keypairMode;
     _draftPow = ctrl0.powDifficulty;
-    _draftBlur = ctrl0.blurImages;
+    // Blur seeds from the per-pubkey key first, then the global key, default
+    // blur — `loadImageBlurSettings` precedence (settings.js:1139-1156; the
+    // PWA's modal shows the resolved value, and the Save-time `setBlurImages`
+    // writes both keys, converging them). Anything that isn't
+    // 'friends'/'true' coerces to 'false' exactly like the PWA's
+    // `saved === 'true'` boolean read.
+    final selfPk = ref.read(appStateProvider).selfPubkey;
+    final rawBlur = (selfPk.isNotEmpty
+            ? kv.getString(StorageKeys.imageBlurFor(selfPk))
+            : null) ??
+        kv.getString(StorageKeys.imageBlur);
+    _draftBlur = rawBlur == null
+        ? 'true' // default to blur
+        : rawBlur == 'friends'
+            ? 'friends'
+            : (rawBlur == 'true' ? 'true' : 'false');
     // Seed the landing-channel field from the persisted value (F8).
-    final kv = ref.read(keyValueStoreProvider);
     _landing = readLandingChannel(kv);
     _landingController.text = _landing.label;
     // Restore the persisted section collapse layout (the PWA calls
@@ -610,7 +647,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // disabled, app.js:3237-3241, so its value never changes).
     final nostrLoggedIn =
         ref.read(nostrControllerProvider).identity?.loginMethod != null;
-    if (!nostrLoggedIn) ctrl.setKeypairMode(_draftKeypair);
+    if (!nostrLoggedIn) {
+      ctrl.setKeypairMode(_draftKeypair);
+      // `saveSettings`' keypair side effects (app.js:3878-3890): switching to
+      // random/hardcore removes the saved session nsec so the next launch
+      // generates a fresh identity; switching to persistent saves the CURRENT
+      // keypair's nsec (only when none is stored) so the identity in use
+      // survives the next launch instead of being regenerated.
+      final secure = SecureStore();
+      if (_draftKeypair == 'random' || _draftKeypair == 'hardcore') {
+        unawaited(secure.remove(SecretKeys.sessionNsec));
+      } else {
+        final privkey = ref.read(nostrControllerProvider).identity?.privkey;
+        if (privkey != null) {
+          unawaited(() async {
+            try {
+              final existing = await secure.get(SecretKeys.sessionNsec);
+              if (existing == null || existing.isEmpty) {
+                await secure.set(
+                    SecretKeys.sessionNsec, bech32.encodeNsecBytes(privkey));
+              }
+            } catch (_) {
+              // Best-effort, like the PWA's swallowed nsecEncode try/catch.
+            }
+          }());
+        }
+      }
+    }
     ctrl.setPowDifficulty(_draftPow);
     ctrl.setBlurImages(_draftBlur, pubkey: ref.read(appStateProvider).selfPubkey);
 
@@ -647,13 +710,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   /// Chat-Wallpaper "Upload" tile: pick an image from the gallery, validate
-  /// the PWA's 1920x1080 minimum (users.js:830-850 `uploadWallpaper`), copy it
-  /// into the app documents dir so it persists across launches, store its
-  /// absolute path in `nym_wallpaper_custom_url`, then select custom mode.
-  /// Mirrors the PWA `triggerWallpaperUpload`/`handleWallpaperUpload`
+  /// the PWA's 1920x1080 minimum (users.js:830-850 `uploadWallpaper`), upload
+  /// it to the Blossom hosts and store the returned public URL in
+  /// `nym_wallpaper_custom_url` (so it can roam cross-device as
+  /// `wallpaperCustomUrl`, settings.js:12), then select custom mode. Mirrors
+  /// the PWA `triggerWallpaperUpload`/`handleWallpaperUpload`
   /// (app.js:4177-4209) — including the Upload tile's "Uploading..." state and
-  /// thumbnail — except the PWA uploads to a remote URL whereas here the file
-  /// lives on-device (the render path in wallpaper_layer.dart handles both).
+  /// thumbnail, and leaving the selection unchanged on a failed upload.
   /// No-op on cancel.
   Future<void> _uploadCustomWallpaper(SettingsController ctrl) async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
@@ -664,9 +727,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // under 1920x1080 with the exact PWA system message; a decode failure
       // counts as invalid, like the PWA's `img.onerror`).
       const minWidth = 1920, minHeight = 1080;
+      final bytes = await File(picked.path).readAsBytes();
       var validSize = false;
       try {
-        final bytes = await File(picked.path).readAsBytes();
         final codec = await ui.instantiateImageCodec(bytes);
         final frame = await codec.getNextFrame();
         validSize =
@@ -681,15 +744,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             'Wallpaper image must be at least ${minWidth}x$minHeight pixels.');
         return;
       }
-      final dir = await getApplicationDocumentsDirectory();
-      final dest = p.join(
-        dir.path,
-        'wallpaper_custom${p.extension(picked.path)}',
-      );
-      await File(picked.path).copy(dest);
+      // Upload through the proxy to the Blossom hosts (users.js:852-857
+      // `_uploadWithFallback` — the SHA-256 `x`-tag auth + 3-server fallback
+      // live in `NostrController.uploadImage`, the same path chat images use).
+      String? url;
+      try {
+        url = await ref
+            .read(nostrControllerProvider)
+            .uploadImage(bytes, contentType: _imageContentType(picked.path));
+      } catch (e) {
+        // `uploadWallpaper`'s catch branch (users.js:864-866).
+        _systemMessage('Failed to upload wallpaper: $e');
+        return;
+      }
+      if (url == null || url.isEmpty) {
+        // Every server failed (`_uploadWithFallback` throws → uploadWallpaper
+        // returns null): the tile reverts and the selection stays unchanged,
+        // like `handleWallpaperUpload`'s null branch (app.js:4203-4205).
+        _systemMessage('Failed to upload wallpaper: upload failed');
+        return;
+      }
       await ref.read(keyValueStoreProvider).setString(
             StorageKeys.wallpaperCustomUrl,
-            dest,
+            url,
           );
       // Live-applied like the PWA's custom upload; mirror into the draft so the
       // Save fan-out (which sends `_draft.wallpaperType`) keeps 'custom'
@@ -700,6 +777,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _systemMessage('Wallpaper uploaded and applied.');
     } finally {
       if (mounted) setState(() => _wallpaperUploading = false);
+    }
+  }
+
+  /// The picked file's MIME type from its extension (the PWA sends the File's
+  /// own `type` to the Blossom PUT).
+  static String _imageContentType(String path) {
+    switch (p.extension(path).toLowerCase()) {
+      case '.png':
+        return 'image/png';
+      case '.webp':
+        return 'image/webp';
+      case '.gif':
+        return 'image/gif';
+      case '.heic':
+        return 'image/heic';
+      default:
+        return 'image/jpeg';
     }
   }
 
@@ -2611,13 +2705,28 @@ class _WallpaperPicker extends StatelessWidget {
       );
     }
     final path = customThumbPath;
-    if (path != null && path.isNotEmpty && File(path).existsSync()) {
-      return ClipRRect(
-        borderRadius: NymRadius.rxs,
-        child: SizedBox.expand(
-          child: Image.file(File(path), fit: BoxFit.cover),
-        ),
-      );
+    if (path != null && path.isNotEmpty) {
+      // The PWA stores the uploaded blob's public URL; older native installs
+      // may still hold an on-device file path — render either.
+      final isRemote =
+          path.startsWith('http://') || path.startsWith('https://');
+      if (isRemote || File(path).existsSync()) {
+        return ClipRRect(
+          borderRadius: NymRadius.rxs,
+          child: SizedBox.expand(
+            child: isRemote
+                // Proxied like every other remote image (hide IP / bypass
+                // hotlink 403s), matching wallpaper_layer.dart's render path.
+                ? Image.network(
+                    proxiedAvatarUrl(path) ?? path,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => NymSvgIcon(NymIcons.upload,
+                        size: 18, color: c.textDim),
+                  )
+                : Image.file(File(path), fit: BoxFit.cover),
+          ),
+        );
+      }
     }
     return NymSvgIcon(NymIcons.upload, size: 18, color: c.textDim);
   }

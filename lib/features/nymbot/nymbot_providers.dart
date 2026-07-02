@@ -118,6 +118,7 @@ class BotChatState {
     this.git,
     this.balance = BotBalance.empty,
     this.balanceKnown = false,
+    this.balanceUnavailable = false,
     this.sending = false,
     this.clearedAtSec = 0,
   });
@@ -134,6 +135,11 @@ class BotChatState {
   /// "checking credits…" until then — PWA `channelMeta` initial text).
   final bool balanceKnown;
 
+  /// True when a balance check failed before any count ever landed — the
+  /// header meta shows 'credits unavailable' (PWA `_refreshBotCreditMeta`,
+  /// pms.js:2382-2389). Cleared the moment any balance arrives.
+  final bool balanceUnavailable;
+
   final bool sending;
 
   /// The `?clear` watermark (seconds), 0 = never cleared. A cleared chat is
@@ -148,6 +154,7 @@ class BotChatState {
     Object? git = _sentinel,
     BotBalance? balance,
     bool? balanceKnown,
+    bool? balanceUnavailable,
     bool? sending,
     int? clearedAtSec,
   }) =>
@@ -157,6 +164,7 @@ class BotChatState {
         git: identical(git, _sentinel) ? this.git : git as GitConfig?,
         balance: balance ?? this.balance,
         balanceKnown: balanceKnown ?? this.balanceKnown,
+        balanceUnavailable: balanceUnavailable ?? this.balanceUnavailable,
         sending: sending ?? this.sending,
         clearedAtSec: clearedAtSec ?? this.clearedAtSec,
       );
@@ -490,8 +498,8 @@ class BotChatController extends StateNotifier<BotChatState> {
     _persistGit(null);
   }
 
-  void setBalance(BotBalance b) =>
-      state = state.copyWith(balance: b, balanceKnown: true);
+  void setBalance(BotBalance b) => state = state.copyWith(
+      balance: b, balanceKnown: true, balanceUnavailable: false);
 
   // --- Command dispatch (the PWA `_handleBotPM` command branches) -------------
 
@@ -680,19 +688,13 @@ class BotChatController extends StateNotifier<BotChatState> {
           e.pro ? CreditTier.pro : CreditTier.standard);
     } on NymbotException catch (e) {
       _setBotTyping(false);
+      // A response DID come back — the PWA advances read receipts before its
+      // `status >= 400 || data.error` check (pms.js:2481-2487); only the
+      // network-exception catch below skips them.
+      _markBotPMReceipts('read');
       // `status >= 400 || data.error` → 'Nymbot: <error|request failed>'
       // (pms.js:2484-2487).
-      String detail = 'request failed';
-      final body = e.body;
-      if (body != null && body.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(body);
-          if (decoded is Map && decoded['error'] is String) {
-            detail = decoded['error'] as String;
-          }
-        } catch (_) {}
-      }
-      _system('Nymbot: $detail');
+      _system('Nymbot: ${_errorDetail(e) ?? 'request failed'}');
     } catch (_) {
       _setBotTyping(false);
       _system('Nymbot is unavailable right now. Please try again.');
@@ -701,10 +703,26 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
   }
 
+  /// The worker `error` string carried in a [NymbotException] body (the PWA's
+  /// `data.error` reads), or null when the failure had no parseable error.
+  static String? _errorDetail(NymbotException e) {
+    final body = e.body;
+    if (body == null || body.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['error'] is String) {
+        final err = decoded['error'] as String;
+        if (err.isNotEmpty) return err;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   void _applyLedgerBalance(int balance, {required bool pro}) {
     final b = state.balance;
     state = state.copyWith(
       balanceKnown: true,
+      balanceUnavailable: false,
       balance: pro
           ? BotBalance(
               balance: b.balance,
@@ -734,7 +752,8 @@ class BotChatController extends StateNotifier<BotChatState> {
       final b =
           await _service.balance(pubkey: _pubkey!, auth: _authFor('balance'));
       if (!mounted) return;
-      state = state.copyWith(balance: b, balanceKnown: true);
+      state = state.copyWith(
+          balance: b, balanceKnown: true, balanceUnavailable: false);
       if (display) {
         final std = b.balance;
         final pro = b.proBalance;
@@ -743,12 +762,26 @@ class BotChatController extends StateNotifier<BotChatState> {
             '**$pro** Pro credit${pro == 1 ? '' : 's'}.'
             '${std <= 0 && pro <= 0 ? ' Type `?buy` to purchase more.' : ''}');
       }
-    } on NymbotException {
-      if (display) _system('Nymbot: could not check balance');
+    } on NymbotException catch (e) {
+      // `'Nymbot: ' + (data.error || 'could not check balance')`
+      // (pms.js:2529-2532).
+      if (display) {
+        _system('Nymbot: ${_errorDetail(e) ?? 'could not check balance'}');
+      }
+      _markBalanceUnavailable();
     } catch (_) {
       if (display) {
         _system('Could not reach Nymbot to check your balance.');
       }
+      _markBalanceUnavailable();
+    }
+  }
+
+  /// Failed check with no count ever cached → header meta 'credits unavailable'
+  /// (`_refreshBotCreditMeta`, pms.js:2382-2389).
+  void _markBalanceUnavailable() {
+    if (mounted && !state.balanceKnown) {
+      state = state.copyWith(balanceUnavailable: true);
     }
   }
 
@@ -851,7 +884,8 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
     _displayBotInfoMessage([
       '**📖 Nymbot premium guide**',
-      'You right now: ${statusBits.join(' · ')}.',
+      // The status line renders in italics (`<em>`, pms.js:1749).
+      '*You right now: ${statusBits.join(' · ')}.*',
       '',
       '**1. Standard premium (this chat)**',
       'Each message is auto-routed to the best AI model for its task. Replies cost **standard credits** (10 sats each, bulk bonuses from 500 sats): 1 credit for general chat, creative writing, or translation; 2 credits for coding or reasoning/math.',

@@ -157,21 +157,24 @@ class ChannelListItem extends ConsumerWidget {
                       child: Container(
                         width: 3,
                         decoration: BoxDecoration(
-                          color: active ? c.primary : _pinnedGrey,
+                          // Active bar is `--primary`; the pinned-not-active bar
+                          // is `var(--text-dim)` (styles-shell.css:355-366).
+                          color: active ? c.primary : c.textDim,
                           borderRadius: const BorderRadius.only(
                             topRight: Radius.circular(3),
                             bottomRight: Radius.circular(3),
                           ),
-                          // `::before` accent bar glow 0 0 8px primary@40%
-                          // (no glow on the grey pinned bar).
-                          boxShadow: active
-                              ? [
-                                  BoxShadow(
-                                    color: c.primaryA(0.4),
-                                    blurRadius: 8,
-                                  ),
-                                ]
-                              : null,
+                          // `::before` accent bar glow: 0 0 8px primary@40%
+                          // when active; 0 0 8px rgba(150,150,160,0.3) on the
+                          // grey pinned bar.
+                          boxShadow: [
+                            BoxShadow(
+                              color: active
+                                  ? c.primaryA(0.4)
+                                  : _pinnedGrey.withValues(alpha: 0.3),
+                              blurRadius: 8,
+                            ),
+                          ],
                         ),
                       ),
                     ),

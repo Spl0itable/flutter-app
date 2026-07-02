@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -845,6 +846,11 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
       const Duration(milliseconds: _PanicHoldDetector.holdMs),
       () {
         _fired = true;
+        // The hold fires the SAME 30ms `nymHapticTap` every other long-press
+        // site uses, right as the timer elapses (`if (window.nymHapticTap)
+        // window.nymHapticTap(); this.panicWipe()`, panic.js:20-25) — mapped
+        // to lightImpact like the port's other nymHapticTap sites.
+        HapticFeedback.lightImpact();
         widget.onHold();
       },
     );
