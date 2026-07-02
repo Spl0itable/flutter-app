@@ -287,8 +287,8 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   }
 
   /// The `#botCreditMeta` text (`_renderBotCreditMeta`, pms.js:2361-2380):
-  /// Pro pinned → '<n> Pro credit(s) · <model> [· <repoName>]'; otherwise the
-  /// standard count ('<n> credit(s) left', or both pools when Pro credits
+  /// Pro pinned → `'<n> Pro credit(s) · <model> [· <repoName>]'`; otherwise the
+  /// standard count (`'<n> credit(s) left'`, or both pools when Pro credits
   /// exist). 'checking credits…' until the first balance lands.
   String _botCreditMeta(BotChatState state) {
     final proModel = state.proModel;

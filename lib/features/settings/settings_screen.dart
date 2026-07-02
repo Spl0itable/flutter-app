@@ -210,7 +210,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// Reads the real on-device cache size from the controller and formats the
   /// PWA readout into [_cacheReadout] (F7). Mirrors `refreshAppCacheSize`
   /// (app.js:3681-3716): show "Calculating…" until the async read resolves,
-  /// then `"<size> cached on device — N channels, N PM/group threads,
+  /// then `"[size] cached on device — N channels, N PM/group threads,
   /// N profiles, N reaction records"` (size auto-scaled B/KB/MB/GB), the
   /// honest empty-state string when nothing is cached, or the
   /// cache-unavailable string when the store errors.
