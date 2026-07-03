@@ -380,12 +380,19 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   /// The author's active message-style decoration. The supporter badge also
   /// adds a gold "supporter-style" treatment to the message body
-  /// (`.message.supporter-style`); an explicit style takes precedence.
+  /// (`.message.supporter-style`) — and the PWA applies BOTH classes when a
+  /// style is active too (`_applyShopClassesToMessage`, shop.js:485-495), so
+  /// the two cascade together: supporter's gold text/row wash composes over
+  /// the style per [composeSupporterStyle].
   MessageStyleDecoration? _styleDecoration(BuildContext context) {
     final cos = _cosmetics;
     final isLight = context.nym.isLight;
     final styled = messageStyleDecoration(cos.styleId, isLight: isLight);
-    if (styled != null) return styled;
+    if (styled != null) {
+      return cos.supporter
+          ? composeSupporterStyle(styled, cos.styleId!, isLight: isLight)
+          : styled;
+    }
     if (cos.supporter) {
       return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
     }
@@ -1037,51 +1044,43 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // gold/neon/phoenix/cosmic aura gradients). Takes precedence over the flat
     // [bg] in the row decoration below.
     List<Color>? bgGradient;
-    // IRC layout paints the message-style accents on the row itself
+    // IRC layout paints the SUPPORTER accents on the row itself
     // (`body:not(.chat-bubbles) .message.supporter-style { background; border-left }`).
+    // The style CONTENT plates (satoshi/eclipse/crt `.message-content`
+    // backgrounds) belong to the content box below, never the row.
     if (deco?.borderAccent != null) {
       barColor = deco!.borderAccent;
-      // Supporter paints a gold linear-gradient on the IRC row (not a flat fill);
-      // a plain style background (none today in IRC) would use contentBackground.
       bgGradient = deco.backgroundGradient ?? bgGradient;
-      if (deco.backgroundGradient == null) {
-        bg = deco.contentBackgroundFor(bubble: false) ?? bg;
-      }
     }
-    // Special cosmetic auras also paint a left bar + background tint on the row.
-    // The PWA paints `background: linear-gradient(135deg,…)` on the IRC row for
-    // gold/neon/phoenix/cosmic, and a flat fill for frost — read BOTH here (the
-    // old code read only `aura.background`, dropping the 4 gradient auras).
+    // Special cosmetic auras split by scope. gold/neon/phoenix/cosmic are
+    // ROW-scoped in IRC — `body:not(.chat-bubbles) .message.cosmetic-aura-*`
+    // paints the 3px left bar, inset ring, glow and 135deg gradient on the
+    // whole row (styles-features.css:1099-1186). frost/rainbow/hologram target
+    // `.message-content` in EVERY layout (:1121-1139, :1141-1167, :1197-1211),
+    // so they decorate the content box below — never the time/author columns.
+    // The IRC border-left is the discriminator: exactly the row-scoped four
+    // carry one.
     final auras = _resolveAuras(context);
-    final strongestAura = auras.isNotEmpty ? auras.last : null;
-    if (strongestAura?.borderAccent != null) {
-      barColor = strongestAura!.borderAccent;
+    final rowAuras = [
+      for (final a in auras)
+        if (a.borderAccent != null) a,
+    ];
+    final contentAuras = [
+      for (final a in auras)
+        if (a.borderAccent == null) a,
+    ];
+    final rowAura = rowAuras.isNotEmpty ? rowAuras.last : null;
+    if (rowAura != null) {
+      barColor = rowAura.borderAccent;
+      bgGradient = rowAura.gradient ?? bgGradient;
     }
-    if (strongestAura?.gradient != null) {
-      bgGradient = strongestAura!.gradient;
-    } else if (strongestAura?.background != null && !_styleClassActive) {
-      // The frost icy wash paints ONLY when no message style is active
-      // (`.message:not([class*="style-"]).cosmetic-frost .message-content`,
-      // styles-features.css:1163-1166); the IRC row gradients above carry no
-      // such gate.
-      bg = strongestAura!.background;
-    }
-    // The aura whose overlay (prism ring / hologram sheen) must paint on the IRC
-    // row — the same painter the bubble path uses (was bubble-only, so IRC
-    // rainbow/hologram rendered nothing but a glow).
-    final overlayAura =
-        auras.where((a) => a.hasOverlay && (a.prismRing || a.hologram)).isNotEmpty
-            ? auras.firstWhere((a) => a.prismRing || a.hologram)
-            : null;
-    // The watermark + whether it tiles edge-only — both read off the SAME aura
-    // (the first with a watermark) so a frost+other combination stays consistent.
-    final styleWatermark = deco?.watermark;
-    final CosmeticAura? auraWatermark = styleWatermark != null
-        ? null
-        : auras.where((a) => a.watermark != null).fold<CosmeticAura?>(
-            null, (prev, a) => prev ?? a);
-    final watermark = styleWatermark ?? auraWatermark?.watermark;
-    final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
+    // The cosmic starfield is part of the IRC ROW background
+    // (`body:not(.chat-bubbles) .message.cosmetic-aura-cosmic { background:
+    // gradient, url(starfield) }`, :1179-1186, no style gate) — it tiles the
+    // whole row, unlike the content-scoped `--style-pattern` textures.
+    final CosmeticAura? rowWatermarkAura = rowAuras
+        .where((a) => a.watermark != null)
+        .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
 
     // The three `.message` flex items, in PWA HTML order (messages.js:936-938):
     // `.message-time` (FIRST), `.message-author`, `.message-content`.
@@ -1141,11 +1140,114 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         ),
       ),
     );
+    // ---- The `.message-content` box ----
+    // Everything that targets `.message-content` decorates THIS box, not the
+    // row: the satoshi/eclipse/crt background plates (+ satoshi's own
+    // `padding: 10px 15px`), the tiled `--style-pattern` watermark
+    // (`.message-content::before` at `inset: 0` of the CONTENT element,
+    // styles-features.css:966-990) and the content-scoped cosmetics. The
+    // reactions row is a `.message` sibling (reactions.js:475), so it sits
+    // OUTSIDE the plate.
+    Widget contentBody = _bodyContent(
+        context, _bitchatColor(c) ?? c.text, fontSize,
+        deco: deco);
+    // The style plate (`.message.style-X .message-content { background }` —
+    // satoshi orange@.2 / light rgba(196,122,21,.1); eclipse rgba(18,14,28,.72)
+    // and crt rgba(10,8,2,.82) in BOTH themes, :545-552 + :1289-1299 +
+    // themes:899-901). Supporter's wash is bubble-only, so it returns null
+    // here. The frost icy fill applies ONLY when no message style is active
+    // (`.message:not([class*="style-"]).cosmetic-frost .message-content`,
+    // :1163-1166).
+    Color? contentFill = deco?.contentBackgroundFor(bubble: false);
+    if (contentFill == null && !_styleClassActive) {
+      contentFill = contentAuras
+          .where((a) => a.background != null)
+          .fold<Color?>(null, (prev, a) => prev ?? a.background);
+    }
+    // The content watermark: the style `--style-pattern` tile, else a
+    // content-scoped aura texture (frost's 18px edge snowflakes, :1149-1161).
+    final styleWatermark = deco?.watermark;
+    final CosmeticAura? contentWatermarkAura = styleWatermark != null
+        ? null
+        : contentAuras.where((a) => a.watermark != null).fold<CosmeticAura?>(
+            null, (prev, a) => prev ?? a);
+    final contentWatermark = styleWatermark ?? contentWatermarkAura?.watermark;
+    final contentEdgeWatermark = contentWatermarkAura?.edgeWatermark ?? false;
+    // Content-scoped aura glows (frost 10px / rainbow 16px / hologram 18px)
+    // sit on the content box, as does the overlay painter for the prism ring,
+    // hologram sheen and frost/hologram inset rings — the same painter the
+    // bubble path uses.
+    final contentShadows = <BoxShadow>[
+      for (final a in contentAuras)
+        if (a.glowColorFor(bubble: false) != null &&
+            a.glowBlurFor(bubble: false) > 0)
+          BoxShadow(
+            color: a.glowColorFor(bubble: false)!,
+            blurRadius: a.glowBlurFor(bubble: false),
+          ),
+    ];
+    final contentOverlays = contentAuras.where((a) => a.hasOverlay).toList();
+    final contentOverlayAura =
+        contentOverlays.isNotEmpty ? contentOverlays.first : null;
+    if (contentFill != null ||
+        contentWatermark != null ||
+        contentShadows.isNotEmpty ||
+        contentOverlayAura != null ||
+        deco?.contentPadding != null) {
+      Widget inner = contentBody;
+      if (contentWatermark != null || contentOverlayAura != null) {
+        inner = Stack(
+          children: [
+            if (contentWatermark != null)
+              Positioned.fill(
+                  child: StyleWatermarkLayer(
+                      watermark: contentWatermark,
+                      edgeOnly: contentEdgeWatermark)),
+            contentBody,
+            if (contentOverlayAura != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: CosmeticOverlayPainter(
+                      aura: contentOverlayAura,
+                      // `.message-content` has no border-radius in IRC (the
+                      // `::before`/`::after` `border-radius: inherit` resolves
+                      // to 0), so the box is square.
+                      radius: BorderRadius.zero,
+                      bubble: false,
+                      // Drops the hologram iridescent fill + sheen when a
+                      // `style-…` class is active (`:not([class*="style-"])
+                      // .cosmetic-bubble-hologram`, styles-features.css:
+                      // 1203-1211) — the ring/glow stay.
+                      styleActive: _styleClassActive,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      }
+      contentBody = Container(
+        // Columns mode stretches the content to the column
+        // (`.cv-list .message-content { width: 100% }`); in the wrap row the
+        // box hugs the content like the PWA's shrink-wrapped satoshi plate.
+        width: widget.columnsMode ? double.infinity : null,
+        padding: deco?.contentPadding,
+        decoration: BoxDecoration(
+          color: contentFill,
+          boxShadow: contentShadows.isEmpty ? null : contentShadows,
+        ),
+        // Clip the tiled watermark / painted overlays to the box.
+        clipBehavior: (contentWatermark != null || contentOverlayAura != null)
+            ? Clip.antiAlias
+            : Clip.none,
+        child: inner,
+      );
+    }
     final contentColumn = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
-            deco: deco),
+        contentBody,
         // Reactions row renders only when reactions OR zaps exist (the PWA
         // `updateMessageReactions` early-returns on an empty reaction set,
         // removing the row entirely unless zaps remain). The zap badge sits
@@ -1259,25 +1361,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // centered, `border-radius:0 3px 3px 0`; mentions add a secondary glow.
     final body = Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      child: watermark != null
+      child: rowWatermarkAura != null
           ? Stack(
               children: [
                 Positioned.fill(
                     child: StyleWatermarkLayer(
-                        watermark: watermark, edgeOnly: edgeWatermark)),
+                        watermark: rowWatermarkAura.watermark!,
+                        edgeOnly: rowWatermarkAura.edgeWatermark)),
                 rowChildren,
               ],
             )
           : rowChildren,
     );
-    // The IRC row inset ring is approximated by a 1px border — but suppress it
-    // for an overlay aura (prism/hologram), whose ring the painter strokes (else
-    // a double ring). gold/neon/phoenix/cosmic keep the border approximation.
-    final rowRing = (strongestAura?.insetColor != null &&
-            strongestAura != overlayAura)
-        ? strongestAura!.insetColor
-        : null;
-    final rowGlowBlur = strongestAura?.glowBlurFor(bubble: false) ?? 0;
+    // The row-scoped auras' inset ring (gold/neon/phoenix/cosmic — `inset 0 0 0
+    // 1px <ring>` on the row) is approximated by a 1px border; the
+    // content-scoped rings (frost/hologram) are stroked by the content box's
+    // painter above.
+    final rowRing = rowAura?.insetColor;
+    final rowGlowColor = rowAura?.glowColorFor(bubble: false);
+    final rowGlowBlur = rowAura?.glowBlurFor(bubble: false) ?? 0;
     final hasBg = bg != null || bgGradient != null;
     final content = Container(
       // `.message` is a block-level flex row filling `.messages-container` (no
@@ -1303,14 +1405,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // The bubble path routes these through CosmeticOverlayPainter/_decorate
         // Bubble; here we approximate the inset ring with a 1px border.
         border: rowRing != null ? Border.all(color: rowRing, width: 1) : null,
-        boxShadow:
-            (strongestAura?.glowColor != null && rowGlowBlur > 0)
-                ? [
-                    BoxShadow(
-                        color: strongestAura!.glowColor!,
-                        blurRadius: rowGlowBlur),
-                  ]
-                : null,
+        boxShadow: (rowGlowColor != null && rowGlowBlur > 0)
+            ? [BoxShadow(color: rowGlowColor, blurRadius: rowGlowBlur)]
+            : null,
       ),
       clipBehavior: hasBg ? Clip.antiAlias : Clip.none,
       child: barColor != null
@@ -1345,36 +1442,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             )
           : body,
     );
-    // The prism ring / holographic sheen — the same painter the bubble uses,
-    // now wired into the IRC ROW (rainbow/hologram in IRC previously rendered
-    // only a glow). Painted over the full row bounds (clipped to the row radius)
-    // so the ring sits at the row edge, not inside the content padding.
-    final decorated = overlayAura == null
-        ? content
-        : Stack(
-            children: [
-              content,
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: ClipRRect(
-                    borderRadius: NymRadius.rsm,
-                    child: CustomPaint(
-                      painter: CosmeticOverlayPainter(
-                        aura: overlayAura,
-                        radius: NymRadius.rsm,
-                        bubble: false,
-                        // Drops the hologram iridescent fill + sheen when a
-                        // `style-…` class is active (`:not([class*="style-"])
-                        // .cosmetic-bubble-hologram`, styles-features.css:
-                        // 1203-1211) — the ring/glow stay.
-                        styleActive: _styleClassActive,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
+    // The prism ring / hologram sheen / frost ring are CONTENT-scoped in every
+    // layout (`.message.cosmetic-* .message-content`, styles-features.css:
+    // 1121-1211) — they're painted by the content box above, so the row itself
+    // carries no overlay painter.
     return _SwipeToAct(
       settings: settings,
       onAction: (a) => _dispatchSwipeAction(context, a),
@@ -1385,7 +1456,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       // Desktop right-click → context menu (PWA `contextmenu` handler).
       onSecondaryTap: () => _openContextMenu(context),
       swipeReactEmojiUrl: _swipeReactEmojiUrl,
-      child: decorated,
+      child: content,
     );
   }
 
@@ -1423,13 +1494,26 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // text over a `linear-gradient(transparent, transparent)` border-box layer).
     // The frost flat wash applies only when no message style is active
     // (`.message:not([class*="style-"]).cosmetic-frost`, :1163-1166).
-    final bubbleColor = deco?.contentBackgroundFor(bubble: true) ??
-        (_styleClassActive ? null : lastAura?.background) ??
-        (self
-            ? c.primaryA(c.isLight ? 0.20 : 0.25)
-            : (c.isLight
-                ? const Color(0x1A000000) // black @ 0.10
-                : Colors.white.withValues(alpha: 0.14)));
+    //
+    // SELF + fire/ice: `body.chat-bubbles .message.self.style-fire/.style-ice
+    // .message-content { background: rgb(from var(--primary) r g b / 0.25)
+    // !important }` (styles-features.css:3708-3711) — five class selectors in
+    // the LAST-loaded stylesheet, so it beats the light-mode rgba(0,0,0,.08)
+    // fill (themes:1412-1415) and the supporter bubble wash: a self fire/ice
+    // bubble keeps primary@0.25 in BOTH themes; only other users' bubbles get
+    // the style override.
+    final selfFireIce = self &&
+        (_cosmetics.styleId == 'style-fire' ||
+            _cosmetics.styleId == 'style-ice');
+    final bubbleColor = selfFireIce
+        ? c.primaryA(0.25)
+        : deco?.contentBackgroundFor(bubble: true) ??
+            (_styleClassActive ? null : lastAura?.background) ??
+            (self
+                ? c.primaryA(c.isLight ? 0.20 : 0.25)
+                : (c.isLight
+                    ? const Color(0x1A000000) // black @ 0.10
+                    : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
     // The bubble interior = the body, THEN the `.bubble-time-inner` (the
@@ -1582,6 +1666,29 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
+    // `body.chat-bubbles .message.cosmetic-aura-gold { box-shadow: none;
+    // background: linear-gradient(135deg, rgba(255,215,0,0.05), transparent) }`
+    // (styles-themes-responsive.css:1551-1554): bubble mode ADDITIONALLY paints
+    // a faint 135deg gold wash across the whole `.message` ROW behind a
+    // gold-aura user's bubble. The rule carries no theme gate and has no light
+    // override, so it applies in both themes.
+    Widget rowStack = stack;
+    if (auras.any((a) => a.id == 'cosmetic-aura-gold')) {
+      rowStack = DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0x0DFFD700), // rgba(255,215,0,.05)
+              Color(0x00FFD700), // transparent
+            ],
+          ),
+        ),
+        child: stack,
+      );
+    }
+
     // The swipe / long-press / double-tap surface is the whole `.message` row:
     // the PWA binds `setupSwipeToReply` to `.message` and translates the FULL
     // row — name + bubble + translation + readers + reactions all slide with
@@ -1598,7 +1705,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       onSecondaryTap: () => _openContextMenu(context),
       avatarDx: widget.swipeAvatarDx,
       swipeReactEmojiUrl: _swipeReactEmojiUrl,
-      child: stack,
+      child: rowStack,
     );
 
     // `bubble-snap-in` (styles-features.css:3453-3471): a newly-appended
@@ -1681,10 +1788,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
     for (final a in auras) {
       // Inset ring (approximated as a tight 0-blur spread inside the box via a
-      // border below) + the outer glow (the bubble blur, e.g. gold 12px not 18).
+      // border below) + the outer glow at the bubble's colour + blur (light
+      // gold: 10px rgba(180,140,0,.15), themes:929-932 — not the IRC .12/12px).
       final blur = a.glowBlurFor(bubble: true);
-      if (a.glowColor != null && blur > 0) {
-        shadows.add(BoxShadow(color: a.glowColor!, blurRadius: blur));
+      final glowColor = a.glowColorFor(bubble: true);
+      if (glowColor != null && blur > 0) {
+        shadows.add(BoxShadow(color: glowColor, blurRadius: blur));
       }
     }
     // The strongest inset ring (last aura) is drawn as a hairline inner border

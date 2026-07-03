@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -205,6 +206,39 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   bool get _canBack => _index > 0;
   bool get _canForward => _index >= 0 && _index < _history.length - 1;
 
+  @override
+  void initState() {
+    super.initState();
+    // Columns mode: the deck may already be focused on the bot column when the
+    // header mounts (restored layout), so run the bot-header activation for
+    // the initial view too — `_renderPMHeader` fires on every open/focus in
+    // the PWA (pms.js:2905-2938).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _maybeActivateBotHeader(ref.read(currentViewProvider));
+    });
+  }
+
+  /// Columns mode keeps this shared header while the deck renders the bot
+  /// column, so focusing/opening the Nymbot conversation must do what the
+  /// PWA's `_renderPMHeader` does for a verified bot ("Split out of openPM so
+  /// column-view focus can show the same header", pms.js:2905-2938): kick
+  /// `_refreshBotCreditMeta` → `_checkBotCredits(false)` so the
+  /// 'E2E encrypted · checking credits…' meta resolves, and run the engine's
+  /// empty-thread intro (`loadPMMessages`'s empty branch — start line, welcome,
+  /// silent refresh). Single-pane mode mounts [BotChatScreen] instead, whose
+  /// initState already does exactly this.
+  void _maybeActivateBotHeader(ChatView view) {
+    if (!widget.columnsMode) return;
+    if (view.kind != ViewKind.pm) return;
+    final nostr = ref.read(nostrControllerProvider);
+    if (!nostr.isVerifiedBot(view.id)) return;
+    nostr.bindBotChat();
+    final engine = ref.read(botChatControllerProvider.notifier);
+    engine.attachSigner(nostr.signer);
+    engine.ensureIntro();
+    unawaited(engine.refreshBalance());
+  }
+
   void _recordView(ChatView view) {
     if (_navigating) return;
     if (_index >= 0 && _history[_index] == view) return;
@@ -245,6 +279,13 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     final app = ref.watch(appStateProvider);
     final view = ref.watch(currentViewProvider);
     _recordView(view);
+
+    // Columns-deck focus / sidebar switches onto the bot PM re-render this
+    // shared header — mirror `_renderPMHeader`'s bot branch (credit-meta
+    // refresh + empty-thread intro; see [_maybeActivateBotHeader]).
+    ref.listen(currentViewProvider, (prev, next) {
+      if (prev != next) _maybeActivateBotHeader(next);
+    });
 
     final title = _titleFor(app, view);
     final meta = _metaFor(app, view);

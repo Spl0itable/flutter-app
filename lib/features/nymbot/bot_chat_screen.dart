@@ -14,7 +14,8 @@ import '../../models/message.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
-import '../../widgets/chat/composer.dart' show EmojiSentinelController;
+import '../../widgets/chat/composer.dart'
+    show ComposerDrafts, EmojiSentinelController;
 import '../../widgets/chat/message_row.dart' show MessageGroup, MessageGroupEntry;
 import '../../widgets/chat/typing_indicator.dart';
 import '../../widgets/common/nym_avatar.dart';
@@ -866,15 +867,37 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// mid-open doesn't reshuffle.
   List<MapEntry<String, String>> _translateLangOrder = const [];
 
+  /// The bot conversation's draft key in the shared session store — the PWA's
+  /// one persistent `#messageInput` keeps bot-PM drafts in the same
+  /// `_inputDrafts` map as every other conversation (`_getInputContextKey`
+  /// `'p:'+pm`, channels.js:1075-1105).
+  static final String _draftKey =
+      ComposerDrafts.keyFor(const ChatView.pm(kNymbotPubkey));
+
   @override
   void initState() {
     super.initState();
     _controller.addListener(_onTextChanged);
     _focus.addListener(() => setState(() {}));
+    // Restore any unsent input previously typed for the bot conversation
+    // (`_restoreDraftForContext` on open, pms.js:3023-3024). Post-frame so the
+    // change listener's setState never fires mid-mount.
+    final draft = ComposerDrafts.restore(_draftKey);
+    if (draft.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _controller.text = draft;
+        _controller.selection = TextSelection.collapsed(offset: draft.length);
+      });
+    }
   }
 
   @override
   void dispose() {
+    // Stash the unsent input before this composer unmounts (switching away
+    // from the bot chat) — `_saveCurrentDraft` on every conversation switch
+    // (channels.js:1082-1089); a blank draft deletes the entry.
+    ComposerDrafts.save(_draftKey, _controller.expand(_controller.text));
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focus.dispose();

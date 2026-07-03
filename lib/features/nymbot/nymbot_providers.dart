@@ -313,6 +313,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     _auth = auth;
     _privkey = privkey;
     _signer = signer ?? (privkey != null ? LocalSigner(privkey) : null);
+    _wireApiWsAuth();
   }
 
   /// Late-attaches the ACTIVE [EventSigner] (local key OR NIP-46 remote) on
@@ -322,8 +323,41 @@ class BotChatController extends StateNotifier<BotChatState> {
   /// instead of a static pre-bound auth blob. Keeps the bound privkey (the
   /// local reply-unwrap path) intact.
   void attachSigner(EventSigner? signer) {
-    if (signer != null) _signer = signer;
+    if (signer != null) {
+      _signer = signer;
+      _wireApiWsAuth();
+    }
   }
+
+  /// Wires the service's WS-first `/api` transport: the socket's one-time AUTH
+  /// handshake signs a kind-27235 `api-ws` event bound to `https://<host>/api/WS`
+  /// (`_signBotAuth('api-ws', 'WS')` inside `_ensureApiSocket`, shop.js:30 —
+  /// endpoint 'WS' → `/api/WS`, pms.js:1652), signed ONCE per connection through
+  /// the active signer so every bot money op rides the authenticated socket and
+  /// only the HTTP fallback signs per action.
+  void _wireApiWsAuth() {
+    final signer = _signer;
+    if (signer == null) return;
+    // `…/api/bot` → `…/api/WS` (same fixed host as the service URL).
+    final url =
+        _service.baseUrl.replaceFirst(RegExp(r'/bot$'), '/WS');
+    _service.setApiWsAuthBuilder(() => Nip98Auth.buildSigned(
+          action: 'api-ws',
+          url: url,
+          signer: signer,
+        ));
+  }
+
+  /// `_purgeBotPMArchive` seam (pms.js:1881-1891): batch `pm-delete` of the
+  /// cleared thread's wrap ids from the D1 archive so no device can restore it.
+  /// Wired by [NostrController.bindBotChat] (the storage-sync slice owns the
+  /// authed transport); null before boot → the purge is skipped best-effort.
+  Future<void> Function(List<String> wrapIds)? pmArchivePurger;
+
+  /// Debounced encrypted-settings publish (`_debouncedNostrSettingsSave(2000)`,
+  /// pms.js:1878/1903) so the cleared-at watermark / welcomed flag reach the
+  /// user's other devices immediately. Wired by [NostrController.bindBotChat].
+  void Function()? settingsSyncRequester;
 
   bool get isBound => _pubkey != null;
 
@@ -386,7 +420,7 @@ class BotChatController extends StateNotifier<BotChatState> {
   void _displayBotInfoMessage(String text, {String? id, int? createdAtMs}) {
     final nowMs = createdAtMs ?? DateTime.now().millisecondsSinceEpoch;
     final msgId = id ?? 'nymbot-info-$nowMs-${_infoSeq++}';
-    final msg = Message(
+    _appendInfo(Message(
       id: msgId,
       author: _botNym,
       pubkey: kNymbotPubkey,
@@ -400,10 +434,36 @@ class BotChatController extends StateNotifier<BotChatState> {
       eventKind: 1059,
       isBot: true,
       senderVerified: true,
-    );
+    ));
+  }
+
+  /// A transient, LOCAL-ONLY centered system line in the bot thread. The PWA's
+  /// 'Start of private message' / `?clear` confirmation are `displaySystemMessage`
+  /// DOM rows that never enter `pmMessages` (they vanish on every re-render,
+  /// pms.js:3065-3082 / 1908-1916) — so here they ride [BotChatState.infoMessages]
+  /// instead of the persisted canonical store. A repeated [id] replaces the old
+  /// row with a fresh timestamp (the per-open re-render).
+  void _displayTransientSystem(String text, {String? id}) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    _appendInfo(Message(
+      id: id ?? 'nymbot-sys-$nowMs-${_infoSeq++}',
+      author: '',
+      pubkey: '',
+      content: text,
+      createdAt: nowMs ~/ 1000,
+      ms: nowMs,
+      timestamp: nowMs,
+      conversationKey: conversationKey,
+      kind: MessageKind.system,
+    ));
+  }
+
+  /// Appends [msg] to the transient info layer, replacing any older row with
+  /// the same id (the welcome/start line re-rendered fresh on every open).
+  void _appendInfo(Message msg) {
     state = state.copyWith(infoMessages: [
       for (final m in state.infoMessages)
-        if (m.id != msgId) m,
+        if (m.id != msg.id) m,
       msg,
     ]);
   }
@@ -509,12 +569,18 @@ class BotChatController extends StateNotifier<BotChatState> {
     final list = _thread;
     if (!_primed) _primeHandled(list);
     if (list.isNotEmpty) return;
-    _system('Start of private message');
+    // The PWA re-renders the WHOLE empty conversation as transient DOM on
+    // EVERY open (`loadPMMessages`'s empty branch, pms.js:3065-3082): the
+    // 'Start of private message' line, the welcome bubble (only when the chat
+    // was never `?clear`-ed), and a silent credit refresh. Nothing persists —
+    // reset the transient layer to exactly that intro so a restart with a
+    // still-empty thread re-greets like the PWA (no start line ever enters
+    // the persisted canonical store).
+    state = state.copyWith(infoMessages: const <Message>[]);
+    _displayTransientSystem('Start of private message', id: 'nymbot-start');
     if (state.clearedAtSec == 0) {
-      // Rendered fresh (current timestamp) on every open of an empty thread,
-      // exactly like the PWA's per-open DOM render — no future-stamped time.
-      // Ordering after the start line is the bot screen's merge rule (store
-      // rows sort before info bubbles at equal timestamps).
+      // Rendered fresh (current timestamp) after the start line, matching the
+      // PWA's DOM append order.
       _displayBotInfoMessage(botWelcomeText, id: 'nymbot-welcome');
     }
     unawaited(checkBotCredits(display: false));
@@ -554,6 +620,10 @@ class BotChatController extends StateNotifier<BotChatState> {
       senderVerified: true,
     ));
     await p.setString(_kWelcomedPref, 'true');
+    // Push the welcomed flag to synced settings so the user's other devices
+    // skip the proactive PM too (`_debouncedNostrSettingsSave(2000)`,
+    // pms.js:1878).
+    settingsSyncRequester?.call();
   }
 
   // --- Local controls --------------------------------------------------------
@@ -837,7 +907,9 @@ class BotChatController extends StateNotifier<BotChatState> {
       final data = await _service.sendBotMessage(
         pubkey: _pubkey!,
         eventId: wrapId,
-        auth: await _authFor('pm'),
+        // Signed only on the HTTP fallback leg — the authenticated socket
+        // skips per-action auth (shop.js:158-165).
+        auth: () => _authFor('pm'),
         proModel: pro?.key,
         fresh: fresh,
         // Repo mode rides only on Pro replies with a connected repo
@@ -977,7 +1049,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     if (_pubkey == null) return;
     try {
       final b = await _service.balance(
-          pubkey: _pubkey!, auth: await _authFor('balance'));
+          pubkey: _pubkey!, auth: () => _authFor('balance'));
       if (!mounted) return;
       state = state.copyWith(
           balance: b, balanceKnown: true, balanceUnavailable: false);
@@ -1063,29 +1135,41 @@ class BotChatController extends StateNotifier<BotChatState> {
   // --- ?clear (pms.js `_clearBotPMHistory`, :1894-1917) -----------------------
 
   Future<void> clearBotPMHistory() async {
+    // Snapshot the thread's wrap ids BEFORE the local wipe — they key the D1
+    // archive purge (`_purgeBotPMArchive` collects them from `pmMessages`,
+    // pms.js:1885-1887; non-hex local ids are filtered by the purger).
+    final ids = [for (final m in _thread) m.id];
     _setClearedAt(DateTime.now().millisecondsSinceEpoch ~/ 1000);
-    // Best-effort server-side context wipe (`_clearBotServerThread`). The D1
-    // PM-archive purge (`_purgeBotPMArchive`) is owned by the storage-sync
-    // slice — see handoffs.
+    // Best-effort server-side context wipe (`_clearBotServerThread`).
     if (_pubkey != null) {
       final pk = _pubkey!;
-      unawaited(_authFor('clear-history')
-          .then((auth) => _service.clearHistory(pubkey: pk, auth: auth))
+      unawaited(_service
+          .clearHistory(pubkey: pk, auth: () => _authFor('clear-history'))
           .catchError((_) => <String, dynamic>{}));
     }
+    // Batch pm-delete of the thread's wraps from the D1 archive so no device
+    // can restore the cleared thread (`_purgeBotPMArchive`, pms.js:1900).
+    final purge = pmArchivePurger;
+    if (purge != null) unawaited(purge(ids));
+    // Sync the cleared-at marker so other devices filter the thread too,
+    // covering any archived wraps this device didn't know about
+    // (`_debouncedNostrSettingsSave(2000)`, pms.js:1901-1903).
+    settingsSyncRequester?.call();
     // Wipe the local thread from the canonical store + the transient bubbles.
-    final ids = [for (final m in _thread) m.id];
     for (final id in ids) {
       _app.removeMessage(id);
     }
-    state = state.copyWith(infoMessages: const <Message>[]);
     _handledIds.clear();
     _lastLen = 0;
     _lastLastId = '';
-    // Re-render the empty conversation: start line, NO welcome (clearedAt),
-    // then the confirmation (pms.js:1908-1916).
-    _system('Start of private message');
-    _system('Nymbot chat cleared — starting fresh. Earlier messages are no '
+    // Re-render the empty conversation TRANSIENTLY, like the PWA's
+    // `loadPMMessages(conversationKey, true)` + `displaySystemMessage`
+    // (pms.js:1908-1916): start line, NO welcome (clearedAt), then the
+    // confirmation — none of it enters the persisted store.
+    state = state.copyWith(infoMessages: const <Message>[]);
+    _displayTransientSystem('Start of private message', id: 'nymbot-start');
+    _displayTransientSystem(
+        'Nymbot chat cleared — starting fresh. Earlier messages are no '
         'longer used as context.');
   }
 
@@ -1244,6 +1328,10 @@ class BotChatController extends StateNotifier<BotChatState> {
       }
       _system('Transferred ${moved.isEmpty ? '0 credits' : moved.join(' and ')} '
           'to @$targetNym. Your balance is now 0.');
+    } on NymbotException catch (e) {
+      // `status >= 400` → `'Transfer failed: ' + (data.error || 'request
+      // failed')` (pms.js:1965-1967).
+      _system('Transfer failed: ${_errorDetail(e) ?? 'request failed'}');
     } catch (_) {
       _system('Transfer failed. Please try again.');
     }
@@ -1524,7 +1612,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       amountSats: amountSats,
       tier: tier,
       pubkey: _pubkey!,
-      auth: await _authFor('create-invoice'),
+      auth: () => _authFor('create-invoice'),
       recipientPubkey: recip,
       zapRequest: zapRequest,
       comment: comment,
@@ -1543,7 +1631,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       final check = await _service.checkInvoice(
         invoiceId: invoice.invoiceId,
         pubkey: _pubkey!,
-        auth: await _authFor('check-invoice'),
+        auth: () => _authFor('check-invoice'),
       );
       if (check['paid'] != true) return false;
       // Paid → claim the credits (idempotent server-side). `gifterNym` names
@@ -1555,7 +1643,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       final claim = await _service.claimCredits(
         invoiceId: invoice.invoiceId,
         pubkey: _pubkey!,
-        auth: await _authFor('claim-credits'),
+        auth: () => _authFor('claim-credits'),
         gifterNym: gifterNym,
       );
       if (claim['error'] != null) return false;
@@ -1583,7 +1671,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     final res = await _service.transfer(
         pubkey: _pubkey!,
         targetPubkey: targetPubkey,
-        auth: await _authFor('transfer-credits'));
+        auth: () => _authFor('transfer-credits'));
     // Mirror the PWA: zero the displayed balances once the transfer succeeds.
     if (res['error'] == null) {
       final b = state.balance;

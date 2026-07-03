@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -45,13 +47,9 @@ Future<void> showSidebarQuickMenu(
   // pulse, so mediumImpact rather than the faint lightImpact.
   HapticFeedback.mediumImpact();
 
-  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-  if (overlay == null) return;
-  final size = overlay.size;
-
   final selected = await Navigator.of(context, rootNavigator: true)
       .push<SidebarQuickMenuItem>(
-    _QuickMenuRoute(anchor: globalPosition, overlaySize: size, items: items),
+    _QuickMenuRoute(anchor: globalPosition, items: items),
   );
   selected?.onSelected();
 }
@@ -60,16 +58,17 @@ Future<void> showSidebarQuickMenu(
 /// near the press point and clamps it on-screen. Outside presses dismiss it
 /// instantly (no exit animation) after a 400ms opening grace period,
 /// mirroring the PWA's `_showSidebarActionMenu` close handling
-/// (sidebar-sections.js:137-146).
+/// (sidebar-sections.js:137-146) — and, like the PWA's `onOutside` (which
+/// never preventDefaults/stopPropagates), they ALSO reach whatever sits under
+/// them, so tapping another sidebar row while the menu is open closes the menu
+/// AND opens that conversation in one tap.
 class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
   _QuickMenuRoute({
     required this.anchor,
-    required this.overlaySize,
     required this.items,
   });
 
   final Offset anchor;
-  final Size overlaySize;
   final List<SidebarQuickMenuItem> items;
 
   /// Wall-clock open time: outside presses within 400ms of opening are
@@ -85,6 +84,15 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
   // the PWA's 400ms grace period), not the stock barrier.
   @override
   bool get barrierDismissible => false;
+
+  // The PWA has NO barrier: its outside-close handler is a document-level
+  // `mousedown`/`touchstart` listener that only removes the menu, so the
+  // press also activates the element under it (sidebar-sections.js:142-159).
+  // The stock (even colorless) [ModalBarrier] eats every pointer; replace it
+  // with a non-hit-testable filler so presses fall through to the routes
+  // below.
+  @override
+  Widget buildModalBarrier() => const IgnorePointer(child: SizedBox.expand());
 
   @override
   String? get barrierLabel => 'Dismiss';
@@ -103,31 +111,17 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
-    const double menuWidth = 200;
-    final double itemH = 36; // ~14px font + 8/8 padding
-    final double menuH = items.length * itemH + 8; // + 4/4 menu padding
-    // PWA clamp (sidebar-sections.js:128-131):
-    // `left = max(10, min(x, vw - w - 10))`; top only clamps when overflowing
-    // the bottom: `top = max(10, vh - h - 10)`.
-    double left = anchor.dx;
-    double top = anchor.dy;
-    if (left > overlaySize.width - menuWidth - 10) {
-      left = overlaySize.width - menuWidth - 10;
-    }
-    if (left < 10) left = 10;
-    if (top + menuH > overlaySize.height - 10) {
-      top = overlaySize.height - menuH - 10;
-      if (top < 10) top = 10;
-    }
-
     return Stack(
       children: [
         // Outside presses dismiss on pointer-DOWN (the PWA listens on
         // `mousedown`/`touchstart`), but presses within 400ms of opening are
-        // ignored (sidebar-sections.js:142-146).
+        // ignored (sidebar-sections.js:142-146). TRANSLUCENT: the press is
+        // observed, never consumed — like the PWA's `onOutside`, it also hits
+        // whatever lies under it (a row tap opens that conversation, a new
+        // 500ms hold starts immediately).
         Positioned.fill(
           child: Listener(
-            behavior: HitTestBehavior.opaque,
+            behavior: HitTestBehavior.translucent,
             onPointerDown: (_) {
               if (DateTime.now().difference(_openedAt) <
                   const Duration(milliseconds: 400)) {
@@ -138,10 +132,14 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
             child: const SizedBox.expand(),
           ),
         ),
-        Positioned(
-          left: left,
-          top: top,
-          child: _QuickMenu(animation: animation, items: items),
+        // The PWA measures the REAL rendered menu (appended hidden, then
+        // `offsetWidth`/`offsetHeight`, sidebar-sections.js:121-126) before
+        // clamping; a layout delegate gets the same measured size.
+        Positioned.fill(
+          child: CustomSingleChildLayout(
+            delegate: _QuickMenuLayout(anchor: anchor),
+            child: _QuickMenu(animation: animation, items: items),
+          ),
         ),
       ],
     );
@@ -155,6 +153,35 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
     Widget child,
   ) =>
       child; // entrance handled inside _QuickMenu via the animation.
+}
+
+/// Places the menu at the press point, clamped on-screen from its MEASURED
+/// size — the PWA math (sidebar-sections.js:128-131):
+/// `left = max(10, min(x, vw - w - 10))`; top only clamps when overflowing the
+/// bottom: `top = max(10, vh - h - 10)`.
+class _QuickMenuLayout extends SingleChildLayoutDelegate {
+  _QuickMenuLayout({required this.anchor});
+
+  final Offset anchor;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final left = math.max(
+        10.0, math.min(anchor.dx, size.width - childSize.width - 10));
+    double top = anchor.dy;
+    if (top + childSize.height > size.height - 10) {
+      top = math.max(10.0, size.height - childSize.height - 10);
+    }
+    return Offset(left, top);
+  }
+
+  @override
+  bool shouldRelayout(_QuickMenuLayout oldDelegate) =>
+      oldDelegate.anchor != anchor;
 }
 
 class _QuickMenu extends ConsumerWidget {

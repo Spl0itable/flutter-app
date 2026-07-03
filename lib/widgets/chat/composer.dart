@@ -43,6 +43,45 @@ import '../context_menu/interaction_hooks.dart';
 import 'message_row.dart'
     show GroupInfoMember, encodeGroupInfoSystemMessage;
 
+/// Session-wide per-conversation unsent drafts — the PWA's app-level
+/// `_inputDrafts` map + `_getInputContextKey` (channels.js:1075-1105). The PWA
+/// has ONE persistent `#messageInput` shared by every conversation (including
+/// the bot PM), so its draft map survives every switch; natively the store
+/// must live OUTSIDE the composer widget state, because opening the Nymbot
+/// chat swaps the canonical [Composer] out entirely (chat_pane returns
+/// `BotChatScreen`) and its bot composer shares this same store.
+class ComposerDrafts {
+  ComposerDrafts._();
+
+  static final Map<String, String> _drafts = {};
+
+  /// `_getInputContextKey` (channels.js:1075-1079): `'g:'+group` / `'p:'+pm` /
+  /// `'c:'+(geohash||channel)` — the [ChatView] id carries exactly those.
+  static String keyFor(ChatView view) {
+    switch (view.kind) {
+      case ViewKind.group:
+        return 'g:${view.id}';
+      case ViewKind.pm:
+        return 'p:${view.id}';
+      case ViewKind.channel:
+        return 'c:${view.id}';
+    }
+  }
+
+  /// `_saveCurrentDraft` semantics (channels.js:1082-1089): stash [value]
+  /// under [key]; a blank/whitespace draft DELETES the stored entry.
+  static void save(String key, String value) {
+    if (value.trim().isNotEmpty) {
+      _drafts[key] = value;
+    } else {
+      _drafts.remove(key);
+    }
+  }
+
+  /// The saved draft for [key], or '' when none (`_restoreDraftForContext`).
+  static String restore(String key) => _drafts[key] ?? '';
+}
+
 /// The message composer (`.input-container` + `.message-input` + `.input-buttons`,
 /// docs/specs/02 §5.5). A multi-line input with a toolbar of image/file/emoji/GIF
 /// icon buttons and a SEND button wired to a local echo. On mobile the toolbar
@@ -88,26 +127,14 @@ class _ComposerState extends ConsumerState<Composer> {
   PendingEdit? _pendingEdit;
 
   // --- Per-conversation unsent drafts ---------------------------------------
-  // `_inputDrafts` + `_activeDraftKey` (channels.js:1075-1105): every
+  // [ComposerDrafts] + `_activeDraftKey` (channels.js:1075-1105): every
   // conversation switch — a sidebar/channel switch OR a columns-deck focus
   // change (`_cvFocusColumn`, columns.js:549-564) — stashes the current input
   // under the OUTGOING conversation's key, clears the quote chip, cancels a
-  // pending edit, then restores the INCOMING conversation's saved draft.
-  final Map<String, String> _inputDrafts = {};
+  // pending edit, then restores the INCOMING conversation's saved draft. The
+  // map itself is session-level ([ComposerDrafts]) so drafts survive this
+  // composer unmounting (the bot chat swap).
   String? _activeDraftKey;
-
-  /// `_getInputContextKey` (channels.js:1075-1079): `'g:'+group` / `'p:'+pm` /
-  /// `'c:'+(geohash||channel)` — the [ChatView] id carries exactly those.
-  static String _draftKeyFor(ChatView view) {
-    switch (view.kind) {
-      case ViewKind.group:
-        return 'g:${view.id}';
-      case ViewKind.pm:
-        return 'p:${view.id}';
-      case ViewKind.channel:
-        return 'c:${view.id}';
-    }
-  }
 
   /// `_saveCurrentDraft` (channels.js:1082-1089): stash the input under the
   /// active key — a blank/whitespace draft DELETES the stored entry. Stored in
@@ -118,21 +145,16 @@ class _ComposerState extends ConsumerState<Composer> {
   void _saveCurrentDraft() {
     final key = _activeDraftKey;
     if (key == null) return;
-    final v = _controller.expand(_controller.text);
-    if (v.trim().isNotEmpty) {
-      _inputDrafts[key] = v;
-    } else {
-      _inputDrafts.remove(key);
-    }
+    ComposerDrafts.save(key, _controller.expand(_controller.text));
   }
 
   /// `_restoreDraftForContext` (channels.js:1092-1105): point the active key at
   /// [view] and load its saved draft (empty when none). No-ops when the input
   /// already holds that exact text.
   void _restoreDraftForContext(ChatView view) {
-    final key = _draftKeyFor(view);
+    final key = ComposerDrafts.keyFor(view);
     _activeDraftKey = key;
-    final draft = _inputDrafts[key] ?? '';
+    final draft = ComposerDrafts.restore(key);
     if (_controller.text == draft) return;
     _controller.text = draft;
     _controller.selection =
@@ -243,6 +265,11 @@ class _ComposerState extends ConsumerState<Composer> {
 
   @override
   void dispose() {
+    // Stash the active conversation's unsent input before this composer
+    // unmounts (opening the Nymbot chat swaps the whole pane for
+    // `BotChatScreen`) — the PWA's single persistent input never unmounts, so
+    // its `_inputDrafts` survives implicitly; ours must save here.
+    _saveCurrentDraft();
     _focus.removeListener(_onFocusChanged);
     _controller.dispose();
     _focus.dispose();
@@ -334,7 +361,7 @@ class _ComposerState extends ConsumerState<Composer> {
     // Seed the draft key with the conversation already in view so the FIRST
     // switch away saves its unsent input (the PWA sets `_activeDraftKey` in
     // `_restoreDraftForContext`, which the boot path runs too).
-    _activeDraftKey = _draftKeyFor(ref.read(currentViewProvider));
+    _activeDraftKey = ComposerDrafts.keyFor(ref.read(currentViewProvider));
     // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
     // rebuild on focus change to swap those in/out.
     _focus.addListener(_onFocusChanged);
@@ -350,6 +377,10 @@ class _ComposerState extends ConsumerState<Composer> {
       // Mount the chip portal once; [_chipOverlay] renders nothing until a
       // quote/edit is actually pending.
       _chipPortal.show();
+      // A REMOUNT (e.g. returning from the bot chat, which swaps this composer
+      // out) must restore the incoming conversation's stashed draft — the
+      // PWA's persistent input still holds it; ours starts empty.
+      _restoreDraftForContext(ref.read(currentViewProvider));
     });
   }
 

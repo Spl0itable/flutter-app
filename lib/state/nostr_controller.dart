@@ -2001,6 +2001,22 @@ class NostrController {
         return;
       }
     }
+    // Nymbot replies may lead with a <think> reasoning block — split it into
+    // its own field for ANY verified-bot sender at ingest (`handleGiftWrapDM`,
+    // pms.js:1255-1265, the one path every bot reply flows through), so
+    // previews/search see only the visible reply and the renderer shows the
+    // collapsed Reasoning section no matter how the wrap arrived (relay echo,
+    // archive/backlog restore, delegated-signer accounts).
+    if (!m.isOwn && isVerifiedBot(m.pubkey)) {
+      final tm = RegExp(r'^\s*<think>([\s\S]*?)<\/think>\s*',
+              caseSensitive: false)
+          .firstMatch(m.content);
+      if (tm != null && m.content.substring(tm.end).trim().isNotEmpty) {
+        m.thinking = tm.group(1)?.trim();
+        m.content = m.content.substring(tm.end);
+      }
+      m.isBot = true;
+    }
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
@@ -3064,10 +3080,23 @@ class NostrController {
       // BEFORE any echo/encrypt/publish (pms.js:1581-1591): they are never
       // encrypted, published, shown as bubbles, or stored — `?git` can carry a
       // GitHub access token that must never reach the relays.
-      if (isVerifiedBot(view.id) && botPMCommandRe.hasMatch(trimmed)) {
+      if (isVerifiedBot(view.id)) {
+        if (botPMCommandRe.hasMatch(trimmed)) {
+          unawaited(_ref
+              .read(botChatControllerProvider.notifier)
+              .handleBotPMCommand(trimmed));
+          return;
+        }
+        // A normal message to the bot routes through the engine's send path so
+        // exactly ONE bot-addressed wrap is published and its id rides the paid
+        // request (`sendPM` → `sendNIP17PM` → `_handleBotPM(content, wrapped)`,
+        // pms.js:1595-1598). The engine echoes the message into the canonical
+        // store itself — publishing here via `publishPM` (which never surfaces
+        // its wrap ids) would make the observer build and publish a SECOND
+        // bot-addressed wrap just to have an eventId for the worker.
         unawaited(_ref
             .read(botChatControllerProvider.notifier)
-            .handleBotPMCommand(trimmed));
+            .sendUserBotPM(trimmed));
         return;
       }
       final nymMessageId = PmLogic.generateSharedEventId();
@@ -3685,9 +3714,10 @@ class NostrController {
   /// Clears all cached channels / PMs / profiles / reactions (settings.js
   /// "Clear cache"). Flushes any pending dirty writes first so an in-flight
   /// debounce can't immediately re-persist what we just wiped, drops the dirty
-  /// sets, then wipes the store. Also clears the in-memory hydrated profile /
-  /// reaction caches via the cache wipe; the live app_state is untouched (the
-  /// PWA clears the persisted cache, not the open session).
+  /// sets, wipes the store, then mirrors the wipe in the OPEN SESSION too —
+  /// the PWA clears `nym.messages` / `nym.pmMessages` / `nym.reactions` /
+  /// `nym.userBios` and empties the rendered `#messages` after `resetCache`
+  /// (app.js:4013-4030) so the UI immediately reflects the cleared state.
   Future<void> clearCache() async {
     final cache = _cache;
     if (cache == null || !cache.isOpen) return;
@@ -3698,6 +3728,19 @@ class NostrController {
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
     await cache.wipe();
+    // In-memory mirror (app.js:4013-4030): `messages` holds channel + PM +
+    // group histories (the PWA's `messages` + `pmMessages`), `reactions` is
+    // the tally map, and the users' `about` fields are the PWA's `userBios`.
+    final appState = _ref.read(appStateProvider);
+    appState.messages.clear();
+    appState.reactions.clear();
+    for (final u in appState.users.values) {
+      u.profile?.about = null;
+    }
+    // Publish the mutated state (an empty hydrate is a bare
+    // `state = state.copyWith()` republish) so every open conversation
+    // re-renders from the now-empty store — the PWA's emptied `#messages`.
+    _ref.read(appStateProvider.notifier).hydrateReactions(const {});
   }
 
   /// Wipes the on-device PM + group-chat cache (the shared `pms` table). Called
@@ -7152,11 +7195,30 @@ class NostrController {
     // Pass the privkey so the bot controller can build per-action NIP-98 auth
     // for paid requests (PWA `_signBotAuth`). Null for delegated signers
     // (ext/nip46) — those fall back to the pre-supplied auth blob.
-    _ref.read(botChatControllerProvider.notifier).bind(
-          pubkey: identity.pubkey,
-          privkey: identity.privkey,
-        );
+    final bot = _ref.read(botChatControllerProvider.notifier);
+    bot.bind(
+      pubkey: identity.pubkey,
+      privkey: identity.privkey,
+    );
+    // `?clear`'s server-visible legs beyond clear-history: the D1 PM-archive
+    // purge (`_purgeBotPMArchive` via pm-delete, pms.js:1900) and the debounced
+    // synced-settings push of the cleared-at / welcomed markers
+    // (`_debouncedNostrSettingsSave`, pms.js:1878/1903).
+    bot.pmArchivePurger = purgeBotPmArchive;
+    bot.settingsSyncRequester = syncSettings;
     return true;
+  }
+
+  /// Best-effort removal of the Nymbot conversation's encrypted wraps from the
+  /// D1 PM archive so a cleared thread can't be restored on any device —
+  /// `_purgeBotPMArchive` (pms.js:1881-1891). Gated like the PWA's
+  /// `_pmArchiveAllowed` (durable identity + cachePMs); [StorageSync.pmDelete]
+  /// filters to 64-hex ids and chunks to the server's 200-id cap.
+  Future<void> purgeBotPmArchive(List<String> wrapIds) async {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    if (!_ref.read(settingsProvider).cachePMs) return;
+    await sync.pmDelete(wrapIds);
   }
 
   Future<void> dispose() async {

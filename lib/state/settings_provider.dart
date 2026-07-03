@@ -73,6 +73,11 @@ class SettingsController extends StateNotifier<Settings> {
   void resetColumns() {
     _kv.remove(StorageKeys.columnsLayout);
     state = state.copyWith(columnsResetTick: state.columnsResetTick + 1);
+    // SYNCED: the PWA pushes the cleared/re-seeded layout to the other devices
+    // in BOTH branches — `nostrSettingsSave()` directly when columns are
+    // inactive (columns.js:368) and via `_cvSeedDefaults` → `_cvSaveLayout` →
+    // `nostrSettingsSave` when they are live (columns.js:374 → :994).
+    _syncedChanged();
   }
 
   void setTextSize(int size) {

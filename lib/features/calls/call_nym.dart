@@ -7,10 +7,12 @@
 //
 // `self` renders a plain "You" with no decorations (calls.js line 21).
 //
-// Self-contained: the verified ✓ and friend badges are drawn here so the call
-// feature carries no dependency on the (separately-owned) context-menu badge
-// widgets. Flair/supporter reuse the shared shop [CosmeticNymBadges] so the
-// glyphs match the rest of the app.
+// The verified ✓ and friend badges are the shared [VerifiedBadge] /
+// [FriendBadge] widgets — the PWA reuses the global `.verified-badge` /
+// `.friend-badge` classes in `_callNymHtml`, so the unscoped light-mode
+// darkening (`#1a8cd8` / `#0288d1`, styles-themes-responsive.css:76-78 +
+// 1300-1307) applies in the call UI too. Flair/supporter reuse the shared shop
+// [CosmeticNymBadges] so the glyphs match the rest of the app.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +22,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../widgets/context_menu/profile_badges.dart';
 
 /// A decorated call nym: `base` + dim `#suffix` + flair/supporter + verified ✓ +
 /// friend badge. Pass [self] (or a pubkey equal to the local identity) to render
@@ -121,89 +124,15 @@ class CallNym extends ConsumerWidget {
         ),
         if (isDev || isBot) ...[
           const SizedBox(width: 3),
-          _CallVerifiedBadge(size: badgeSize),
+          VerifiedBadge(size: badgeSize),
         ],
         if (isFriend) ...[
           const SizedBox(width: 3),
-          _CallFriendBadge(size: badgeSize),
+          FriendBadge(size: badgeSize),
         ],
       ],
     );
   }
-}
-
-/// The blue verified ✓ badge (`.verified-badge`): a #1DA1F2 circle with a white
-/// ✓. Self-contained copy for the call surface.
-class _CallVerifiedBadge extends StatelessWidget {
-  const _CallVerifiedBadge({required this.size});
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1DA1F2),
-        shape: BoxShape.circle,
-      ),
-      child: Text(
-        '✓',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: size * 0.6,
-          fontWeight: FontWeight.w700,
-          height: 1,
-        ),
-      ),
-    );
-  }
-}
-
-/// The friend badge (`.friend-badge`): people-with-check glyph in #4fc3f7.
-class _CallFriendBadge extends StatelessWidget {
-  const _CallFriendBadge({required this.size});
-  static const Color color = Color(0xFF4FC3F7);
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CustomPaint(painter: _FriendBadgePainter()),
-    );
-  }
-}
-
-class _FriendBadgePainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final s = size.width / 16.0;
-    final fill = Paint()
-      ..color = _CallFriendBadge.color
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-    final stroke = Paint()
-      ..color = _CallFriendBadge.color
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5 * s
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = true;
-
-    canvas.drawCircle(Offset(6 * s, 5 * s), 2.5 * s, fill);
-    final body = Path()
-      ..moveTo(1.5 * s, 14 * s)
-      ..cubicTo(1.5 * s, 10.5 * s, 3.5 * s, 9 * s, 6 * s, 9 * s)
-      ..cubicTo(8.5 * s, 9 * s, 10.5 * s, 10.5 * s, 10.5 * s, 14 * s);
-    canvas.drawPath(body, fill);
-    canvas.drawLine(Offset(13 * s, 6 * s), Offset(13 * s, 10 * s), stroke);
-    canvas.drawLine(Offset(11 * s, 8 * s), Offset(15 * s, 8 * s), stroke);
-  }
-
-  @override
-  bool shouldRepaint(covariant _FriendBadgePainter oldDelegate) => false;
 }
 
 /// Inline `@mention` highlighting for call-chat text (calls.js

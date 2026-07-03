@@ -28,7 +28,7 @@ import 'shop_widgets.dart';
 class UserCosmetics {
   const UserCosmetics({
     this.styleId,
-    this.flairId,
+    this.flairIds = const [],
     this.supporter = false,
     this.cosmetics = const [],
     this.genesisEdition,
@@ -37,8 +37,16 @@ class UserCosmetics {
   /// Active message-style item id (e.g. `style-satoshi`), or null.
   final String? styleId;
 
-  /// Active nickname-flair item id (e.g. `flair-crown`), or null.
-  final String? flairId;
+  /// Active nickname-flair item ids (e.g. `flair-crown`), in record order. The
+  /// PWA renders a badge for EVERY id in a user's flair array (`getFlairForUser`
+  /// maps each id, shop.js:1149-1154; `_applyFlairBadgesToMessage` forEach,
+  /// :520-527) — the SELF activation UI merely caps the local set to one
+  /// (shop.js:401), so multi-flair records only arrive for other users.
+  final List<String> flairIds;
+
+  /// The last active flair id, or null — for the single-badge surfaces that
+  /// only show one (autocomplete rows, poll cards).
+  String? get flairId => flairIds.isNotEmpty ? flairIds.last : null;
 
   /// True when the user owns + has the supporter badge active.
   final bool supporter;
@@ -52,7 +60,7 @@ class UserCosmetics {
   final int? genesisEdition;
 
   bool get isEmpty =>
-      styleId == null && flairId == null && !supporter && cosmetics.isEmpty;
+      styleId == null && flairIds.isEmpty && !supporter && cosmetics.isEmpty;
   bool get isNotEmpty => !isEmpty;
 
   /// True when the redacted privacy cosmetic is active (blanks content + author
@@ -84,7 +92,8 @@ UserCosmetics resolveCosmetics(WidgetRef ref, String pubkey) {
 UserCosmetics _selfCosmetics(ActiveItems active) {
   return UserCosmetics(
     styleId: active.style,
-    flairId: active.flair.isNotEmpty ? active.flair.last : null,
+    // The PWA caps the SELF flair set to the last activated id (shop.js:401).
+    flairIds: active.flair.isNotEmpty ? [active.flair.last] : const [],
     supporter: active.supporter,
     cosmetics: active.cosmetics,
     genesisEdition: active.editions['flair-genesis'],
@@ -99,9 +108,10 @@ UserCosmetics userCosmeticsFromUser(User? user) {
     styleId: (user.shopStyle != null && user.shopStyle!.isNotEmpty)
         ? user.shopStyle
         : null,
-    flairId: (user.shopFlair != null && user.shopFlair!.isNotEmpty)
-        ? user.shopFlair
-        : null,
+    // Presence broadcasts carry a single flair field.
+    flairIds: (user.shopFlair != null && user.shopFlair!.isNotEmpty)
+        ? [user.shopFlair!]
+        : const [],
     supporter: user.isSupporter,
     cosmetics: user.shopCosmetics,
     genesisEdition: user.shopEdition,
@@ -110,11 +120,12 @@ UserCosmetics userCosmeticsFromUser(User? user) {
 
 /// Builds [UserCosmetics] from a D1 `shop-status` active record — the
 /// authoritative source for other users' cosmetics (shop.js:459-467). Keeps the
-/// last flair like the PWA and surfaces the Genesis edition from `active.editions`.
+/// FULL flair array (the PWA renders a badge per id, shop.js:520-527/1149-1154)
+/// and surfaces the Genesis edition from `active.editions`.
 UserCosmetics userCosmeticsFromStatus(ShopStatusActive a) {
   return UserCosmetics(
     styleId: (a.style != null && a.style!.isNotEmpty) ? a.style : null,
-    flairId: a.flair.isNotEmpty ? a.flair.last : null,
+    flairIds: a.flair,
     supporter: a.supporter,
     cosmetics: a.cosmetics,
     genesisEdition: a.editions['flair-genesis'],
@@ -174,20 +185,31 @@ class CosmeticNymBadges extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final flairId = cosmetics.flairId;
+    // One badge per ACTIVE flair id, in record order, skipping ids the catalog
+    // doesn't know (`_applyFlairBadgesToMessage` forEach + its
+    // `getShopItemById(id)` guard, shop.js:520-527).
+    final flairIds = [
+      for (final id in cosmetics.flairIds)
+        if (id.isNotEmpty && ShopCatalog.byId(id) != null) id,
+    ];
     final supporter = cosmetics.supporter;
-    if ((flairId == null || flairId.isEmpty) && !supporter) {
+    if (flairIds.isEmpty && !supporter) {
       return const SizedBox.shrink();
     }
-    // Stamp the Genesis edition number when the active flair is genesis and an
-    // explicit edition wasn't passed (`_flairIconHtml(id, editions[id])`).
-    final ed = edition ??
-        (flairId == 'flair-genesis' ? cosmetics.genesisEdition : null);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (flairId != null && flairId.isNotEmpty)
-          FlairBadge(flairId: flairId, edition: ed, size: flairSize),
+        for (final id in flairIds)
+          FlairBadge(
+            flairId: id,
+            // Stamp the Genesis edition number on the genesis badge when an
+            // explicit edition wasn't passed (`_flairIconHtml(id, editions[id])`
+            // — only genesis renders its number).
+            edition: id == 'flair-genesis'
+                ? (edition ?? cosmetics.genesisEdition)
+                : null,
+            size: flairSize,
+          ),
         if (supporter) SupporterBadge(height: supporterHeight),
       ],
     );
@@ -197,7 +219,7 @@ class CosmeticNymBadges extends StatelessWidget {
 /// True when [cosmetics] should bold the whole author nym — the Genesis holder
 /// treatment (`.has-genesis-flair { font-weight: 700 }`, the suffix stays 400).
 bool hasGenesisFlair(UserCosmetics cosmetics) =>
-    cosmetics.flairId == 'flair-genesis';
+    cosmetics.flairIds.contains('flair-genesis');
 
 /// A faithful Flutter translation of a `.message.style-X` rule from
 /// `css/styles-features.css`. Captures the parts we can render natively:
@@ -223,6 +245,8 @@ class MessageStyleDecoration {
     this.gradientGlow,
     this.contentBackground,
     this.bubbleContentBackground,
+    this.bubbleOnlyContentBackground = false,
+    this.contentPadding,
     this.transparentBubble = false,
     this.backgroundGradient,
     this.bubbleTextColor,
@@ -257,6 +281,19 @@ class MessageStyleDecoration {
   /// `rgba(247,147,26,.12)` in bubbles but the IRC `rgba(196,122,21,.1)` tint.
   /// Null = [contentBackground] in both layouts.
   final Color? bubbleContentBackground;
+
+  /// True when [contentBackground] is a BUBBLE-layout-only wash: supporter's
+  /// gold `.message-content` fill is `body.chat-bubbles`-gated
+  /// (styles-features.css:3692-3694), so the IRC layout paints NO content plate
+  /// for it (supporter's IRC treatment is the row [backgroundGradient] + left
+  /// bar alone) — [contentBackgroundFor] `(bubble: false)` returns null.
+  final bool bubbleOnlyContentBackground;
+
+  /// The `.message-content` padding a style adds over the layout default — only
+  /// satoshi (`.message.style-satoshi .message-content { padding: 10px 15px }`,
+  /// styles-features.css:548-549). Applied by the IRC content plate; the bubble
+  /// keeps its own layout padding.
+  final EdgeInsets? contentPadding;
 
   /// True when the bubble layout REPLACES the default translucent bubble fill
   /// with a fully transparent one — aurora (`body.chat-bubbles .message.
@@ -323,7 +360,7 @@ class MessageStyleDecoration {
       if (transparentBubble) return const Color(0x00000000);
       return bubbleContentBackground ?? contentBackground;
     }
-    return contentBackground;
+    return bubbleOnlyContentBackground ? null : contentBackground;
   }
 
   /// The colour for an INNER `> *` element (link/mention/emoji) and for the shop
@@ -433,6 +470,7 @@ class CosmeticAura {
     this.insetWidth = 1,
     this.glowColor,
     this.glowBlur = 0,
+    this.bubbleGlowColor,
     this.bubbleGlowBlur,
     this.borderAccent,
     this.gradient,
@@ -465,6 +503,13 @@ class CosmeticAura {
   /// `box-shadow: 0 0 {glowBlur}px {glowColor}` (IRC).
   final Color? glowColor;
   final double glowBlur;
+
+  /// The bubble-layout outer-glow COLOUR when it differs from the IRC
+  /// [glowColor] — light gold strokes `rgba(180,140,0,.15)` on the bubble
+  /// (`body.light-mode.chat-bubbles … .message-content`,
+  /// styles-themes-responsive.css:929-932) vs the IRC `.12`. Null = use
+  /// [glowColor] in both layouts.
+  final Color? bubbleGlowColor;
 
   /// The bubble-layout outer-glow blur when it differs from the IRC [glowBlur]
   /// (gold: bubble 12px vs IRC 18px). Null = use [glowBlur] in both layouts.
@@ -522,6 +567,10 @@ class CosmeticAura {
   /// The inset ring colour for [bubble] layout (the bubble override when set).
   Color? insetColorFor({required bool bubble}) =>
       bubble ? (bubbleInsetColor ?? insetColor) : insetColor;
+
+  /// The outer-glow colour for [bubble] layout (the bubble override when set).
+  Color? glowColorFor({required bool bubble}) =>
+      bubble ? (bubbleGlowColor ?? glowColor) : glowColor;
 
   /// The outer-glow blur for [bubble] layout (the bubble override when set).
   double glowBlurFor({required bool bubble}) =>
@@ -591,6 +640,8 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // (styles-themes-responsive.css:1417) vs its IRC rgba(196,122,21,.1) tint.
     bubbleContentBackground:
         isLight ? _styleLightBubbleContentBackground[styleId] : null,
+    // satoshi's own `.message-content` padding (`padding: 10px 15px`, :548).
+    contentPadding: _styleContentPadding[styleId],
     // Aurora replaces the bubble fill with a transparent border-box layer in
     // BOTH modes (styles-features.css:3675-3686 + themes:843's light gradient).
     transparentBubble: styleId == 'style-aurora',
@@ -690,6 +741,13 @@ const Map<String, Color> _styleBubbleTextColor = {
 /// Styles that bold their glyphs (`font-weight: bold` on the inner spans).
 /// satoshi (`styles-features.css:572`).
 const Set<String> _styleBold = {'style-satoshi'};
+
+/// Per-style `.message-content` padding — satoshi's plate carries its own
+/// `padding: 10px 15px` (styles-features.css:548-549, kept by the light
+/// override); eclipse/crt paint their plates with no extra padding.
+const Map<String, EdgeInsets> _styleContentPadding = {
+  'style-satoshi': EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+};
 
 /// Dark-mode `.message-content` CONTAINER body-text colour for styles whose bare
 /// body differs from their inner `> *` child colour. Only satoshi: the container
@@ -1080,6 +1138,9 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
   glow: Color(0x40FFD700), // rgba(255,215,0,.25) — single-layer fallback
   // body.chat-bubbles .message.supporter-style .message-content { bg rgba(255,215,0,.12) }
   contentBackground: Color(0x1FFFD700), // rgba(255,215,0,.12) bubble wash
+  // The gold wash is `body.chat-bubbles`-gated (:3692) — IRC paints only the
+  // row gradient + bar, never a content plate.
+  bubbleOnlyContentBackground: true,
   // body:not(.chat-bubbles) .message.supporter-style { bg gradient .08→.03 } (:1085)
   backgroundGradient: [Color(0x14FFD700), Color(0x08FFD700)],
   borderAccent: Color(0xFFFFD700),
@@ -1096,11 +1157,103 @@ const MessageStyleDecoration supporterStyleDecorationLight =
   // { background: rgba(180,150,0,0.08) !important } (themes:1421) — note the
   // 150 green channel (NOT the 140 of the wash/border rules).
   contentBackground: Color(0x14B49600), // rgba(180,150,0,.08) bubble wash
+  // Bubble-only, like the dark wash — IRC light paints just the row gradient.
+  bubbleOnlyContentBackground: true,
   // body.light-mode:not(.chat-bubbles) .message.supporter-style { bg gradient
   // rgba(180,140,0,.06→.02) } (:935).
   backgroundGradient: [Color(0x0FB48C00), Color(0x05B48C00)],
   borderAccent: Color(0xFFB8960A),
 );
+
+/// Message styles whose DARK body-text colour rule is declared AFTER the
+/// supporter gold rule (`.message.supporter-style .message-content
+/// { color:#ffd700 !important }`, styles-features.css:1089) at equal
+/// specificity — so they keep their own colour + text-shadow when both classes
+/// are present: eclipse (:1249) and crt (:1281).
+const Set<String> _darkStyleColorBeatsSupporter = {
+  'style-eclipse',
+  'style-crt',
+};
+
+/// Message styles whose LIGHT body-text colour rule is declared AFTER the light
+/// supporter rule (`body.light-mode .message.supporter-style .message-content
+/// { color:#8a6d00 !important }`, styles-themes-responsive.css:939) at equal
+/// specificity — ocean/sakura/galaxy/toxic/blood/royal/circuit/gold (:987-1002)
+/// and vapor (:1009) keep their own light colour; every other style (and
+/// eclipse/crt, whose 3-class dark rules lose to the 4-class light supporter
+/// rule) goes supporter gold-brown.
+const Set<String> _lightStyleColorBeatsSupporter = {
+  'style-ocean',
+  'style-sakura',
+  'style-galaxy',
+  'style-toxic',
+  'style-blood',
+  'style-royal',
+  'style-circuit',
+  'style-gold',
+  'style-vapor',
+};
+
+/// Composes the supporter-badge gold treatment ONTO an active message style —
+/// the PWA adds BOTH classes to the message (`_applyShopClassesToMessage`,
+/// shop.js:485-495), so the two cascade together rather than one replacing the
+/// other:
+///
+/// * Row (IRC): supporter's gold 135deg wash + 3px gold left bar
+///   (`body:not(.chat-bubbles) .message.supporter-style`) — no style paints
+///   those, so they always compose in.
+/// * Bubble fill: supporter's gold wash (`body.chat-bubbles .message.
+///   supporter-style .message-content { background … !important }`,
+///   styles-features.css:3692) is declared after every style's bubble
+///   background at equal-or-winning specificity/importance, so it replaces the
+///   style's bubble fill.
+/// * Body text: supporter's `color:#ffd700 !important` + gold text-shadow
+///   (:1089-1092) beat the style colour rules declared before them (source
+///   order at equal specificity); the styles in
+///   [_darkStyleColorBeatsSupporter] / [_lightStyleColorBeatsSupporter] are
+///   declared later and keep their own text. The style's content plates
+///   (satoshi/eclipse/crt), watermark, monospace/bold and the bubble-only
+///   fire/ice colours (`body.chat-bubbles …`, 4 classes, :3664-3672) survive.
+///
+/// aurora is exempt: its text is gradient-clipped with
+/// `-webkit-text-fill-color: transparent`, so the gold `color` never shows.
+MessageStyleDecoration composeSupporterStyle(
+  MessageStyleDecoration styled,
+  String styleId, {
+  required bool isLight,
+}) {
+  if (styleId == 'style-aurora') return styled;
+  final supporter =
+      isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+  final goldText = isLight
+      ? !_lightStyleColorBeatsSupporter.contains(styleId)
+      : !_darkStyleColorBeatsSupporter.contains(styleId);
+  return MessageStyleDecoration(
+    textColor: goldText ? supporter.textColor : styled.textColor,
+    glow: goldText ? supporter.glow : styled.glow,
+    // Supporter's `text-shadow: 0 0 8px gold@.25` (:1090) replaces the style's
+    // stack (glitch's chromatic split included) whenever the gold colour wins;
+    // light supporter resets `text-shadow: none` (themes:940).
+    glowShadows: goldText ? supporter.glowShadows : styled.glowShadows,
+    glyphShadows: goldText ? null : styled.glyphShadows,
+    gradient: styled.gradient,
+    gradientGlow: styled.gradientGlow,
+    contentBackground: styled.contentBackground,
+    bubbleOnlyContentBackground: styled.bubbleOnlyContentBackground,
+    // Supporter's bubble wash wins over every style's bubble fill (dark
+    // rgba(255,215,0,.12) at :3692; light rgba(180,150,0,.08) at themes:1421).
+    bubbleContentBackground: supporter.contentBackgroundFor(bubble: true),
+    contentPadding: styled.contentPadding,
+    transparentBubble: styled.transparentBubble,
+    backgroundGradient: supporter.backgroundGradient,
+    bubbleTextColor: styled.bubbleTextColor,
+    childColor: styled.childColor,
+    borderAccent: supporter.borderAccent,
+    monospace: styled.monospace,
+    bold: styled.bold,
+    watermark: styled.watermark,
+  );
+}
 
 // =============================================================================
 // Special cosmetics (auras / watermarks / prism / hologram). `.message.cosmetic-X`
@@ -1251,6 +1404,9 @@ final Map<String, CosmeticAura> _cosmeticAurasLight = {
     insetRing: true,
     glowColor: Color(0x1FB48C00), // rgba(180,140,0,.12)
     glowBlur: 12,
+    // Bubble glow: 0 0 10px rgba(180,140,0,.15) (themes:931) — .15, not the
+    // IRC .12.
+    bubbleGlowColor: Color(0x26B48C00), // rgba(180,140,0,.15)
     bubbleGlowBlur: 10,
     borderAccent: Color(0xFFB8960A),
     gradient: [Color(0x0FB48C00), Color(0x05B48C00)], // .06→.02

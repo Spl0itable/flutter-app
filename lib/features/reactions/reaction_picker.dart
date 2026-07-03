@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/message.dart';
@@ -69,11 +70,17 @@ void showReactionPicker(
             target: reactionTargetFor(message),
             kind: inferOriginalKind(message, view: view),
           );
-          if (ok && !already && context.mounted) {
-            final box = context.findRenderObject() as RenderBox?;
-            if (box != null && box.hasSize) {
-              ReactionBurst.play(
-                  context, box.localToGlobal(box.size.center(Offset.zero)), emoji);
+          if (ok && !already) {
+            // Every add path buzzes: `sendReaction` fires `nymHapticTap` (the
+            // shared 30ms vibrate) right after the optimistic add
+            // (reactions.js:968) — including picks from this enhanced picker.
+            HapticFeedback.mediumImpact();
+            if (context.mounted) {
+              final box = context.findRenderObject() as RenderBox?;
+              if (box != null && box.hasSize) {
+                ReactionBurst.play(context,
+                    box.localToGlobal(box.size.center(Offset.zero)), emoji);
+              }
             }
           }
         },

@@ -2974,13 +2974,15 @@ final usersProvider = Provider<Map<String, User>>((ref) {
   return out;
 });
 
-/// Ordered messages for the active view (oldest first). Messages from blocked
-/// users, keyword matches (content OR author nym), and heuristic spam are
-/// dropped — mirrors the PWA's `.message.blocked` hiding (messages.js §11) plus
-/// the `spamHit` term of the non-own hide branch (messages.js:648).
-final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
-  final s = ref.watch(appStateProvider);
-  final list = s.messages[s.view.storageKey] ?? const <Message>[];
+/// The filtered, ordered messages for one conversation [storageKey] (oldest
+/// first). Messages from blocked users, keyword matches (content OR author
+/// nym), and heuristic spam are dropped — mirrors the PWA's
+/// `getFilteredMessages`/`getFilteredPMMessages` (messages.js:2934-2949), the
+/// single pipeline `renderMessagesWithVirtualScroll` renders through, which
+/// makes it shared by the single view AND every columns-deck column
+/// (columns.js:510).
+List<Message> visibleMessagesFor(AppState s, String storageKey) {
+  final list = s.messages[storageKey] ?? const <Message>[];
   // Fast-path only when nothing can filter: no blocks AND the content spam
   // filter is off. With the filter on (its default) every non-own message is
   // tested, so the empty-block-sets shortcut must NOT skip it.
@@ -2992,6 +2994,15 @@ final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
       : [...list];
   visible.sort(compareMessages);
   return visible;
+}
+
+/// Ordered messages for the active view (oldest first), via
+/// [visibleMessagesFor] — mirrors the PWA's `.message.blocked` hiding
+/// (messages.js §11) plus the `spamHit` term of the non-own hide branch
+/// (messages.js:648).
+final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
+  final s = ref.watch(appStateProvider);
+  return visibleMessagesFor(s, s.view.storageKey);
 });
 
 /// Transient "scroll-flash" signal: the id of the message currently flashing its

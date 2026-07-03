@@ -477,7 +477,9 @@ class GitConfig {
         'host': host,
         'token': token,
         'repo': repo,
-        if (branch != null && branch!.isNotEmpty) 'branch': branch,
+        // Always present — empty string when unset, byte-parity with the PWA's
+        // `branch: git.branch || ''` (pms.js:2464).
+        'branch': branch ?? '',
         'allowWrites': allowWrites,
       };
 

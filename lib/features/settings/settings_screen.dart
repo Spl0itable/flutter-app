@@ -18,7 +18,6 @@ import '../../core/theme/nym_theme.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../models/channel.dart';
 import '../../models/settings.dart';
-import '../../services/api/storage_sync.dart';
 import '../notifications/notifications_service.dart';
 import '../../services/location/geolocation.dart';
 import '../../services/storage/secure_store.dart';
@@ -322,9 +321,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // Watch the moderation Sets so the Friends/Blocked/Keywords/Hidden/Blocked
     // lists (F1) re-render on add/remove.
     ref.watch(appStateProvider);
-    // Watch inbound settings-transfer offers so the Pending Settings Transfers
-    // list (F17) re-renders as offers arrive or are accepted/declined.
-    ref.watch(pendingSettingsTransfersProvider);
+    // Watch inbound USER-TO-USER settings transfers so the Pending Settings
+    // Transfers list (F17) re-renders as offers arrive or are
+    // accepted/rejected.
+    ref.watch(pendingUserSettingsTransfersProvider);
 
     // `.settings-section.mobile-only` is `display:none` by default and revealed
     // only `@media (max-width:768px)` (styles-components.css:215 +
@@ -826,17 +826,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// Add Keyword (F4): persist + render the new row + confirm + queue the
   /// cross-device sync (users.js:121-148 `addBlockedKeyword` ends with
-  /// `nostrSettingsSave()`).
+  /// `nostrSettingsSave()`). A duplicate is a no-op on the Set, but the PWA
+  /// still clears the input, shows the confirmation, and syncs — only an
+  /// empty input skips everything.
   void _addKeyword(SettingsController ctrl) {
-    final raw = _keywordController.text.trim();
-    if (raw.isEmpty) return;
-    final added = ref.read(appStateProvider.notifier).addBlockedKeyword(raw);
+    final kw = _keywordController.text.trim().toLowerCase();
+    if (kw.isEmpty) return;
+    ref.read(appStateProvider.notifier).addBlockedKeyword(kw);
     _persistBlockedKeywords();
     _keywordController.clear();
-    if (added != null) {
-      _systemMessage('Blocked keyword: "$added"');
-      ref.read(nostrControllerProvider).syncSettings();
-    }
+    _systemMessage('Blocked keyword: "$kw"');
+    ref.read(nostrControllerProvider).syncSettings();
     setState(() {});
   }
 
@@ -856,9 +856,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         StorageKeys.blockedKeywords, ref.read(appStateProvider).blockedKeywords);
   }
 
-  /// Quick React emoji "Change" (F5): open the emoji picker; on pick stage the
-  /// choice into the Save-gated draft (09-M1 — the PWA commits it on Save). The
-  /// recents list still records immediately (preview state, like the PWA).
+  /// Quick React emoji "Change" (F5): open the emoji picker; a pick commits
+  /// IMMEDIATELY (app.js:3294-3303 — the picker callback sets
+  /// `nym.settings.swipeReactEmoji` + localStorage `nym_swipe_react_emoji` at
+  /// once, so the choice survives Cancel). No `nostrSettingsSave` fires at
+  /// pick time, so the write goes through `ctrl.update` (raw KV + live state,
+  /// no synced publish); Save later re-sends the same value through the
+  /// synced setter, like the PWA's `saveSettings`. The draft is kept in step
+  /// so Save persists what was picked.
   void _openSwipeReactPicker(SettingsController ctrl) {
     final c = context.nym;
     final recents = ref.read(recentEmojisProvider);
@@ -880,6 +885,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             recents: recents,
             onSelect: (emoji) {
               Navigator.of(dialogCtx).maybePop();
+              // Immediate commit (app.js:3298-3300): persisted key + live
+              // state, no sync publish at pick time.
+              ref
+                  .read(keyValueStoreProvider)
+                  .setString(StorageKeys.swipeReactEmoji, emoji);
+              ctrl.update((s) => s.copyWith(swipeReactEmoji: emoji));
               _mutate((d) => d.copyWith(swipeReactEmoji: emoji));
               ref.read(recentEmojisProvider.notifier).record(emoji);
             },
@@ -927,11 +938,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     svc.playSound(value);
   }
 
-  /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, wipe the
-  /// real on-device cache via the controller, then re-read the size so the
-  /// readout updates in place and toast (app.js:4001 `clearLocalStorageCache`).
-  /// The modal stays open so the freshly-cleared "No cached data on device yet"
-  /// readout is observable.
+  /// Clear Local Storage Cache (F10): danger confirm with the PWA copy, wipe
+  /// the real on-device cache via the controller (which also mirrors the wipe
+  /// in the in-memory session, app.js:4013-4030), then toast and close the
+  /// settings modal (app.js:4033 `closeModal('settingsModal')`). The wipe is
+  /// best-effort — the PWA swallows `resetCache` errors (app.js:4007-4011) and
+  /// still confirms + closes.
   Future<void> _clearCache() async {
     final ok = await showAppConfirm(
       context,
@@ -944,26 +956,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final controller = ref.read(nostrControllerProvider);
     // Reflect the in-flight wipe in the readout immediately.
     setState(() => _cacheReadout = null);
-    var wiped = true;
     try {
       await controller.clearCache();
     } catch (_) {
-      // Best-effort; re-read so the readout reflects the true state.
-      wiped = false;
+      // Best-effort, like the PWA's swallowed resetCache try/catch.
     }
     if (!mounted) return;
-    if (wiped) {
-      // The PWA re-probes the (now empty) persisted store and lands on the
-      // empty state (app.js:3701-3708). The in-memory session counts are NOT
-      // cleared (the PWA clears the persisted cache, not the open session), so
-      // recomputing from app state here would show stale items.
-      setState(() => _cacheReadout = 'No cached data on device yet');
-    } else {
-      await _loadCacheSize();
-    }
+    setState(() => _cacheReadout = 'No cached data on device yet');
     _systemMessage(
         'Local storage cache cleared. Settings, group memberships, and login '
         'preserved.');
+    Navigator.of(context).maybePop();
   }
 
   /// Reset Settings to Defaults (F11): danger confirm, wipe the exact settings
@@ -1077,14 +1080,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// Resolves the proximity-sorting grant at Save time (F13 / 09-M1). Mirrors
   /// the PWA's `saveSettings` geolocation branch (app.js:3917-3950): when the
-  /// staged value is enabled, request location permission — on grant keep it on,
-  /// on deny flip back to Disabled and clear the cached location. Returns the
-  /// resolved enabled state for `_onSave` to persist.
+  /// staged value is enabled AND no location is cached yet, request location
+  /// permission — on grant keep it on, on deny flip back to Disabled and clear
+  /// the cached location. Returns the resolved enabled state for `_onSave` to
+  /// persist.
   Future<bool> _resolveProximityOnSave(bool desired) async {
     if (!desired) {
       ref.read(userLocationProvider.notifier).state = null;
       return false;
     }
+    // Already have a location: the PWA's `else` branch (app.js:3941-3946)
+    // keeps proximity on SILENTLY — no permission re-request, no fresh GPS
+    // fix, and no repeated "Location access granted…" system message.
+    if (ref.read(userLocationProvider) != null) return true;
     try {
       var status = await Permission.locationWhenInUse.status;
       if (!status.isGranted) {
@@ -1640,6 +1648,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 onRemove: (kw) {
                   ref.read(appStateProvider.notifier).removeBlockedKeyword(kw);
                   _persistBlockedKeywords();
+                  // users.js:150-178 `removeBlockedKeyword`: confirm with the
+                  // system pill, then `nostrSettingsSave()`.
+                  _systemMessage('Unblocked keyword: "$kw"');
                   ref.read(nostrControllerProvider).syncSettings();
                 },
               ),
@@ -2252,7 +2263,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // --- Data & Backup --------------------------------------------------------
 
   List<_GroupSpec> _data(Settings s, SettingsController ctrl) {
-    final transfers = ref.watch(pendingSettingsTransfersProvider);
+    final transfers = ref.watch(pendingUserSettingsTransfersProvider);
     return [
       _GroupSpec(
         text: 'Low Data Mode Disabled Enabled Reduces bandwidth by connecting '
@@ -2322,8 +2333,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ),
       _GroupSpec(
-        text: 'Pending Settings Transfers Accept Decline '
-            '${transfers.isEmpty ? 'No pending transfers' : transfers.map((t) => _humanizeSection(t.section)).join(' ')}',
+        text: 'Pending Settings Transfers Accept Reject '
+            '${transfers.isEmpty ? 'No pending transfers' : transfers.map((t) => t.fromNym).join(' ')}',
         child: FormGroup(
           label: 'Pending Settings Transfers',
           child: _pendingTransfers(),
@@ -2478,107 +2489,98 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   /// Pending Settings Transfers list (F17; shop.js:1996
-  /// `renderPendingSettingsTransfers`): one card per inbound offer (sender nym +
-  /// verified-sender-key + date + an "Includes:" summary) with Accept/Decline
-  /// buttons wired to the provider's notifier. Falls back to the dim placeholder
-  /// when there are no offers.
+  /// `renderPendingSettingsTransfers`): one card per inbound USER-TO-USER
+  /// transfer (from another account's `executeSettingsTransfer`) showing the
+  /// sender nym, `Verified sender key: <first16>…<last8>`, the transfer date,
+  /// and an "Includes:" summary, with Accept/Reject buttons wired to
+  /// [NostrController.acceptUserSettingsTransfer] /
+  /// [NostrController.rejectUserSettingsTransfer]. Falls back to the dim
+  /// placeholder when there are no offers. (The controller's own-device D1
+  /// sections auto-apply and never appear here, matching the PWA.)
   Widget _pendingTransfers() {
-    final transfers = ref.watch(pendingSettingsTransfersProvider);
+    final transfers = ref.watch(pendingUserSettingsTransfersProvider);
     if (transfers.isEmpty) return _emptyListBox('No pending transfers');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final t in transfers) _transferRow(t),
+      ],
+    );
+  }
+
+  /// One `.nm-shop-27` transfer card (shop.js:2005-2018): info column (flex 1)
+  /// + Accept/Reject `.icon-btn`s in a trailing `.nm-shop-32` row (gap 6px,
+  /// margin-left 8px). Card chrome: `padding:8px; margin-bottom:6px;
+  /// background:rgba(255,255,255,.03); border:1px glass-border;
+  /// border-radius:8px`, contents vertically centered.
+  Widget _transferRow(UserSettingsTransfer t) {
     final c = context.nym;
     final controller = ref.read(nostrControllerProvider);
-    void accept(String id) => controller.acceptSettingsTransfer(id);
-    void decline(String id) => controller.declineSettingsTransfer(id);
+    // `Includes: ${t.nickname ? 'nickname' : ''}${t.avatarUrl ? ', avatar' :
+    // ''}${t.settings ? ', preferences' : ''}` (shop.js:2013) — including the
+    // PWA's leading-comma quirk when the nickname is absent. `settings` is
+    // always present (the ingest guard requires it), so ', preferences'
+    // always renders.
+    final includes = StringBuffer('Includes: ');
+    if ((t.nickname ?? '').isNotEmpty) includes.write('nickname');
+    if ((t.avatarUrl ?? '').isNotEmpty) includes.write(', avatar');
+    includes.write(', preferences');
+    final dimStyle = TextStyle(color: c.textDim, fontSize: 11);
     return Container(
-      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: c.bg.withValues(alpha: c.isLight ? 1 : 0.3),
-        borderRadius: NymRadius.rsm,
+        color: c.isLight ? c.bg : Colors.white.withValues(alpha: 0.03),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: c.glassBorder),
       ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      child: Row(
         children: [
-          for (var i = 0; i < transfers.length; i++)
-            _transferRow(
-              transfers[i],
-              isFirst: i == 0,
-              onAccept: accept,
-              onDecline: decline,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // `.nm-shop-29`: sender nym, 13px/500.
+                Text(
+                  t.fromNym,
+                  style: TextStyle(
+                      color: c.text, fontSize: 13, fontWeight: FontWeight.w500),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 2),
+                // `.nm-shop-30` with `title="<full pubkey>"` → Tooltip.
+                Tooltip(
+                  message: t.fromPubkey,
+                  child: Text(
+                    'Verified sender key: '
+                    '${abbreviateTransferKey(t.fromPubkey)}',
+                    style: dimStyle,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                // `new Date(t.transferredAt * 1000).toLocaleString()`.
+                Text(formatTransferTimestamp(t.transferredAt), style: dimStyle),
+                // `.nm-shop-31`.
+                Text(includes.toString(), style: dimStyle),
+              ],
             ),
-        ],
-      ),
-    );
-  }
-
-  Widget _transferRow(
-    SettingsTransferOffer t, {
-    required bool isFirst,
-    required void Function(String id) onAccept,
-    required void Function(String id) onDecline,
-  }) {
-    final c = context.nym;
-    final count = t.payload.length;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-      decoration: BoxDecoration(
-        border:
-            isFirst ? null : Border(top: BorderSide(color: c.glassBorder)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // The settings section the offer carries (appearance, privacy, …).
-          Text(
-            '${_humanizeSection(t.section)} settings',
-            style: TextStyle(
-                color: c.text, fontSize: 13, fontWeight: FontWeight.w600),
-            overflow: TextOverflow.ellipsis,
           ),
-          const SizedBox(height: 2),
-          // Publishing device's wall-clock for the category.
-          Text(
-            'Updated ${formatTransferTimestamp(t.updatedAt)}',
-            style: TextStyle(color: c.textDim, fontSize: 11),
+          const SizedBox(width: 8),
+          NymOutlineButton(
+            label: 'Accept',
+            onPressed: () =>
+                unawaited(controller.acceptUserSettingsTransfer(t.eventId)),
           ),
-          if (count > 0)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                'Includes: $count ${count == 1 ? 'preference' : 'preferences'}',
-                style: TextStyle(color: c.textDim, fontSize: 11),
-              ),
-            ),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              // `.icon-btn` (Accept/Decline) is uppercase.
-              NymOutlineButton(
-                label: 'Accept',
-                onPressed: () => onAccept(t.id),
-              ),
-              const SizedBox(width: 8),
-              NymOutlineButton(
-                label: 'Decline',
-                danger: true,
-                onPressed: () => onDecline(t.id),
-              ),
-            ],
+          const SizedBox(width: 6),
+          NymOutlineButton(
+            label: 'Reject',
+            danger: true,
+            onPressed: () => controller.rejectUserSettingsTransfer(t.eventId),
           ),
         ],
       ),
     );
-  }
-
-  /// Humanizes a settings-transfer category (`nymchat-settings-appearance` →
-  /// `Appearance`) for the pending-transfers list.
-  String _humanizeSection(String s) {
-    final base =
-        s.replaceAll('nymchat-settings-', '').replaceAll('nymchat-', '').trim();
-    if (base.isEmpty) return 'Synced';
-    return base[0].toUpperCase() + base.substring(1);
   }
 
   /// Resolves a `base#suffix` display nym for a pubkey, preferring a known user
@@ -3019,7 +3021,8 @@ class _ViewPicker extends StatelessWidget {
 
     // `.view-preview { min-height: 90px; padding: 8px; gap: 4px; background:
     //   rgba(0,0,0,.3); border-radius: var(--radius-xs) }`; selected →
-    //   primary@.08.
+    //   primary@.08 dark / primary@.12 light (styles-columns.css:480-486
+    //   `body.light-mode .view-option.selected .view-preview`).
     Widget previewBox(bool selected, MainAxisAlignment align,
         List<Widget> cols) {
       return Container(
@@ -3028,7 +3031,7 @@ class _ViewPicker extends StatelessWidget {
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(
           color: selected
-              ? c.primaryA(0.08)
+              ? c.primaryA(c.isLight ? 0.12 : 0.08)
               : Colors.black.withValues(alpha: c.isLight ? 0.06 : 0.3),
           borderRadius: NymRadius.rxs,
         ),

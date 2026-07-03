@@ -2025,8 +2025,9 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
     super.dispose();
   }
 
-  /// Animates the transform to the given target — the CSS `transition:
-  /// transform <duration> ease` the PWA toggles via `gesture-animating`.
+  /// Animates the transform to the given target — the CSS
+  /// `transition: transform [duration] ease` the PWA toggles via
+  /// `gesture-animating`.
   void _animateTo(double scale, double tx, double ty, Duration duration) {
     _anim.stop();
     final s0 = _scale, x0 = _tx, y0 = _ty;

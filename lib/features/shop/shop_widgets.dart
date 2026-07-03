@@ -590,12 +590,14 @@ class ShopAuraBubble extends StatelessWidget {
       fillColor = last.background;
     }
 
-    // Every aura's outer glow (`0 0 {blur}px {color}`), at the layout's blur.
+    // Every aura's outer glow (`0 0 {blur}px {color}`), at the layout's
+    // colour + blur (light gold's bubble glow is `.15` vs the IRC `.12`).
     final shadows = <BoxShadow>[
       for (final a in auras)
-        if (a.glowColor != null && a.glowBlurFor(bubble: bubble) > 0)
+        if (a.glowColorFor(bubble: bubble) != null &&
+            a.glowBlurFor(bubble: bubble) > 0)
           BoxShadow(
-            color: a.glowColor!,
+            color: a.glowColorFor(bubble: bubble)!,
             blurRadius: a.glowBlurFor(bubble: bubble),
           ),
     ];
@@ -768,11 +770,13 @@ class ShopItemPreview extends StatelessWidget {
         // The Genesis card stamps a sample edition (#69) on the badge, matching
         // `_renderLimitedCard`.
         final sampleEdition = item.id == 'flair-genesis' ? 69 : null;
+        // The flair-tab preview nym is REGULAR weight (`<span>Your_Nick …`,
+        // shop.js:759) — only the limited-tab flair card (:864) and the
+        // supporter demo (:786) wrap it in `<strong>`.
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Your_Nick',
-                style: TextStyle(fontWeight: FontWeight.w600)),
+            const Text('Your_Nick'),
             FlairBadge(flairId: item.id, edition: sampleEdition),
           ],
         );

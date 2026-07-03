@@ -221,7 +221,10 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   /// bolt11 (zaps.js `handleZapPaymentSuccess`; dedup via `_selfCountedZapInvoices`).
   void _markPaid(LnInvoice invoice) {
     if (!_settledInvoices.add(invoice.dedupKey)) return; // already counted
-    HapticFeedback.lightImpact(); // PWA `window.nymHapticTap`
+    // PWA `window.nymHapticTap` — the same shared 30ms vibrate every other
+    // haptic site fires (inline-bindings.js:112-114), mapped app-wide to
+    // mediumImpact.
+    HapticFeedback.mediumImpact();
     // Record our own zap on the target message's badge instantly (zaps.js
     // `_recordOwnMessageZap`), deduped by the invoice's bolt11 so a later
     // kind-9735 echo for the same payment can't double-count (same dedupKey

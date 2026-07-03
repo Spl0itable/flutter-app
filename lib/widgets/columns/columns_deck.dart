@@ -18,7 +18,6 @@ import '../../features/reactions/reaction_picker.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../models/channel.dart';
 import '../../models/group.dart';
-import '../../models/message.dart';
 import '../../models/pm_conversation.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -237,12 +236,128 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   OverlayEntry? _dragGhostEntry;
   Offset _ghostPos = Offset.zero;
 
+  /// Per-column `col._atBottom` flags keyed by storage key, reported by each
+  /// mounted [_DeckColumn] (`_cvAttachColumnScroll`, columns.js:633-636).
+  /// Absent means at-bottom — columns start pinned to the newest message
+  /// (`col._atBottom = true`, columns.js:433).
+  final Map<String, bool> _atBottomByKey = <String, bool>{};
+
+  /// The [AppStateNotifier] the deck registered its [columnsReadGate] on, kept
+  /// so [dispose] can unregister without touching `ref` after teardown.
+  AppStateNotifier? _gateHost;
+
+  @override
+  void initState() {
+    super.initState();
+    // Register the columns-mode read gate for the deck's lifetime (the PWA's
+    // `_cvMarkColumnRead`, columns.js:26-42): while it is set, the unread bump
+    // (app_state ingest), the `switchView` clear, channel read receipts
+    // (`isConversationSeen`) and `markVisibleColumnsRead` (fired on resume,
+    // relays.js:532/584) all defer to focused + at-bottom + visible.
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.columnsReadGate = _columnsReadGate;
+    _gateHost = notifier;
+  }
+
   @override
   void dispose() {
+    // Unregister the read gate (single view has none — the active conversation
+    // is simply the seen one). Guarded so a hypothetical second deck's gate is
+    // never clobbered.
+    final host = _gateHost;
+    if (host != null && host.columnsReadGate == _columnsReadGate) {
+      host.columnsReadGate = null;
+    }
+    _gateHost = null;
     _removeGhost();
     _pageController.dispose();
     _stripScroll.dispose();
     super.dispose();
+  }
+
+  // --- Columns read gate (`_cvMarkColumnRead`, columns.js:26-47) --------------
+
+  /// `_cvMarkColumnRead`'s pass condition (columns.js:26-42): [key] belongs to
+  /// the FOCUSED column, that column is pinned to the bottom
+  /// (`col._atBottom !== false`), and the app is visible (`!document.hidden`).
+  /// Unread keys arrive as either the storage key or the bare id (peer pubkey /
+  /// group id / channel name) depending on the ingest path, so both forms match.
+  bool _columnsReadGate(String key) {
+    if (key.isEmpty || _columns.isEmpty) return false;
+    if (_focused < 0 || _focused >= _columns.length) return false;
+    final desc = _columns[_focused];
+    if (!_descMatchesKey(desc, key)) return false;
+    // `document.hidden`: a backgrounded app never marks columns read; unread
+    // accrued while hidden is cleared on resume via `markVisibleColumnsRead`.
+    // `inactive` (visible but unfocused) still counts as visible — on the web
+    // an unfocused-but-visible tab has `document.hidden === false`.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == AppLifecycleState.hidden ||
+        lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.detached) {
+      return false;
+    }
+    return _atBottomByKey[desc.storageKey] ?? true;
+  }
+
+  /// Whether an unread-counts [key] refers to [desc]'s conversation — accepts
+  /// the storage key (`#chan` / `pm-<pk>` / `group-<id>`), the descriptor key,
+  /// and (for channels) the bare lowercase name/geohash badge bucket.
+  bool _descMatchesKey(_ColumnDesc desc, String key) {
+    if (key == desc.storageKey || key == desc.key) return true;
+    if (desc.kind == _ColumnKind.channel) {
+      final k = key.toLowerCase();
+      return k == desc.key || k == '#${desc.key}';
+    }
+    return false;
+  }
+
+  /// `_cvAttachColumnScroll`'s at-bottom bookkeeping (columns.js:633-636):
+  /// track the per-column flag and, on the scrolled-up → at-bottom transition,
+  /// mark the column read — only the focused + visible column's badge actually
+  /// clears (`_cvMarkColumnRead` re-checks the gate).
+  void _onColumnAtBottom(_ColumnDesc desc, bool atBottom) {
+    final was = _atBottomByKey[desc.storageKey] ?? true;
+    _atBottomByKey[desc.storageKey] = atBottom;
+    if (atBottom && !was) _markColumnRead(desc);
+  }
+
+  /// `_cvMarkColumnRead` (columns.js:26-42): when the gate passes, clear the
+  /// column's unread badge AND stamp its read watermark ([clearUnread] folds
+  /// the PWA's `clearUnreadCount` + `_markChannelRead` branches together).
+  void _markColumnRead(_ColumnDesc desc) {
+    if (!_columnsReadGate(desc.storageKey)) return;
+    ref.read(appStateProvider.notifier).clearUnread(desc.storageKey);
+  }
+
+  /// Binds [_onColumnAtBottom] to [desc] at BUILD time, so a scroll event that
+  /// races a live reorder can't report under a stale index's column.
+  ValueChanged<bool> _atBottomHandlerFor(_ColumnDesc desc) =>
+      (atBottom) => _onColumnAtBottom(desc, atBottom);
+
+  /// `cvResetColumns` while columns are LIVE (columns.js:363-381): tear down
+  /// the in-memory columns and let the next build re-seed the defaults
+  /// (`_cvSeedDefaults` — storage was already cleared by
+  /// [SettingsController.resetColumns] before the tick bump), re-derive the
+  /// primary column, re-focus the first column and snap the strip/carousel to
+  /// it. Without this a mounted deck would keep its stale `_columns` and the
+  /// next `_saveLayout` would re-persist them, permanently undoing the reset.
+  void _onColumnsReset() {
+    if (!mounted) return;
+    setState(() {
+      _columns.clear();
+      _seeded = false; // build → `_seedIfNeeded` → seed defaults + save
+      _pickerOpen = false;
+      _focused = 0;
+    });
+    _primaryKey = null; // re-derived by the re-seed (columns.js:376-377)
+    _syncedInitialView = false; // re-fire `_cvFocusColumn(first.id)` (:378-379)
+    _atBottomByKey.clear();
+    // Snap the carousel/strip back to the first (focused) column once the
+    // re-seeded columns have built.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _columns.isNotEmpty) _scrollToIndex(0);
+    });
   }
 
   // --- Persistence (`_cvSaveLayout` / `_cvLoadLayout`) -----------------------
@@ -416,6 +531,11 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     });
     // `cvRemoveColumn`: `if (this._cvPrimaryId === id) this._cvPrimaryId = null`.
     if (desc.key == _primaryKey) _primaryKey = null;
+    // No column shows this conversation anymore — drop its at-bottom flag so a
+    // later re-add starts pinned (`col._atBottom = true`, columns.js:433).
+    if (!_columns.any((d) => d.storageKey == desc.storageKey)) {
+      _atBottomByKey.remove(desc.storageKey);
+    }
     _saveLayout();
     _syncPageController();
     // Re-point the shared header/composer only when the focused column itself
@@ -482,7 +602,13 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final view = _viewForDesc(desc);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (ref.read(appStateProvider).view == view) return;
+      if (ref.read(appStateProvider).view == view) {
+        // `_cvFocusColumn` still marks the (re)focused column read
+        // (columns.js:565) even when the shared view already points at it;
+        // the gated `switchView` clear below covers the switching path.
+        _markColumnRead(desc);
+        return;
+      }
       // Flag the deck-driven switch so the `ref.listen(view)` nav-sink
       // (`_onExternalView`) doesn't treat it as outside navigation and recurse.
       _syncingFromDeck = true;
@@ -1006,32 +1132,41 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// drag `end()` and keeps the sheet open across removals), so dismissing the
   /// sheet never discards anything. Metrics from `styles-columns.css:623-772`.
   Future<void> _openTabsView() async {
-    final result = await showModalBottomSheet<_TabsResult>(
+    // The PWA overlay is a plain `display: none` → `display: flex` toggle
+    // (`.cv-tabs-overlay.open`, styles-columns.css:623-635) with no
+    // transition/animation, so the sheet POPS in/out instantly on both
+    // breakpoints — a general dialog with a zero-length transition, not a
+    // slide-up modal bottom sheet.
+    final result = await showGeneralDialog<_TabsResult>(
       context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Columns',
       // `.cv-tabs-overlay` background rgba(0,0,0,0.5).
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => _TabsSheet(
-        columns: List<_ColumnDesc>.from(_columns),
-        activeDesc: (_focused >= 0 && _focused < _columns.length)
-            ? _columns[_focused]
-            : null,
-        titleOf: (d) => _columnTitleWidget(
-          ctx,
-          d,
-          TextStyle(
-            color: ctx.nym.secondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
+      transitionDuration: Duration.zero,
+      pageBuilder: (ctx, _, __) => Material(
+        type: MaterialType.transparency,
+        child: _TabsSheet(
+          columns: List<_ColumnDesc>.from(_columns),
+          activeDesc: (_focused >= 0 && _focused < _columns.length)
+              ? _columns[_focused]
+              : null,
+          titleOf: (d) => _columnTitleWidget(
+            ctx,
+            d,
+            TextStyle(
+              color: ctx.nym.secondary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
           ),
+          iconOf: (d) => _columnIcon(ctx, d, size: 24),
+          onReorder: _commitTabsReorder,
+          onRemove: (d) async {
+            await _removeColumn(d);
+            return !_columns.contains(d);
+          },
         ),
-        iconOf: (d) => _columnIcon(ctx, d, size: 24),
-        onReorder: _commitTabsReorder,
-        onRemove: (d) async {
-          await _removeColumn(d);
-          return !_columns.contains(d);
-        },
       ),
     );
     if (result == null || !mounted) return;
@@ -1200,6 +1335,17 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       (prev, next) => _onExternalView(next),
     );
 
+    // "Reset columns to defaults" pressed while the deck is mounted — the PWA
+    // resets LIVE (`cvResetColumns` tears down + re-seeds + re-focuses,
+    // columns.js:363-381); the tick is bumped by `SettingsController.
+    // resetColumns` after clearing the persisted layout.
+    ref.listen<int>(
+      settingsProvider.select((s) => s.columnsResetTick),
+      (prev, next) {
+        if (prev != next) _onColumnsReset();
+      },
+    );
+
     if (_focused >= _columns.length) {
       _focused = _columns.isEmpty ? 0 : _columns.length - 1;
     }
@@ -1299,6 +1445,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                               _onColumnHeaderDown(i, e, boundaryCtx),
                           onDragMove: _onColumnHeaderMove,
                           onDragEnd: _onColumnHeaderUp,
+                          onAtBottomChanged: _atBottomHandlerFor(_columns[i]),
                         ),
                         const SizedBox(width: _CvDimens.gap),
                       ],
@@ -1392,6 +1539,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           onPrev: () => _stepFocused(-1),
           onNext: () => _stepFocused(1),
           onOpenTabs: _openTabsView,
+          onAtBottomChanged: _atBottomHandlerFor(desc),
         );
       },
     );
@@ -1419,6 +1567,7 @@ class _DesktopColumnSlot extends StatefulWidget {
     required this.onDragDown,
     required this.onDragMove,
     required this.onDragEnd,
+    this.onAtBottomChanged,
   });
 
   final int index;
@@ -1439,6 +1588,9 @@ class _DesktopColumnSlot extends StatefulWidget {
       onDragDown;
   final void Function(PointerMoveEvent event) onDragMove;
   final VoidCallback onDragEnd;
+
+  /// At-bottom transitions, forwarded to the deck's read-gate bookkeeping.
+  final ValueChanged<bool>? onAtBottomChanged;
 
   @override
   State<_DesktopColumnSlot> createState() => _DesktopColumnSlotState();
@@ -1477,6 +1629,7 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
       },
       onHeaderMove: widget.onDragMove,
       onHeaderUp: widget.onDragEnd,
+      onAtBottomChanged: widget.onAtBottomChanged,
     );
 
     // Any click inside the column focuses it (`columns.js:175-179`) — EXCEPT
@@ -1514,6 +1667,7 @@ class _MobileColumn extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     required this.onOpenTabs,
+    this.onAtBottomChanged,
   });
 
   final int index;
@@ -1524,6 +1678,9 @@ class _MobileColumn extends StatelessWidget {
   final VoidCallback onPrev;
   final VoidCallback onNext;
   final VoidCallback onOpenTabs;
+
+  /// At-bottom transitions, forwarded to the deck's read-gate bookkeeping.
+  final ValueChanged<bool>? onAtBottomChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1542,6 +1699,7 @@ class _MobileColumn extends StatelessWidget {
       onPrev: onPrev,
       onNext: onNext,
       onOpenTabs: onOpenTabs,
+      onAtBottomChanged: onAtBottomChanged,
     );
   }
 }
@@ -1566,6 +1724,7 @@ class _DeckColumn extends ConsumerStatefulWidget {
     this.onHeaderDown,
     this.onHeaderMove,
     this.onHeaderUp,
+    this.onAtBottomChanged,
   });
 
   final _ColumnDesc desc;
@@ -1600,6 +1759,11 @@ class _DeckColumn extends ConsumerStatefulWidget {
   final void Function(PointerMoveEvent event)? onHeaderMove;
   final VoidCallback? onHeaderUp;
 
+  /// Reports `col._atBottom` transitions up to the deck
+  /// (`_cvAttachColumnScroll`, columns.js:633-636) so the columns read gate
+  /// and the at-bottom mark-read can see this column's scroll state.
+  final ValueChanged<bool>? onAtBottomChanged;
+
   @override
   ConsumerState<_DeckColumn> createState() => _DeckColumnState();
 }
@@ -1620,6 +1784,24 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   }
 
   @override
+  void didUpdateWidget(covariant _DeckColumn old) {
+    super.didUpdateWidget(old);
+    if (old.desc.storageKey != widget.desc.storageKey) {
+      // Repurposed column (`_cvNavigateColumn` → `_cvRenderColumn`): the PWA
+      // re-renders the new conversation pinned to the newest message
+      // (`scrollerEl.scrollTop = 0; col._atBottom = true`, columns.js:511-512).
+      _lastMessageCount = 0;
+      _atBottom = true;
+      _showScrollButton = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_scroll.hasClients && _scroll.offset != 0) _scroll.jumpTo(0);
+        widget.onAtBottomChanged?.call(true);
+      });
+    }
+  }
+
+  @override
   void dispose() {
     _scroll.removeListener(_onScroll);
     _scroll.dispose();
@@ -1635,6 +1817,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final distanceFromBottom = _scroll.offset;
     final atBottom = distanceFromBottom < 120;
     final showButton = distanceFromBottom > 150;
+    if (atBottom != _atBottom) widget.onAtBottomChanged?.call(atBottom);
     if (atBottom != _atBottom || showButton != _showScrollButton) {
       setState(() {
         _atBottom = atBottom;
@@ -1660,8 +1843,12 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final settings = ref.watch(settingsProvider);
     final app = ref.watch(appStateProvider);
     final reactions = ref.watch(reactionsProvider);
-    final messages = [...(app.messages[widget.desc.storageKey] ?? const <Message>[])];
-    messages.sort(compareMessages);
+    // Columns render the same FILTERED view as the single chat: the PWA's
+    // columns draw via `renderMessagesWithVirtualScroll` → `getFilteredMessages`
+    // / `getFilteredPMMessages` (columns.js:510 → messages.js:2934-2949), so
+    // blocked users, blocked-keyword hits and heuristic spam are dropped here
+    // exactly like `messagesForCurrentViewProvider` does for the single view.
+    final messages = visibleMessagesFor(app, widget.desc.storageKey);
 
     // `_cvAttachAutoScroll` (columns.js:442-456): when new messages arrive
     // while the user is at the bottom (<120px, `_atBottom`), pin the column
@@ -1774,6 +1961,12 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
                                 return MessageGroup(
                                   entries: entries,
                                   settings: settings,
+                                  // `body.columns-mode` message-layout variants
+                                  // (styles-columns.css:27-82): IRC rows stack
+                                  // vertically, hover buttons stack, media caps
+                                  // at 100%, and desktop self bubble groups
+                                  // drop the 14px right padding.
+                                  columnsMode: true,
                                   onReactionPicker: (msg) =>
                                       showReactionPicker(context, ref, msg),
                                 );
@@ -2241,17 +2434,25 @@ class _PagerState extends State<_Pager> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // `.cv-pdot`: text-dim @ 0.4, active primary @ 1 — but
+                // `.cv-pager:hover .cv-pdot { opacity: 0.7 }` outweighs
+                // `.cv-pdot.active` (specificity 0,3,0 vs 0,2,0), so on hover
+                // EVERY dot — the active one included — dims to 0.7. Both the
+                // opacity and background cross-fade over 0.15s (ease).
                 for (var i = 0; i < widget.count; i++)
-                  Container(
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    curve: Curves.ease,
                     width: 7,
                     height: 7,
                     margin: const EdgeInsets.symmetric(horizontal: 2),
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: i == widget.active
-                          ? c.primary
-                          : c.textDim.withValues(
-                              alpha: _hover ? 0.7 : 0.4),
+                      color: (i == widget.active ? c.primary : c.textDim)
+                          .withValues(
+                              alpha: _hover
+                                  ? 0.7
+                                  : (i == widget.active ? 1.0 : 0.4)),
                     ),
                   ),
               ],

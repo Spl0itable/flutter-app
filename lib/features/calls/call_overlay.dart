@@ -11,6 +11,7 @@
 
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1108,17 +1109,29 @@ class _ChatRow extends ConsumerWidget {
   }
 
   Widget _buildRow(BuildContext context, NymColors c, TextStyle base) {
-    return GestureDetector(
-      // `_setupCallChatInteractions` (calls.js:1598-1621): a 500ms hold
-      // (cancelled after 10px of movement) buzzes (`nymHapticTap` = a 30ms
-      // vibrate) and opens the quick-react popup centred on the PRESS POINT —
-      // `_showCallChatQuickReact` places it `left = cx - w/2, top = cy - h -
-      // 10` from the recorded touch x/y (calls.js:1533-1537) — NOT on the row
-      // rect. A zero-size anchor at the touch point reproduces that.
-      onLongPressStart: (d) {
-        HapticFeedback.mediumImpact();
-        _openQuickReact(context,
-            Rect.fromCenter(center: d.globalPosition, width: 0, height: 0));
+    // `_setupCallChatInteractions` (calls.js:1598-1621): a 500ms hold
+    // (cancelled once the touch drifts more than 10px on either axis) buzzes
+    // (`nymHapticTap` = a 30ms vibrate) and opens the quick-react popup
+    // centred on the PRESS POINT — `_showCallChatQuickReact` places it
+    // `left = cx - w/2, top = cy - h - 10` from the recorded touch x/y
+    // (calls.js:1533-1537) — NOT on the row rect. A zero-size anchor at the
+    // touch point reproduces that. The tight 10px pre-fire cancel slop needs
+    // the custom recognizer: a stock long-press would ride the framework's
+    // ~18px kTouchSlop and still fire after a small scroll drift.
+    return RawGestureDetector(
+      gestures: <Type, GestureRecognizerFactory>{
+        _CallChatLongPressRecognizer: GestureRecognizerFactoryWithHandlers<
+            _CallChatLongPressRecognizer>(
+          () => _CallChatLongPressRecognizer(debugOwner: this),
+          (r) => r
+            ..onLongPressStart = (d) {
+              HapticFeedback.mediumImpact();
+              _openQuickReact(
+                  context,
+                  Rect.fromCenter(
+                      center: d.globalPosition, width: 0, height: 0));
+            },
+        ),
       },
       // `.call-chat-msg` is a left-aligned IRC-style log row (no align-self /
       // text-align:right for self in the CSS); self ONLY dims the from-line.
@@ -1169,6 +1182,49 @@ class _ChatRow extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
+
+/// A [LongPressGestureRecognizer] with the PWA's tighter pre-fire cancel slop
+/// for the call-chat quick-react hold (`_setupCallChatInteractions`,
+/// calls.js:1595,1611-1616): the pending 500ms timer is cancelled once the
+/// touch drifts more than `MOVE = 10` px on EITHER axis — tighter than the
+/// framework's default ~18px kTouchSlop drift, which would still pop the popup
+/// on a slow call-chat scroll. Movement AFTER the 500ms deadline no longer
+/// matters (the popup is already up), so the check applies only before the
+/// deadline elapses.
+class _CallChatLongPressRecognizer extends LongPressGestureRecognizer {
+  _CallChatLongPressRecognizer({super.debugOwner});
+
+  /// `MOVE` (calls.js:1595).
+  static const double _moveThreshold = 10;
+
+  Offset _downPosition = Offset.zero;
+  Duration _downTime = Duration.zero;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    if (event.pointer == primaryPointer) {
+      _downPosition = event.position;
+      _downTime = event.timeStamp;
+    }
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent &&
+        event.pointer == primaryPointer &&
+        state == GestureRecognizerState.possible &&
+        event.timeStamp - _downTime < (deadline ?? kLongPressTimeout) &&
+        ((event.position.dx - _downPosition.dx).abs() > _moveThreshold ||
+            (event.position.dy - _downPosition.dy).abs() > _moveThreshold)) {
+      // Same rejection path the built-in pre-accept slop check takes.
+      resolve(GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      return;
+    }
+    super.handleEvent(event);
   }
 }
 

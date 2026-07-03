@@ -376,7 +376,9 @@ class EmojiBaselineDrop extends SingleChildRenderObjectWidget {
 
   @override
   void updateRenderObject(
-      BuildContext context, covariant _RenderEmojiBaselineDrop renderObject) {
+      BuildContext context,
+      // ignore: library_private_types_in_public_api
+      covariant _RenderEmojiBaselineDrop renderObject) {
     renderObject.drop = drop;
   }
 }
