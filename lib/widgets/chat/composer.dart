@@ -2739,7 +2739,12 @@ class _PreviewChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: c.bgTertiary,
+        // solid-ui repaints the chip opaque: `body.solid-ui .quote-preview,
+        // .edit-preview { background: #1c1c2c }` — which IS the solid dark
+        // bg-tertiary — but light `#ececea` (styles-themes-responsive.css:
+        // 1836-1843), NOT the solid light bg-tertiary `#f0f0ed`, so the token
+        // alone can't carry the light plate.
+        color: c.solidUi && c.isLight ? const Color(0xFFECECEA) : c.bgTertiary,
         // `border: 1px solid var(--glass-border)`; `body.light-mode
         // .quote-preview/.edit-preview` re-states rgba(0,0,0,0.08) — the light
         // glassBorder — so both themes resolve to glassBorder.

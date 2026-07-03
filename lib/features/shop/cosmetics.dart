@@ -858,15 +858,15 @@ const Map<String, Color> _styleLightBubbleContentBackground = {
 /// solid-ui content-background overrides, dark. Satoshi's plate goes OPAQUE in
 /// both layouts: `body.solid-ui.chat-bubbles .message.style-satoshi
 /// .message-content { background: #4a3a1f !important }` (styles-themes-
-/// responsive.css:1733) and `body.solid-ui:not(.chat-bubbles) … {
-/// background-color: #4a3a1f }` (:1745).
+/// responsive.css:1714) and `body.solid-ui:not(.chat-bubbles) … {
+/// background-color: #4a3a1f }` (:1750).
 const Map<String, Color> _styleSolidContentBackground = {
   'style-satoshi': Color(0xFF4A3A1F),
 };
 
 /// solid-ui content-background overrides, light: satoshi `#f3dcb4` in both
 /// layouts (`body.solid-ui.light-mode[.chat-bubbles] .message.style-satoshi
-/// .message-content`, styles-themes-responsive.css:1755/1770).
+/// .message-content`, styles-themes-responsive.css:1738/1764).
 const Map<String, Color> _styleSolidLightContentBackground = {
   'style-satoshi': Color(0xFFF3DCB4),
 };
@@ -1219,6 +1219,50 @@ const MessageStyleDecoration supporterStyleDecorationLight =
   borderAccent: Color(0xFFB8960A),
 );
 
+/// solid-ui supporter style, dark: the gold text/glow is unchanged, but the
+/// translucent washes go opaque — bubble `.message-content` fill `#3d3520`
+/// (`body.solid-ui.chat-bubbles .message.supporter-style .message-content
+/// { background: #3d3520 !important }`, styles-themes-responsive.css:1718) and
+/// the IRC row flattens to `#2a2418` + the same 3px `#ffd700` bar
+/// (`body.solid-ui:not(.chat-bubbles) .message.supporter-style`, :1754-1757).
+const MessageStyleDecoration supporterStyleDecorationSolid =
+    MessageStyleDecoration(
+  textColor: Color(0xFFFFD700),
+  glowShadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+  glow: Color(0x40FFD700),
+  contentBackground: Color(0xFF3D3520), // opaque bubble wash (:1718)
+  bubbleOnlyContentBackground: true,
+  // Flat row plate — a same-stop "gradient" so the IRC row path (which paints
+  // [backgroundGradient]) renders the flat `#2a2418`.
+  backgroundGradient: [Color(0xFF2A2418), Color(0xFF2A2418)],
+  borderAccent: Color(0xFFFFD700),
+);
+
+/// solid-ui supporter style, light: bubble wash `#efe2a8` (`body.solid-ui.
+/// light-mode.chat-bubbles … { background: #efe2a8 !important }`, styles-themes-
+/// responsive.css:1742), IRC row flat `#f4ead0` + `#b8960a` bar (:1768-1771);
+/// text keeps the light `#8a6d00` / no glow.
+const MessageStyleDecoration supporterStyleDecorationSolidLight =
+    MessageStyleDecoration(
+  textColor: Color(0xFF8A6D00),
+  contentBackground: Color(0xFFEFE2A8), // opaque bubble wash (:1742)
+  bubbleOnlyContentBackground: true,
+  backgroundGradient: [Color(0xFFF4EAD0), Color(0xFFF4EAD0)],
+  borderAccent: Color(0xFFB8960A),
+);
+
+/// The supporter decoration for the current mode: [solidUi] selects the opaque
+/// solid-ui plates, [isLight] the light palette.
+MessageStyleDecoration supporterStyleDecorationFor(
+    {required bool isLight, bool solidUi = false}) {
+  if (solidUi) {
+    return isLight
+        ? supporterStyleDecorationSolidLight
+        : supporterStyleDecorationSolid;
+  }
+  return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+}
+
 /// Message styles whose DARK body-text colour rule is declared AFTER the
 /// supporter gold rule (`.message.supporter-style .message-content
 /// { color:#ffd700 !important }`, styles-features.css:1089) at equal
@@ -1275,10 +1319,11 @@ MessageStyleDecoration composeSupporterStyle(
   MessageStyleDecoration styled,
   String styleId, {
   required bool isLight,
+  bool solidUi = false,
 }) {
   if (styleId == 'style-aurora') return styled;
   final supporter =
-      isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+      supporterStyleDecorationFor(isLight: isLight, solidUi: solidUi);
   final goldText = isLight
       ? !_lightStyleColorBeatsSupporter.contains(styleId)
       : !_darkStyleColorBeatsSupporter.contains(styleId);
@@ -1321,10 +1366,10 @@ MessageStyleDecoration composeSupporterStyle(
 /// PWA ships one ONLY for gold; the other auras keep their dark values in light
 /// mode (see [cosmeticAuraFor]).
 List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics,
-    {bool isLight = false}) {
+    {bool isLight = false, bool solidUi = false}) {
   final out = <CosmeticAura>[];
   for (final id in cosmetics.cosmetics) {
-    final aura = cosmeticAuraFor(id, isLight: isLight);
+    final aura = cosmeticAuraFor(id, isLight: isLight, solidUi: solidUi);
     if (aura != null) out.add(aura);
   }
   return out;
@@ -1333,9 +1378,17 @@ List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics,
 /// The aura for a single cosmetic [id], mode-aware. Only GOLD has a light-mode
 /// override in the PWA; every other aura keeps its dark values in light mode
 /// (styles-themes-responsive.css:923-931 is the sole `body.light-mode`
-/// cosmetic-aura rule). Used by both the chat bubble and the shop card preview.
-CosmeticAura? cosmeticAuraFor(String id, {bool isLight = false}) =>
-    (isLight ? _cosmeticAurasLight[id] : null) ?? _cosmeticAuras[id];
+/// cosmetic-aura rule). [solidUi] likewise swaps in gold's `body.solid-ui`
+/// opaque plates (:1722/:1746 bubble, :1759/:1773 IRC row) — the solid block
+/// touches no other aura. Used by both the chat bubble and the shop card
+/// preview (which keeps the glass defaults).
+CosmeticAura? cosmeticAuraFor(String id,
+        {bool isLight = false, bool solidUi = false}) =>
+    (solidUi
+        ? (isLight ? _cosmeticAurasSolidLight : _cosmeticAurasSolid)[id]
+        : null) ??
+    (isLight ? _cosmeticAurasLight[id] : null) ??
+    _cosmeticAuras[id];
 
 const String _frostSnowflakeSvg =
     "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
@@ -1466,6 +1519,64 @@ final Map<String, CosmeticAura> _cosmeticAurasLight = {
     gradient: [Color(0x0FB48C00), Color(0x05B48C00)], // .06→.02
     bubbleGradient: [Color(0x2EB48C00), Color(0x0FB48C00)], // .18→.06
     bubblePaintsGradient: true,
+  ),
+};
+
+/// solid-ui aura overrides, DARK (`body.solid-ui`, styles-themes-responsive.
+/// css:1722/:1759). Only GOLD is targeted by the solid block; ring/glow
+/// box-shadows are untouched, so they carry over from the dark table.
+final Map<String, CosmeticAura> _cosmeticAurasSolid = {
+  // gold — IRC row flattens to the opaque `#2a2418` plate + the same `#ffd700`
+  // bar (`body.solid-ui:not(.chat-bubbles) .message.cosmetic-aura-gold
+  // { background: #2a2418; border-left: 3px solid #ffd700 }`, :1759-1762; the
+  // base rule's inset ring / 18px glow persist — solid only resets background
+  // + border-left). The UNSTYLED bubble keeps the GLASS gold wash: the
+  // last-loaded features rule (`body.chat-bubbles .message:not([class*=
+  // "style-"]).cosmetic-aura-gold .message-content { …gradient… !important }`,
+  // styles-features.css:3700, specificity 0,5,1) outcascades the solid
+  // `#38311e !important` plate (themes:1722, also 0,5,1 but declared in an
+  // earlier sheet) — so [bubbleGradient] stays translucent and `#38311e` only
+  // surfaces on STYLED messages via [bubbleStyledFill] (no `:not` gate on the
+  // solid rule, and it beats every solid style plate).
+  'cosmetic-aura-gold': const CosmeticAura(
+    id: 'cosmetic-aura-gold',
+    insetColor: Color(0x59FFD700),
+    bubbleInsetColor: Color(0x8CFFD700),
+    insetWidth: 1,
+    insetRing: true,
+    glowColor: Color(0x2EFFD700),
+    glowBlur: 18,
+    bubbleGlowBlur: 12,
+    borderAccent: Color(0xFFFFD700),
+    gradient: [Color(0xFF2A2418), Color(0xFF2A2418)], // flat opaque row plate
+    bubbleGradient: [Color(0x29FFD700), Color(0x0FFFD700)], // glass wash wins
+    bubblePaintsGradient: true,
+    bubbleStyledFill: Color(0xFF38311E), // themes:1722, styled bubbles only
+  ),
+};
+
+/// solid-ui aura overrides, LIGHT (`body.solid-ui.light-mode`). Gold's bubble
+/// plate is `#f0e3ad` for styled AND unstyled messages here — the (0,6,1)
+/// `body.solid-ui.light-mode.chat-bubbles .message.cosmetic-aura-gold
+/// .message-content { background: #f0e3ad !important }` (themes:1746) beats the
+/// (0,5,1) features glass wash — and the IRC row flattens to `#f4ead0` +
+/// `#b8960a` bar (:1773-1776). Ring/glow keep the light-gold values.
+final Map<String, CosmeticAura> _cosmeticAurasSolidLight = {
+  'cosmetic-aura-gold': const CosmeticAura(
+    id: 'cosmetic-aura-gold',
+    insetColor: Color(0x4DB48C00),
+    bubbleInsetColor: Color(0x80B48C00),
+    insetWidth: 1,
+    insetRing: true,
+    glowColor: Color(0x1FB48C00),
+    glowBlur: 12,
+    bubbleGlowColor: Color(0x26B48C00),
+    bubbleGlowBlur: 10,
+    borderAccent: Color(0xFFB8960A),
+    gradient: [Color(0xFFF4EAD0), Color(0xFFF4EAD0)], // flat opaque row plate
+    bubbleGradient: [Color(0xFFF0E3AD), Color(0xFFF0E3AD)], // flat bubble plate
+    bubblePaintsGradient: true,
+    bubbleStyledFill: Color(0xFFF0E3AD),
   ),
 };
 

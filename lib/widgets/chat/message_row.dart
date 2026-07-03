@@ -440,24 +440,33 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// the style per [composeSupporterStyle].
   MessageStyleDecoration? _styleDecoration(BuildContext context) {
     final cos = _cosmetics;
-    final isLight = context.nym.isLight;
-    final styled = messageStyleDecoration(cos.styleId, isLight: isLight);
+    final c = context.nym;
+    final isLight = c.isLight;
+    // solid-ui swaps the translucent satoshi/supporter washes for the opaque
+    // `body.solid-ui` plates (styles-themes-responsive.css:1714-1776).
+    final solidUi = c.solidUi;
+    final styled = messageStyleDecoration(cos.styleId,
+        isLight: isLight, solidUi: solidUi);
     if (styled != null) {
       return cos.supporter
-          ? composeSupporterStyle(styled, cos.styleId!, isLight: isLight)
+          ? composeSupporterStyle(styled, cos.styleId!,
+              isLight: isLight, solidUi: solidUi)
           : styled;
     }
     if (cos.supporter) {
-      return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+      return supporterStyleDecorationFor(isLight: isLight, solidUi: solidUi);
     }
     return null;
   }
 
   /// The active special-cosmetic auras (gold/neon/prism/frost/phoenix/cosmic/
   /// hologram) composed onto the bubble/row, resolved for the current brightness
-  /// (the PWA swaps gold — and a derived tone for the rest — in `light-mode`).
+  /// (the PWA swaps gold — and a derived tone for the rest — in `light-mode`)
+  /// and for solid-ui (which flattens gold's translucent washes to opaque
+  /// plates, styles-themes-responsive.css:1722-1776).
   List<CosmeticAura> _resolveAuras(BuildContext context) =>
-      resolveCosmeticAuras(_cosmetics, isLight: context.nym.isLight);
+      resolveCosmeticAuras(_cosmetics,
+          isLight: context.nym.isLight, solidUi: context.nym.solidUi);
 
   /// True when the message element carries a `style-…` class — the PWA adds the
   /// RAW active style id as a class (`messageEl.classList.add(activeStyle)`), so
@@ -1549,7 +1558,17 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // gated on NO active message style (`body.chat-bubbles .message:not(
     // [class*="style-"]).cosmetic-aura-gold .message-content`,
     // styles-features.css:3699-3701): a styled bubble keeps only the ring/glow.
-    final bubbleGradient = (lastAura != null &&
+    // Ghost + solid-ui flattens EVERY translucent bubble wash — fire/ice/
+    // rainbow/satoshi/supporter/aura-gold all go `#2a2a2a !important`
+    // (self fire/ice/rainbow `#444444 !important`; light `#dddddd`/`#bbbbbb`)
+    // via `body.solid-ui.theme-ghost.chat-bubbles …` (styles-themes-
+    // responsive.css:1777-1806), and the (0,4,1) ghost-solid base fill
+    // (:1686-1700) also buries frost's (0,4,0) icy wash. Only eclipse/crt's
+    // plates and aurora's transparent fill survive: their last-loaded
+    // features-sheet rules tie the ghost base at (0,4,1) / carry !important.
+    final ghostSolid = c.solidUi && settings.theme == NymThemeKey.ghost;
+    final bubbleGradient = (!ghostSolid &&
+            lastAura != null &&
             lastAura.bubblePaintsGradient &&
             !_styleClassActive)
         ? lastAura.bubbleFillGradient
@@ -1579,18 +1598,56 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // fill (themes:1412-1415) and the supporter bubble wash: a self fire/ice
     // bubble keeps primary@0.25 in BOTH themes; only other users' bubbles get
     // the style override.
+    //
+    // solid-ui widens the self override to RAINBOW and swaps the fill for the
+    // opaque `color-mix(in srgb, var(--primary) 22%, #2a2a3a)` plate
+    // (`body.solid-ui.chat-bubbles .message.self.style-fire/.style-ice/
+    // .style-rainbow .message-content { … !important }`, themes:1708-1711 —
+    // 0,6,1, so it even beats the solid gold-aura plate) = `c.bubbleSelfBg`.
     final selfFireIce = self &&
         (_cosmetics.styleId == 'style-fire' ||
-            _cosmetics.styleId == 'style-ice');
-    final bubbleColor = selfFireIce
-        ? c.primaryA(0.25)
-        : deco?.contentBackgroundFor(bubble: true) ??
-            (_styleClassActive || self ? null : lastAura?.background) ??
-            (self
-                ? c.primaryA(c.isLight ? 0.20 : 0.25)
-                : (c.isLight
-                    ? const Color(0x1A000000) // black @ 0.10
-                    : Colors.white.withValues(alpha: 0.14)));
+            _cosmetics.styleId == 'style-ice' ||
+            (c.solidUi && _cosmetics.styleId == 'style-rainbow'));
+    // solid-ui gold-aura plate on a STYLED message: `body.solid-ui
+    // [.light-mode].chat-bubbles .message.cosmetic-aura-gold .message-content
+    // { background: #38311e / #f0e3ad !important }` (themes:1722/:1746) has no
+    // `:not([class*="style-"])` gate and outcascades every solid style plate
+    // (satoshi/supporter declared earlier at equal specificity; eclipse/crt
+    // not !important). Unstyled messages take it via [bubbleGradient] instead
+    // (dark keeps the glass wash there — see `_cosmeticAurasSolid`).
+    Color? auraStyledFill;
+    for (final a in auras) {
+      auraStyledFill = a.bubbleStyledFill ?? auraStyledFill;
+    }
+    final Color bubbleColor;
+    if (ghostSolid &&
+        !selfFireIce &&
+        !(deco?.transparentBubble ?? false) &&
+        _cosmetics.styleId != 'style-eclipse' &&
+        _cosmetics.styleId != 'style-crt') {
+      // Ghost-solid flatten (see [ghostSolid] above): the satoshi/supporter/
+      // gold `#2a2a2a !important` group rule (themes:1781-1785, 0,6,1) beats
+      // the non-important self `#444444` (:1690), so ONLY an unstyled or
+      // fire/ice/rainbow self bubble keeps the self grey.
+      final flattenedToOther = _cosmetics.styleId == 'style-satoshi' ||
+          _cosmetics.supporter ||
+          auras.any((a) => a.id == 'cosmetic-aura-gold');
+      bubbleColor =
+          (self && !flattenedToOther) ? c.bubbleSelfBg : c.bubbleOtherBg;
+    } else if (selfFireIce) {
+      // Glass keeps primary@0.25 in BOTH themes (features:3708-3711); solid
+      // resolves to the opaque color-mix plate via the theme token.
+      bubbleColor = c.solidUi ? c.bubbleSelfBg : c.primaryA(0.25);
+    } else if (_styleClassActive && auraStyledFill != null) {
+      bubbleColor = auraStyledFill;
+    } else {
+      // Base fills come from the theme tokens: glass = self primary@0.25/0.20,
+      // others white@0.14 / black@0.10; solid-ui = the opaque `#2a2a3a` /
+      // `#e6e6e0` (+ color-mix self) plates (themes:1660-1684).
+      bubbleColor = deco?.contentBackgroundFor(bubble: true) ??
+          (_styleClassActive || self ? null : lastAura?.background) ??
+          (self ? c.bubbleSelfBg : c.bubbleOtherBg);
+    }
     final radius = _bubbleRadius(self);
 
     // The bubble interior = the body, THEN the `.bubble-time-inner` (the
@@ -1693,9 +1750,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           // `.message.mentioned .message-content`: `box-shadow: inset 0 0 0 1px
           // rgb(from var(--secondary) r g b / 0.25)` (styles-features.css:3657)
           // — light mode strokes .2 (themes:1404) — rendered as a 1px inner
-          // border on the bubble.
-          mentionRing:
-              mentioned ? c.secondaryA(c.isLight ? 0.2 : 0.25) : null,
+          // border on the bubble. solid-ui strokes the FULL secondary
+          // (`body.solid-ui[.light-mode].chat-bubbles .message.mentioned
+          // .message-content { box-shadow: inset 0 0 0 1px var(--secondary) }`,
+          // themes:1669/:1682 — higher specificity than both glass rules).
+          mentionRing: mentioned
+              ? (c.solidUi
+                  ? c.secondary
+                  : c.secondaryA(c.isLight ? 0.2 : 0.25))
+              : null,
           child: Padding(
             // Default bubble padding 8px 12px 6px (styles-features.css:3607).
             // A style's own `.message-content` padding OUTRANKS it — satoshi's
