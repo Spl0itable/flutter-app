@@ -609,8 +609,19 @@ class CosmeticAura {
 /// PWA swaps to a darker tone and drops the glow (`text-shadow: none`). Styles
 /// with no light override (eclipse/crt only restyle the background) keep their
 /// dark text/glow.
+///
+/// [solidUi] applies the `body.solid-ui` overrides (Transparency OFF, the
+/// default): satoshi's translucent orange plate becomes the opaque `#4a3a1f` /
+/// `#f3dcb4` in BOTH layouts (styles-themes-responsive.css:1714 bubble / 1750
+/// IRC, light :1738/:1764), and the light fire/ice `rgba(0,0,0,.08)` bubble fill
+/// is dropped so those bubbles fall back to the solid base plate (`body.solid-ui
+/// [.light-mode].chat-bubbles .message.style-fire/.style-ice/.style-rainbow
+/// .message-content { background: #2a2a3a / #e6e6e0 !important }`, :1702/:1723 —
+/// higher specificity than the features-sheet fire/ice fills). Eclipse/crt keep
+/// their own translucent plates (the solid block never targets them, and their
+/// last-loaded features rules outcascade the solid base fill).
 MessageStyleDecoration? messageStyleDecoration(String? styleId,
-    {bool isLight = false}) {
+    {bool isLight = false, bool solidUi = false}) {
   if (styleId == null || styleId.isEmpty) return null;
   final v = ShopCatalog.styleVisuals[styleId];
   if (v == null) return null;
@@ -653,13 +664,20 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // `text-shadow: none` (styles-themes-responsive.css:884-897).
     gradientGlow:
         (!isLight && v.gradient != null) ? _styleGradientGlow[styleId] : null,
-    contentBackground:
+    contentBackground: (solidUi
+            ? (isLight
+                ? _styleSolidLightContentBackground
+                : _styleSolidContentBackground)[styleId]
+            : null) ??
         (isLight ? _styleLightContentBackground[styleId] : null) ??
-            _styleContentBackground[styleId],
+        _styleContentBackground[styleId],
     // Bubble-layout background override — light satoshi's rgba(247,147,26,.12)
     // (styles-themes-responsive.css:1417) vs its IRC rgba(196,122,21,.1) tint.
-    bubbleContentBackground:
-        isLight ? _styleLightBubbleContentBackground[styleId] : null,
+    // solid-ui drops these: satoshi's opaque plate above covers both layouts,
+    // and fire/ice fall back to the solid base bubble fill (themes:1723-1727).
+    bubbleContentBackground: (isLight && !solidUi)
+        ? _styleLightBubbleContentBackground[styleId]
+        : null,
     // satoshi's own `.message-content` padding (`padding: 10px 15px`, :548).
     contentPadding: _styleContentPadding[styleId],
     // Aurora replaces the bubble fill with a transparent border-box layer in
@@ -835,6 +853,22 @@ const Map<String, Color> _styleLightBubbleContentBackground = {
   'style-satoshi': Color(0x1FF7931A),
   'style-fire': Color(0x14000000), // rgba(0,0,0,0.08)
   'style-ice': Color(0x14000000), // rgba(0,0,0,0.08)
+};
+
+/// solid-ui content-background overrides, dark. Satoshi's plate goes OPAQUE in
+/// both layouts: `body.solid-ui.chat-bubbles .message.style-satoshi
+/// .message-content { background: #4a3a1f !important }` (styles-themes-
+/// responsive.css:1733) and `body.solid-ui:not(.chat-bubbles) … {
+/// background-color: #4a3a1f }` (:1745).
+const Map<String, Color> _styleSolidContentBackground = {
+  'style-satoshi': Color(0xFF4A3A1F),
+};
+
+/// solid-ui content-background overrides, light: satoshi `#f3dcb4` in both
+/// layouts (`body.solid-ui.light-mode[.chat-bubbles] .message.style-satoshi
+/// .message-content`, styles-themes-responsive.css:1755/1770).
+const Map<String, Color> _styleSolidLightContentBackground = {
+  'style-satoshi': Color(0xFFF3DCB4),
 };
 
 /// Explicit glyph shadows for styles whose CSS `text-shadow` is not a single
