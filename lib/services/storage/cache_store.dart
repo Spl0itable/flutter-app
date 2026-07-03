@@ -195,6 +195,12 @@ class CacheStore {
     return _decodeMessages(rows.first['json'] as String?);
   }
 
+  /// Load EVERY cached channel history, keyed by storage key — the boot
+  /// hydration read (persistence.js `hydrateFromCache` getAll over the
+  /// `channels` store, :427-433). Empty/corrupt records are skipped.
+  Future<Map<String, List<Message>>> loadAllChannelMessages() =>
+      _loadAllMessages('channels');
+
   // ---------------------------------------------------------------------------
   // PM / group messages (only persisted when caching enabled)
   // ---------------------------------------------------------------------------
@@ -237,6 +243,30 @@ class CacheStore {
     );
     if (rows.isEmpty) return [];
     return _decodeMessages(rows.first['json'] as String?);
+  }
+
+  /// Load EVERY cached PM/group conversation, keyed by storage key — the boot
+  /// hydration read (persistence.js `hydrateFromCache` getAll over the `pms`
+  /// store, :455-461). The caller gates this on `settings.cachePMs` the way
+  /// the PWA does (`cachePMsAllowed`); disabled → it calls [clearPms] instead.
+  Future<Map<String, List<Message>>> loadAllPmMessages() =>
+      _loadAllMessages('pms');
+
+  Future<Map<String, List<Message>>> _loadAllMessages(String table) async {
+    final rows = await _database.query(table, columns: ['key', 'json']);
+    final out = <String, List<Message>>{};
+    for (final r in rows) {
+      final key = r['key'] as String?;
+      if (key == null || key.isEmpty) continue;
+      final List<Message> msgs;
+      try {
+        msgs = _decodeMessages(r['json'] as String?);
+      } catch (_) {
+        continue; // One corrupt record must not abort the whole hydration.
+      }
+      if (msgs.isNotEmpty) out[key] = msgs;
+    }
+    return out;
   }
 
   /// Wipe the `pms` table (`clearPMCache`). Used when the user disables PM

@@ -1335,6 +1335,13 @@ class NostrController {
               isFriend: isFriend,
               isMention: isMention,
               isGroup: isGroup,
+              // eventId + timestamp engage the service's replay guards
+              // (notifications.js:22-69): the 24h backlog age gate, the
+              // eventId-precise dedup against the bell history, and the
+              // persisted `e:<id>` seen-key — without them the guards fell
+              // back to the fuzzy title/body key and "now" timestamps.
+              eventId: eventId,
+              timestampMs: tsMs,
             ),
           ));
     }
@@ -5579,14 +5586,34 @@ class NostrController {
       final cache = CacheStore();
       await cache.open();
       _cache = cache;
+      // PMs hydrate only when caching is enabled; disabled → wipe the store,
+      // exactly the PWA's `cachePMsAllowed ? … : this.clearPMCache()`
+      // (persistence.js:455-475).
+      final cachePms = _ref.read(settingsProvider).cachePMs;
       // Load stores in parallel (mirrors hydrateFromCache's Promise.all).
       final results = await Future.wait([
         cache.loadAllProfiles(),
         cache.loadAllReactions(),
+        cache.loadAllChannelMessages(),
+        cachePms
+            ? cache.loadAllPmMessages()
+            : Future.value(<String, List<Message>>{}),
       ]);
       final profiles = results[0] as Map<String, UserProfile>;
       final reactions = results[1] as Map<String, List<dynamic>>;
+      final channelMsgs = results[2] as Map<String, List<Message>>;
+      final pmMsgs = results[3] as Map<String, List<Message>>;
       if (profiles.isNotEmpty) appState.hydrateProfiles(profiles);
+      // Boot message hydration (persistence.js:427-475): every cached channel
+      // + PM/group history lands in state BEFORE the D1/relay backfills, so
+      // the open view paints instantly and the archive replay dedups against
+      // the seeded `_seenIds` instead of double-inserting. One copyWith inside.
+      if (channelMsgs.isNotEmpty || pmMsgs.isNotEmpty) {
+        appState.hydrateAllMessages({...channelMsgs, ...pmMsgs});
+      }
+      if (!cachePms) unawaited(cache.clearPms());
+      // Reactions hydrate AFTER messages so their tallies attach to rows that
+      // now exist (same effective order as the PWA's single hydration pass).
       if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
       // Web-of-trust graph: restore the persisted nymchatPubkeys / vouches /
       // trusted sets so the spam gate isn't cold on launch (it still grows live
@@ -5597,8 +5624,6 @@ class NostrController {
         cache.loadMetaSet(CacheStore.metaTrustedPubkeys),
       ]);
       appState.hydrateTrustSets(trust[0], trust[1], trust[2]);
-      // Channel/PM message rehydration happens lazily as channels are opened
-      // (loadChannelMessages); the cache is wired so saves persist 1000 caps.
     } catch (e) {
       debugPrint('hydrateFromCache failed: $e');
     }
@@ -5895,10 +5920,16 @@ class NostrController {
     unawaited(_reconcileShopPurchases());
   }
 
-  /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
-  /// 60s freshness window lives in [StorageSync.channelGet]; this set just
-  /// avoids redundant in-flight calls within the same tight switch loop.
-  final Set<String> _channelBackfillInFlight = <String>{};
+  /// Per-channel in-flight backfill (channels.js `_channelD1FetchedAt`). The
+  /// 60s freshness window lives in [StorageSync.channelGet]; this map lets
+  /// concurrent triggers for the same channel SHARE the running fetch instead
+  /// of being dropped — the previous `Set` guard silently swallowed the
+  /// reconnect-edge and view-reopen retries while a hung boot fetch sat in
+  /// flight, leaving the channel empty with no second chance. Each future
+  /// resolves to whether the fetch produced any events; a waiter whose shared
+  /// run came back empty re-runs the fetch itself.
+  final Map<String, Future<bool>> _channelBackfillInFlight =
+      <String, Future<bool>>{};
 
   // --- D1 profile backfill (PWA `queueProfileFetch` / `_flushProfileBatch`) ---
 
@@ -5987,7 +6018,34 @@ class NostrController {
     final sync = _storageSync;
     if (sync == null || channelKey.isEmpty) return;
     final name = channelKey.toLowerCase();
-    if (!_channelBackfillInFlight.add(name)) return;
+    final inFlight = _channelBackfillInFlight[name];
+    if (inFlight != null) {
+      // A fetch for this channel is already running: await ITS outcome rather
+      // than dropping this trigger. If it produced events we're done; if it
+      // hung (10s timeout), errored, or came back empty, fall through and run
+      // a fresh attempt — unless another waiter already started one (the map
+      // was repopulated by the time we resumed).
+      final produced = await inFlight;
+      if (produced || _channelBackfillInFlight.containsKey(name)) return;
+    }
+    final run = _runChannelBackfill(name, channelKey, sync);
+    _channelBackfillInFlight[name] = run;
+    try {
+      await run;
+    } finally {
+      // Clear only our own entry — a waiter that re-ran may have replaced it.
+      if (identical(_channelBackfillInFlight[name], run)) {
+        _channelBackfillInFlight.remove(name);
+      }
+    }
+  }
+
+  /// One `channel-get` attempt for [_backfillChannelArchive]: fetch
+  /// (time-bounded), replay through the live ingest path, top up zap badges.
+  /// Returns whether any archived events were produced, so a sharing waiter
+  /// knows an immediate retry is warranted. Never throws.
+  Future<bool> _runChannelBackfill(
+      String name, String channelKey, StorageSync sync) async {
     try {
       // FORCE the fetch, bypassing channelGet's 60s freshness window — this is an
       // explicit channel OPEN/boot, which the PWA always forces
@@ -5998,7 +6056,17 @@ class NostrController {
       // doesn't unmark on error) would suppress the boot/open restore for 60s,
       // leaving #nymchat empty with no retry. `_channelBackfillInFlight` still
       // de-dups concurrent calls for the same channel.
-      final events = await sync.channelGet([name], force: true);
+      //
+      // TIME-BOUND the fetch (10s → empty): an orphaned socket request must not
+      // pin the in-flight slot until the transport's own 45s timeout — the PWA
+      // fails a pending request the moment its socket closes, so the next
+      // trigger (reconnect edge / view reopen) retries immediately. The empty
+      // result reads as "produced nothing", which is exactly what tells a
+      // concurrent waiter to re-run.
+      final events = await sync.channelGet([name], force: true).timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => const <Map<String, dynamic>>[],
+          );
       final appState = _ref.read(appStateProvider.notifier);
       for (final raw in events) {
         try {
@@ -6012,10 +6080,10 @@ class NostrController {
       // `channel-get` streams zaps rows only within the channel window — this
       // also recovers receipts on older cached messages.
       _backfillZapReceiptsFor('#$channelKey', scope: 'channel');
+      return events.isNotEmpty;
     } catch (_) {
       // Best-effort: live subscription continues regardless.
-    } finally {
-      _channelBackfillInFlight.remove(name);
+      return false;
     }
   }
 

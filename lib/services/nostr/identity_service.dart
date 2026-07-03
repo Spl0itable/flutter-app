@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import '../../core/constants/storage_keys.dart';
 import '../../core/crypto/bech32_codec.dart' as bech32;
 import '../../core/crypto/keys.dart';
+import '../../core/utils/nym_utils.dart';
 import '../storage/key_value_store.dart';
 import '../storage/secure_store.dart';
 import 'nym_generator.dart';
@@ -50,6 +52,35 @@ class IdentityService {
     return _secure.get(name);
   }
 
+  /// The cached kind-0 profile name persisted for the durable login — the
+  /// PWA's `nym_nostr_login_profile` instant-restore cache (written by
+  /// `updateSidebarFromProfile`, app.js:5523-5527, whenever the SELF kind-0
+  /// resolves — the controller's `_syncSelfNymFromProfile` — and read on boot
+  /// BEFORE relays connect, app.js:4514-4522). Null when absent/corrupt.
+  /// Parsing matches the controller's `_cachedLoginProfileName` byte-for-byte.
+  String? _cachedLoginProfileName() {
+    final raw = _kv.getString(StorageKeys.nostrLoginProfile);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        final name = decoded['name'];
+        if (name is String && name.isNotEmpty) return name;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// A durable login's display nym: the cached kind-0 profile name (falling
+  /// back to `'nym'` until the live kind-0 resolves), suffixed via
+  /// [getNymFromPubkey] — exactly the seed the controller applies at init
+  /// (nostr_controller.dart `_cachedLoginProfileName(kv) ?? 'nym'`) and the
+  /// PWA's boot restore (app.js:4514-4522). NEVER the ephemeral
+  /// customNick / autoEphemeralNick — those belong to the ephemeral identity
+  /// and would mislabel the account until its profile fetch landed.
+  String _durableLoginNym(String pubkey) =>
+      getNymFromPubkey(_cachedLoginProfileName() ?? 'nym', pubkey);
+
   /// Boots the appropriate identity for the saved login method
   /// (`checkSavedConnection`, docs/specs/01 §7): an saved nsec account is
   /// restored with its real keypair; ephemeral / unknown falls back to
@@ -67,14 +98,10 @@ class IdentityService {
         try {
           final sk = bech32.decodeNsec(savedNsec);
           final pubkey = getPublicKeyHex(sk);
-          final nym = _kv.getString(StorageKeys.customNick) ??
-              _kv.getString(StorageKeys.autoEphemeralNick) ??
-              _nymGen.generate(pubkey,
-                  style: _kv.getString(StorageKeys.nickStyle) ?? 'fancy');
           return Identity(
             pubkey: pubkey,
             privkey: sk,
-            nym: nym,
+            nym: _durableLoginNym(pubkey),
             loginMethod: 'nsec',
           );
         } catch (_) {
@@ -99,7 +126,8 @@ class IdentityService {
   ///     overwrite the persistent identity's profile (app.js:5494-5495).
   ///
   /// Returns the durable [Identity] (`loginMethod:'nsec'`) with its nym resolved
-  /// exactly like [boot] (customNick → autoEphemeralNick → generated).
+  /// exactly like [boot] (cached kind-0 login-profile name → 'nym' fallback,
+  /// via [_durableLoginNym]).
   Future<Identity> loginWithNsec(String nsec) async {
     final input = nsec.trim();
     final sk = bech32.decodeNsec(input); // throws on invalid (len-checked below)
@@ -122,14 +150,10 @@ class IdentityService {
     await _kv.remove(StorageKeys.avatarUrl);
     await _kv.remove(StorageKeys.bannerUrl);
 
-    final nym = _kv.getString(StorageKeys.customNick) ??
-        _kv.getString(StorageKeys.autoEphemeralNick) ??
-        _nymGen.generate(pubkey,
-            style: _kv.getString(StorageKeys.nickStyle) ?? 'fancy');
     return Identity(
       pubkey: pubkey,
       privkey: sk,
-      nym: nym,
+      nym: _durableLoginNym(pubkey),
       loginMethod: 'nsec',
     );
   }
