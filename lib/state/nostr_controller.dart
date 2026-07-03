@@ -282,6 +282,9 @@ class NostrController {
       // resurrect from the D1 backlog on relaunch (F02; pms.js `nym_closed_pms`
       // / `nym_closed_pm_times`).
       _hydrateClosedPMs(appState);
+      // Restore left-group state from KV so a group left on any device stays
+      // suppressed on relaunch and the retroactive-removal pass runs.
+      _hydrateLeftGroups(appState);
       // Restore the per-conversation read watermark so a relaunch's D1 backfill
       // of older history doesn't re-count as unread (channelLastRead).
       _hydrateChannelLastRead(appState);
@@ -5644,6 +5647,27 @@ class NostrController {
     appState.hydrateClosedPMs(closed, times);
   }
 
+  /// Reads the KV left-group set + leave times and merges them into the live
+  /// group store (boot + post-sync). Mirrors the PWA `_loadLeftGroups`.
+  void _hydrateLeftGroups(AppStateNotifier appState) {
+    final ids = _readSet(_kLeftGroupsKey);
+    final times = <String, int>{};
+    final raw =
+        _ref.read(keyValueStoreProvider).getString(StorageKeys.leftGroupTimes);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          decoded.forEach((k, v) {
+            final t = v is num ? v.toInt() : int.tryParse('$v');
+            if (t != null) times['$k'] = t;
+          });
+        }
+      } catch (_) {}
+    }
+    if (ids.isNotEmpty || times.isNotEmpty) appState.mergeLeftGroups(ids, times);
+  }
+
   /// Persists the per-conversation read watermark (`nym_channel_last_read`) as a
   /// JSON object so a relaunch's D1 backfill doesn't re-count already-read
   /// history as unread (PWA `channelLastRead`, channels.js:1709-1735).
@@ -7093,6 +7117,13 @@ class NostrController {
             .read(keyValueStoreProvider)
             .setString(StorageKeys.leftGroupTimes, jsonEncode(merged));
       } catch (_) {}
+    }
+    // Apply the merged left-group state to the LIVE group store (not just KV):
+    // union the ids + newest leave times and retroactively drop any now-left
+    // group (app.js:6692-6712). Reads back from the KV we just wrote so it
+    // covers both the leftGroups and leftGroupTimes branches above.
+    if (leftGroups is List || rawLeftTimes is Map) {
+      _hydrateLeftGroups(appState);
     }
 
     // Per-conversation read watermarks (app.js:6565-6577): monotonic max per

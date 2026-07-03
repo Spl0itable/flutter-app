@@ -2302,6 +2302,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _closedPMTimes.addAll(closedTimes);
   }
 
+  /// Additively merges synced/boot-restored left-group state (PWA
+  /// `applyNostrSettings` leftGroups block + retroactive removal,
+  /// app.js:6549-6561 / 6692-6712): union the ids, keep the newest leave time
+  /// per group, and retroactively drop any group now marked left from the live
+  /// store (a group left on another device disappears here too — a later
+  /// membership event newer than the leave time can still resurrect it via the
+  /// normal ingest gate). Idempotent.
+  void mergeLeftGroups(Set<String> ids, Map<String, int> times) {
+    if (ids.isEmpty && times.isEmpty) return;
+    _leftGroups.addAll(ids);
+    times.forEach((gid, ts) {
+      if (ts > (_leftGroupTimes[gid] ?? 0)) _leftGroupTimes[gid] = ts;
+    });
+    var changed = false;
+    for (final gid in _leftGroups) {
+      final idx = state.groups.indexWhere((g) => g.id == gid);
+      if (idx < 0) continue;
+      state.groups.removeAt(idx);
+      state.messages.remove(GroupLogic.groupStorageKey(gid));
+      changed = true;
+    }
+    if (changed) state = state.copyWith();
+  }
+
+  /// Snapshot of the left-group ids → leave timestamp (sec), for the
+  /// controller's KV persistence and outbound settings sync.
+  Set<String> get leftGroups => Set.unmodifiable(_leftGroups);
+  Map<String, int> get leftGroupTimes => Map.unmodifiable(_leftGroupTimes);
+
   /// Snapshot of the closed-PM peer pubkeys → close timestamp (sec), for the
   /// controller's KV persistence (paired with [closedPMs]).
   Map<String, int> get closedPmTimes => Map.unmodifiable(_closedPMTimes);
