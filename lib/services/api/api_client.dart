@@ -798,6 +798,39 @@ class ApiClient {
         if (extra != null) ...extra,
       };
 
+  /// UTF-8 text of an HTTP response body. NEVER use `res.body` for wire text:
+  /// package:http picks the charset from the Content-Type header and silently
+  /// falls back to LATIN-1 when the header carries no `charset=` — and the nym
+  /// worker sends charset-less `application/json` / `application/x-ndjson`
+  /// (storage.js:199/638). Every UTF-8 byte then decodes as one Latin-1 char,
+  /// so multibyte nyms/emoji arrive as mojibake ('ð£…' instead of '🅃…').
+  /// The PWA's `response.json()` / TextDecoder always decodes UTF-8 (with
+  /// U+FFFD replacement, never throwing), so mirror that here.
+  static String _utf8Body(http.Response res) =>
+      utf8.decode(res.bodyBytes, allowMalformed: true);
+
+  /// Re-wrap a JSON response whose Content-Type lacks a `charset=` so that
+  /// downstream `res.body` readers (the LNURL flows consume the raw response
+  /// from [proxiedJsonFetch]) decode UTF-8 instead of package:http's Latin-1
+  /// default. JSON is UTF-8 by spec (RFC 8259 §8.1), and the PWA's
+  /// `response.json()` always decodes UTF-8.
+  static http.Response _utf8Response(http.Response res) {
+    final ct = res.headers['content-type'];
+    if (ct != null && ct.toLowerCase().contains('charset=')) return res;
+    return http.Response.bytes(
+      res.bodyBytes,
+      res.statusCode,
+      headers: {
+        ...res.headers,
+        'content-type': '${ct ?? 'application/json'}; charset=utf-8',
+      },
+      request: res.request,
+      reasonPhrase: res.reasonPhrase,
+      isRedirect: res.isRedirect,
+      persistentConnection: res.persistentConnection,
+    );
+  }
+
   /// POST translate `{text, source, target}` -> `{translatedText, detectedLanguage}`.
   /// `source` defaults to `'auto'` (proxy.js:504).
   Future<TranslateResult> translate(
@@ -814,10 +847,10 @@ class ApiClient {
     _trackApiData('translate',
         sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
-      throw ApiException('translate', res.statusCode, res.body);
+      throw ApiException('translate', res.statusCode, _utf8Body(res));
     }
     return TranslateResult.fromJson(
-        jsonDecode(res.body) as Map<String, dynamic>);
+        jsonDecode(_utf8Body(res)) as Map<String, dynamic>);
   }
 
   /// GET unfurl (OpenGraph preview).
@@ -826,9 +859,10 @@ class ApiClient {
     final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('unfurl', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
-      throw ApiException('unfurl', res.statusCode, res.body);
+      throw ApiException('unfurl', res.statusCode, _utf8Body(res));
     }
-    return UnfurlResult.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+    return UnfurlResult.fromJson(
+        jsonDecode(_utf8Body(res)) as Map<String, dynamic>);
   }
 
   /// PUT a Blossom blob through the proxy. [authHeader] is the full
@@ -850,9 +884,9 @@ class ApiClient {
     );
     _trackApiData('upload', sent: bytes.length, recv: _bodyLen(res.bodyBytes));
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw ApiException('upload', res.statusCode, res.body);
+      throw ApiException('upload', res.statusCode, _utf8Body(res));
     }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
 
   /// PUT a Blossom mirror request through the proxy (`action=mirror`,
@@ -879,9 +913,9 @@ class ApiClient {
     _trackApiData('mirror',
         sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      throw ApiException('mirror', res.statusCode, res.body);
+      throw ApiException('mirror', res.statusCode, _utf8Body(res));
     }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
 
   /// Fetches a JSON resource through the `/api/proxy?action=json` privacy
@@ -912,12 +946,12 @@ class ApiClient {
       );
       _trackApiData('json',
           sent: _bodyLen(body), recv: _bodyLen(res.bodyBytes));
-      return res;
+      return _utf8Response(res);
     } catch (_) {
-      return run(
+      return _utf8Response(await run(
         Uri.parse(targetUrl),
         contentType != null ? {'Content-Type': contentType} : null,
-      );
+      ));
     }
   }
 
@@ -929,7 +963,7 @@ class ApiClient {
     final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('geo-relays', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) return const [];
-    final data = jsonDecode(res.body);
+    final data = jsonDecode(_utf8Body(res));
     if (data is! Map || data['relays'] is! List) return const [];
     final out = <GeoRelay>[];
     for (final r in data['relays'] as List) {
@@ -956,9 +990,9 @@ class ApiClient {
     final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('geocode', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
-      throw ApiException('geocode', res.statusCode, res.body);
+      throw ApiException('geocode', res.statusCode, _utf8Body(res));
     }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
 
   /// GET Giphy search -> raw Giphy JSON.
@@ -967,9 +1001,9 @@ class ApiClient {
     final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
-      throw ApiException('giphy', res.statusCode, res.body);
+      throw ApiException('giphy', res.statusCode, _utf8Body(res));
     }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
 
   /// GET Giphy trending -> raw Giphy JSON.
@@ -978,9 +1012,9 @@ class ApiClient {
     final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
-      throw ApiException('giphy', res.statusCode, res.body);
+      throw ApiException('giphy', res.statusCode, _utf8Body(res));
     }
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    return jsonDecode(_utf8Body(res)) as Map<String, dynamic>;
   }
 
   // ---------------------------------------------------------------------------
@@ -1014,7 +1048,7 @@ class ApiClient {
       _trackApiData('zap-verify',
           sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
       if (res.statusCode != 200) return false;
-      final data = jsonDecode(res.body);
+      final data = jsonDecode(_utf8Body(res));
       return data is Map && data['paid'] == true;
     } catch (_) {
       return false;
@@ -1048,7 +1082,7 @@ class ApiClient {
       throw ApiException(
         (body['action'] ?? 'storage').toString(),
         res.statusCode,
-        decoded['error']?.toString() ?? res.body,
+        decoded['error']?.toString() ?? _utf8Body(res),
       );
     }
     return decoded;
@@ -1085,11 +1119,11 @@ class ApiClient {
       throw ApiException(
         (body['action'] ?? 'storage').toString(),
         res.statusCode,
-        decoded['error']?.toString() ?? res.body,
+        decoded['error']?.toString() ?? _utf8Body(res),
       );
     }
     final items = <dynamic>[];
-    for (final line in const LineSplitter().convert(res.body)) {
+    for (final line in const LineSplitter().convert(_utf8Body(res))) {
       final trimmed = line.trim();
       if (trimmed.isEmpty) continue;
       try {
@@ -1121,7 +1155,7 @@ class ApiClient {
       throw ApiException(
         (body['action'] ?? 'bot').toString(),
         res.statusCode,
-        decoded['error']?.toString() ?? res.body,
+        decoded['error']?.toString() ?? _utf8Body(res),
       );
     }
     return decoded;
@@ -1129,7 +1163,7 @@ class ApiClient {
 
   Map<String, dynamic> _decodeJson(http.Response res) {
     try {
-      final d = jsonDecode(res.body);
+      final d = jsonDecode(_utf8Body(res));
       return d is Map<String, dynamic> ? d : <String, dynamic>{};
     } catch (_) {
       return <String, dynamic>{};
