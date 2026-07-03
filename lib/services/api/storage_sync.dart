@@ -685,6 +685,39 @@ class StorageSync {
     return _publishCategoryWrap(payload, dTag, trim: _trimOldestSeen);
   }
 
+  /// Publishes the cross-device read-state category — the PWA's
+  /// `nymchat-readstate` blob (`_syncReadStateToD1`, settings.js:745-776). Carries
+  /// the full `{channelLastRead}` map (per-channel / PM / group read watermarks)
+  /// so another device restores its unread badges. Unlike the settings sections
+  /// this is a D1-only write (no relay `nym-sync` wrap — the PWA routes it through
+  /// `_saveSettingsBlobToD1`, not `_publishCategoryWrap`), deduped by content hash
+  /// in [_setSettingsCategory]. Entries with a non-positive ts are dropped and the
+  /// most-recently-read 2000 are kept (settings.js:757-762). No-op (no network)
+  /// when [channelLastRead] is empty or unchanged since the last publish. Returns
+  /// whether the category was actually sent.
+  Future<bool> readStateSet(Map<String, int> channelLastRead) async {
+    if (channelLastRead.isEmpty) return false;
+    final entries = <MapEntry<String, int>>[
+      for (final e in channelLastRead.entries)
+        if (e.value > 0) MapEntry(e.key, e.value),
+    ];
+    if (entries.isEmpty) return false;
+    // Keep the most-recently-read conversations (settings.js:758-762).
+    entries.sort((a, b) => b.value.compareTo(a.value));
+    const maxEntries = 2000;
+    final capped =
+        entries.length > maxEntries ? entries.sublist(0, maxEntries) : entries;
+    final map = <String, dynamic>{for (final e in capped) e.key: e.value};
+    const dTag = 'nymchat-readstate';
+    // The PWA's payload is a bare `{channelLastRead}` (settings.js:767); the real
+    // category rides inside the blob as `__cat` so the D1 column stays opaque.
+    final payload = <String, dynamic>{'channelLastRead': map};
+    return _setSettingsCategory(
+      d1Category(dTag),
+      jsonEncode(_withCat(payload, dTag)),
+    );
+  }
+
   /// Embeds the real category into the (to-be-encrypted) blob as `__cat`
   /// (settings.js:720) so the cleartext D1 column can stay opaque.
   Map<String, dynamic> _withCat(Map<String, dynamic> payload, String category) {
@@ -772,8 +805,14 @@ class StorageSync {
     // N26: pull the cross-device notification read-state wrap (a separate
     // category from the settings sections) so the caller can merge its seen-keys.
     Map<String, dynamic>? notificationsPayload;
+    // The `nymchat-readstate` category (per-channel/PM/group read watermarks)
+    // rides alongside the settings sections but is non-core; the PWA applies it
+    // additively (settings.js:815-819). Surface it so the caller can merge its
+    // `channelLastRead` map regardless of the core-section ts gate.
+    Map<String, dynamic>? readStatePayload;
     for (final d in decoded) {
       if (d.category == 'nymchat-notifications') notificationsPayload = d.payload;
+      if (d.category == 'nymchat-readstate') readStatePayload = d.payload;
     }
 
     bool isCore(String c) =>
@@ -789,14 +828,16 @@ class StorageSync {
         ? sections
         : core.where((d) => d.category == 'nymchat-settings').toList();
     if (toApply.isEmpty) {
-      // No settings sections to apply — but a notifications wrap alone is still
-      // worth returning so the caller can merge the seen-keys (N26).
-      return notificationsPayload == null
+      // No settings sections to apply — but a notifications wrap or a readstate
+      // category alone is still worth returning so the caller can merge the
+      // seen-keys (N26) / read watermarks (cross-device unread state).
+      return (notificationsPayload == null && readStatePayload == null)
           ? null
           : SettingsLoadResult(
               payload: const {},
               newestTs: 0,
               notificationsPayload: notificationsPayload,
+              readStatePayload: readStatePayload,
             );
     }
 
@@ -810,6 +851,7 @@ class StorageSync {
       payload: merged,
       newestTs: newestTs,
       notificationsPayload: notificationsPayload,
+      readStatePayload: readStatePayload,
     );
   }
 
@@ -885,6 +927,20 @@ class StorageSync {
       offers.add(SettingsTransferOffer(
         id: d.category,
         section: section,
+        payload: d.payload,
+        updatedAt: d.updatedAt,
+      ));
+    }
+    // The non-core `nymchat-readstate` category (per-conversation read
+    // watermarks) is applied additively by the PWA (settings.js:815-819); surface
+    // it here too so the modal-open refresh path applies its `channelLastRead`
+    // when newer than the last sync — the read side of cross-device unread state.
+    for (final d in decoded) {
+      if (d.category != 'nymchat-readstate') continue;
+      if (d.updatedAt <= sinceMs) continue;
+      offers.add(SettingsTransferOffer(
+        id: d.category,
+        section: d.category,
         payload: d.payload,
         updatedAt: d.updatedAt,
       ));
@@ -1688,6 +1744,7 @@ class SettingsLoadResult {
     required this.payload,
     required this.newestTs,
     this.notificationsPayload,
+    this.readStatePayload,
   });
   final Map<String, dynamic> payload;
   final int newestTs;
@@ -1697,6 +1754,15 @@ class SettingsLoadResult {
   /// Surfaced separately from the settings [payload] because the caller merges
   /// it additively (idempotently) regardless of the settings ts gate.
   final Map<String, dynamic>? notificationsPayload;
+
+  /// The decrypted `nymchat-readstate` category payload, when present — carries
+  /// `channelLastRead` (the per-channel/PM/group read watermarks another device
+  /// published). Surfaced separately from the core settings [payload] because
+  /// the PWA applies non-core categories additively via
+  /// `applyNostrSettingsAdditive` (settings.js:815-819) BEFORE and independent
+  /// of the core-section ts gate, so cross-device unread state syncs even when
+  /// no core setting changed.
+  final Map<String, dynamic>? readStatePayload;
 }
 
 /// An inbound settings-transfer offer (one synced settings section another

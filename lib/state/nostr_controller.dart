@@ -110,6 +110,25 @@ class NostrController {
   /// [_storageSync]; null before boot.
   ZapArchive? _zapArchive;
 
+  /// Id of the last own kind-0 mirrored to D1 (`_lastMirroredOwnProfileId`,
+  /// nostr-core.js:198) so duplicate relay receipts of the same profile — and
+  /// the relay echo of a profile we just published — don't re-POST it.
+  String? _lastMirroredOwnProfileId;
+
+  /// Re-mirrors our own authoritative signed kind-0 to D1 (`profile-set`) so a
+  /// profile edited in another Nostr client stays reflected in the D1 public
+  /// copy (`_saveProfileToD1`, nostr-core.js:194-204). Gated on a durable
+  /// identity (the native analogue of `_hasCustomProfileData`) and deduped by
+  /// event id. Best-effort.
+  void _mirrorOwnProfileToD1(NostrEvent event) {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    if (event.id.isEmpty || event.sig.isEmpty) return;
+    if (event.id == _lastMirroredOwnProfileId) return;
+    _lastMirroredOwnProfileId = event.id;
+    unawaited(sync.profileSet(event.toJson()));
+  }
+
   /// Shared [ApiClient] for the storage-sync paths (one instance, reused).
   ApiClient? _api;
 
@@ -486,6 +505,26 @@ class NostrController {
     // Channel-activity discovery + archive restore over {current ∪ joined ∪
     // discovered} (relays.js:2791-2797), not just the single open view.
     await _restoreAllChannelArchives();
+    // Custom-emoji archive hydration (`_emojiRestoreFromD1`, relays.js:2813-2815)
+    // — packs archived by the relay-pool worker that have aged off relays must
+    // re-hydrate on every reconnect/resume, not only at cold boot, or archived
+    // shortcodes render broken on a long-lived session.
+    unawaited(_restoreEmojiFromD1(sync));
+    // Profile-zap backfill for ourselves (relays.js:2819-2821,
+    // `_backfillZapReceiptsFromD1([this.pubkey], 'profile')`) — profile receipts
+    // are keyed on the recipient pubkey with a tight relay #p window, so they
+    // must be re-pulled from D1 on every reconnect/resume; boot-only misses zaps
+    // that land while backgrounded/disconnected.
+    final selfPk = _identity?.pubkey;
+    final zapArchive = _zapArchive;
+    if (selfPk != null && zapArchive != null) {
+      final appState = _ref.read(appStateProvider.notifier);
+      unawaited(zapArchive.backfill(
+        [selfPk],
+        'profile',
+        (receipt) => _onPublicZapReceipt(receipt, appState),
+      ));
+    }
   }
 
   /// Max number of per-channel D1 archive restores in flight at once. The PWA
@@ -1034,6 +1073,12 @@ class NostrController {
     // profile cache (PWA `updateSidebarFromProfile`, app.js:5507-5528).
     if (event.kind == EventKind.profile && event.pubkey == _identity?.pubkey) {
       _syncSelfNymFromProfile();
+      // Re-mirror our OWN authoritative signed kind-0 to D1 so a profile edited
+      // in another Nostr client — which reaches us over relays — refreshes the
+      // D1 public copy other users batch-read (nostr-core.js:632-635 / 2266-2269,
+      // `_saveProfileToD1`). Without this the D1 mirror goes stale until the next
+      // in-app profile edit.
+      _mirrorOwnProfileToD1(event);
     }
     // Public reaction (kind 7) to our message → notify + record (reactions.js
     // `handleReaction` notify block). Skip removals.
@@ -5311,12 +5356,10 @@ class NostrController {
 
     // Mirror the signed kind-0 to D1 (`profile-set`) in addition to the relay
     // publish, so other clients get a fast public read (`_saveProfileToD1`,
-    // nostr-core.js:194). Only durable identities mirror (the PWA gates on
-    // `_hasCustomProfileData`; durable = logged-in is the native analogue).
-    final sync = _storageSync;
-    if (sync != null && sync.durableIdentity) {
-      unawaited(sync.profileSet(signed.toJson()));
-    }
+    // nostr-core.js:194). Records the mirrored event id so the relay echo of
+    // this same profile (which re-enters via the self kind-0 ingest path) is a
+    // no-op instead of a duplicate POST.
+    _mirrorOwnProfileToD1(signed);
     return true;
   }
 
@@ -5466,6 +5509,82 @@ class NostrController {
 
   void _persistSet(String key, Set<String> values) {
     _ref.read(keyValueStoreProvider).setString(key, jsonEncode(values.toList()));
+  }
+
+  /// The PWA's `nym_left_groups` localStorage key (`_saveLeftGroups`). No typed
+  /// [StorageKeys] constant exists (the native group store doesn't yet hydrate
+  /// from it — see [_applySyncedSettings]); kept as a literal so the outbound
+  /// settings sync (storage_sync.dart reads `'nym_left_groups'`) round-trips.
+  static const String _kLeftGroupsKey = 'nym_left_groups';
+
+  /// Applies a synced `channelLastRead` map (app.js:6565-6577): monotonic max per
+  /// key via [AppStateNotifier.markChannelRead], which keeps the newer watermark
+  /// and persists through `onChannelReadChanged`. No-op for a null/non-map value.
+  void _applyChannelLastRead(dynamic raw) {
+    if (raw is! Map) return;
+    final appState = _ref.read(appStateProvider.notifier);
+    raw.forEach((k, v) {
+      final ts = v is num ? v.toInt() : int.tryParse('$v');
+      if (ts != null && ts > 0) {
+        try {
+          appState.markChannelRead('$k', ts);
+        } catch (_) {}
+      }
+    });
+  }
+
+  /// Merges a synced favorite-GIF list into the local `nym_favorite_gifs` store,
+  /// deduped by url, local entries first, capped at 100 (app.js:6454-6468). Each
+  /// remote entry must be a `{url, title}` object with a string url.
+  void _mergeFavoriteGifs(KeyValueStore kv, List<dynamic> remote) {
+    try {
+      final out = <Map<String, dynamic>>[];
+      final seen = <String>{};
+      void add(dynamic g) {
+        if (g is! Map || g['url'] is! String) return;
+        final url = g['url'] as String;
+        if (url.isEmpty || !seen.add(url)) return;
+        out.add({'url': url, 'title': g['title'] is String ? g['title'] : ''});
+      }
+
+      final localRaw = kv.getString(StorageKeys.favoriteGifs);
+      if (localRaw != null && localRaw.isNotEmpty) {
+        final decoded = jsonDecode(localRaw);
+        if (decoded is List) {
+          for (final g in decoded) {
+            add(g);
+          }
+        }
+      }
+      for (final g in remote) {
+        add(g);
+      }
+      final capped = out.length > 100 ? out.sublist(0, 100) : out;
+      kv.setString(StorageKeys.favoriteGifs, jsonEncode(capped));
+    } catch (_) {}
+  }
+
+  /// Merges a synced recent-emoji MRU list into `nym_recent_emojis`, most-recent
+  /// first (remote before local), deduped, capped at 24 (app.js:6480-6491).
+  void _mergeRecentEmojis(KeyValueStore kv, List<dynamic> remote) {
+    try {
+      final out = <String>[];
+      final seen = <String>{};
+      for (final e in remote) {
+        if (e is String && e.isNotEmpty && seen.add(e)) out.add(e);
+      }
+      final localRaw = kv.getString(StorageKeys.recentEmojis);
+      if (localRaw != null && localRaw.isNotEmpty) {
+        final decoded = jsonDecode(localRaw);
+        if (decoded is List) {
+          for (final e in decoded) {
+            if (e is String && e.isNotEmpty && seen.add(e)) out.add(e);
+          }
+        }
+      }
+      final capped = out.length > 24 ? out.sublist(0, 24) : out;
+      kv.setString(StorageKeys.recentEmojis, jsonEncode(capped));
+    } catch (_) {}
   }
 
   /// Reads a persisted JSON string-array set (`['a','b']`) from KV; empty if
@@ -5975,8 +6094,14 @@ class NostrController {
     // Persist the closed-PM set on every mutation so a deleted PM stays deleted
     // across a relaunch (F02; pms.js `nym_closed_pms` / `nym_closed_pm_times`).
     _ref.read(appStateProvider.notifier).onClosedPmsChanged = _persistClosedPMs;
-    _ref.read(appStateProvider.notifier).onChannelReadChanged =
-        _persistChannelLastRead;
+    // Persist the read watermark locally AND schedule a debounced cross-device
+    // read-state publish (`nymchat-readstate`) so a message read here silences
+    // its unread badge on our other devices (the PWA's `_syncReadStateToD1`
+    // debounce, settings.js:774-775). `syncSettings` is 5s-debounced + gated.
+    _ref.read(appStateProvider.notifier).onChannelReadChanged = () {
+      _persistChannelLastRead();
+      syncSettings();
+    };
   }
 
   /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
@@ -6080,6 +6205,14 @@ class NostrController {
   /// columns mode (`_cvMarkVisibleColumnsRead`, relays.js:532/584).
   void onAppResumed() {
     _onViewOpened(_ref.read(appStateProvider).view);
+    // Re-pull the FULL D1 backlog on every foreground/resume — the PWA fires
+    // `backfillFromD1OnReconnect` on visibilitychange/focus/resume (relays.js:
+    // 536/588/622), independent of whether the socket actually dropped, so PMs
+    // and messages/activity in every non-focused channel and group that landed
+    // while backgrounded are restored even when the relay count never hit 0.
+    // 30s-throttled + idempotent inside, so pairing it with the per-view top-up
+    // above (which gives the active conversation an immediate refresh) is safe.
+    unawaited(_backfillFromD1OnReconnect());
     _ref.read(appStateProvider.notifier).markVisibleColumnsRead();
     unawaited(_reconcileShopPurchases());
   }
@@ -6423,6 +6556,14 @@ class NostrController {
               .mergeSeenNotifications(seen);
         }
       }
+      // Cross-device read watermarks ride the non-core `nymchat-readstate`
+      // category, which the PWA applies additively regardless of the core-section
+      // ts gate (settings.js:815-819). Merge it (monotonic max per conversation)
+      // BEFORE the gate so unread badges sync even when no core setting changed.
+      final readState = result.readStatePayload;
+      if (readState != null) {
+        _applyChannelLastRead(readState['channelLastRead']);
+      }
       final kv = _ref.read(keyValueStoreProvider);
       final lastTs = int.tryParse(
               kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
@@ -6430,13 +6571,10 @@ class NostrController {
       // The stored ts is in seconds (PWA); newestTs is ms. Compare in seconds.
       final newestSec = result.newestTs ~/ 1000;
       if (newestSec <= lastTs) return;
+      // `_applySyncedSettings` now persists the monotonic `encryptAtRestPreferred`
+      // hint itself (every apply path, matching the PWA's `applyNostrSettings`),
+      // so the merge path no longer needs a separate copy.
       _applySyncedSettings(result.payload);
-      // Cross-device "encryption at rest preferred" hint (app.js:6101): persist
-      // it so the encrypt-at-rest prompt only offers to protect this device when
-      // the user already uses encryption elsewhere (key-vault.js:419 gate).
-      if (result.payload['encryptAtRestPreferred'] == true) {
-        await kv.setBool(StorageKeys.encryptAtRestPref, true);
-      }
       kv.setString(StorageKeys.lastSettingsSyncTs, '$newestSec');
     } catch (_) {
       // Best-effort.
@@ -6635,6 +6773,333 @@ class NostrController {
             );
       } catch (_) {}
     }
+
+    // =======================================================================
+    // KV-backed synced prefs the PWA writes straight to localStorage in
+    // applyNostrSettings but the native apply never restored — the "not all
+    // data is fetched" completeness gaps. Each mirrors the PWA field name,
+    // shape and merge semantics so every synced key round-trips.
+    // =======================================================================
+    final appState = _ref.read(appStateProvider.notifier);
+    final selfPk = _ref.read(appStateProvider).selfPubkey;
+
+    // Saved column layout (app.js:6256-6259) — the multi-column arrangement.
+    final columnsLayout = p['columnsLayout'];
+    if (columnsLayout is List) {
+      try {
+        kvStore.setString(StorageKeys.columnsLayout, jsonEncode(columnsLayout));
+      } catch (_) {}
+    }
+    // Custom wallpaper URL (app.js:6226-6244): paired with `wallpaperType`
+    // (applied above) so a synced `custom` wallpaper keeps its background URL
+    // instead of arriving blank on the receiving device.
+    final wallpaperUrl = p['wallpaperCustomUrl'];
+    if (wallpaperUrl is String && wallpaperUrl.isNotEmpty) {
+      try {
+        kvStore.setString(StorageKeys.wallpaperCustomUrl, wallpaperUrl);
+      } catch (_) {}
+    }
+    // Lightning receive/zap address (app.js:6272-6275): the global cache plus the
+    // per-pubkey key `loadImageBlurSettings`'s sibling reads (zaps.js:234). Applied
+    // on EVERY settings sync, not only the user-to-user accept path.
+    final lightning = p['lightningAddress'];
+    if (lightning is String && lightning.isNotEmpty) {
+      try {
+        kvStore.setString(StorageKeys.lightningAddressGlobal, lightning);
+        if (selfPk.isNotEmpty) {
+          kvStore.setString(
+              StorageKeys.lightningAddressFor(selfPk), lightning);
+        }
+      } catch (_) {}
+    }
+    // Proof-of-work difficulty (app.js:6278-6282) — the spam-control setting.
+    final pow = p['powDifficulty'];
+    if (pow is num) {
+      try {
+        c.setPowDifficulty(pow.toInt());
+      } catch (_) {}
+    }
+    // Hide non-pinned channels toggle (app.js:6285-6288).
+    boolean('hideNonPinned', c.setHideNonPinned);
+    // Image-blur privacy preference (app.js:6291-6297): true | false | 'friends'.
+    // Writes the global + per-pubkey keys via the PWA-faithful setter.
+    final blur = p['blurOthersImages'];
+    if (blur is bool || blur == 'friends') {
+      try {
+        final v = blur == 'friends'
+            ? 'friends'
+            : (blur == true ? 'true' : 'false');
+        c.setBlurImages(v, pubkey: selfPk.isEmpty ? null : selfPk);
+      } catch (_) {}
+    }
+    // Sidebar section order (app.js:6494-6496).
+    final sidebar = p['sidebarSectionOrder'];
+    if (sidebar is List) {
+      try {
+        kvStore.setString(StorageKeys.sidebarSectionOrder,
+            jsonEncode(sidebar.whereType<String>().toList()));
+      } catch (_) {}
+    }
+    // Favorite translation languages (app.js:6440-6444) — replace the list.
+    final translateFavs = p['translateFavoriteLanguages'];
+    if (translateFavs is List) {
+      try {
+        kvStore.setString(StorageKeys.translateFavorites,
+            jsonEncode(translateFavs.whereType<String>().toList()));
+      } catch (_) {}
+    }
+    // Notifications master toggle (app.js:6515-6518) — typed Settings state +
+    // KV (the notifications panel writes both, notifications_panel.dart:367).
+    final notif = p['notificationsEnabled'];
+    if (notif is bool) {
+      try {
+        c.update((s) => s.copyWith(notificationsEnabled: notif));
+        kvStore.setString(StorageKeys.notificationsEnabled, '$notif');
+      } catch (_) {}
+    }
+    // Group mentions-only / friends-only notification prefs (app.js:6519-6526):
+    // KV-backed booleans read as the string 'true'/'false' (nostr_controller
+    // gates on `== 'true'`, :1243/:1239).
+    final groupMentions = p['groupNotifyMentionsOnly'];
+    if (groupMentions is bool) {
+      try {
+        kvStore.setString(
+            StorageKeys.groupNotifyMentionsOnly, '$groupMentions');
+      } catch (_) {}
+    }
+    final friendsOnly = p['notifyFriendsOnly'];
+    if (friendsOnly is bool) {
+      try {
+        kvStore.setString(StorageKeys.notifyFriendsOnly, '$friendsOnly');
+      } catch (_) {}
+    }
+    // MLS history-sync preference (app.js:6509-6512) — typed Settings + KV.
+    final mls = p['syncMLSHistory'];
+    if (mls is bool) {
+      try {
+        c.update((s) => s.copyWith(syncMLSHistory: mls));
+        kvStore.setBool(StorageKeys.syncMlsHistory, mls);
+      } catch (_) {}
+    }
+    // Favorite GIFs — merge remote into local, dedupe by url, cap 100
+    // (app.js:6454-6468).
+    final favGifs = p['favoriteGifs'];
+    if (favGifs is List && favGifs.isNotEmpty) {
+      _mergeFavoriteGifs(kvStore, favGifs);
+    }
+    // Recent emojis — merge most-recent-first, dedupe, cap 24 (app.js:6480-6491).
+    final recent = p['recentEmojis'];
+    if (recent is List && recent.isNotEmpty) {
+      _mergeRecentEmojis(kvStore, recent);
+    }
+
+    // -----------------------------------------------------------------------
+    // Social / moderation lists. The PWA REPLACES friends / blockedUsers /
+    // blockedKeywords from the payload (app.js:6392-6430); reconcile the live
+    // AppState set via add/remove diffs (so an unfriend/unblock on one device
+    // propagates) and persist the KV list the boot hydrator reads.
+    // -----------------------------------------------------------------------
+    final friends = p['friends'];
+    if (friends is List) {
+      try {
+        final incoming = friends
+            .whereType<String>()
+            .where((s) => s.isNotEmpty)
+            .toSet();
+        final current = {..._ref.read(appStateProvider).friends};
+        for (final pk in incoming.difference(current)) {
+          appState.addFriend(pk);
+        }
+        for (final pk in current.difference(incoming)) {
+          appState.removeFriend(pk);
+        }
+        _persistSet(StorageKeys.friends, _ref.read(appStateProvider).friends);
+      } catch (_) {}
+    }
+    final blockedUsers = p['blockedUsers'];
+    if (blockedUsers is List) {
+      try {
+        final incoming = blockedUsers
+            .whereType<String>()
+            .where((s) => s.isNotEmpty)
+            .toSet();
+        final current = {..._ref.read(appStateProvider).blockedUsers};
+        for (final pk in incoming.difference(current)) {
+          appState.blockUser(pk);
+        }
+        for (final pk in current.difference(incoming)) {
+          appState.unblockUser(pk);
+        }
+        final blocked = _ref.read(appStateProvider).blockedUsers;
+        _persistSet(StorageKeys.blocked, blocked);
+        // Keep the bell badge's blocked-sender exclusion in sync (C02-4).
+        _ref.read(notificationHistoryProvider.notifier).setBlocked(blocked);
+      } catch (_) {}
+    }
+    final blockedKeywords = p['blockedKeywords'];
+    if (blockedKeywords is List) {
+      try {
+        final incoming = blockedKeywords
+            .whereType<String>()
+            .map((k) => k.toLowerCase())
+            .where((k) => k.isNotEmpty)
+            .toSet();
+        final current = {..._ref.read(appStateProvider).blockedKeywords};
+        for (final kw in incoming.difference(current)) {
+          appState.addBlockedKeyword(kw);
+        }
+        for (final kw in current.difference(incoming)) {
+          appState.removeBlockedKeyword(kw);
+        }
+        _persistSet(StorageKeys.blockedKeywords,
+            _ref.read(appStateProvider).blockedKeywords);
+      } catch (_) {}
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel lists (app.js:6350-6389). The PWA replaces each set + registers
+    // joined channels; apply additively into the live registry (restoring them
+    // on a fresh device) and persist the KV lists. Migrate the legacy default
+    // key 'nym' → 'nymchat' like the PWA (app.js:6364).
+    // -----------------------------------------------------------------------
+    final pinnedChannels = p['pinnedChannels'];
+    final hiddenChannels = p['hiddenChannels'];
+    final blockedChannels = p['blockedChannels'];
+    Set<String>? pinnedSet;
+    Set<String>? hiddenSet;
+    Set<String>? blockedSet;
+    List<ChannelEntry>? joinedEntries;
+    if (pinnedChannels is List) {
+      pinnedSet = pinnedChannels
+          .whereType<String>()
+          .map((k) => k == 'nym' ? 'nymchat' : k.toLowerCase())
+          .where((k) => k.isNotEmpty)
+          .toSet();
+    }
+    if (hiddenChannels is List) {
+      hiddenSet =
+          hiddenChannels.whereType<String>().where((k) => k.isNotEmpty).toSet();
+    }
+    if (blockedChannels is List) {
+      blockedSet = blockedChannels
+          .whereType<String>()
+          .where((k) => k.isNotEmpty)
+          .toSet();
+    }
+    final userJoined = p['userJoinedChannels'];
+    if (userJoined is List) {
+      final keys = <String>{
+        for (final raw in userJoined.whereType<String>())
+          if (raw.isNotEmpty) (raw == 'nym' ? 'nymchat' : raw),
+      };
+      joinedEntries = [
+        for (final k in keys)
+          if (k != kDefaultChannel) ChannelEntry(channel: k, geohash: k),
+      ];
+    }
+    if (pinnedSet != null ||
+        hiddenSet != null ||
+        blockedSet != null ||
+        joinedEntries != null) {
+      try {
+        appState.hydrateChannelState(
+          pinned: pinnedSet,
+          hidden: hiddenSet,
+          blocked: blockedSet,
+          joinedChannels: joinedEntries,
+        );
+        if (pinnedSet != null) {
+          _persistSet(StorageKeys.pinnedChannels,
+              _ref.read(appStateProvider).pinnedChannels);
+        }
+        if (hiddenSet != null) {
+          _persistSet(StorageKeys.hiddenChannels,
+              _ref.read(appStateProvider).hiddenChannels);
+        }
+        if (blockedSet != null) {
+          _persistSet(StorageKeys.blockedChannels,
+              _ref.read(appStateProvider).blockedChannels);
+        }
+        if (joinedEntries != null) _persistJoinedChannels();
+      } catch (_) {}
+    }
+
+    // -----------------------------------------------------------------------
+    // Closed-PM / left-group read state. closedPMs is additive and closedPMTimes
+    // is a per-key monotonic-max merge (app.js:6535-6547): a PM closed on any
+    // device stays closed everywhere, and the newest close time wins.
+    // -----------------------------------------------------------------------
+    final closedPmTimes = <String, int>{};
+    final rawClosedTimes = p['closedPMTimes'];
+    if (rawClosedTimes is Map) {
+      rawClosedTimes.forEach((k, v) {
+        final t = v is num ? v.toInt() : int.tryParse('$v');
+        if (t != null && t > 0) closedPmTimes['$k'] = t;
+      });
+    }
+    final closedPMs = p['closedPMs'];
+    if (closedPMs is List) {
+      try {
+        final existingTimes = appState.closedPmTimes;
+        final existingClosed = appState.closedPMs;
+        for (final raw in closedPMs.whereType<String>()) {
+          if (raw.isEmpty) continue;
+          final incomingTs = closedPmTimes[raw] ??
+              (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+          final curTs = existingTimes[raw] ?? 0;
+          // Additive close; only (re)stamp the time when strictly newer so the
+          // monotonic close/reopen ordering is preserved.
+          if (!existingClosed.contains(raw) || incomingTs > curTs) {
+            appState.closePM(raw, nowSec: incomingTs);
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Left-group state (app.js:6549-6561). The native group store has no public
+    // "mark left" / boot-hydrate path (see app_state `_leftGroups`), so this
+    // persists the KV the PWA writes (`_saveLeftGroups` + `nym_left_group_times`)
+    // — enabling the outbound round-trip and a future boot hydrator — with a
+    // per-key monotonic-max merge for the leave times.
+    final leftGroups = p['leftGroups'];
+    if (leftGroups is List) {
+      try {
+        final merged = _readSet(_kLeftGroupsKey)
+          ..addAll(leftGroups.whereType<String>().where((s) => s.isNotEmpty));
+        _persistSet(_kLeftGroupsKey, merged);
+      } catch (_) {}
+    }
+    final rawLeftTimes = p['leftGroupTimes'];
+    if (rawLeftTimes is Map) {
+      try {
+        final merged = <String, int>{};
+        final existing =
+            _ref.read(keyValueStoreProvider).getString(StorageKeys.leftGroupTimes);
+        if (existing != null && existing.isNotEmpty) {
+          final decoded = jsonDecode(existing);
+          if (decoded is Map) {
+            decoded.forEach((k, v) {
+              final t = v is num ? v.toInt() : int.tryParse('$v');
+              if (t != null) merged['$k'] = t;
+            });
+          }
+        }
+        rawLeftTimes.forEach((k, v) {
+          final t = v is num ? v.toInt() : int.tryParse('$v');
+          if (t == null || t <= 0) return;
+          if (t > (merged['$k'] ?? 0)) merged['$k'] = t;
+        });
+        _ref
+            .read(keyValueStoreProvider)
+            .setString(StorageKeys.leftGroupTimes, jsonEncode(merged));
+      } catch (_) {}
+    }
+
+    // Per-conversation read watermarks (app.js:6565-6577): monotonic max per
+    // channel/PM/group so a new device's badges don't re-surface already-read
+    // history. `markChannelRead` keeps the max and persists via its callback.
+    _applyChannelLastRead(p['channelLastRead']);
+
     // Tutorial / bot-PM markers (applyNostrSettings, app.js:6083-6098):
     // `tutorialSeen` / `botPmWelcomed` only ever flip ON (seen on any device →
     // suppressed everywhere), and `botPmClearedAt` is monotonic — a `?clear`
@@ -6652,6 +7117,17 @@ class NostrController {
             clearedAtSec: botCleared is num ? botCleared.toInt() : 0,
           );
     } catch (_) {}
+    // Cross-device "encryption at rest preferred" hint (applyNostrSettings,
+    // app.js:6101-6103): monotonic — persisted on EVERY inbound apply path
+    // (settings-get merge, live nym-sync wrap, section transfer, user-transfer
+    // accept), not just the settings-get merge, so an encrypt-at-rest preference
+    // set on another device gates this device's prompt (key-vault.js:419). The
+    // PWA sets it inside `applyNostrSettings`, which every apply routes through.
+    if (p['encryptAtRestPreferred'] == true) {
+      try {
+        kvStore.setBool(StorageKeys.encryptAtRestPref, true);
+      } catch (_) {}
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -6777,6 +7253,14 @@ class NostrController {
         _ref
             .read(notificationHistoryProvider.notifier)
             .seenNotificationsForSync(),
+      );
+      // Publish the cross-device read-state category (`nymchat-readstate`) so a
+      // channel/PM/group marked read here restores its unread watermark on our
+      // other devices (`_syncReadStateToD1`, settings.js:745-776). No-op when
+      // empty/unchanged. Read state changes route here via the debounced
+      // `syncSettings` fired from `onChannelReadChanged`.
+      await sync.readStateSet(
+        _ref.read(appStateProvider.notifier).channelLastRead,
       );
     } catch (_) {
       // Best-effort.
