@@ -2099,6 +2099,28 @@ class AppStateNotifier extends StateNotifier<AppState> {
       return out;
     }
 
+    // Pre-populate the users map from the synced kind-0 snapshots so nyms /
+    // avatars display immediately on restore instead of "nym" while relay
+    // profiles load (PWA `_loadGroupConversations` memberProfiles seeding,
+    // groups.js:566-580). Only seeds an UNKNOWN pubkey with a name — never
+    // clobbers a live user; a real profile fetch still supersedes it.
+    final memberProfiles = data['memberProfiles'];
+    if (memberProfiles is Map) {
+      memberProfiles.forEach((pkRaw, prof) {
+        final pk = pkRaw.toString();
+        if (prof is! Map || state.users.containsKey(pk)) return;
+        final name = prof['name'];
+        if (name is! String || name.isEmpty) return;
+        final pic = prof['picture'];
+        state.users[pk] = User(
+          pubkey: pk,
+          nym: name,
+          profile:
+              (pic is String && pic.isNotEmpty) ? UserProfile(picture: pic) : null,
+        );
+      });
+    }
+
     final existing = groupById(groupId);
     if (existing == null) {
       state.groups.add(Group(

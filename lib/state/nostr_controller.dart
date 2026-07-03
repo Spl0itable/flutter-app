@@ -7415,7 +7415,26 @@ class NostrController {
     // Group conversation metadata (PWA `_buildGroupConversationsSync`).
     final conversations = <String, Map<String, dynamic>>{};
     for (final g in st.groups) {
-      conversations[g.id] = _serializeGroupForSync(g);
+      final data = _serializeGroupForSync(g);
+      // Snapshot each member's cached kind-0 (nym + avatar) so a fresh device
+      // shows names/avatars immediately on restore instead of "nym" while
+      // relay profiles load (PWA `_saveGroupConversations` memberProfiles,
+      // groups.js:323-335). Only members with a known nym or picture.
+      final memberProfiles = <String, Map<String, dynamic>>{};
+      for (final pk in g.members) {
+        final u = st.users[pk];
+        final name = u?.nym;
+        final pic = u?.profile?.picture;
+        final hasName = name != null && name.isNotEmpty;
+        final hasPic = pic != null && pic.isNotEmpty;
+        if (!hasName && !hasPic) continue;
+        memberProfiles[pk] = {
+          if (hasName) 'name': name,
+          if (hasPic) 'picture': pic,
+        };
+      }
+      data['memberProfiles'] = memberProfiles;
+      conversations[g.id] = data;
     }
 
     // Serialized per-group ephemeral keys.
