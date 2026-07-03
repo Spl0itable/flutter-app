@@ -2113,9 +2113,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
         avatar: nz(data['avatar']),
         banner: nz(data['banner']),
         description: nz(data['description']),
+        allowMemberInvites: data['allowMemberInvites'] != false,
         inviteEnabled: data['inviteEnabled'] == true,
         inviteEpoch: (data['inviteEpoch'] as num?)?.toInt() ?? 0,
         metaUpdatedAt: (data['metaUpdatedAt'] as num?)?.toInt() ?? 0,
+        lastModTs: (data['lastModTs'] as num?)?.toInt() ?? 0,
+        lastModEventId: nz(data['lastModEventId']),
         modLog: parseLog(data['modLog']),
       ));
       state = state.copyWith();
@@ -2138,6 +2141,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       g.banner = nz(data['banner']);
       g.avatar = nz(data['avatar']);
       g.description = nz(data['description']);
+      g.allowMemberInvites = data['allowMemberInvites'] != false;
       g.inviteEnabled = data['inviteEnabled'] == true;
       g.inviteEpoch = (data['inviteEpoch'] as num?)?.toInt() ?? 0;
       g.metaUpdatedAt = incomingMetaTs;
@@ -2182,6 +2186,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (g.modLog.length > 50) {
         g.modLog.removeRange(0, g.modLog.length - 50);
       }
+    }
+    // Moderation-dedup watermark advances on its own timeline (a mod event can
+    // land without a metadata edit), so merge monotonically regardless of the
+    // metaUpdatedAt gate — keep the newest lastModTs and its event id.
+    final incomingModTs = (data['lastModTs'] as num?)?.toInt() ?? 0;
+    if (incomingModTs > g.lastModTs) {
+      g.lastModTs = incomingModTs;
+      g.lastModEventId = nz(data['lastModEventId']);
+      changed = true;
     }
     if (changed) state = state.copyWith();
     return changed;

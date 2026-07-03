@@ -7450,10 +7450,14 @@ class NostrController {
     );
   }
 
-  /// Serializes a [Group] for the `nymchat-groups` category, byte-matching the
-  /// PWA's `_buildGroupConversationsSync` (settings.js:299-321): exactly the
-  /// fields the PWA syncs (no `allowMemberInvites` / `lastModTs`), with modLog
-  /// capped to the most recent 50 entries.
+  /// Serializes a [Group] for the `nymchat-groups` category, matching the PWA's
+  /// `_buildGroupConversationsSync` (groups.js:337-355). Includes
+  /// `allowMemberInvites` / `lastModTs` / `lastModEventId` — the PWA writes them
+  /// into the group blob, and since the native client has no local group
+  /// persistence this D1 blob is the ONLY restore path (same-device relaunch and
+  /// cross-device), so dropping them would reset member-invite policy to `true`
+  /// and lose moderation-dedup state on every launch. modLog is capped to the
+  /// most recent 50 entries.
   static Map<String, dynamic> _serializeGroupForSync(Group g) {
     final modLog = g.modLog.length > 50
         ? g.modLog.sublist(g.modLog.length - 50)
@@ -7468,9 +7472,12 @@ class NostrController {
       'banner': g.banner,
       'avatar': g.avatar,
       'description': g.description,
+      'allowMemberInvites': g.allowMemberInvites,
       'inviteEnabled': g.inviteEnabled == true,
       'inviteEpoch': g.inviteEpoch,
       'metaUpdatedAt': g.metaUpdatedAt,
+      'lastModTs': g.lastModTs,
+      'lastModEventId': g.lastModEventId,
       'modLog': [for (final e in modLog) e.toJson()],
     };
   }
