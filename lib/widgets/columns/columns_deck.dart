@@ -13,6 +13,8 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/nymbot/nymbot_providers.dart'
+    show BotChatController, botChatControllerProvider, mergeBotThreadWithInfo;
 import '../../features/pms/pm_logic.dart';
 import '../../features/reactions/reaction_picker.dart';
 import '../../features/shop/cosmetics.dart';
@@ -1848,7 +1850,17 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     // / `getFilteredPMMessages` (columns.js:510 → messages.js:2934-2949), so
     // blocked users, blocked-keyword hits and heuristic spam are dropped here
     // exactly like `messagesForCurrentViewProvider` does for the single view.
-    final messages = visibleMessagesFor(app, widget.desc.storageKey);
+    var messages = visibleMessagesFor(app, widget.desc.storageKey);
+    // The Nymbot PM column additionally merges the bot engine's LOCAL-ONLY
+    // info bubbles (welcome intro, `?help` guide, command outputs — PWA
+    // `_displayBotInfoMessage`) exactly like the single-view `BotChatScreen`:
+    // they never enter the shared store, so the store-only filter above would
+    // silently drop them. The "thinking" strip needs no merge — it rides the
+    // shared typing indicator ([TypingIndicatorRow] below).
+    if (widget.desc.storageKey == BotChatController.conversationKey) {
+      messages = mergeBotThreadWithInfo(
+          messages, ref.watch(botChatControllerProvider).infoMessages);
+    }
 
     // `_cvAttachAutoScroll` (columns.js:442-456): when new messages arrive
     // while the user is at the bottom (<120px, `_atBottom`), pin the column

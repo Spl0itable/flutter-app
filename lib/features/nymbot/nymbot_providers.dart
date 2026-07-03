@@ -253,8 +253,14 @@ class BotChatController extends StateNotifier<BotChatState> {
         } catch (_) {}
       }
       final clearedAt = int.tryParse(p.getString(_kClearedAtPref) ?? '') ?? 0;
+      // Monotonic: a synced remote marker ([applySyncedMarkers]) may have
+      // landed before prefs hydrated — never regress it to the older on-disk
+      // value.
       state = state.copyWith(
-          proModel: model, git: git, clearedAtSec: clearedAt);
+          proModel: model,
+          git: git,
+          clearedAtSec:
+              clearedAt > state.clearedAtSec ? clearedAt : state.clearedAtSec);
       // A cache restore may have landed before the watermark hydrated — drop
       // any already-loaded bot-thread messages at or before it
       // (`displayMessage`'s clearedAt guard, pms.js:1121-1124).
@@ -294,6 +300,26 @@ class BotChatController extends StateNotifier<BotChatState> {
   void _setClearedAt(int sec) {
     state = state.copyWith(clearedAtSec: sec);
     unawaited(_prefs.then((p) => p.setString(_kClearedAtPref, '$sec')));
+  }
+
+  /// Inbound leg of the synced bot-PM markers (`applyNostrSettings`,
+  /// app.js:6083-6098): `botPmWelcomed` only ever flips ON (once the user was
+  /// welcomed on any device the proactive PM stays suppressed everywhere) and
+  /// `botPmClearedAt` is monotonic — take the newest clear time seen on any
+  /// device so a `?clear` elsewhere hides this device's pre-clear Nymbot
+  /// history too. Called from the settings-merge path
+  /// ([NostrController._applySyncedSettings]).
+  void applySyncedMarkers({bool welcomed = false, int clearedAtSec = 0}) {
+    if (welcomed) {
+      unawaited(_prefs.then((p) => p.setString(_kWelcomedPref, 'true')));
+    }
+    if (clearedAtSec > 0 && clearedAtSec > state.clearedAtSec) {
+      _setClearedAt(clearedAtSec);
+      // Drop the already-loaded pre-clear thread from the canonical store —
+      // the ingest-time guard the PWA applies in `handleGiftWrapDM`
+      // (pms.js:1121-1124) keyed off the freshly-advanced watermark.
+      _purgeCleared(clearedAtSec);
+    }
   }
 
   // --- Identity ---------------------------------------------------------------
@@ -1701,6 +1727,28 @@ final botChatControllerProvider =
   });
   return controller;
 });
+
+/// Merges the canonical store thread with the controller's transient info
+/// bubbles ([BotChatState.infoMessages]), ordered by wall-clock timestamp; at
+/// an equal stamp store rows sort first (so the empty-thread welcome lands
+/// right after the 'Start of private message' line, matching the PWA's DOM
+/// append order). Shared by the single-view `BotChatScreen` message area and
+/// the columns deck's bot column — the info bubbles never enter the shared
+/// store, so a store-only render would drop them.
+List<Message> mergeBotThreadWithInfo(List<Message> store, List<Message> info) {
+  if (info.isEmpty) return store;
+  final merged = <({Message m, bool isInfo, int idx})>[
+    for (var i = 0; i < store.length; i++) (m: store[i], isInfo: false, idx: i),
+    for (var i = 0; i < info.length; i++) (m: info[i], isInfo: true, idx: i),
+  ];
+  merged.sort((a, b) {
+    final dt = a.m.timestamp - b.m.timestamp;
+    if (dt != 0) return dt;
+    if (a.isInfo != b.isInfo) return a.isInfo ? 1 : -1;
+    return a.idx - b.idx;
+  });
+  return [for (final e in merged) e.m];
+}
 
 /// Convenience: the catalogue of public `?` commands (for help/autocomplete UI).
 final botCommandsProvider = Provider<List<BotCommand>>((_) => kBotCommands);

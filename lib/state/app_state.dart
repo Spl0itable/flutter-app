@@ -1070,10 +1070,47 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (gate == null) return;
     // Iterate a snapshot: `clearUnread` mutates `unreadCounts`. Keys may be
     // stored under the storage key OR the bare id depending on the ingest
-    // path, so the deck-registered gate must accept either form.
+    // path, so the deck-registered gate must accept either form — and
+    // `clearUnread` derives its dual buckets from the STORAGE key, so a bare
+    // id is resolved to storage form first (otherwise only the bare bucket
+    // would clear, leaving the storage-key badge + watermark stale).
     for (final key in state.unreadCounts.keys.toList()) {
-      if (gate(key)) clearUnread(key);
+      if (gate(key)) clearUnread(_unreadStorageKey(key));
     }
+  }
+
+  /// Resolves a raw unread-counts key — either a storage key or a bare id
+  /// (peer pubkey / group id / channel name), the same dual-key model the
+  /// columns deck's `_descMatchesKey` gate accepts — to the storage-style key
+  /// [clearUnread] derives both of its buckets from. Bare ids are classified
+  /// against the live stores (PM ingest buckets under the bare peer pubkey,
+  /// app_state PM path); anything unrecognized falls back to the channel form,
+  /// whose bare alt is the original key again.
+  String _unreadStorageKey(String key) {
+    if (key.startsWith('#') ||
+        key.startsWith('pm-') ||
+        key.startsWith('group-')) {
+      return key;
+    }
+    if (state.messages.containsKey('pm-$key') || state.users.containsKey(key)) {
+      return 'pm-$key';
+    }
+    if (state.messages.containsKey('group-$key') ||
+        state.groups.any((g) => g.id == key)) {
+      return 'group-$key';
+    }
+    return '#$key';
+  }
+
+  /// Clears the session's processed-event dedup sets — the in-memory
+  /// `processedPMEventIds` / `deletedEventIds` analogues the PWA wipes inside
+  /// `clearLocalStorageCache` (app.js:4021-4022) — so relay backlog / archive
+  /// restore can repopulate the just-cleared cache instead of being dropped
+  /// as already-seen duplicates. Called by [NostrController.clearCache] after
+  /// the store wipe.
+  void clearSessionDedup() {
+    _seenIds.clear();
+    _seenNymMessageIds.clear();
   }
 
   int _localSeq = 1000000;

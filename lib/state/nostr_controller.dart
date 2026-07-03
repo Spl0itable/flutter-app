@@ -3737,6 +3737,11 @@ class NostrController {
     for (final u in appState.users.values) {
       u.profile?.about = null;
     }
+    // The PWA also wipes the session dedup sets (`processedPMEventIds` /
+    // `deletedEventIds`, app.js:4021-4022) — here `_seenIds` /
+    // `_seenNymMessageIds` — so relay backlog can re-ingest the wiped
+    // conversations instead of being dropped as already-seen duplicates.
+    _ref.read(appStateProvider.notifier).clearSessionDedup();
     // Publish the mutated state (an empty hydrate is a bare
     // `state = state.copyWith()` republish) so every open conversation
     // re-renders from the now-empty store — the PWA's emptied `#messages`.
@@ -6313,6 +6318,23 @@ class NostrController {
             );
       } catch (_) {}
     }
+    // Tutorial / bot-PM markers (applyNostrSettings, app.js:6083-6098):
+    // `tutorialSeen` / `botPmWelcomed` only ever flip ON (seen on any device →
+    // suppressed everywhere), and `botPmClearedAt` is monotonic — a `?clear`
+    // on another device hides this device's pre-clear Nymbot history too.
+    // SETTINGS-SYNC seam (inbound apply of the ?clear/welcome push).
+    if (p['tutorialSeen'] == true) {
+      try {
+        kvStore.setString(StorageKeys.tutorialSeen, 'true');
+      } catch (_) {}
+    }
+    final botCleared = p['botPmClearedAt'];
+    try {
+      _ref.read(botChatControllerProvider.notifier).applySyncedMarkers(
+            welcomed: p['botPmWelcomed'] == true,
+            clearedAtSec: botCleared is num ? botCleared.toInt() : 0,
+          );
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------

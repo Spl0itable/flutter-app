@@ -355,7 +355,7 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     // The canonical thread merged with the LOCAL-ONLY info bubbles (welcome,
     // `?help` guide, command outputs — never in the shared store, never
     // persisted; PWA `_displayBotInfoMessage`, pms.js:1773-1776).
-    final msgs = _mergeWithInfo(
+    final msgs = mergeBotThreadWithInfo(
       app.messages[BotChatController.conversationKey] ?? const <Message>[],
       ref.watch(botChatControllerProvider).infoMessages,
     );
@@ -434,25 +434,6 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       !cur.isMeAction &&
       prev.pubkey == cur.pubkey &&
       (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
-
-  /// Merges the canonical store thread with the controller's transient info
-  /// bubbles, ordered by wall-clock timestamp; at an equal stamp store rows
-  /// sort first (so the empty-thread welcome lands right after the 'Start of
-  /// private message' line, matching the PWA's DOM append order).
-  static List<Message> _mergeWithInfo(List<Message> store, List<Message> info) {
-    if (info.isEmpty) return store;
-    final merged = <({Message m, bool isInfo, int idx})>[
-      for (var i = 0; i < store.length; i++) (m: store[i], isInfo: false, idx: i),
-      for (var i = 0; i < info.length; i++) (m: info[i], isInfo: true, idx: i),
-    ];
-    merged.sort((a, b) {
-      final dt = a.m.timestamp - b.m.timestamp;
-      if (dt != 0) return dt;
-      if (a.isInfo != b.isInfo) return a.isInfo ? 1 : -1;
-      return a.idx - b.idx;
-    });
-    return [for (final e in merged) e.m];
-  }
 
   // ---------------------------------------------------------------------------
   // Modals (premium surfaces kept on top of the canonical chat)
