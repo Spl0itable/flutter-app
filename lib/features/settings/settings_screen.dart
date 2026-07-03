@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -27,6 +26,7 @@ import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../../widgets/common/nym_avatar.dart' show proxiedAvatarUrl;
 import '../../widgets/nym_icons.dart';
+import '../../widgets/wallpaper/wallpaper_layer.dart';
 import '../emoji/emoji_picker.dart';
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
@@ -424,10 +424,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
                 child: Stack(
                   children: [
+                    // Pinned modal chrome: the SETTINGS title (+ floating ✕
+                    // chip) stays fixed at the top and the Cancel/Save
+                    // `.modal-actions` row stays fixed at the bottom; only the
+                    // sections between them scroll, like the PWA modal.
                     Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         _header(c),
+                        // `.modal-header { margin-bottom: 24px }` — the gap
+                        // between the header rule and the search row shows the
+                        // modal background.
+                        const SizedBox(height: 24),
                         // `.settings-search` is `position: sticky; top: 0` over
                         // the scrolling modal body (styles-components.css:136),
                         // so it renders as a pinned row above the scroll view.
@@ -436,8 +444,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       child: SingleChildScrollView(
                         // Sections are full-bleed; the no-results text carries
                         // the `.modal-content { padding: 32px }` horizontal
-                        // inset itself.
-                        padding: const EdgeInsets.only(bottom: 8),
+                        // inset itself. The 20px body→actions gap
+                        // (`.modal-body { margin-bottom }`) lives on the pinned
+                        // actions row so it stays constant while scrolling.
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
@@ -494,12 +503,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // --- Chrome ---------------------------------------------------------------
 
   Widget _header(NymColors c) {
-    // `.modal-header`: a full-width title with a 1px glass bottom rule. The
-    // close ✕ is the separate absolute chip (build), not a Row child. Right
-    // padding (56) keeps the title clear of the floating chip.
+    // `.modal-header`: a full-width title with a 1px glass bottom rule
+    // (`padding-bottom: 14px`), inset by `.modal-content { padding: 32px }`.
+    // The close ✕ is the separate absolute chip (build), not a Row child.
+    // Right padding (56) keeps the title clear of the floating chip.
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(32, 24, 56, 14),
+      padding: const EdgeInsets.fromLTRB(32, 32, 56, 14),
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
@@ -532,11 +542,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Widget _actions(NymColors c) {
+    // `.modal-actions`: a centered 10px-gap button row with NO border or
+    // background of its own — separated from the body by `.modal-body
+    // { margin-bottom: 20px }` and inset by `.modal-content { padding: 32px }`.
     return Container(
-      padding: const EdgeInsets.fromLTRB(32, 12, 32, 20),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: c.glassBorder)),
-      ),
+      padding: const EdgeInsets.fromLTRB(32, 20, 32, 32),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -2692,7 +2702,13 @@ class _WallpaperPicker extends StatelessWidget {
                   child: Container(
                     width: double.infinity,
                     decoration: BoxDecoration(
-                      color: c.bg.withValues(alpha: c.isLight ? 1 : 0.4),
+                      // `.wallpaper-preview` background: rgba(0,0,0,0.3) dark /
+                      // #ffffff light (styles-features.css:3170 +
+                      // styles-themes-responsive.css:1354-1357), so the light
+                      // thumbnails read light-primary-on-white like the PWA.
+                      color: c.isLight
+                          ? Colors.white
+                          : Colors.black.withValues(alpha: 0.3),
                       borderRadius: NymRadius.rxs,
                       border: Border.all(
                         color: o.id == value ? c.primary : c.glassBorder,
@@ -2702,10 +2718,11 @@ class _WallpaperPicker extends StatelessWidget {
                     alignment: Alignment.center,
                     // `.wallpaper-option` icons (index.html:1420-1471): "None"
                     // is the two-line ✕ SVG, "Upload" is the feather upload
-                    // glyph. Each pattern tile renders a distinct mini preview of
-                    // its CSS pattern in the PWA — reproduce that with a small
-                    // per-pattern painter so the 7 tiles are differentiable
-                    // (09-L) instead of one shared texture glyph.
+                    // glyph. Each pattern tile renders the SAME tiled CSS
+                    // pattern as the live wallpaper at thumbnail scale
+                    // (`.wallpaper-preview.wallpaper-<name>`,
+                    // styles-features.css:3184-3243) via the shared painter's
+                    // preview variant.
                     child: o.id == 'none'
                         ? NymSvgIcon(NymIcons.close,
                             size: 18, color: c.textDim)
@@ -2715,9 +2732,11 @@ class _WallpaperPicker extends StatelessWidget {
                                 borderRadius: NymRadius.rxs,
                                 child: CustomPaint(
                                   size: Size.infinite,
-                                  painter: _WallpaperThumbPainter(
+                                  painter: WallpaperPatternPainter(
                                     type: o.id,
-                                    tint: c.primary,
+                                    primary: c.primary,
+                                    isLight: c.isLight,
+                                    preview: true,
                                   ),
                                 ),
                               ),
@@ -2774,124 +2793,6 @@ class _WallpaperPicker extends StatelessWidget {
     }
     return NymSvgIcon(NymIcons.upload, size: 18, color: c.textDim);
   }
-}
-
-/// Paints a small distinct preview of one wallpaper pattern into a tile (09-L).
-/// The PWA renders each `.wallpaper-preview.wallpaper-<name>` as a mini version
-/// of the same CSS pattern used for the live chat wallpaper; reproduce that at
-/// thumbnail scale (geometry mirrors the families in `wallpaper_layer.dart`) so
-/// the 7 tiles are visually differentiable instead of sharing one glyph. Strokes
-/// are the active `--primary` ([tint]) at a low alpha, matching the live layer's
-/// faint primary tint.
-class _WallpaperThumbPainter extends CustomPainter {
-  _WallpaperThumbPainter({required this.type, required this.tint});
-
-  /// One of the 7 preset pattern ids (geometric/circuit/dots/waves/topography/
-  /// hexagons/diamonds).
-  final String type;
-  final Color tint;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width, h = size.height;
-    final stroke = Paint()
-      ..color = tint.withValues(alpha: 0.55)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1
-      ..strokeCap = StrokeCap.round;
-    final fill = Paint()..color = tint.withValues(alpha: 0.5);
-
-    switch (type) {
-      case 'dots':
-        // Evenly-spaced tinted dots.
-        const step = 7.0;
-        for (double y = step / 2; y < h; y += step) {
-          for (double x = step / 2; x < w; x += step) {
-            canvas.drawCircle(Offset(x, y), 1, fill);
-          }
-        }
-      case 'waves':
-        // Stacked sine ridges.
-        for (double y = 5; y < h; y += 7) {
-          final path = Path()..moveTo(0, y);
-          for (double x = 0; x <= w; x += 6) {
-            path.relativeQuadraticBezierTo(3, -3, 6, 0);
-          }
-          canvas.drawPath(path, stroke);
-        }
-      case 'diamonds':
-        // Tiled diamond outlines.
-        const s = 8.0;
-        for (double cy = 0; cy < h + s; cy += s) {
-          for (double cx = 0; cx < w + s; cx += s) {
-            final p = Path()
-              ..moveTo(cx, cy - s / 2)
-              ..lineTo(cx + s / 2, cy)
-              ..lineTo(cx, cy + s / 2)
-              ..lineTo(cx - s / 2, cy)
-              ..close();
-            canvas.drawPath(p, stroke);
-          }
-        }
-      case 'hexagons':
-        // Honeycomb of small hexagons.
-        const r = 5.0;
-        final dx = r * 1.5, dy = r * 1.732;
-        var row = 0;
-        for (double cy = r; cy < h + r; cy += dy / 2) {
-          final offX = (row.isOdd) ? dx : 0.0;
-          for (double cx = r + offX; cx < w + r; cx += dx * 2) {
-            final p = Path();
-            for (var i = 0; i < 6; i++) {
-              final a = math.pi / 3 * i + math.pi / 6;
-              final pt = Offset(cx + r * math.cos(a), cy + r * math.sin(a));
-              if (i == 0) {
-                p.moveTo(pt.dx, pt.dy);
-              } else {
-                p.lineTo(pt.dx, pt.dy);
-              }
-            }
-            p.close();
-            canvas.drawPath(p, stroke);
-          }
-          row++;
-        }
-      case 'circuit':
-        // Inset square + corner pads + center ring (the circuit tile motif).
-        canvas.drawRect(
-            Rect.fromLTWH(w * 0.18, h * 0.18, w * 0.64, h * 0.64), stroke);
-        for (final o in [
-          Offset(w * 0.18, h * 0.18),
-          Offset(w * 0.82, h * 0.18),
-          Offset(w * 0.18, h * 0.82),
-          Offset(w * 0.82, h * 0.82),
-        ]) {
-          canvas.drawCircle(o, 1.4, fill);
-        }
-        canvas.drawCircle(Offset(w / 2, h / 2), 3, stroke);
-      case 'topography':
-        // Nested contour ovals.
-        for (var i = 0; i < 3; i++) {
-          final inset = 3.0 + i * 5;
-          canvas.drawOval(
-              Rect.fromLTWH(inset, inset, w - inset * 2, h - inset * 2),
-              stroke);
-        }
-      case 'geometric':
-      default:
-        // Diagonal hatching at two angles.
-        for (double x = -h; x < w; x += 8) {
-          canvas.drawLine(Offset(x, 0), Offset(x + h, h), stroke);
-        }
-        for (double x = 0; x < w + h; x += 8) {
-          canvas.drawLine(Offset(x, 0), Offset(x - h, h), stroke);
-        }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_WallpaperThumbPainter old) =>
-      old.type != type || old.tint != tint;
 }
 
 /// A selectable preview card shared by the Chat-View (`.view-option`) and
