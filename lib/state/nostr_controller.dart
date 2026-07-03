@@ -383,14 +383,19 @@ class NostrController {
         unawaited(_backfillChannelArchive(bootView.id));
       }
 
-      // Discover recently-active GEOHASH + NAMED channels from the D1 archive and
-      // seed the sidebar / globe / unread floors — the PWA's
-      // `fetchGeohashActivityFromD1` + `fetchNamedChannelActivityFromD1`, fired on
-      // connect inside `backfillFromD1OnReconnect` (relays.js:2799-2805), NOT only
-      // on a view switch. Runs after `_initStorageSync` wires `_storageSync` (it
-      // no-ops otherwise). Throttled ~30s inside; also re-fired on reconnect (see
-      // [_onConnectionChanged]). Best-effort; never blocks boot.
-      unawaited(_discoverChannelActivity());
+      // Discover recently-active GEOHASH + NAMED channels from the D1 archive,
+      // seed the sidebar / globe / unread floors, THEN restore the D1 message
+      // archive for the full {current ∪ joined ∪ discovered} channel set — the
+      // PWA's `fetchGeohashActivityFromD1` + `fetchNamedChannelActivityFromD1`
+      // AND `channelRestoreManyFromD1` over {current ∪ joined}, both fired on
+      // connect inside `backfillFromD1OnReconnect` (relays.js:2791-2805), NOT
+      // only on a view switch. Restoring the whole set here (not just the boot
+      // view above) keeps every badge-bearing channel's messages loaded up front
+      // so a sidebar unread badge never opens to an empty channel. Runs after
+      // `_initStorageSync` wires `_storageSync` (no-ops otherwise); discovery is
+      // ~30s-throttled and each channel's fetch is deduped/bounded. Best-effort;
+      // never blocks boot (also re-fired on reconnect, see [_onConnectionChanged]).
+      unawaited(_restoreAllChannelArchives());
     } catch (e, st) {
       // Boot failed (e.g. no secure storage). Never strand the user on demo
       // data: if we never reached `goLive` (so the store is still the empty
@@ -478,17 +483,58 @@ class NostrController {
     // (previously group-open-only).
     await _restorePmArchive(sync);
     await _backfillGroupArchive();
-    // Channel-activity discovery + archive restore over {current ∪ joined}
-    // (relays.js:2791-2797), not just the single open view.
-    unawaited(_discoverChannelActivity());
+    // Channel-activity discovery + archive restore over {current ∪ joined ∪
+    // discovered} (relays.js:2791-2797), not just the single open view.
+    await _restoreAllChannelArchives();
+  }
+
+  /// Max number of per-channel D1 archive restores in flight at once. The PWA
+  /// coalesces the whole set into ONE `channel-get` (channels.js:1123); here
+  /// each channel keeps its own in-flight dedup + 10s timeout inside
+  /// [_backfillChannelArchive], so we cap the fan-out rather than await serially
+  /// — a few slow/empty channels no longer stall the rest of the restore.
+  static const int _kChannelBackfillConcurrency = 4;
+
+  /// Discovers active channels from D1 (seeding the sidebar + unread floors),
+  /// THEN restores the D1 message archive for the full {current ∪ joined ∪
+  /// discovered} channel set — the PWA's `channelRestoreManyFromD1` over
+  /// {current ∪ joined} run from `backfillFromD1OnReconnect` (relays.js:2791)
+  /// and at boot. Discovery is AWAITED first so freshly-discovered channels
+  /// (added to `state.channels` + given an unread floor by
+  /// [AppStateNotifier.applyChannelActivity]) are included in the restore set;
+  /// otherwise a discovered channel surfaces a badge but never has its messages
+  /// backfilled → the phantom "No recent messages" on open. Best-effort.
+  Future<void> _restoreAllChannelArchives() async {
+    await _discoverChannelActivity();
     final keys = <String>{
       for (final c in _ref.read(appStateProvider).channels) c.key,
     };
     final view = _ref.read(appStateProvider).view;
     if (view.kind == ViewKind.channel && view.id.isNotEmpty) keys.add(view.id);
-    for (final key in keys) {
-      await _backfillChannelArchive(key);
+    await _backfillChannelArchivesFor(keys);
+  }
+
+  /// Restores the D1 archive for every channel in [keys] with bounded
+  /// concurrency ([_kChannelBackfillConcurrency] at a time) via
+  /// [_backfillChannelArchive] (which dedups concurrent calls per channel and
+  /// time-bounds each fetch). Best-effort; empty/blank keys are skipped.
+  Future<void> _backfillChannelArchivesFor(Iterable<String> keys) async {
+    final list = <String>{
+      for (final k in keys)
+        if (k.isNotEmpty) k,
+    }.toList();
+    if (list.isEmpty) return;
+    var next = 0;
+    Future<void> worker() async {
+      while (next < list.length) {
+        await _backfillChannelArchive(list[next++]);
+      }
     }
+
+    final workerCount = _kChannelBackfillConcurrency < list.length
+        ? _kChannelBackfillConcurrency
+        : list.length;
+    await Future.wait([for (var i = 0; i < workerCount; i++) worker()]);
   }
 
   /// Last `_discoverChannelActivity` run (ms) — the ~30s throttle the PWA applies
