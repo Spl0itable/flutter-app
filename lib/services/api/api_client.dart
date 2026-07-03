@@ -451,10 +451,14 @@ class ApiSocket {
   /// Sends a `REQ` for [action] with [extra] and resolves the result. [stream]
   /// collects `ITEM` frames until `END`; otherwise a single `RES`. Rejects on a
   /// closed socket or a per-request timeout (so the caller falls back to HTTP).
+  /// [timeout] overrides the socket-wide request timeout for THIS request —
+  /// the PWA's `opts.timeout || 45000` (shop.js:142), which the bot `pm`
+  /// action stretches to 180s (pms.js:2470).
   Future<ApiSocketResult> request(
     String action,
     Map<String, dynamic> extra, {
     bool stream = false,
+    Duration? timeout,
   }) {
     if (!_open || _channel == null) {
       return Future.error(StateError('api socket not ready'));
@@ -462,7 +466,7 @@ class ApiSocket {
     final id = _nextId++;
     final p = _Pending(stream: stream, action: action);
     _pending[id] = p;
-    p.timer = Timer(_requestTimeout, () {
+    p.timer = Timer(timeout ?? _requestTimeout, () {
       if (_pending.remove(id) != null) {
         p.completeError(StateError('api request timeout'));
       }
@@ -722,6 +726,44 @@ class ApiClient {
       return result;
     } catch (_) {
       return null; // fall back to HTTP
+    }
+  }
+
+  /// Runs one bot/ledger [action] over the shared identity-authed `/api`
+  /// socket with RAW semantics — resolves `(status, data)` regardless of the
+  /// status so callers can branch on `noCredits`/`error` themselves — the WS
+  /// leg of the PWA's `_botMoneyRequest` (`_apiSocketSend(action, extra,
+  /// {raw:true, timeout})`, shop.js:158-161). This is THE seam that lets
+  /// [NymbotService] ride the SAME multiplexed socket as the storage sync (the
+  /// PWA's single `_apiSock`) instead of opening + AUTH-signing a second one.
+  ///
+  /// Gated on a signable identity like the PWA's `if (this.pubkey)`
+  /// (shop.js:158): with no auth builder wired, the ledger never rides the
+  /// socket. Returns null on any socket unavailability/failure so the caller
+  /// falls back to the per-action-signed HTTP POST. Unlike the storage paths
+  /// there is no fast-fallback connect cap — `_botMoneyRequest` awaits
+  /// `_ensureApiSocket()` in full (user-initiated, no boot backfill to stall).
+  Future<({int status, Map<String, dynamic> data})?> botSocketRequest(
+    String action,
+    Map<String, dynamic> extra, {
+    Duration? timeout,
+  }) async {
+    if (!_socketEnabled) return null;
+    final authBuilder = _apiSocketAuthBuilder;
+    if (authBuilder == null) return null;
+    try {
+      final socket = _ensureSocketObject();
+      Map<String, dynamic>? authEvent;
+      if (!socket.isAuthenticated) {
+        authEvent = await authBuilder();
+        // No signable identity → the bot ledger can't ride the socket.
+        if (authEvent == null) return null;
+      }
+      await socket.ensureConnected(authEvent: authEvent);
+      final res = await socket.request(action, extra, timeout: timeout);
+      return (status: res.status, data: res.data);
+    } catch (_) {
+      return null; // fall back to HTTP (shop.js:162)
     }
   }
 
@@ -1146,7 +1188,15 @@ class ApiClient {
     );
     _trackApiData(action,
         sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
-    if (res.statusCode < 200 || res.statusCode >= 300) {
+    // The worker streams `application/x-ndjson` for these actions; the PWA
+    // rejects even a 2xx whose Content-Type isn't NDJSON, surfacing the JSON
+    // `{error}` body (shop.js:232-237: `!resp.ok || ct.indexOf(
+    // 'application/x-ndjson') < 0`). Without this gate a 200 JSON/HTML error
+    // body would be line-split into bogus "items" instead of throwing.
+    final contentType = res.headers['content-type'] ?? '';
+    if (res.statusCode < 200 ||
+        res.statusCode >= 300 ||
+        !contentType.contains('application/x-ndjson')) {
       final decoded = _decodeJson(res);
       throw ApiException(
         (body['action'] ?? 'storage').toString(),

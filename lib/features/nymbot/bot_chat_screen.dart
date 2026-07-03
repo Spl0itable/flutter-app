@@ -384,7 +384,14 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       final entry = MessageGroupEntry(
         message: m,
         reactions: reactions[m.id] ?? const [],
-        mentioned: !m.isOwn && m.content.contains(mentionToken),
+        // Same gated fast probe as messages_list.dart: `.mentioned` never
+        // applies to self or PM rows (messages.js:686-692) and bails while the
+        // self nym is unknown (messages.js:400) — a bare '@' token must not
+        // flag every '@'-containing message.
+        mentioned: mentionToken.length > 1 &&
+            !m.isOwn &&
+            !m.isPM &&
+            m.content.contains(mentionToken),
       );
       if (settings.useBubbles &&
           units.isNotEmpty &&
@@ -815,9 +822,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// count as input events (the PWA palette reacts to `input` only).
   String _lastText = '';
 
-  /// Deferred quote-reply chip (`setQuoteReply`): author + stripped text; the
-  /// quote is prepended to the outgoing content only at send.
-  ({String author, String text})? _pendingQuote;
+  /// Deferred quote-reply chip (`setQuoteReply`): the author, the nested-quote-
+  /// stripped [text] that is prepended to the outgoing content only at send,
+  /// and the FULL original [fullText] the chip previews (the PWA's `cleanText`
+  /// derives from `text`, not `strippedText` — messages.js:1845-1846).
+  ({String author, String text, String fullText})? _pendingQuote;
 
   // Emoji / GIF picker popovers, anchored above their toolbar buttons like the
   // PWA's inline `bottom:100%` popups.
@@ -958,7 +967,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         _controller.selection =
             TextSelection.collapsed(offset: _controller.text.length);
       case QuoteAction(:final fullNym, :final content):
-        _pendingQuote = (author: fullNym, text: _strippedQuoteText(content));
+        _pendingQuote = (
+          author: fullNym,
+          text: _strippedQuoteText(content),
+          fullText: content,
+        );
     }
     _focus.requestFocus();
     setState(() {});
@@ -1062,6 +1075,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     return KeyEventResult.ignored;
   }
 
+  /// Insert text at the current selection (mirrors PWA `insertEmoji`/`insertGif`
+  /// which splice at the caret), keeping focus in the input — both call
+  /// `input.focus()` after the splice (reactions.js:1236-1240 /
+  /// ui-context.js:2180-2186).
   void _insertAtCaret(String insert) {
     final text = _controller.text;
     final sel = _controller.selection;
@@ -1072,7 +1089,26 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
       text: next,
       selection: TextSelection.collapsed(offset: at + insert.length),
     );
+    _focus.requestFocus();
   }
+
+  /// Hides an emoji/GIF picker WITHOUT a selection (✕ / tap-out / button
+  /// toggle) and, on desktop widths, returns focus to the message input —
+  /// `closeEnhancedEmojiModal`/`closeGifPicker` → `_focusMessageInput`
+  /// (reactions.js:908 / ui-context.js:2194), which bails at ≤768px
+  /// (channels.js:1383-1393) so a phone keyboard isn't yanked open.
+  void _hidePickerAndRefocus(OverlayPortalController portal) {
+    portal.hide();
+    if (!mounted) return;
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return;
+    }
+    _focus.requestFocus();
+  }
+
+  void _hideEmojiPicker() => _hidePickerAndRefocus(_emojiPortal);
+
+  void _hideGifPicker() => _hidePickerAndRefocus(_gifPortal);
 
   Future<void> _onEmojiSelected(String emoji) async {
     _insertAtCaret(emoji);
@@ -1091,7 +1127,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
 
   Future<void> _toggleEmojiPicker() async {
     if (_emojiPortal.isShowing) {
-      _emojiPortal.hide();
+      _hideEmojiPicker();
       return;
     }
     _gifPortal.hide();
@@ -1103,7 +1139,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
 
   Future<void> _toggleGifPicker() async {
     if (_gifPortal.isShowing) {
-      _gifPortal.hide();
+      _hideGifPicker();
       return;
     }
     _emojiPortal.hide();
@@ -1461,9 +1497,12 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                         border:
                             Border(bottom: BorderSide(color: c.glassBorder)),
                       ),
+                      // NOT autofocused: the PWA never focuses the dropdown
+                      // search on open (only the Select-Your-Language MODAL
+                      // focuses its search, translate.js:190) — grabbing focus
+                      // here would yank the IME away from the message input.
                       child: TextField(
                         controller: _translateSearchController,
-                        autofocus: true,
                         onChanged: (v) => setState(() => _translateQuery = v),
                         style: TextStyle(color: c.text, fontSize: 13),
                         cursorColor: c.isLight ? Colors.black : Colors.white,
@@ -1540,14 +1579,27 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     try {
       final res = await TranslateService().translate(text, targetLang);
       if (!mounted) return;
-      final out = res.translatedText.trim();
-      if (out.isNotEmpty) {
-        _controller.text = out;
-        _controller.selection =
-            TextSelection.collapsed(offset: _controller.text.length);
+      final out = res.translatedText;
+      // Don't clobber the input if the upstream returned nothing or echoed
+      // the original (detected language already matches the target) —
+      // `translateInputText` (translate.js:479-483).
+      if (out.trim().isEmpty || out.trim() == text) {
+        _systemLine(
+            'Nothing to translate (text may already be in the target language).');
+        return;
       }
-    } catch (_) {
-      if (mounted) _systemLine('Translation failed.');
+      _controller.text = out;
+      _controller.selection =
+          TextSelection.collapsed(offset: _controller.text.length);
+    } catch (e) {
+      // `'Translation failed: ' + (err.message || 'Unknown error')`
+      // (translate.js:488) — [TranslateException.message] already carries the
+      // "Translation failed: …" prefix.
+      if (mounted) {
+        _systemLine(e is TranslateException
+            ? e.message
+            : 'Translation failed: Unknown error');
+      }
     } finally {
       if (mounted) setState(() => _translating = false);
     }
@@ -1596,7 +1648,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: _QuotePreviewChip(
                     author: _pendingQuote!.author,
-                    text: _quotePreviewText(_pendingQuote!.text),
+                    // The chip previews the FULL original content; only the
+                    // SENT quote is nested-quote-stripped (messages.js:1845).
+                    text: _quotePreviewText(_pendingQuote!.fullText),
                     onClose: _clearQuote,
                   ),
                 ),
@@ -1788,11 +1842,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         controller: _emojiPortal,
         overlayChildBuilder: (context) => _popover(
           link: _emojiAnchor,
-          onDismiss: _emojiPortal.hide,
+          onDismiss: _hideEmojiPicker,
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
-            onClose: _emojiPortal.hide,
+            onClose: _hideEmojiPicker,
           ),
         ),
         child: _BotIconBtn(
@@ -1816,11 +1870,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           if (prefs == null) return const SizedBox.shrink();
           return _popover(
             link: _gifAnchor,
-            onDismiss: _gifPortal.hide,
+            onDismiss: _hideGifPicker,
             child: GifPicker(
               favoritesStore: FavoriteGifsStore(prefs),
               onSelect: _onGifSelected,
-              onClose: _gifPortal.hide,
+              onClose: _hideGifPicker,
             ),
           );
         },
