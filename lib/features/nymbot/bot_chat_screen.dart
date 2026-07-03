@@ -384,7 +384,14 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       final entry = MessageGroupEntry(
         message: m,
         reactions: reactions[m.id] ?? const [],
-        mentioned: !m.isOwn && m.content.contains(mentionToken),
+        // Same gated fast probe as messages_list.dart: `.mentioned` never
+        // applies to self or PM rows (messages.js:686-692) and bails while the
+        // self nym is unknown (messages.js:400) — a bare '@' token must not
+        // flag every '@'-containing message.
+        mentioned: mentionToken.length > 1 &&
+            !m.isOwn &&
+            !m.isPM &&
+            m.content.contains(mentionToken),
       );
       if (settings.useBubbles &&
           units.isNotEmpty &&
@@ -815,9 +822,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// count as input events (the PWA palette reacts to `input` only).
   String _lastText = '';
 
-  /// Deferred quote-reply chip (`setQuoteReply`): author + stripped text; the
-  /// quote is prepended to the outgoing content only at send.
-  ({String author, String text})? _pendingQuote;
+  /// Deferred quote-reply chip (`setQuoteReply`): the author, the nested-quote-
+  /// stripped [text] that is prepended to the outgoing content only at send,
+  /// and the FULL original [fullText] the chip previews (the PWA's `cleanText`
+  /// derives from `text`, not `strippedText` — messages.js:1845-1846).
+  ({String author, String text, String fullText})? _pendingQuote;
 
   // Emoji / GIF picker popovers, anchored above their toolbar buttons like the
   // PWA's inline `bottom:100%` popups.
@@ -958,7 +967,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         _controller.selection =
             TextSelection.collapsed(offset: _controller.text.length);
       case QuoteAction(:final fullNym, :final content):
-        _pendingQuote = (author: fullNym, text: _strippedQuoteText(content));
+        _pendingQuote = (
+          author: fullNym,
+          text: _strippedQuoteText(content),
+          fullText: content,
+        );
     }
     _focus.requestFocus();
     setState(() {});
@@ -1635,7 +1648,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: _QuotePreviewChip(
                     author: _pendingQuote!.author,
-                    text: _quotePreviewText(_pendingQuote!.text),
+                    // The chip previews the FULL original content; only the
+                    // SENT quote is nested-quote-stripped (messages.js:1845).
+                    text: _quotePreviewText(_pendingQuote!.fullText),
                     onClose: _clearQuote,
                   ),
                 ),

@@ -340,7 +340,6 @@ class BotChatController extends StateNotifier<BotChatState> {
     _auth = auth;
     _privkey = privkey;
     _signer = signer ?? (privkey != null ? LocalSigner(privkey) : null);
-    _wireApiWsAuth();
   }
 
   /// Late-attaches the ACTIVE [EventSigner] (local key OR NIP-46 remote) on
@@ -352,40 +351,7 @@ class BotChatController extends StateNotifier<BotChatState> {
   void attachSigner(EventSigner? signer) {
     if (signer != null) {
       _signer = signer;
-      _wireApiWsAuth();
     }
-  }
-
-  /// Wires the service's WS-first `/api` transport: the socket's one-time AUTH
-  /// handshake signs a kind-27235 `api-ws` event bound to `https://<host>/api/WS`
-  /// (`_signBotAuth('api-ws', 'WS')` inside `_ensureApiSocket`, shop.js:30 —
-  /// endpoint 'WS' → `/api/WS`, pms.js:1652), signed ONCE per connection through
-  /// the active signer so every bot money op rides the authenticated socket and
-  /// only the HTTP fallback signs per action.
-  ///
-  /// The signer's pubkey rides along so the service can tear down a socket
-  /// still AUTHed as a PREVIOUS identity on an in-session switch (the worker
-  /// pins the socket's pubkey; a stale socket would execute ledger actions
-  /// against the old account).
-  void _wireApiWsAuth() {
-    final signer = _signer;
-    if (signer == null) {
-      // No signable identity → HTTP-only (the PWA's `if (this.pubkey)` gate),
-      // and drop any socket a previous identity left authenticated.
-      _service.setApiWsAuthBuilder(null);
-      return;
-    }
-    // `…/api/bot` → `…/api/WS` (same fixed host as the service URL).
-    final url =
-        _service.baseUrl.replaceFirst(RegExp(r'/bot$'), '/WS');
-    _service.setApiWsAuthBuilder(
-      () => Nip98Auth.buildSigned(
-        action: 'api-ws',
-        url: url,
-        signer: signer,
-      ),
-      authPubkey: signer.pubkey,
-    );
   }
 
   /// `_purgeBotPMArchive` seam (pms.js:1881-1891): batch `pm-delete` of the

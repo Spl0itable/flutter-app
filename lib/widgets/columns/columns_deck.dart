@@ -378,7 +378,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     // must schedule the debounced cross-device settings-set publish. The
     // publish snapshot-reads the layout back out of the KV store
     // (storage_sync.dart:256), so the write above is all the state it needs.
-    ref.read(settingsProvider.notifier).onSyncedChange?.call();
+    ref.read(settingsProvider.notifier).notifySyncedChange();
   }
 
   /// Load a saved layout (`_cvLoadLayout`); null when absent/empty/malformed.

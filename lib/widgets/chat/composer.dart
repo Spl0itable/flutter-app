@@ -26,6 +26,7 @@ import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/identity/dev_nsec_modal.dart';
 import '../../features/messages/format/message_content.dart'
     show InlineEmojiText, proxiedMedia;
 import '../../features/messages/inline_network_image.dart';
@@ -455,7 +456,37 @@ class _ComposerState extends ConsumerState<Composer> {
           _withCurrentGroup((gid) => controller.revokeModerator(gid, pubkey)),
       transferOwner: (pubkey) =>
           _withCurrentGroup((gid) => controller.transferOwner(gid, pubkey)),
+      // `/nick <reserved>` → the developer-nsec challenge (cmdNick's reserved
+      // gate, commands.js:614-626).
+      openDevNsecChallenge: () => unawaited(_runDevNsecChallenge()),
     );
+  }
+
+  /// The `/nick <reserved>` challenge flow (`showDevNsecModal('nick')` →
+  /// `applyDeveloperIdentity`, commands.js:614-626): prompt for the developer
+  /// nsec, and on a verified match switch the RUNNING session to the developer
+  /// account — natively the in-session nsec login ([NostrController.
+  /// loginWithNsec], the same primitive the nsec-import modal uses) plays
+  /// `applyDeveloperIdentity`'s role — then surface the PWA's confirmation.
+  /// Cancel/dismiss aborts with the PWA's cancellation line (commands.js:617).
+  Future<void> _runDevNsecChallenge() async {
+    if (!mounted) return;
+    final result = await DevNsecModal.open(context);
+    if (result == null) {
+      _onSystemMessage('Nickname change cancelled.');
+      return;
+    }
+    try {
+      await ref.read(nostrControllerProvider).loginWithNsec(result.nsec);
+    } catch (_) {
+      // The modal pre-verified the nsec, so a failure here is a login-flow
+      // error; surface the abort line rather than crashing the composer.
+      if (mounted) _onSystemMessage('Nickname change cancelled.');
+      return;
+    }
+    if (!mounted) return;
+    final nym = ref.read(appStateProvider).selfNym;
+    _onSystemMessage('Identity verified. You are now logged in as $nym.');
   }
 
   /// Runs [action] against the current group id when the active view is a group.
@@ -635,9 +666,27 @@ class _ComposerState extends ConsumerState<Composer> {
     _focus.requestFocus();
   }
 
+  /// Hides an emoji/GIF picker WITHOUT a selection (✕ / tap-out / button
+  /// toggle) and, on desktop widths, returns focus to the message input —
+  /// `closeEnhancedEmojiModal`/`closeGifPicker` → `_focusMessageInput`
+  /// (reactions.js:908 / ui-context.js:2194), which bails at ≤768px
+  /// (channels.js:1383-1393) so a phone keyboard isn't yanked open.
+  void _hidePickerAndRefocus(OverlayPortalController portal) {
+    portal.hide();
+    if (!mounted) return;
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return;
+    }
+    _focus.requestFocus();
+  }
+
+  void _hideEmojiPicker() => _hidePickerAndRefocus(_emojiPortal);
+
+  void _hideGifPicker() => _hidePickerAndRefocus(_gifPortal);
+
   Future<void> _toggleEmojiPicker() async {
     if (_emojiPortal.isShowing) {
-      _emojiPortal.hide();
+      _hideEmojiPicker();
       return;
     }
     _gifPortal.hide();
@@ -649,7 +698,7 @@ class _ComposerState extends ConsumerState<Composer> {
 
   Future<void> _toggleGifPicker() async {
     if (_gifPortal.isShowing) {
-      _gifPortal.hide();
+      _hideGifPicker();
       return;
     }
     _emojiPortal.hide();
@@ -2237,11 +2286,11 @@ class _ComposerState extends ConsumerState<Composer> {
         // relay-sourced packs live — no override needed.
         overlayChildBuilder: (context) => _popover(
           link: _emojiAnchor,
-          onDismiss: _emojiPortal.hide,
+          onDismiss: _hideEmojiPicker,
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
-            onClose: _emojiPortal.hide,
+            onClose: _hideEmojiPicker,
           ),
         ),
         child: _IconBtn(
@@ -2263,14 +2312,14 @@ class _ComposerState extends ConsumerState<Composer> {
         controller: _gifPortal,
         overlayChildBuilder: (context) => _popover(
           link: _gifAnchor,
-          onDismiss: _gifPortal.hide,
+          onDismiss: _hideGifPicker,
           // `.gif-picker` ≤768: `width: 90%; max-width: 350px`
           // (styles-themes-responsive.css:89-97, ui-context.js:2017-2031).
           phoneWidthFactor: 0.9,
           child: GifPicker(
             favoritesStore: FavoriteGifsStore(_prefs!),
             onSelect: _onGifSelected,
-            onClose: _gifPortal.hide,
+            onClose: _hideGifPicker,
           ),
         ),
         child: _IconBtn(
@@ -2290,7 +2339,9 @@ class _ComposerState extends ConsumerState<Composer> {
   /// [phoneWidthFactor] pins the picker to that fraction of the viewport width
   /// on phones — the GIF picker's ≤768 rule is `width: 90%; max-width: 350px`
   /// (styles-themes-responsive.css:89-97) where the emoji picker only caps
-  /// (`max-width: 90%`, :407-419).
+  /// (`max-width: 90%`, :407-419) on top of its base `width: 350px`
+  /// (styles-components.css:1214). The no-factor fallback cap below matches
+  /// that 350 (the picker itself already self-caps at `min(350, 90vw)`).
   Widget _popover({
     required LayerLink link,
     required VoidCallback onDismiss,
@@ -2331,9 +2382,9 @@ class _ComposerState extends ConsumerState<Composer> {
                     )
                   : ConstrainedBox(
                       constraints: BoxConstraints(
-                          maxWidth: media.size.width - 16 < 360
+                          maxWidth: media.size.width - 16 < 350
                               ? media.size.width - 16
-                              : 360),
+                              : 350),
                       child: picker,
                     ),
             ),

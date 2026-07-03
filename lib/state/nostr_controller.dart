@@ -960,12 +960,12 @@ class NostrController {
     shop.onActiveItemsPublished = null;
     shop.giftEventPublisher = null;
     shop.onSystemMessage = null;
-    // Eagerly drop the bot `/api` socket still AUTHed as the old identity
-    // (setApiWsAuthBuilder(null) with a null pubkey disposes it). The next
-    // bind/attachSigner re-wires it for the new identity, but a sign-out that
-    // never rebinds would otherwise leave the old socket open.
+    // Detach the bot ledger from the shared `/api` socket: the [ApiClient]
+    // that owned it (AUTHed as the old identity) was just disposed above, so
+    // drop the service's request seam too. The next [_initStorageSync]
+    // re-wires it against the new identity's client.
     try {
-      _ref.read(nymbotServiceProvider).setApiWsAuthBuilder(null);
+      _ref.read(nymbotServiceProvider).setApiSocketRequest(null);
     } catch (_) {}
   }
 
@@ -3807,13 +3807,14 @@ class NostrController {
   }
 
   /// `/nick` — change nickname (cmdNick, commands.js:600-660): trim + cap 20,
-  /// no-op on the unchanged nym, REFUSE a reserved nickname (the PWA gates the
-  /// rename behind the developer-nsec challenge, `showDevNsecModal('nick')`,
-  /// commands.js:614-626 — the command path has no modal surface natively, so
-  /// the claim is aborted with the PWA's cancellation line; the nick-edit
-  /// modal carries the full challenge flow), then publish the kind-0.
-  /// [saveProfile] also persists `nym_custom_nick` + the auto-ephemeral nick
-  /// so the rename survives a relaunch (commands.js:633-639).
+  /// no-op on the unchanged nym, gate a RESERVED nickname behind the
+  /// developer-nsec challenge (`showDevNsecModal('nick')` →
+  /// `applyDeveloperIdentity`, commands.js:614-626) via the composer-wired
+  /// [CommandHooks.openDevNsecChallenge] — the hook owns verify/cancel and
+  /// their system lines; headless (no hook) aborts with the PWA's
+  /// cancellation line — then publish the kind-0. [saveProfile] also persists
+  /// `nym_custom_nick` + the auto-ephemeral nick so the rename survives a
+  /// relaunch (commands.js:633-639).
   Future<void> cmdNick(String newNym) async {
     final trimmed = newNym.trim();
     if (trimmed.isEmpty) {
@@ -3826,6 +3827,11 @@ class NostrController {
       return;
     }
     if (isReservedNick(next)) {
+      final challenge = _dispatcher.hooks.openDevNsecChallenge;
+      if (challenge != null) {
+        challenge();
+        return;
+      }
       _emitSystemMessage('Nickname change cancelled.');
       return;
     }
@@ -6479,6 +6485,14 @@ class NostrController {
           signer: signer,
         ));
     api.activateApiSocket();
+    // ONE multiplexed `/api` socket for the whole app (the PWA's single
+    // `_apiSock`, shop.js:12): the bot ledger ops ride the SAME identity-authed
+    // socket as the storage sync — `_botMoneyRequest`'s WS leg shares
+    // `_ensureApiSocket` (shop.js:158-161) — instead of opening (and
+    // AUTH-signing) a second one.
+    _ref
+        .read(nymbotServiceProvider)
+        .setApiSocketRequest(api.botSocketRequest);
     _storageSync = sync;
     _zapArchive?.dispose();
     _zapArchive = ZapArchive(sync);

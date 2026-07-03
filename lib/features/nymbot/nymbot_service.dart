@@ -15,10 +15,11 @@ import 'nymbot_models.dart';
 ///     Nostr event whose `content` is the response text).
 ///   * Private paid chat    → body `{action, …}` → varies per action.
 ///
-/// Private-chat actions ride the authenticated `/api` WebSocket FIRST when a
-/// logged-in identity has wired [setApiWsAuthBuilder], falling back to the
-/// signed HTTP POST — the PWA's `_botMoneyRequest` (shop.js:155-173). Public
-/// `?` commands stay plain HTTP like the PWA's `fetch` in commands.js:196.
+/// Private-chat actions ride the app's ONE identity-authed `/api` WebSocket
+/// FIRST when the controller has wired [setApiSocketRequest], falling back to
+/// the signed HTTP POST — the PWA's `_botMoneyRequest` (shop.js:155-173), whose
+/// WS leg shares the single `_apiSock` with the storage sync. Public `?`
+/// commands stay plain HTTP like the PWA's `fetch` in commands.js:196.
 ///
 /// Network is **lazy**: nothing is fetched at construction; every method makes
 /// exactly one request when called.
@@ -47,53 +48,40 @@ class NymbotService {
   /// `_botMoneyRequest('pm', …, { timeout: 180000 })` (pms.js:2469-2470).
   static const Duration _pmTimeout = Duration(seconds: 180);
 
-  /// Signs the one-time `api-ws` AUTH handshake event for the `/api` socket
-  /// (the PWA's `_signBotAuth('api-ws', 'WS')`, shop.js:30). Wired by the bot
-  /// controller once a signer is bound; null keeps this service HTTP-only
-  /// (logged out / tests), mirroring the PWA's `if (this.pubkey)` gate.
-  Future<Map<String, dynamic>?> Function()? _apiWsAuthBuilder;
+  /// WS-first transport seam: runs one raw ledger [action] over the app's ONE
+  /// shared identity-authed `/api` socket — [ApiClient.botSocketRequest], the
+  /// PWA's `_apiSocketSend(action, extra, {raw:true, timeout})` on the single
+  /// `_apiSock` shared with the storage sync (shop.js:158-161). A null result
+  /// (socket unavailable / auth-less / failed) falls back to the signed HTTP
+  /// POST. Wired by the controller once the storage socket is up; null keeps
+  /// this service HTTP-only (logged out / tests), mirroring the PWA's
+  /// `if (this.pubkey)` gate.
+  Future<({int status, Map<String, dynamic> data})?> Function(
+    String action,
+    Map<String, dynamic> extra, {
+    Duration? timeout,
+  })? _apiSocketRequest;
 
-  /// The identity the wired [_apiWsAuthBuilder] signs as — the socket, once
-  /// AUTHed, stays pinned to it server-side (`context._wsAuthedPubkey`,
-  /// bot.js:1238-1242), so every ledger frame acts on THAT account.
-  String? _apiWsAuthPubkey;
-
-  /// [authPubkey] is the pubkey [builder] signs as. When the bound identity
-  /// changes (in-session nsec login / sign-out → new identity), the still-open
-  /// socket is AUTHed as the PREVIOUS pubkey, so it is torn down here and the
-  /// next request re-connects + re-AUTHs as the new identity. The PWA gets
-  /// this for free: an identity switch reloads the page, dropping `_apiSock`.
-  void setApiWsAuthBuilder(
-    Future<Map<String, dynamic>?> Function()? builder, {
-    String? authPubkey,
-  }) {
-    _apiWsAuthBuilder = builder;
-    if (authPubkey != _apiWsAuthPubkey) {
-      _apiWsAuthPubkey = authPubkey;
-      _socket?.dispose();
-      _socket = null;
-    }
+  /// Registers (or clears, on sign-out/identity teardown) the shared-socket
+  /// request seam (see [_apiSocketRequest]). Identity switches need no special
+  /// handling here: the socket lives on the controller's per-identity
+  /// [ApiClient], which is disposed and rebuilt with the new identity's auth —
+  /// the native analogue of the PWA's page reload dropping `_apiSock`.
+  void setApiSocketRequest(
+    Future<({int status, Map<String, dynamic> data})?> Function(
+      String action,
+      Map<String, dynamic> extra, {
+      Duration? timeout,
+    })? request,
+  ) {
+    _apiSocketRequest = request;
   }
 
-  ApiSocket? _socket;
-
-  /// The multiplexed `wss://<host>/api` socket (`_apiWsUrl`, shop.js:5-8) —
-  /// the SAME endpoint the storage sync rides; the worker routes by action.
-  /// Constructed with the LONGEST per-action wait (`pm`'s 180s); shorter
-  /// actions bound their wait with an outer timeout in [_botRequest]. Every
-  /// frame is tallied into the shared network-stats sink, the PWA's
-  /// `_trackApiData` on each auth/REQ/RES frame (shop.js:60-70, 147).
-  ApiSocket _ensureSocket() => _socket ??= ApiSocket(
-        url: Uri.parse('wss://${ApiConfig.apiHost}/api'),
-        requestTimeout: _pmTimeout,
-        onTraffic: (String action, {int sent = 0, int recv = 0}) =>
-            ApiClient.apiStatsSink?.recordApiData(action, sent: sent, recv: recv),
-      );
-
-  /// One private-chat/ledger action: WS-first over the authenticated socket
-  /// (signed ONCE per connection), falling back to the signed HTTP POST on any
-  /// socket failure — a 1:1 port of `_botMoneyRequest` (raw semantics: resolves
-  /// `{status, data}` so callers can branch on `noCredits`/`error` themselves).
+  /// One private-chat/ledger action: WS-first over the shared authenticated
+  /// socket (signed ONCE per connection by its owner), falling back to the
+  /// signed HTTP POST on any socket failure — a 1:1 port of `_botMoneyRequest`
+  /// (raw semantics: resolves `{status, data}` so callers can branch on
+  /// `noCredits`/`error` themselves).
   ///
   /// [auth] builds the per-action NIP-98 event and is only invoked on the HTTP
   /// leg, exactly like the PWA signing `_signBotAuth(action)` at fallback time.
@@ -104,25 +92,12 @@ class NymbotService {
     Future<Map<String, dynamic>?> Function()? auth,
     Duration timeout = _defaultTimeout,
   }) async {
-    final wsAuth = _apiWsAuthBuilder;
-    if (wsAuth != null) {
-      try {
-        final socket = _ensureSocket();
-        Map<String, dynamic>? authEvent;
-        if (!socket.isAuthenticated) {
-          authEvent = await wsAuth();
-          // No signable identity → the bot ledger can't ride the socket.
-          if (authEvent == null) throw StateError('api-ws auth unavailable');
-        }
-        await socket.ensureConnected(authEvent: authEvent);
-        // The socket is authenticated once; frames drop pubkey/auth (the
-        // worker pins the socket's pubkey). A late error after the outer
-        // timeout is swallowed by Future.timeout.
-        final res = await socket.request(action, extra).timeout(timeout);
-        return (status: res.status, data: res.data);
-      } catch (_) {
-        // Fall back to HTTP (shop.js:162).
-      }
+    final ws = _apiSocketRequest;
+    if (ws != null) {
+      // The socket is authenticated once; frames drop pubkey/auth (the worker
+      // pins the socket's pubkey). Null → fall back to HTTP (shop.js:162).
+      final res = await ws(action, extra, timeout: timeout);
+      if (res != null) return res;
     }
     final authEvent = auth == null ? null : await auth();
     return _postRaw(
@@ -621,8 +596,7 @@ class NymbotService {
   }
 
   void dispose() {
-    _socket?.dispose();
-    _socket = null;
+    _apiSocketRequest = null;
     _client.close();
   }
 }

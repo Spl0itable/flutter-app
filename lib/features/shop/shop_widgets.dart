@@ -506,7 +506,12 @@ class ShopStyleBubblePreview extends StatelessWidget {
       );
     }
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+      // Default bubble padding 8px 12px 6px (styles-features.css:3607); a
+      // style's own `.message-content` padding OUTRANKS it in the shop demo
+      // too — satoshi's `padding: 10px 15px` (specificity 0,3,0,
+      // styles-features.css:548-549) beats the chat-bubbles rule (0,2,1) —
+      // exactly like message_row.dart's bubble.
+      padding: deco.contentPadding ?? const EdgeInsets.fromLTRB(12, 8, 12, 6),
       decoration: BoxDecoration(
         // Bubble layout: `body.chat-bubbles .message-content` is the rounded
         // translucent bubble (`background: rgba(255,255,255,.14)`, radius 16 /

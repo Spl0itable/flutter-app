@@ -295,8 +295,11 @@ class MessageStyleDecoration {
 
   /// The `.message-content` padding a style adds over the layout default — only
   /// satoshi (`.message.style-satoshi .message-content { padding: 10px 15px }`,
-  /// styles-features.css:548-549). Applied by the IRC content plate; the bubble
-  /// keeps its own layout padding.
+  /// styles-features.css:548-549). Applied in BOTH layouts: the rule's
+  /// specificity (0,3,0) beats the chat-bubbles padding rule (0,2,1,
+  /// styles-features.css:3607), so a satoshi bubble is padded 10/15 too —
+  /// message_row.dart and the shop preview both prefer it over the layout
+  /// default.
   final EdgeInsets? contentPadding;
 
   /// True when the bubble layout REPLACES the default translucent bubble fill

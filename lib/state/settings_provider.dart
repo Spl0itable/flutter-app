@@ -34,6 +34,13 @@ class SettingsController extends StateNotifier<Settings> {
     if (cb != null) cb();
   }
 
+  /// Public trigger for [onSyncedChange], for slices that persist a synced
+  /// setting straight to the KV store outside this controller's setters (the
+  /// columns deck's `nym_columns_layout` writes — `_cvSaveLayout`'s trailing
+  /// `nostrSettingsSave()`, columns.js:993-994) — so they schedule the
+  /// debounced cross-device publish without poking the hook field directly.
+  void notifySyncedChange() => _syncedChanged();
+
   /// Reloads settings from the (now-wiped) store back to first-run defaults —
   /// the panic path's analogue of the PWA's page reload re-reading empty
   /// localStorage. Called by [NostrController.resetAfterPanic] after the KV
