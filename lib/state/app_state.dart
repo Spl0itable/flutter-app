@@ -996,6 +996,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// and counts only `created_at > lastRead`, channels.js:1709). Best-effort.
   void Function()? onChannelReadChanged;
 
+  /// Fired whenever the group store mutates — a group is upserted/merged, a
+  /// group message is ingested, or a group control is applied. The controller
+  /// wires this to the debounced cross-device group sync (`nymchat-groups` /
+  /// `nymchat-keys-<gid>` / `nymchat-history-<gid>`), mirroring the PWA's
+  /// `_debouncedNostrSettingsSave()` peppered through every `groups.js` mutation
+  /// (groups.js:690/772/803/…). Best-effort; may be null before boot / in tests.
+  void Function()? onGroupStoreChanged;
+
   /// Per-conversation read watermark: storage key → last-read created_at (sec).
   /// A message bumps the unread badge only when `created_at > lastRead` — the
   /// PWA's `_recomputeUnreadCount` / `channelLastRead` (channels.js:1709-1735),
@@ -1982,6 +1990,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
     onPmMessageIngested?.call(key);
+    onGroupStoreChanged?.call();
     return true;
   }
 
@@ -1996,6 +2005,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.groups.add(group);
     }
     state = state.copyWith();
+    onGroupStoreChanged?.call();
   }
 
   /// Merges an inbound group MESSAGE's carried metadata into the group entry —
@@ -2041,7 +2051,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       existing.lastMessageTime = timestampMs;
       changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) {
+      state = state.copyWith();
+      onGroupStoreChanged?.call();
+    }
   }
 
   /// Looks up a group by id (null if unknown).
@@ -2050,6 +2063,186 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (g.id == id) return g;
     }
     return null;
+  }
+
+  /// Cross-device history cap per group conversation (PWA `pmStorageLimit`,
+  /// app.js:650) applied after merging a restored backlog.
+  static const int _kGroupHistoryCap = 1000;
+
+  /// Applies one decoded `nymchat-groups` entry (`groupId → serialized group`)
+  /// from cross-device sync, mirroring the PWA's `applyGroupData` additive branch
+  /// (app.js:5938-6000). A group unknown to this device is created — so a FRESH
+  /// device restores its membership from D1; a known group has its owner / roles /
+  /// metadata merged monotonically (newer `metaUpdatedAt` wins; mods / banned /
+  /// modLog union, modLog deduped + capped at 50). A left group is skipped.
+  /// Returns true when the store changed. Does NOT fire [onGroupStoreChanged] —
+  /// this IS the inbound apply, so re-publishing the just-restored state would be
+  /// a redundant (content-hash-deduped) echo.
+  bool applyGroupConversationSync(String groupId, Map<String, dynamic> data) {
+    if (_leftGroups.contains(groupId)) return false;
+    List<String> strList(Object? v) =>
+        (v is List) ? v.map((e) => e.toString()).toList() : <String>[];
+    String? nz(Object? v) => (v is String && v.isNotEmpty) ? v : null;
+    List<ModLogEntry> parseLog(Object? v) {
+      final out = <ModLogEntry>[];
+      if (v is List) {
+        for (final e in v) {
+          if (e is Map) {
+            try {
+              out.add(ModLogEntry.fromJson(e.cast<String, dynamic>()));
+            } catch (_) {
+              // Skip a malformed log entry.
+            }
+          }
+        }
+      }
+      return out;
+    }
+
+    final existing = groupById(groupId);
+    if (existing == null) {
+      state.groups.add(Group(
+        id: groupId,
+        name: (data['name'] ?? '') as String,
+        members: strList(data['members']),
+        lastMessageTime: (data['lastMessageTime'] as num?)?.toInt() ??
+            DateTime.now().millisecondsSinceEpoch,
+        createdBy: nz(data['createdBy']),
+        mods: strList(data['mods']),
+        banned: strList(data['banned']),
+        avatar: nz(data['avatar']),
+        banner: nz(data['banner']),
+        description: nz(data['description']),
+        inviteEnabled: data['inviteEnabled'] == true,
+        inviteEpoch: (data['inviteEpoch'] as num?)?.toInt() ?? 0,
+        metaUpdatedAt: (data['metaUpdatedAt'] as num?)?.toInt() ?? 0,
+        modLog: parseLog(data['modLog']),
+      ));
+      state = state.copyWith();
+      return true;
+    }
+
+    final g = existing;
+    var changed = false;
+    if ((g.createdBy == null || g.createdBy!.isEmpty)) {
+      final owner = nz(data['createdBy']);
+      if (owner != null) {
+        g.createdBy = owner;
+        changed = true;
+      }
+    }
+    final incomingMetaTs = (data['metaUpdatedAt'] as num?)?.toInt() ?? 0;
+    if (incomingMetaTs > g.metaUpdatedAt) {
+      final name = data['name'];
+      if (name is String && name.isNotEmpty) g.name = name;
+      g.banner = nz(data['banner']);
+      g.avatar = nz(data['avatar']);
+      g.description = nz(data['description']);
+      g.inviteEnabled = data['inviteEnabled'] == true;
+      g.inviteEpoch = (data['inviteEpoch'] as num?)?.toInt() ?? 0;
+      g.metaUpdatedAt = incomingMetaTs;
+      changed = true;
+    } else {
+      if (g.banner == null && nz(data['banner']) != null) {
+        g.banner = nz(data['banner']);
+        changed = true;
+      }
+      if (g.avatar == null && nz(data['avatar']) != null) {
+        g.avatar = nz(data['avatar']);
+        changed = true;
+      }
+      if (g.description == null && nz(data['description']) != null) {
+        g.description = nz(data['description']);
+        changed = true;
+      }
+    }
+    for (final pk in strList(data['mods'])) {
+      if (!g.mods.contains(pk)) {
+        g.mods.add(pk);
+        changed = true;
+      }
+    }
+    for (final pk in strList(data['banned'])) {
+      if (!g.banned.contains(pk)) {
+        g.banned.add(pk);
+        changed = true;
+      }
+    }
+    final incomingLog = parseLog(data['modLog']);
+    if (incomingLog.isNotEmpty) {
+      String key(ModLogEntry e) => '${e.type}:${e.actor}:${e.target}:${e.ts}';
+      final seen = g.modLog.map(key).toSet();
+      for (final e in incomingLog) {
+        if (seen.add(key(e))) {
+          g.modLog.add(e);
+          changed = true;
+        }
+      }
+      g.modLog.sort((a, b) => a.ts - b.ts);
+      if (g.modLog.length > 50) {
+        g.modLog.removeRange(0, g.modLog.length - 50);
+      }
+    }
+    if (changed) state = state.copyWith();
+    return changed;
+  }
+
+  /// Merges decoded group message history (`group-<gid>` → stripped message
+  /// maps) from cross-device sync into the message store, mirroring the PWA's
+  /// `groupMessageHistory` apply (app.js:6028-6076): each backup message is
+  /// inflated (isGroup / isPM / isHistorical / conversationKey / author / seq),
+  /// deduped by id (against both the existing thread AND the global seen-id set,
+  /// so a later live delivery of the same wrap can't duplicate it), merged,
+  /// re-sorted, and capped to the most recent [_kGroupHistoryCap]. Skips left
+  /// groups. Returns the conversation keys that changed. Does NOT fire
+  /// [onGroupStoreChanged] (inbound apply — see [applyGroupConversationSync]).
+  Set<String> applyGroupHistorySync(Map<String, List<dynamic>> byConvKey) {
+    final changed = <String>{};
+    byConvKey.forEach((convKey, backup) {
+      if (backup.isEmpty || !convKey.startsWith('group-')) return;
+      final gid = convKey.substring(6);
+      if (_leftGroups.contains(gid)) return;
+      final existing = state.messages[convKey] ?? <Message>[];
+      final existingIds = existing.map((m) => m.id).toSet();
+      final newMsgs = <Message>[];
+      for (final raw in backup) {
+        if (raw is! Map) continue;
+        final id = raw['id'];
+        if (id is! String || id.isEmpty || existingIds.contains(id)) continue;
+        // Register globally so a subsequent live/backfilled wrap for this same
+        // message is deduped by [ingestGroupMessage] (`!_seenIds.add`).
+        if (!_seenIds.add(id)) continue;
+        final pubkey = (raw['pubkey'] ?? '') as String;
+        final nymMessageId = raw['nymMessageId'] as String?;
+        if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
+        newMsgs.add(Message(
+          id: id,
+          pubkey: pubkey,
+          author: _nymForPubkey(pubkey),
+          content: (raw['content'] ?? '') as String,
+          createdAt: (raw['created_at'] as num?)?.toInt() ?? 0,
+          isOwn: raw['isOwn'] == true,
+          isPM: true,
+          isGroup: true,
+          groupId: (raw['groupId'] as String?) ?? gid,
+          conversationKey: convKey,
+          isHistorical: true,
+          nymMessageId: nymMessageId,
+          seq: _nextIngestSeq(),
+          deliveryStatus: DeliveryStatus.sent,
+        ));
+        existingIds.add(id);
+      }
+      if (newMsgs.isEmpty) return;
+      final merged = [...existing, ...newMsgs]..sort(compareMessages);
+      final capped = merged.length > _kGroupHistoryCap
+          ? merged.sublist(merged.length - _kGroupHistoryCap)
+          : merged;
+      state.messages[convKey] = capped;
+      changed.add(convKey);
+    });
+    if (changed.isNotEmpty) state = state.copyWith();
+    return changed;
   }
 
   /// Applies a verified group control rumor to the named group, returning the
@@ -2097,6 +2290,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
       state = state.copyWith();
+      onGroupStoreChanged?.call();
     }
     return result;
   }

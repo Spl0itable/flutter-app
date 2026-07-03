@@ -837,6 +837,7 @@ class NostrController {
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
     _ref.read(appStateProvider.notifier).onPmMessageIngested = null;
+    _ref.read(appStateProvider.notifier).onGroupStoreChanged = null;
     // Stop broadcasting shop-update presence / gift DMs / system lines (the
     // bindings captured the old identity/service).
     final shop = _ref.read(shopControllerProvider.notifier);
@@ -3421,6 +3422,10 @@ class NostrController {
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
       _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      // A self-key rotation on send must reach our other devices so they can
+      // decrypt this message's wrap (the PWA saves after every group send,
+      // groups.js:1298). Debounced + content-hash-deduped in `syncSettings`.
+      syncSettings();
       final nymMessageId = GroupLogic.generateGroupId();
       appState.sendLocal(trimmed, nymMessageId: nymMessageId);
       final rumor = GroupLogic.buildGroupMessageRumor(
@@ -4612,6 +4617,10 @@ class NostrController {
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
       _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      // A self-key rotation on send must reach our other devices so they can
+      // decrypt this message's wrap (the PWA saves after every group send,
+      // groups.js:1298). Debounced + content-hash-deduped in `syncSettings`.
+      syncSettings();
       final base = GroupLogic.buildGroupMessageRumor(
         group: group,
         selfPubkey: identity.pubkey,
@@ -6126,6 +6135,16 @@ class NostrController {
       _persistChannelLastRead();
       syncSettings();
     };
+
+    // Publish the per-group cross-device categories (`nymchat-groups` /
+    // `nymchat-keys-<gid>` / `nymchat-history-<gid>`) whenever the group store
+    // mutates — a group created/joined, a message ingested, a control applied —
+    // mirroring the PWA's `_debouncedNostrSettingsSave()` peppered through every
+    // `groups.js` mutation. Routes through the same 5s-debounced `syncSettings`
+    // as every other synced change; `_flushSettingsSync` publishes the group
+    // categories alongside the settings sections. Content-hash dedup means an
+    // unchanged group is a no-op.
+    _ref.read(appStateProvider.notifier).onGroupStoreChanged = syncSettings;
   }
 
   /// The NIP-98 `u`-tag URL the `/api` socket's `api-ws` AUTH event binds to:
@@ -6588,6 +6607,13 @@ class NostrController {
       if (readState != null) {
         _applyChannelLastRead(readState['channelLastRead']);
       }
+      // Per-group cross-device restore (`nymchat-groups` / `nymchat-keys-<gid>` /
+      // `nymchat-history-<gid>`) — applied additively BEFORE the core-section ts
+      // gate (the PWA runs these non-core categories through
+      // `applyNostrSettingsAdditive`, settings.js:812-816) so a fresh device
+      // restores group membership, decryption keys, and backlog even when no
+      // core setting changed.
+      _applyGroupSync(result);
       final kv = _ref.read(keyValueStoreProvider);
       final lastTs = int.tryParse(
               kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
@@ -6603,6 +6629,75 @@ class NostrController {
     } catch (_) {
       // Best-effort.
     }
+  }
+
+  /// Applies the decoded per-group cross-device categories from a settings-get,
+  /// mirroring the group branches of the PWA's `applyNostrSettingsAdditive`
+  /// (app.js:5938-6076):
+  ///
+  ///  1. **conversations** → the group store (membership/roles/metadata), so a
+  ///     fresh device sees its groups.
+  ///  2. **ephemeral keys** → merged into [GroupManager] and pushed to the
+  ///     [NostrService] as unwrap candidates, so group gift-wraps addressed to
+  ///     our restored ephemeral pubkeys DECRYPT (the crux of the fresh-device
+  ///     restore). When new self pubkeys were added we kick a group-archive
+  ///     backfill to recover their history from D1 (`_recoverEphemeralHistory`,
+  ///     app.js:6015-6017).
+  ///  3. **history** → merged into the message store (deduped by id, capped).
+  ///
+  /// Applied additively/idempotently regardless of the core-section ts gate;
+  /// safe to run on every boot (the D1 write path dedups any republish).
+  void _applyGroupSync(SettingsLoadResult result) {
+    final appState = _ref.read(appStateProvider.notifier);
+
+    // 1) Group conversations → membership/metadata.
+    final conversations = result.groupConversations;
+    if (conversations != null) {
+      conversations.forEach((gid, data) {
+        if (data is Map) {
+          try {
+            appState.applyGroupConversationSync(
+                gid, data.cast<String, dynamic>());
+          } catch (_) {
+            // Skip a malformed group entry.
+          }
+        }
+      });
+    }
+
+    // 2) Ephemeral keys → decryption. Merge into the manager, re-arm the
+    // service's unwrap candidates, and backfill history for any new self keys.
+    final groups = _groups;
+    final ek = result.groupEphemeralKeys;
+    var keysAdded = false;
+    if (groups != null && ek.isNotEmpty) {
+      ek.forEach((gid, entry) {
+        if (entry is Map) {
+          try {
+            if (groups.mergeEphemeralKeys(gid, entry.cast<String, dynamic>())) {
+              keysAdded = true;
+            }
+          } catch (_) {
+            // Skip a malformed key entry.
+          }
+        }
+      });
+      _service?.setEphemeralKeys(groups.allEphemeralSecretKeys());
+    }
+
+    // 3) Group message history → message store.
+    final history = result.groupMessageHistory;
+    if (history.isNotEmpty) {
+      try {
+        appState.applyGroupHistorySync(history);
+      } catch (_) {
+        // Best-effort.
+      }
+    }
+
+    // Recover group messages OTHER members sent to our newly-restored ephemeral
+    // keys from the D1 ephemeral inbox (PWA `_recoverEphemeralHistory(newPks)`).
+    if (keysAdded) unawaited(_backfillGroupArchive());
   }
 
   /// Applies a decoded synced-settings payload (PWA field names) into the
@@ -7293,9 +7388,91 @@ class NostrController {
       await sync.readStateSet(
         _ref.read(appStateProvider.notifier).channelLastRead,
       );
+      // Per-group cross-device sync (`nymchat-groups` / `nymchat-keys-<gid>` /
+      // `nymchat-history-<gid>`) so group membership, decryption keys, and
+      // backlog restore on a fresh device (`_publishEncryptedSettings` group
+      // branches, settings.js:435-529). No-op per category when unchanged.
+      await _flushGroupSync(sync);
     } catch (_) {
       // Best-effort.
     }
+  }
+
+  /// Builds the three per-group sync payloads from the live group store +
+  /// ephemeral-key manager + message store and publishes them via
+  /// [StorageSync.groupSyncSet]. Mirrors the group branches of the PWA's
+  /// `_publishEncryptedSettings` (settings.js:435-529): group conversations →
+  /// `nymchat-groups`, ephemeral keys → `nymchat-keys-<gid>`, and the backlog →
+  /// month-bucketed `nymchat-history-<gid>` shards. Own optimistic echoes and
+  /// system pills are excluded from the history (they carry synthetic ids and
+  /// aren't durable messages). Best-effort.
+  Future<void> _flushGroupSync(StorageSync sync) async {
+    final groups = _groups;
+    if (groups == null) return;
+    final appState = _ref.read(appStateProvider.notifier);
+    final st = _ref.read(appStateProvider);
+
+    // Group conversation metadata (PWA `_buildGroupConversationsSync`).
+    final conversations = <String, Map<String, dynamic>>{};
+    for (final g in st.groups) {
+      conversations[g.id] = _serializeGroupForSync(g);
+    }
+
+    // Serialized per-group ephemeral keys.
+    final ephemeralKeys = groups.ephemeralKeysForSync();
+
+    // Group message backlog per conversation key (PWA `_buildGroupHistorySync`).
+    final history = <String, List<Map<String, dynamic>>>{};
+    st.messages.forEach((key, msgs) {
+      if (!key.startsWith('group-') || msgs.isEmpty) return;
+      final out = <Map<String, dynamic>>[];
+      for (final m in msgs) {
+        if (m.isSystemRow || m.optimistic || m.id.isEmpty) continue;
+        if (m.id.startsWith('_optim_') || m.id.startsWith('sys-')) continue;
+        out.add({
+          'id': m.id,
+          'pubkey': m.pubkey,
+          'content': m.content,
+          'created_at': m.createdAt,
+          'isOwn': m.isOwn,
+          'groupId': m.groupId,
+          'nymMessageId': m.nymMessageId,
+        });
+      }
+      if (out.isNotEmpty) history[key] = out;
+    });
+
+    await sync.groupSyncSet(
+      groupConversations: conversations,
+      ephemeralKeysByGroup: ephemeralKeys,
+      historyByConvKey: history,
+      leftGroups: appState.leftGroups,
+    );
+  }
+
+  /// Serializes a [Group] for the `nymchat-groups` category, byte-matching the
+  /// PWA's `_buildGroupConversationsSync` (settings.js:299-321): exactly the
+  /// fields the PWA syncs (no `allowMemberInvites` / `lastModTs`), with modLog
+  /// capped to the most recent 50 entries.
+  static Map<String, dynamic> _serializeGroupForSync(Group g) {
+    final modLog = g.modLog.length > 50
+        ? g.modLog.sublist(g.modLog.length - 50)
+        : g.modLog;
+    return {
+      'name': g.name,
+      'members': g.members,
+      'lastMessageTime': g.lastMessageTime,
+      'createdBy': g.createdBy,
+      'mods': g.mods,
+      'banned': g.banned,
+      'banner': g.banner,
+      'avatar': g.avatar,
+      'description': g.description,
+      'inviteEnabled': g.inviteEnabled == true,
+      'inviteEpoch': g.inviteEpoch,
+      'metaUpdatedAt': g.metaUpdatedAt,
+      'modLog': [for (final e in modLog) e.toJson()],
+    };
   }
 
   /// Hydrates the deduped custom-emoji set from the D1 archive (`emoji-get` —
@@ -7597,6 +7774,10 @@ class NostrController {
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
       _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      // A self-key rotation on send must reach our other devices so they can
+      // decrypt this message's wrap (the PWA saves after every group send,
+      // groups.js:1298). Debounced + content-hash-deduped in `syncSettings`.
+      syncSettings();
       final nymMessageId = GroupLogic.generateGroupId();
       appState.sendLocal(
         content,

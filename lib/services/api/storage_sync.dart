@@ -718,6 +718,229 @@ class StorageSync {
     );
   }
 
+  // ===========================================================================
+  // Per-group cross-device sync categories (settings.js `_publishEncryptedSettings`
+  // group branches, 435-529). Each rides the SAME hashed-column settings-set path
+  // as the settings sections, so a fresh device restores group membership,
+  // decryption keys, and backlog. The apply side is [settingsGet].
+  // ===========================================================================
+
+  /// The d-tag for a per-group sync category — `<prefix>-<lowercased gid>`
+  /// (`_groupSyncDTag`, settings.js:169). Used for `nymchat-keys` and
+  /// `nymchat-history`; `nymchat-groups` is a single account-wide category.
+  static String _groupSyncDTag(String prefix, String groupId) =>
+      '$prefix-${groupId.toLowerCase()}';
+
+  /// `YYYYMM` bucket id for a unix-seconds timestamp (`_historyBucketId`,
+  /// settings.js:511), used to time-bucket group history so each wrap holds at
+  /// most one month of messages.
+  static String _historyBucketId(int tsSeconds) {
+    final d = DateTime.fromMillisecondsSinceEpoch(
+        (tsSeconds < 0 ? 0 : tsSeconds) * 1000,
+        isUtc: true);
+    final mm = d.month.toString().padLeft(2, '0');
+    return '${d.year}$mm';
+  }
+
+  /// Publishes the three per-group cross-device categories, mirroring the group
+  /// branches of `_publishEncryptedSettings` (settings.js:435-529):
+  ///
+  ///  * **`nymchat-keys-<gid>`** — one wrap per group carrying `{groupEphemeralKeys:
+  ///    {gid: entry}}`; stale members (not in [groupConversations]'s member list)
+  ///    are dropped, and left groups are skipped entirely.
+  ///  * **`nymchat-groups`** — a single `{groupConversations: {...}}` wrap.
+  ///  * **`nymchat-history-<gid>-<YYYYMM>-<shard>`** — the group backlog bucketed
+  ///    by month and packed into byte-bounded shards.
+  ///
+  /// [groupConversations] is `gid → serialized group` (the caller builds it from
+  /// the group store, matching `_buildGroupConversationsSync`). [ephemeralKeysByGroup]
+  /// is `gid → serialized ephemeral-key entry` (from `GroupManager.ephemeralKeysForSync`).
+  /// [historyByConvKey] is `group-<gid> → [message maps]` (the stripped `{id,
+  /// pubkey, content, created_at, isOwn, groupId, nymMessageId}` form). Every
+  /// category dedups against the last publish by content hash, so an unchanged
+  /// group produces no network write. Best-effort; failures per category are
+  /// swallowed like the PWA's per-branch `try/catch`.
+  Future<void> groupSyncSet({
+    required Map<String, Map<String, dynamic>> groupConversations,
+    required Map<String, Map<String, dynamic>> ephemeralKeysByGroup,
+    required Map<String, List<Map<String, dynamic>>> historyByConvKey,
+    Set<String> leftGroups = const {},
+  }) async {
+    // Group ephemeral keys → nymchat-keys-<gid> (one wrap per group).
+    for (final e in ephemeralKeysByGroup.entries) {
+      final gid = e.key;
+      if (leftGroups.contains(gid)) continue;
+      try {
+        final entry = _pruneEphemeralEntry(
+          Map<String, dynamic>.of(e.value),
+          groupConversations[gid],
+        );
+        await _publishCategoryWrap(
+          {
+            'groupEphemeralKeys': {gid: entry},
+          },
+          _groupSyncDTag('nymchat-keys', gid),
+          trim: _trimEphemeralKeys,
+        );
+      } catch (_) {
+        // Best-effort per group (settings.js:461 `catch (_) {}`).
+      }
+    }
+
+    // Group conversation metadata → nymchat-groups.
+    if (groupConversations.isNotEmpty) {
+      try {
+        await _publishCategoryWrap(
+          {'groupConversations': groupConversations},
+          'nymchat-groups',
+          trim: _trimGroupModLogs,
+        );
+      } catch (_) {
+        // Best-effort.
+      }
+    }
+
+    // Group message history → nymchat-history-<gid>-<YYYYMM>-<shard>.
+    const shardBudget = 30000; // ~30 KB of message JSON per shard (settings.js:497).
+    for (final e in historyByConvKey.entries) {
+      final convKey = e.key;
+      final msgs = e.value;
+      if (msgs.isEmpty) continue;
+      try {
+        final gid =
+            convKey.startsWith('group-') ? convKey.substring(6) : convKey;
+        final base = _groupSyncDTag('nymchat-history', gid);
+        // Partition into month buckets.
+        final buckets = <String, List<Map<String, dynamic>>>{};
+        for (final m in msgs) {
+          final b = _historyBucketId((m['created_at'] as num?)?.toInt() ?? 0);
+          (buckets[b] ??= <Map<String, dynamic>>[]).add(m);
+        }
+        for (final be in buckets.entries) {
+          final bucket = be.key;
+          final list = be.value
+            ..sort((a, b) {
+              final ca = (a['created_at'] as num?)?.toInt() ?? 0;
+              final cb = (b['created_at'] as num?)?.toInt() ?? 0;
+              if (ca != cb) return ca - cb;
+              final ia = a['id']?.toString() ?? '';
+              final ib = b['id']?.toString() ?? '';
+              return ia.compareTo(ib);
+            });
+          var shard = 0;
+          var shardMsgs = <Map<String, dynamic>>[];
+          var shardBytes = 0;
+          Future<void> flush() async {
+            if (shardMsgs.isEmpty) return;
+            await _publishCategoryWrap(
+              {
+                'groupMessageHistory': {convKey: shardMsgs},
+              },
+              '$base-$bucket-$shard',
+              trim: _trimOldestHistory,
+            );
+            shard++;
+            shardMsgs = <Map<String, dynamic>>[];
+            shardBytes = 0;
+          }
+
+          for (final m in list) {
+            final sz = jsonEncode(m).length + 4;
+            if (shardBytes + sz > shardBudget && shardMsgs.isNotEmpty) {
+              await flush();
+            }
+            shardMsgs.add(m);
+            shardBytes += sz;
+          }
+          await flush();
+        }
+      } catch (_) {
+        // Best-effort per conversation.
+      }
+    }
+  }
+
+  /// Drops ephemeral-key member entries not in the group's current member list,
+  /// keeping the payload bounded (settings.js:441-448). Returns the same [entry].
+  static Map<String, dynamic> _pruneEphemeralEntry(
+    Map<String, dynamic> entry,
+    Map<String, dynamic>? group,
+  ) {
+    final memberList = group?['members'];
+    final members = entry['members'];
+    if (memberList is! List || members is! Map) return entry;
+    final memberSet = memberList.map((m) => m.toString()).toSet();
+    final ts = entry['memberKeyTs'];
+    for (final realPk in members.keys.toList()) {
+      if (!memberSet.contains(realPk.toString())) {
+        members.remove(realPk);
+        if (ts is Map) ts.remove(realPk);
+      }
+    }
+    return entry;
+  }
+
+  /// Trims the oldest quarter of the (only) group's prev keys, then drops
+  /// `memberKeyTs`, when the keys payload is oversized (`trimEphemeralPrevKeys` +
+  /// `trimMemberKeyTs`, settings.js:427-434).
+  static bool _trimEphemeralKeys(Map<String, dynamic> p) {
+    final map = p['groupEphemeralKeys'];
+    if (map is! Map || map.isEmpty) return false;
+    final entry = map.values.first;
+    if (entry is! Map) return false;
+    final self = entry['self'];
+    if (self is Map) {
+      final prev = self['prev'];
+      if (prev is List && prev.isNotEmpty) {
+        final dropCount = (prev.length * 0.25).ceil().clamp(1, prev.length);
+        prev.removeRange(prev.length - dropCount, prev.length);
+        if (prev.isEmpty) self.remove('prev');
+        return true;
+      }
+    }
+    if (entry['memberKeyTs'] is Map) {
+      entry.remove('memberKeyTs');
+      return true;
+    }
+    return false;
+  }
+
+  /// Halves every group's modLog when the conversations payload is oversized
+  /// (`trimGroupModLogs`, settings.js:479-488).
+  static bool _trimGroupModLogs(Map<String, dynamic> p) {
+    final groups = p['groupConversations'];
+    if (groups is! Map) return false;
+    var trimmed = false;
+    for (final g in groups.values) {
+      if (g is! Map) continue;
+      final modLog = g['modLog'];
+      if (modLog is List && modLog.isNotEmpty) {
+        final keep = modLog.length - (modLog.length / 2).ceil();
+        g['modLog'] = modLog.sublist(modLog.length - keep);
+        trimmed = true;
+      }
+    }
+    return trimmed;
+  }
+
+  /// Last-resort guard dropping the oldest ~10% of a shard's messages when a
+  /// single message is itself enormous (`trimOldestHistory`, settings.js:516-522).
+  static bool _trimOldestHistory(Map<String, dynamic> p) {
+    final hist = p['groupMessageHistory'];
+    if (hist is! Map || hist.isEmpty) return false;
+    final k = hist.keys.first;
+    final arr = hist[k];
+    if (arr is! List || arr.length <= 1) return false;
+    final drop = (arr.length * 0.1).ceil().clamp(1, arr.length);
+    final next = arr.sublist(drop);
+    if (next.isEmpty) {
+      hist.remove(k);
+    } else {
+      hist[k] = next;
+    }
+    return true;
+  }
+
   /// Embeds the real category into the (to-be-encrypted) blob as `__cat`
   /// (settings.js:720) so the cleartext D1 column can stay opaque.
   Map<String, dynamic> _withCat(Map<String, dynamic> payload, String category) {
@@ -810,9 +1033,41 @@ class StorageSync {
     // additively (settings.js:815-819). Surface it so the caller can merge its
     // `channelLastRead` map regardless of the core-section ts gate.
     Map<String, dynamic>? readStatePayload;
+    // The per-group cross-device categories (settings.js:435-529) — decoded here
+    // and merged so the caller restores group membership, decryption keys, and
+    // backlog on a fresh device. Non-core / additive, applied regardless of the
+    // core-section ts gate (the PWA routes them through `applyNostrSettingsAdditive`).
+    Map<String, dynamic>? groupConversations;
+    final groupEphemeralKeys = <String, dynamic>{};
+    final groupMessageHistory = <String, List<dynamic>>{};
     for (final d in decoded) {
-      if (d.category == 'nymchat-notifications') notificationsPayload = d.payload;
-      if (d.category == 'nymchat-readstate') readStatePayload = d.payload;
+      final c = d.category;
+      if (c == 'nymchat-notifications') notificationsPayload = d.payload;
+      if (c == 'nymchat-readstate') readStatePayload = d.payload;
+      if (c == 'nymchat-groups') {
+        final gc = d.payload['groupConversations'];
+        if (gc is Map) {
+          groupConversations = {
+            ...?groupConversations,
+            ...gc.cast<String, dynamic>(),
+          };
+        }
+      } else if (c.startsWith('nymchat-keys-')) {
+        final ek = d.payload['groupEphemeralKeys'];
+        if (ek is Map) {
+          ek.forEach((gid, entry) => groupEphemeralKeys[gid.toString()] = entry);
+        }
+      } else if (c.startsWith('nymchat-history-')) {
+        final hist = d.payload['groupMessageHistory'];
+        if (hist is Map) {
+          hist.forEach((convKey, msgs) {
+            if (msgs is List) {
+              (groupMessageHistory[convKey.toString()] ??= <dynamic>[])
+                  .addAll(msgs);
+            }
+          });
+        }
+      }
     }
 
     bool isCore(String c) =>
@@ -827,17 +1082,25 @@ class StorageSync {
     final toApply = sections.isNotEmpty
         ? sections
         : core.where((d) => d.category == 'nymchat-settings').toList();
+    final hasGroupData = groupConversations != null ||
+        groupEphemeralKeys.isNotEmpty ||
+        groupMessageHistory.isNotEmpty;
     if (toApply.isEmpty) {
-      // No settings sections to apply — but a notifications wrap or a readstate
-      // category alone is still worth returning so the caller can merge the
-      // seen-keys (N26) / read watermarks (cross-device unread state).
-      return (notificationsPayload == null && readStatePayload == null)
+      // No settings sections to apply — but a notifications wrap, a readstate
+      // category, or per-group data alone is still worth returning so the caller
+      // can merge the seen-keys (N26) / read watermarks / group restore.
+      return (notificationsPayload == null &&
+              readStatePayload == null &&
+              !hasGroupData)
           ? null
           : SettingsLoadResult(
               payload: const {},
               newestTs: 0,
               notificationsPayload: notificationsPayload,
               readStatePayload: readStatePayload,
+              groupConversations: groupConversations,
+              groupEphemeralKeys: groupEphemeralKeys,
+              groupMessageHistory: groupMessageHistory,
             );
     }
 
@@ -852,6 +1115,9 @@ class StorageSync {
       newestTs: newestTs,
       notificationsPayload: notificationsPayload,
       readStatePayload: readStatePayload,
+      groupConversations: groupConversations,
+      groupEphemeralKeys: groupEphemeralKeys,
+      groupMessageHistory: groupMessageHistory,
     );
   }
 
@@ -1745,9 +2011,31 @@ class SettingsLoadResult {
     required this.newestTs,
     this.notificationsPayload,
     this.readStatePayload,
+    this.groupConversations,
+    this.groupEphemeralKeys = const {},
+    this.groupMessageHistory = const {},
   });
   final Map<String, dynamic> payload;
   final int newestTs;
+
+  /// Decoded `nymchat-groups` category: `groupId → serialized group` (the
+  /// PWA's `groupConversations` sync map, settings.js `_buildGroupConversationsSync`).
+  /// Null when no group-conversation category was present. Applied additively /
+  /// monotonically regardless of the core-section ts gate (the PWA runs it
+  /// through `applyNostrSettingsAdditive`, settings.js:812-816).
+  final Map<String, dynamic>? groupConversations;
+
+  /// Decoded + merged `nymchat-keys-<gid>` categories: `groupId → serialized
+  /// ephemeral-key entry`. Each per-group category is a separate D1 row (the
+  /// PWA publishes one wrap per group, settings.js:435-461); they are merged
+  /// here into a single map for the caller.
+  final Map<String, dynamic> groupEphemeralKeys;
+
+  /// Decoded + merged `nymchat-history-<gid>-<bucket>-<shard>` categories:
+  /// `group-<gid> → [message maps]`. The PWA shards a group's backlog across
+  /// month-bucketed, byte-bounded wraps (settings.js:495-529); the shards for a
+  /// conversation key are concatenated here.
+  final Map<String, List<dynamic>> groupMessageHistory;
 
   /// The decrypted `nymchat-notifications` wrap payload (N26), when present —
   /// carries `seenNotifications` (the cross-device notification read-state map).
