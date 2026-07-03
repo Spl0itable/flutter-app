@@ -37,9 +37,21 @@ import '../messages/format/message_content.dart';
 Future<void> showNotificationsPanel(BuildContext context) {
   // Read the store before showDialog so the snapshot precedes the shell's
   // on-open markAllViewed() (which flips the same entries' `viewed` bools).
-  // Newest-first; the store already trims to 24h and caps the list.
-  final entries =
-      ProviderScope.containerOf(context).read(notificationHistoryProvider).entries;
+  final container = ProviderScope.containerOf(context);
+  final all = container.read(notificationHistoryProvider).entries;
+  // PWA openNotificationsModal filters at RENDER time (notifications.js:
+  // 456-462): drop entries older than 24h (the store trims only when a new
+  // record lands, so a long-running session / stale hydrate can still hold
+  // older rows) and entries from blocked senders, then order newest-first
+  // regardless of insertion order (historical replay + remote sync merges can
+  // leave the store out of order).
+  final blocked = container.read(appStateProvider).blockedUsers;
+  final cutoff24h =
+      DateTime.now().millisecondsSinceEpoch - 24 * 60 * 60 * 1000;
+  final entries = [
+    for (final e in all)
+      if (e.ts > cutoff24h && !blocked.contains(e.senderPubkey ?? '')) e,
+  ]..sort((a, b) => b.ts.compareTo(a.ts));
   // Freeze the unread state per entry as a parallel list of bools (a public
   // type, so the widget constructor doesn't leak a private one).
   final viewedAtOpen = [for (final e in entries) e.viewed];
