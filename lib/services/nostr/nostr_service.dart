@@ -712,10 +712,22 @@ class NostrService {
   /// Adds ephemeral group pubkeys as additional `#p` gift-wrap subscriptions so
   /// rotated-key group messages reach us. Best-effort; auto-managed by the
   /// controller as keys rotate.
-  Subscription subscribeEphemeral(List<String> ephemeralPubkeys) {
+  ///
+  /// [limit] / [since] mirror the PWA's filter split (`_refreshEphemeralSubscriptions`,
+  /// relays.js:2711-2721): under an API host the sub is real-time only
+  /// (`limit: 1` — D1 supplies the history), otherwise a 7-day `since` +
+  /// per-key limit pulls the relay backlog. The controller picks per its
+  /// storage-sync availability; both null keep the unbounded legacy filter.
+  Subscription subscribeEphemeral(
+    List<String> ephemeralPubkeys, {
+    int? limit,
+    int? since,
+  }) {
     return pool.subscribe([
       NostrFilter(
         kinds: [EventKind.giftWrap],
+        since: since,
+        limit: limit,
         tags: {'p': ephemeralPubkeys},
       ),
     ]);

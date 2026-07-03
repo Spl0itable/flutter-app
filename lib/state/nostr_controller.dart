@@ -49,6 +49,8 @@ import '../models/user.dart';
 import '../features/identity/dev_nsec_modal.dart' show isReservedNick;
 import '../features/identity/nip46_service.dart';
 import '../features/identity/panic_wipe.dart';
+import '../features/identity/vault_settings_modal.dart'
+    show identityVaultProvider;
 import '../services/nostr/event_mapper.dart';
 import '../services/nostr/event_signer.dart';
 import '../services/nostr/identity_service.dart';
@@ -287,8 +289,15 @@ class NostrController {
     _started = true;
     try {
       final kv = _ref.read(keyValueStoreProvider);
-      final identityService =
-          IdentityService(kv: kv, secure: SecureStore());
+      // `secretWrite` routes identity-secret persistence through the vault
+      // (key-vault.js `secretSet`): with the vault enabled + unlocked (the
+      // boot gate unlocked the SAME provider instance), post-boot writes stay
+      // `enc:v1:`-encrypted instead of downgrading to plaintext.
+      final identityService = IdentityService(
+        kv: kv,
+        secure: SecureStore(),
+        secretWrite: _ref.read(identityVaultProvider).secretSet,
+      );
 
       // NIP-46 remote-signer login: restore the persisted session and build a
       // remote signer (no local key). Mirrors the PWA's `signEvent` dispatch by
@@ -951,6 +960,13 @@ class NostrController {
     shop.onActiveItemsPublished = null;
     shop.giftEventPublisher = null;
     shop.onSystemMessage = null;
+    // Eagerly drop the bot `/api` socket still AUTHed as the old identity
+    // (setApiWsAuthBuilder(null) with a null pubkey disposes it). The next
+    // bind/attachSigner re-wires it for the new identity, but a sign-out that
+    // never rebinds would otherwise leave the old socket open.
+    try {
+      _ref.read(nymbotServiceProvider).setApiWsAuthBuilder(null);
+    } catch (_) {}
   }
 
   /// Switches the running session to a freshly-imported nsec account WITHOUT an
@@ -969,7 +985,12 @@ class NostrController {
   /// boot gate (now seeing a saved login) lands on the shell.
   Future<void> loginWithNsec(String nsec) async {
     final kv = _ref.read(keyValueStoreProvider);
-    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    // Vault-aware secret writes (see the [init] construction site).
+    final identityService = IdentityService(
+      kv: kv,
+      secure: SecureStore(),
+      secretWrite: _ref.read(identityVaultProvider).secretSet,
+    );
     // Persist method + nsec + pubkey (throws on an invalid key — propagated so
     // the modal can show its existing error and NOT complete).
     await identityService.loginWithNsec(nsec);
@@ -3690,7 +3711,12 @@ class NostrController {
     if (_ref.read(settingsProvider.notifier).keypairMode != 'hardcore') return;
 
     final kv = _ref.read(keyValueStoreProvider);
-    final identityService = IdentityService(kv: kv, secure: SecureStore());
+    // Vault-aware secret writes (see the [init] construction site).
+    final identityService = IdentityService(
+      kv: kv,
+      secure: SecureStore(),
+      secretWrite: _ref.read(identityVaultProvider).secretSet,
+    );
     final rotated = await identityService.rotateEphemeral(current);
     // rotateEphemeral returns the same instance for a durable login; the guard
     // above already excludes that, but stay safe against a no-op rotation.
@@ -4409,6 +4435,14 @@ class NostrController {
       content: leaveContent,
       settings: _msgSettings,
     );
+
+    // Delete the left group's ephemeral key entry and re-arm the service's
+    // unwrap candidates (PWA `groupEphemeralKeys.delete(groupId)` +
+    // `_saveEphemeralKeys()`, groups.js:1822-1824) — AFTER the leave wrap
+    // above (it encrypts with these keys), BEFORE the control below (whose
+    // `onGroupStoreChanged` persist then writes the pruned
+    // `nym_ephemeral_keys_<pubkey>` blob without them).
+    groups.removeGroup(groupId);
 
     // Drop locally via the self-removal path (adds to leftGroups, removes the
     // group + its messages). The self-kick is always authorized (group_logic).
@@ -6894,11 +6928,16 @@ class NostrController {
     unawaited(_restoreEmojiFromD1(sync));
     // Load the user's own shop record (owned + active cosmetics) from D1 so their
     // purchased flair/style applies on a fresh device (PWA `loadShopFromServer`,
-    // shop.js:358). Local-key only (remote signers can't auth the read).
+    // shop.js:358). Any signable identity qualifies — the shop layer signs its
+    // NIP-98 auth through the [ShopIdentity.signer] (the PWA's generic
+    // `signEvent` dispatch, pms.js:1649-1679), so NIP-46 accounts restore their
+    // cosmetics too; [privkey] stays as the signer-less fallback.
     final id = _identity;
-    if (id != null && id.privkey != null) {
+    final signer = _signer;
+    if (id != null && (signer != null || id.privkey != null)) {
       unawaited(_ref.read(shopControllerProvider.notifier).loadFromServer(
-          ShopIdentity(pubkey: id.pubkey, privkey: id.privkey)));
+          ShopIdentity(
+              pubkey: id.pubkey, privkey: id.privkey, signer: signer)));
       // Finalize any shop purchase that settled while the app was closed (the
       // PWA fires `reconcilePendingPurchases` on connect, relays.js:490).
       unawaited(_reconcileShopPurchases());
@@ -6909,20 +6948,23 @@ class NostrController {
 
   Subscription? _shopReceiptSub;
   Timer? _shopReceiptTimer;
-  Completer<bool>? _shopReceiptCompleter;
+  Completer<Object>? _shopReceiptCompleter;
 
   /// Fallback payment detection for a shop buy whose invoice has neither a
   /// LUD-21 `verify` nor a `serverVerify` URL (shop.js:1483-1511
   /// `_listenForShopReceipt` + zaps.js:1181-1189): REQ `kinds:[9735]`,
   /// `#p:[bot pubkey]`, `since: now-60`, `limit: 25`, and match the receipt's
   /// `bolt11` tag against the invoice [bolt11] (case-insensitive). Completes
-  /// `true` when the matching receipt lands, `false` on the 180s timeout (the
-  /// modal then shows the "Payment not detected yet" status). A new call
-  /// replaces any previous wait; [clearShopReceiptWait] cancels it (modal
-  /// closed / verify path took over).
-  Future<bool> listenForShopReceipt(String bolt11) {
+  /// with the matched kind-9735 receipt event JSON when it lands (the PWA's
+  /// `currentShopInvoice.receipt = event`, shop.js:1187 — a `needsReceipt`
+  /// invoice is confirmed by the worker ONLY from `body.receipt`,
+  /// storage.js:381, so the claim must carry it), or `false` on the 180s
+  /// timeout (the modal then shows the "Payment not detected yet" status). A
+  /// new call replaces any previous wait; [clearShopReceiptWait] cancels it
+  /// (modal closed / verify path took over).
+  Future<Object> listenForShopReceipt(String bolt11) {
     clearShopReceiptWait();
-    final completer = Completer<bool>();
+    final completer = Completer<Object>();
     _shopReceiptCompleter = completer;
     final service = _service;
     if (service == null || bolt11.isEmpty) {
@@ -6946,7 +6988,7 @@ class NostrController {
       final bolt = event.tagValue('bolt11');
       if (bolt == null || bolt.toLowerCase() != want) return;
       if (_shopReceiptCompleter == completer && !completer.isCompleted) {
-        clearShopReceiptWait(result: true);
+        clearShopReceiptWait(result: event.toJson());
       }
     }, onError: (_) {});
     // 180s timeout (shop.js:1499 `setTimeout(…, 180000)`).
@@ -6960,8 +7002,9 @@ class NostrController {
 
   /// Cancels the pending shop-receipt wait (shop.js `_clearShopReceiptWait`),
   /// closing the REQ and the timer. [result] resolves an in-flight
-  /// [listenForShopReceipt] future (defaults to false = not detected).
-  void clearShopReceiptWait({bool result = false}) {
+  /// [listenForShopReceipt] future — the matched receipt event JSON, or the
+  /// default `false` (= not detected / cancelled).
+  void clearShopReceiptWait({Object result = false}) {
     _shopReceiptSub?.close();
     _shopReceiptSub = null;
     _shopReceiptTimer?.cancel();
@@ -6975,14 +7018,18 @@ class NostrController {
 
   /// Re-checks persisted pending shop purchases against `shop-check` and claims
   /// any that settled (shop.js `reconcilePendingPurchases`, triggered on
-  /// connect + foreground from relays.js:490). Local-key identities only (the
-  /// claim needs NIP-98 auth). Best-effort.
+  /// connect + foreground from relays.js:490). Needs a signable identity for
+  /// the claim's NIP-98 auth — a local key OR the active signer (NIP-46
+  /// accounts sign through it like the PWA's generic `signEvent` dispatch).
+  /// Best-effort.
   Future<void> _reconcileShopPurchases() async {
     final id = _identity;
-    if (id == null || id.privkey == null) return;
+    final signer = _signer;
+    if (id == null || (signer == null && id.privkey == null)) return;
     try {
       await _ref.read(shopControllerProvider.notifier).reconcilePendingPurchases(
-            ShopIdentity(pubkey: id.pubkey, privkey: id.privkey),
+            ShopIdentity(
+                pubkey: id.pubkey, privkey: id.privkey, signer: signer),
             gifterNym: id.nym,
           );
     } catch (_) {
@@ -7013,15 +7060,10 @@ class NostrController {
       // N26 inbound: merge the cross-device notification read-state additively
       // (idempotent) BEFORE the settings ts gate — a notification read on another
       // device clears its badge here even if no settings section changed
-      // (app.js:5760, `seenNotifications` → `_mergeSeenNotifications`).
+      // (app.js:5760/5791/5817: seenNotifications → lastReadTime → history).
       final notif = result.notificationsPayload;
       if (notif != null) {
-        final seen = notif['seenNotifications'];
-        if (seen is Map) {
-          _ref
-              .read(notificationHistoryProvider.notifier)
-              .mergeSeenNotifications(seen);
-        }
+        _applyNotificationsSync(notif);
       }
       // Cross-device read watermarks ride the non-core `nymchat-readstate`
       // category, which the PWA applies additively regardless of the core-section
@@ -7124,10 +7166,15 @@ class NostrController {
 
     // 2) Ephemeral keys → decryption. Merge into the manager, re-arm the
     // service's unwrap candidates, and backfill history for any new self keys.
+    // Left groups are skipped (defense-in-depth against an old un-cleared
+    // `nymchat-keys-<gid>` blob resurrecting keys the leave path deleted —
+    // the leave writes an empty tombstone, but a device that missed it can
+    // still republish the stale entry).
     final groups = _groups;
     var keysAdded = false;
     if (groups != null && ephemeralKeys != null && ephemeralKeys.isNotEmpty) {
       ephemeralKeys.forEach((gid, entry) {
+        if (appState.isLeftGroup(gid)) return;
         if (entry is Map) {
           try {
             if (groups.mergeEphemeralKeys(gid, entry.cast<String, dynamic>())) {
@@ -7182,7 +7229,18 @@ class NostrController {
     _ephemeralSub = null;
     final pks = groups.allEphemeralPubkeys();
     if (pks.isEmpty) return;
-    final sub = service.subscribeEphemeral(pks);
+    // Filter split per relays.js:2711-2721: under an API host the REQ is
+    // real-time only (`limit: 1` — D1 supplies the history, so reconnects
+    // don't pull relay backlog through the id-deduped ingest); without one,
+    // a 7-day `since` + per-key limit recovers the relay backlog.
+    final hasApiHost = _storageSync != null;
+    final sub = service.subscribeEphemeral(
+      pks,
+      limit: hasApiHost ? 1 : 200 * pks.length,
+      since: hasApiHost
+          ? null
+          : DateTime.now().millisecondsSinceEpoch ~/ 1000 - 604800,
+    );
     // Route each wrap through the normal gift-wrap handler (the PWA's
     // ephemeral REQ feeds `handleGiftWrapDM` like any other 1059).
     sub.events.listen(service.unwrapArchivedWrap, onError: (_) {});
@@ -7195,16 +7253,10 @@ class NostrController {
   /// accepts. Everything here is idempotent / monotonic (set unions, per-key
   /// max merges, id-deduped history), so re-application is safe.
   void _applySyncedSettingsAdditive(Map<String, dynamic> s) {
-    // Cross-device seen-notification keys (app.js:5760-5786) — a notification
-    // read/dismissed on another device clears its badge here.
-    final seen = s['seenNotifications'];
-    if (seen is Map) {
-      try {
-        _ref
-            .read(notificationHistoryProvider.notifier)
-            .mergeSeenNotifications(seen);
-      } catch (_) {}
-    }
+    // Cross-device notification read-state (app.js:5760-5894) — a notification
+    // read/dismissed on another device clears its badge here, and its bell
+    // history merges in.
+    _applyNotificationsSync(s);
     // Closed-PM read state: additive set + INDEPENDENT per-key monotonic-max
     // time merge (app.js:6528-6547 — a set entry without a time gets NO time).
     final closedPMs = s['closedPMs'];
@@ -7251,6 +7303,40 @@ class NostrController {
             rawKeys is Map ? rawKeys.map((k, v) => MapEntry('$k', v)) : null,
         history: history,
       );
+    }
+  }
+
+  /// Applies the inbound `nymchat-notifications` read-state trio in the PWA's
+  /// order (app.js:5760-5894): `seenNotifications` merge, then a NEWER
+  /// `notificationLastReadTime` (with its receivedAt-based retro-mark), then
+  /// the `notificationHistory` merge (eventId/fuzzy matching, blocked-sender +
+  /// answered-missed-call exclusions). All idempotent; inbound applies never
+  /// republish. Shared by the boot settings-get merge and the live own
+  /// nym-sync wrap apply.
+  void _applyNotificationsSync(Map<String, dynamic> s) {
+    try {
+      final notifier = _ref.read(notificationHistoryProvider.notifier);
+      final seen = s['seenNotifications'];
+      if (seen is Map) {
+        notifier.mergeSeenNotifications(seen);
+      }
+      final lastRead = s['notificationLastReadTime'];
+      if (lastRead is num) {
+        notifier.adoptNotificationLastReadTime(lastRead.toInt());
+      }
+      final history = s['notificationHistory'];
+      if (history is List && history.isNotEmpty) {
+        notifier.mergeHistory(
+          history,
+          // The answered status is the tombstone for a synced missed-call
+          // entry (app.js:5860-5862, `_callStatus(...) === 'answered'`).
+          isCallAnswered: (callId) =>
+              _ref.read(callServiceProvider).seenCallStatus(callId) ==
+              'answered',
+        );
+      }
+    } catch (_) {
+      // History store may be unavailable in teardown.
     }
   }
 
@@ -7960,6 +8046,7 @@ class NostrController {
       // The default landing channel is KV-only (not a typed Settings field), so
       // thread it in explicitly so it rides the `channels` section like the PWA
       // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.
+      final appState = _ref.read(appStateProvider.notifier);
       await sync.settingsSet(
         _ref.read(settingsProvider),
         pinnedLandingChannelJson:
@@ -7968,14 +8055,27 @@ class NostrController {
         // declined/missed on this device reflects on our others (calls.js
         // `_seenCallsForSync`, settings.js:152). F06-A3 outbound seam.
         seenCalls: _ref.read(callServiceProvider).seenCallsForSync(),
+        // Left-group state from the LIVE app state (the PWA serializes
+        // `this.leftGroups`/`this.leftGroupTimes`, settings.js:147-149) —
+        // the KV fallback in buildSectionPayloads can lag the fire-and-forget
+        // `_persistLeftGroups` write, publishing a stale/empty leave set.
+        extras: {
+          'leftGroups': appState.leftGroups.toList(),
+          'leftGroupTimes':
+              Map<String, dynamic>.from(appState.leftGroupTimes),
+        },
       );
       // N26 outbound: publish the cross-device notification read-state wrap (the
       // `nymchat-notifications` category) so a notification read/dismissed here
-      // is silenced on our other devices (settings.js:559). No-op when unchanged.
+      // is silenced on our other devices (settings.js:559). Carries the LIVE
+      // bell history + last-read watermark alongside the seen keys — the PWA
+      // payload `{notificationHistory, notificationLastReadTime,
+      // seenNotifications?}` (settings.js:534-557). No-op when unchanged.
+      final notifHistory = _ref.read(notificationHistoryProvider.notifier);
       await sync.notificationsWrapSet(
-        _ref
-            .read(notificationHistoryProvider.notifier)
-            .seenNotificationsForSync(),
+        notifHistory.seenNotificationsForSync(),
+        notificationHistory: notifHistory.historyForSync(),
+        notificationLastReadTime: notifHistory.notificationLastReadTime,
       );
       // Publish the cross-device read-state category (`nymchat-readstate`) so a
       // channel/PM/group marked read here restores its unread watermark on our
