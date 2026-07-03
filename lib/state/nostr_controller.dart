@@ -832,6 +832,13 @@ class NostrController {
       await _ref.read(keyValueStoreProvider).clear();
     } catch (_) {}
 
+    // Reset live settings to first-run defaults from the now-empty store — the
+    // PWA's page reload re-reads wiped localStorage; without this the in-memory
+    // theme/layout/etc. survive the wipe until the next process launch.
+    try {
+      _ref.read(settingsProvider.notifier).resetToDefaults();
+    } catch (_) {}
+
     // Re-enable persistence for the NEXT session (the PWA's page reload resets
     // its `_cacheDisabled`); everything the old session could have written is
     // gone by now.

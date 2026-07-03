@@ -2602,7 +2602,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String _nymLabelFor(String pubkey) {
     final user = ref.read(appStateProvider).users[pubkey];
     if (user != null && user.nym.isNotEmpty) return user.nym;
-    return getNymFromPubkey('anon', pubkey);
+    return getNymFromPubkey('nym', pubkey);
   }
 }
 

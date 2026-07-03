@@ -849,7 +849,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final nym = users[pk]?.nym;
     final baseNym = (nym != null && nym.isNotEmpty)
         ? stripPubkeySuffix(nym)
-        : 'anon';
+        : 'nym';
     final suffix = getPubkeySuffix(pk);
     final nymStyle = TextStyle(color: c.textDim, fontSize: size, height: 1.3);
     return Row(
