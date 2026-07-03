@@ -241,6 +241,18 @@ class NostrController {
       _identity = identity;
       _signer = signer;
 
+      // Durable login (nsec/NIP-46): never surface the boot chain's leftover
+      // auto-ephemeral / derived nick as the account's name — the PWA seeds
+      // the header from the CACHED kind-0 profile name
+      // (`nym_nostr_login_profile`, app.js:4514-4522, fallback 'nym') and
+      // lets the profile fetch below overwrite it. [_syncSelfNymFromProfile]
+      // rewrites that cache whenever our own profile resolves, so relaunches
+      // restore the account nick instantly.
+      if (identity.loginMethod != null) {
+        identity.nym = getNymFromPubkey(
+            _cachedLoginProfileName(kv) ?? 'nym', identity.pubkey);
+      }
+
       final appState = _ref.read(appStateProvider.notifier);
       appState.goLive(identity.pubkey, identity.nym);
 
@@ -298,6 +310,13 @@ class NostrController {
         onTimeout: () {},
       );
 
+      // The hydrated cache may hold our own kind-0 (flushed by a previous
+      // session) — mirror its name onto the live identity BEFORE the first
+      // presence broadcast below, so `recordOwnActivity` / channel `['n', …]`
+      // tags never announce the ephemeral boot nick when the real one is
+      // already known locally.
+      _syncSelfNymFromProfile();
+
       final service = NostrService(identity: identity, signer: signer);
       _service = service;
       _groups = GroupManager(service);
@@ -341,12 +360,17 @@ class NostrController {
       // our own profile so the sidebar header shows our real nym + avatar instead
       // of the ephemeral derived nym. `resolveProfiles` reads the D1 database
       // FIRST (`profile-get`, the source of truth) and only falls back to a relay
-      // kind-0 fetch if D1 holds no profile for us — so a brand-new account with
-      // no saved profile correctly stays on the derived nym. It has no self-guard
-      // (unlike `_maybeBackfillProfiles`), and `_ingestProfile` now updates
-      // `selfNym` for self, so this restores both the avatar and the header text.
-      // Covers `loginWithNsec` too (it re-runs `init`). Best-effort.
-      unawaited(resolveProfiles([identity.pubkey]));
+      // kind-0 fetch if D1 holds no profile for us. It has no self-guard (unlike
+      // `_maybeBackfillProfiles`), and `_ingestProfile` updates `selfNym` for
+      // self, so this restores both the avatar and the header text; the chained
+      // [_syncSelfNymFromProfile] then mirrors the resolved name onto the live
+      // [Identity] (presence / `n` tags / mentions) and rewrites the
+      // instant-restore login-profile cache (`updateSidebarFromProfile`,
+      // app.js:5507-5528). The relay-fallback results land via [_onEvent], which
+      // runs the same sync. Covers `loginWithNsec` too (it re-runs `init`).
+      // Best-effort.
+      unawaited(resolveProfiles([identity.pubkey])
+          .then((_) => _syncSelfNymFromProfile()));
 
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
@@ -561,6 +585,57 @@ class NostrController {
       return (identity, Nip46SignerAdapter(svc));
     } catch (_) {
       return null;
+    }
+  }
+
+  /// The cached kind-0 profile name persisted for the durable login — the
+  /// PWA's `nym_nostr_login_profile` instant-restore cache (written in
+  /// `updateSidebarFromProfile`, app.js:5523-5527; read on boot BEFORE relays
+  /// connect, app.js:4514-4522). Null when absent/corrupt.
+  String? _cachedLoginProfileName(KeyValueStore kv) {
+    final raw = kv.getString(StorageKeys.nostrLoginProfile);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        final name = decoded['name'];
+        if (name is String && name.isNotEmpty) return name;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Mirrors the resolved SELF kind-0 profile name onto the live [Identity]
+  /// and refreshes the durable login's instant-restore profile cache — the
+  /// PWA's `updateSidebarFromProfile` (`nym.nym = user.nym` + the
+  /// `nym_nostr_login_profile` write, app.js:5507-5528).
+  ///
+  /// `_ingestProfile` / `hydrateProfiles` already keep `AppState.selfNym` (the
+  /// sidebar header, composer/self messages, mention token, settings) in sync;
+  /// this covers every `identity.nym` read site too — presence broadcasts,
+  /// channel `['n', …]` tags, mention detection, group invites/leaves, polls,
+  /// settings transfers, `/who` — so peers and self-surfaces all see the
+  /// account nick, never the boot identity's ephemeral nick. No-op while our
+  /// own profile has no name (a brand-new account keeps its fallback).
+  void _syncSelfNymFromProfile() {
+    final identity = _identity;
+    if (identity == null) return;
+    final profile = _ref.read(appStateProvider).users[identity.pubkey]?.profile;
+    final name = profile?.name;
+    if (name == null || name.isEmpty) return;
+    final nym = getNymFromPubkey(name, identity.pubkey);
+    if (identity.nym != nym) identity.nym = nym;
+    if (_ref.read(appStateProvider).selfNym != nym) {
+      _ref.read(appStateProvider.notifier).setIdentity(identity.pubkey, nym);
+    }
+    // Persist for instant restore on the next launch (durable logins only —
+    // an ephemeral identity's nick lives in `nym_auto_ephemeral_nick`).
+    if (identity.loginMethod != null) {
+      final kv = _ref.read(keyValueStoreProvider);
+      unawaited(kv.setString(
+        StorageKeys.nostrLoginProfile,
+        jsonEncode({'name': name, 'avatar': profile?.picture}),
+      ));
     }
   }
 
@@ -877,6 +952,12 @@ class NostrController {
       _storageSync?.markProfileCached(event.pubkey);
     }
     appState.ingestEvent(event);
+    // A SELF kind-0 (live relay update or the login profile-fetch fallback)
+    // must also flow onto the live identity + the instant-restore login
+    // profile cache (PWA `updateSidebarFromProfile`, app.js:5507-5528).
+    if (event.kind == EventKind.profile && event.pubkey == _identity?.pubkey) {
+      _syncSelfNymFromProfile();
+    }
     // Public reaction (kind 7) to our message → notify + record (reactions.js
     // `handleReaction` notify block). Skip removals.
     if (event.kind == EventKind.reaction) {
@@ -5059,6 +5140,10 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     appState.setIdentity(identity.pubkey, identity.nym);
     appState.ingestEvent(signed); // routes kind-0 → _ingestProfile
+    // Refresh the durable login's instant-restore profile cache with the new
+    // name/avatar (PWA `updateSidebarFromProfile` re-caches after every self
+    // kind-0, app.js:5519-5528) so a relaunch shows the new nick immediately.
+    _syncSelfNymFromProfile();
 
     // Mirror the signed kind-0 to D1 (`profile-set`) in addition to the relay
     // publish, so other clients get a fast public read (`_saveProfileToD1`,

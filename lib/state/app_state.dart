@@ -1541,17 +1541,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       changed = true;
     }
-    if (changed) {
-      // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
-      // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
-      // app.js:5510). Without this, restoring our own profile on login fixes the
-      // avatar but leaves the header text as the ephemeral derived nym.
-      final selfNym =
-          (e.pubkey == state.selfPubkey && (p.name ?? '').isNotEmpty)
-              ? getNymFromPubkey(p.name!, e.pubkey)
-              : null;
-      state =
-          selfNym != null ? state.copyWith(selfNym: selfNym) : state.copyWith();
+    // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
+    // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
+    // app.js:5510). Without this, restoring our own profile on login fixes the
+    // avatar but leaves the header text as the ephemeral derived nym. Checked
+    // OUTSIDE the no-op guard above: boot hydration ([hydrateProfiles]) can
+    // seed this same profile into `users` before the login's D1/relay re-fetch
+    // lands, making that re-fetch a "no-op" while `selfNym` still holds the
+    // boot identity's ephemeral nick — the header must still be repaired.
+    // Reads the STORED (newest-wins) profile, not the event payload, so a
+    // stale kind-0 can never regress the name.
+    String? selfNym;
+    if (e.pubkey == state.selfPubkey) {
+      final name = state.users[e.pubkey]?.profile?.name;
+      if (name != null && name.isNotEmpty) {
+        final resolved = getNymFromPubkey(name, e.pubkey);
+        if (resolved != state.selfNym) selfNym = resolved;
+      }
+    }
+    if (changed || selfNym != null) {
+      state = state.copyWith(selfNym: selfNym);
     }
   }
 
@@ -2566,7 +2575,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
         );
       }
     });
-    state = state.copyWith();
+    // Cached SELF profile → restore the header nym immediately, the native
+    // analogue of the PWA applying the cached login profile name before
+    // relays connect (`nym_nostr_login_profile`, app.js:4514-4522). Without
+    // this the boot identity's ephemeral/derived nick stays in `selfNym`
+    // until a live kind-0 lands — which `_ingestProfile`'s no-op guard may
+    // then skip because this hydration already stored the same profile.
+    String? selfNym;
+    if (state.selfPubkey.isNotEmpty) {
+      final name = state.users[state.selfPubkey]?.profile?.name;
+      if (name != null && name.isNotEmpty) {
+        final resolved = getNymFromPubkey(name, state.selfPubkey);
+        if (resolved != state.selfNym) selfNym = resolved;
+      }
+    }
+    state = state.copyWith(selfNym: selfNym);
   }
 
   /// Hydrates cached reactions (entries shape `[[emoji,[[reactor,nym]]]]`) into

@@ -225,8 +225,12 @@ bool hasGenesisFlair(UserCosmetics cosmetics) =>
 /// `css/styles-features.css`. Captures the parts we can render natively:
 ///
 /// * [textColor] — the glyph colour (`.message-content { color }`).
-/// * [glow] — the text-shadow glow colour (approximated as a [Shadow] on the
-///   content text and as a soft box-shadow behind it).
+/// * [glow] — the text-shadow glow colour, rendered as a [Shadow] on the
+///   content GLYPHS only (via [textShadows]). The CSS style glow is a
+///   `text-shadow` — no style paints a `.message-content` box-shadow in either
+///   theme, so this must never be drawn as a bubble/box shadow (doing so bled
+///   the high-alpha glow through the translucent dark bubble as an opaque
+///   wash + oversized halo).
 /// * [gradient] — for gradient-text styles (aurora), drawn via a `ShaderMask`.
 /// * [contentBackground] — the translucent `.message-content { background-color }`
 ///   some styles paint behind the text (satoshi / ocean / eclipse / crt / …).
