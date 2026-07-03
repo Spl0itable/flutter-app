@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../../core/theme/nym_colors.dart';
+import '../../../core/theme/nym_metrics.dart';
 
 /// `--radius-sm` (`styles-core.css:87`).
 const double _kVideoRadius = 12;
@@ -33,12 +34,21 @@ class VideoMessage extends StatefulWidget {
   const VideoMessage({
     super.key,
     required this.url,
+    this.fallbackUrls = const [],
     this.maxSize = 300,
     this.borderRadius,
     this.bordered = true,
   });
 
   final String url;
+
+  /// NIP-92 imeta Blossom mirror URLs (already proxied, like [url]) to fall
+  /// back to when the primary source fails. Mirrors the PWA's
+  /// `_attachMediaFallbacks` video handler (messages.js:1165-1186), which swaps
+  /// the `<source>` src to the next `data-media-fallbacks` mirror on `error`
+  /// and re-loads.
+  final List<String> fallbackUrls;
+
   final double maxSize;
   final BorderRadius? borderRadius;
   final bool bordered;
@@ -50,11 +60,21 @@ class VideoMessage extends StatefulWidget {
 class _VideoMessageState extends State<VideoMessage> {
   VideoPlayerController? _controller;
 
+  /// Mouse-hover over the tile (`.video-container:hover`) — drives the desktop
+  /// scale/shadow/border lift and the expand button's fade-in. [MouseRegion]
+  /// enter/exit never fire on touch, so touch platforms never see it.
+  bool _hovered = false;
+
   /// Lazily initialising the controller after the first tap.
   bool _initializing = false;
 
-  /// Initialisation failed → fall back to tap-to-open.
+  /// Initialisation failed (primary AND every imeta mirror) → tap-to-open.
   bool _failed = false;
+
+  /// The source that actually initialized (or the last one tried), mirroring
+  /// the PWA keeping `.video-expand-btn[data-video-src]` in sync with the
+  /// swapped-in mirror (messages.js:1176-1180).
+  String? _activeUrl;
 
   @override
   void dispose() {
@@ -69,37 +89,42 @@ class _VideoMessageState extends State<VideoMessage> {
 
   Future<void> _start() async {
     if (_initializing || _controller != null) return;
-    final uri = Uri.tryParse(widget.url);
-    if (uri == null) {
-      setState(() => _failed = true);
-      return;
-    }
     setState(() => _initializing = true);
-    final controller = VideoPlayerController.networkUrl(uri);
-    try {
-      await controller.initialize();
-      controller.addListener(_onValue);
-      if (!mounted) {
-        await controller.dispose();
+    // Walk the primary URL then each NIP-92 imeta mirror until one initializes
+    // — the PWA's `_attachMediaFallbacks` `tryNext` (messages.js:1165-1186)
+    // swaps the `<source>` src to the next mirror on `error` and re-loads.
+    for (final candidate in [widget.url, ...widget.fallbackUrls]) {
+      final uri = Uri.tryParse(candidate);
+      if (uri == null) continue;
+      _activeUrl = candidate;
+      final controller = VideoPlayerController.networkUrl(uri);
+      try {
+        await controller.initialize();
+        controller.addListener(_onValue);
+        if (!mounted) {
+          await controller.dispose();
+          return;
+        }
+        setState(() {
+          _controller = controller;
+          _initializing = false;
+        });
+        await controller.play();
         return;
+      } catch (_) {
+        await controller.dispose();
+        if (!mounted) return;
       }
-      setState(() {
-        _controller = controller;
-        _initializing = false;
-      });
-      await controller.play();
-    } catch (_) {
-      await controller.dispose();
-      if (!mounted) return;
-      setState(() {
-        _initializing = false;
-        _failed = true;
-      });
     }
+    if (!mounted) return;
+    setState(() {
+      _initializing = false;
+      _failed = true;
+    });
   }
 
   Future<void> _openExternally() async {
-    final uri = Uri.tryParse(widget.url);
+    final uri = Uri.tryParse(_activeUrl ?? widget.url);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
@@ -131,15 +156,61 @@ class _VideoMessageState extends State<VideoMessage> {
       body = _posterTile(c);
     }
 
-    final clipped = ClipRRect(borderRadius: radius, child: body);
-
-    if (!widget.bordered) return clipped;
-    return Container(
-      decoration: BoxDecoration(
+    // `.video-container:hover video.message-video { transform: scale(1.02);
+    // box-shadow: var(--shadow-md); border-color: rgba(255,255,255,0.15) }`
+    // over `transition: all var(--transition)` (styles-chat.css:1029-1046) —
+    // the same desktop-only hover lift images get.
+    Widget result;
+    if (!widget.bordered) {
+      // Gallery cell: no border/shadow; the scaled video is clipped by the
+      // cell (the PWA's `.message-gallery { overflow: hidden }`).
+      result = ClipRRect(
         borderRadius: radius,
-        border: Border.all(color: c.glassBorder),
-      ),
-      child: clipped,
+        child: AnimatedScale(
+          scale: _hovered ? 1.02 : 1.0,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          child: body,
+        ),
+      );
+    } else {
+      // A lone video carries the 1px glass border, brightening to white@0.15
+      // on hover alongside the lift + shadow. `--shadow-md` is 0 4px 16px
+      // black@0.4 dark / black@0.1 light (styles-core.css:92 +
+      // styles-themes-responsive.css:536).
+      result = AnimatedScale(
+        scale: _hovered ? 1.02 : 1.0,
+        duration: NymMotion.transition,
+        curve: NymMotion.curve,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            border: Border.all(
+              color: _hovered
+                  ? Colors.white.withValues(alpha: 0.15)
+                  : c.glassBorder,
+            ),
+            boxShadow: _hovered
+                ? [
+                    BoxShadow(
+                      color:
+                          Colors.black.withValues(alpha: c.isLight ? 0.1 : 0.4),
+                      offset: const Offset(0, 4),
+                      blurRadius: 16,
+                    ),
+                  ]
+                : const [],
+          ),
+          child: ClipRRect(borderRadius: radius, child: body),
+        ),
+      );
+    }
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: result,
     );
   }
 
@@ -159,7 +230,10 @@ class _VideoMessageState extends State<VideoMessage> {
         // A 16:9 poster footprint before we know the real aspect ratio.
         width: widget.maxSize,
         height: widget.maxSize * 9 / 16,
-        color: Colors.black.withValues(alpha: 0.4),
+        // `video.message-video { background: var(--bg-tertiary) }`
+        // (styles-chat.css:1029-1040) — rgba(20,20,35,0.9) dark /
+        // rgba(240,240,237,0.9) light.
+        color: c.bgTertiary,
         alignment: Alignment.center,
         child: _initializing
             ? SizedBox(
@@ -226,10 +300,20 @@ class _VideoMessageState extends State<VideoMessage> {
               ),
             ),
             // `.video-expand-btn` — fullscreen open (top-right, dark pill).
+            // It rests at opacity 0 and fades in over `--transition` on
+            // container hover (styles-chat.css:1048-1072); touch-primary
+            // devices pin it visible (`@media (hover: none)`,
+            // styles-themes-responsive.css:51-55). Like CSS opacity:0, the
+            // hidden button still hit-tests.
             Positioned(
               top: 8,
               right: 8,
-              child: _ExpandButton(onTap: _openFullscreen),
+              child: AnimatedOpacity(
+                opacity: _touchPlatform(context) || _hovered ? 1.0 : 0.0,
+                duration: NymMotion.transition,
+                curve: NymMotion.curve,
+                child: _ExpandButton(onTap: _openFullscreen),
+              ),
             ),
           ],
         ),
@@ -237,7 +321,7 @@ class _VideoMessageState extends State<VideoMessage> {
     );
   }
 
-  /// Init-failed fallback: a dark tile that opens the URL externally on tap
+  /// Init-failed fallback: a tile that opens the URL externally on tap
   /// (`url_launcher`), never a dead end.
   Widget _fallbackTile(NymColors c) {
     return GestureDetector(
@@ -246,7 +330,9 @@ class _VideoMessageState extends State<VideoMessage> {
         constraints: _constraints,
         width: widget.maxSize,
         height: widget.maxSize * 9 / 16,
-        color: Colors.black.withValues(alpha: 0.4),
+        // `video.message-video { background: var(--bg-tertiary) }` — the same
+        // fill the unplayed <video> element sits on in both themes.
+        color: c.bgTertiary,
         alignment: Alignment.center,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -261,6 +347,13 @@ class _VideoMessageState extends State<VideoMessage> {
         ),
       ),
     );
+  }
+
+  /// The `@media (hover: none)` analogue: on touch-primary platforms the
+  /// expand button never gets a hover reveal, so it stays pinned visible.
+  bool _touchPlatform(BuildContext context) {
+    final p = Theme.of(context).platform;
+    return p == TargetPlatform.android || p == TargetPlatform.iOS;
   }
 
   /// Opens the video full-screen in a dialog route (the PWA's expand-to-modal,
@@ -285,17 +378,24 @@ class _ExpandButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 30,
-        height: 30,
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.6),
-          borderRadius: const BorderRadius.all(Radius.circular(8)),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+    return MouseRegion(
+      // `.video-expand-btn { cursor: pointer }` (styles-chat.css:1048-1067).
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.6),
+            // `.video-expand-btn { border-radius: var(--radius-sm) }` (=12,
+            // styles-chat.css:1048-1057).
+            borderRadius:
+                const BorderRadius.all(Radius.circular(_kVideoRadius)),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+          ),
+          child: const Icon(Icons.fullscreen, size: 18, color: Colors.white),
         ),
-        child: const Icon(Icons.fullscreen, size: 18, color: Colors.white),
       ),
     );
   }

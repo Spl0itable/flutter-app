@@ -5,11 +5,14 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/crypto/bech32_codec.dart' as bech32;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/pow.dart' as pow;
+import '../core/crypto/schnorr.dart' as schnorr;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
+import '../core/theme/nym_colors.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
@@ -23,12 +26,12 @@ import '../features/notifications/notifications_service.dart';
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
 import '../features/nymbot/nymbot_providers.dart';
-import '../features/nymbot/nymbot_service.dart';
 import '../features/p2p/p2p_models.dart';
 import '../features/p2p/p2p_service.dart';
 import '../features/pms/pm_logic.dart';
 import '../features/polls/poll_logic.dart';
 import '../features/zaps/lnurl.dart';
+import '../features/zaps/zap_archive.dart';
 import '../features/zaps/zap_logic.dart';
 import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
@@ -41,6 +44,7 @@ import '../models/group.dart';
 import '../models/message.dart';
 import '../models/nostr_event.dart';
 import '../models/poll.dart';
+import '../models/settings.dart';
 import '../models/user.dart';
 import '../features/identity/nip46_service.dart';
 import '../services/nostr/event_mapper.dart';
@@ -99,6 +103,11 @@ class NostrController {
   /// calls through it are lazy + failure-tolerant (the live host may be
   /// unreachable; the PWA treats every storage path as best-effort).
   StorageSync? _storageSync;
+
+  /// Zap-receipt D1 archive: batched `zap-put` of observed kind-9735 receipts
+  /// + `zap-get` backfill for hydrated history (zaps.js:29-93). Built alongside
+  /// [_storageSync]; null before boot.
+  ZapArchive? _zapArchive;
 
   /// Shared [ApiClient] for the storage-sync paths (one instance, reused).
   ApiClient? _api;
@@ -258,6 +267,24 @@ class NostrController {
       appSpamFilterEnabled = settings.spamFilterEnabled;
       appSpamFilterAggressive = settings.spamFilterAggressive;
 
+      // The active pubkey scopes the per-identity image-blur read
+      // (`nym_image_blur_<pubkey>` first, then the global key —
+      // `loadImageBlurSettings`, settings.js:1139-1156).
+      settings.activePubkey = identity.pubkey;
+
+      // Keypair-mode save side effects (app.js:3873-3890): switching to
+      // random/hardcore removes the saved session nsec; switching back to
+      // persistent saves the CURRENT keypair's nsec when none is stored so the
+      // in-use identity survives reload. Skipped for durable logins (the PWA's
+      // `!isNostrLoggedIn()` gate).
+      settings.onKeypairModeChanged = _onKeypairModeChanged;
+
+      // Mirror Low Data Mode onto the relay layer whenever the setting flips
+      // (the PWA's `nym.applyLowDataMode(lowDataMode)` on every settings save,
+      // app.js:3989) — covers the settings modal AND the inbound sync apply.
+      settings.onLowDataModeChanged =
+          (enabled) => unawaited(_service?.setLowDataMode(enabled));
+
       // Touch the live custom-emoji store so it hydrates the persisted NIP-30
       // cache (`nym_custom_emojis` / `nym_custom_emoji_packs`) at boot, mirroring
       // the PWA's `_loadCustomEmojiCache`; live 30030/10030 events then top it up.
@@ -274,6 +301,13 @@ class NostrController {
       final service = NostrService(identity: identity, signer: signer);
       _service = service;
       _groups = GroupManager(service);
+      // Seed Low Data Mode from the persisted setting BEFORE the relay layer
+      // shards its geo relays (the PWA reads `settings.lowDataMode` in
+      // `_computeExpectedShards`, relays.js:1905-1978; boot applies the saved
+      // value). No-op when the setting is off (the default).
+      if (_ref.read(settingsProvider).lowDataMode) {
+        unawaited(service.setLowDataMode(true));
+      }
       await service.start(NostrHandlers(
         onEvent: _onEvent,
         onConnectionChanged: _onConnectionChanged,
@@ -619,6 +653,8 @@ class NostrController {
     _service = null;
     _groups = null;
     _storageSync = null;
+    _zapArchive?.dispose();
+    _zapArchive = null;
     _lastPresenceBroadcast = 0;
     _presenceTimestamps.clear();
     _typingThrottle.clear();
@@ -627,9 +663,22 @@ class NostrController {
     _reactionToggleTracker.clear();
 
     // Stop syncing settings on change (the binding captured the old signer).
-    _ref.read(settingsProvider.notifier).onSyncedChange = null;
+    final settings = _ref.read(settingsProvider.notifier);
+    settings.onSyncedChange = null;
+    // Drop the identity-scoped settings hooks (blur pubkey scope, keypair-mode
+    // side effects, low-data relay mirror — all captured the old identity).
+    settings.activePubkey = null;
+    settings.onKeypairModeChanged = null;
+    settings.onLowDataModeChanged = null;
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
+    _ref.read(appStateProvider.notifier).onPmMessageIngested = null;
+    // Stop broadcasting shop-update presence / gift DMs / system lines (the
+    // bindings captured the old identity/service).
+    final shop = _ref.read(shopControllerProvider.notifier);
+    shop.onActiveItemsPublished = null;
+    shop.giftEventPublisher = null;
+    shop.onSystemMessage = null;
   }
 
   /// Switches the running session to a freshly-imported nsec account WITHOUT an
@@ -831,6 +880,12 @@ class NostrController {
     // Public reaction (kind 7) to our message → notify + record (reactions.js
     // `handleReaction` notify block). Skip removals.
     if (event.kind == EventKind.reaction) {
+      // Register any NIP-30 custom emoji declared on the reaction BEFORE any
+      // routing (reactions.js:206 `this.ingestEmojiTags(event.tags)`) so a
+      // custom `:shortcode:` reaction from a peer resolves to its image.
+      if (event.tags.isNotEmpty) {
+        _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(event.tags);
+      }
       final removed =
           event.tagsNamed('action').any((t) => t.length > 1 && t[1] == 'remove');
       // Resolve the REACTOR's D1 profile so the reactors sheet (and any future
@@ -909,13 +964,17 @@ class NostrController {
       final self = _identity?.pubkey ?? '';
       final geohash = event.tagValue('g');
       final key = EventMapper.channelKeyOf(event);
+      // In columns view the "visible" proxy is the deck's seen gate (focused +
+      // at-bottom + app visible — the PWA sends the receipt only when
+      // `_cvMarkColumnRead` returned true, messages.js:546-555); in single
+      // view it degrades to "is the active view".
       if (event.pubkey != self &&
           geohash != null &&
           geohash.isNotEmpty &&
           _isChannelMessageId(event.id) &&
           !_isHistorical(event.createdAt) &&
           key != null &&
-          _isActiveView(key)) {
+          appState.isConversationSeen(key)) {
         unawaited(sendChannelReadReceipt(event.id, event.pubkey, geohash));
       }
     }
@@ -925,6 +984,12 @@ class NostrController {
   /// (emoji.js `handleEmojiPackEvent`): parse the `d`/`title`/`emoji` tags into a
   /// pack (≤120 emoji, deduped) and store it (newest-wins per pubkey:identifier).
   void _ingestEmojiPack(NostrEvent e) {
+    // PWA validation (emoji.js:253-255): shortcode must match
+    // `^[a-zA-Z0-9_]+$` and the url `^https?://` BEFORE dedup / the 120-cap —
+    // invalid tags never count toward the cap, and an all-invalid pack is
+    // dropped entirely.
+    final rxShortcode = RegExp(r'^[a-zA-Z0-9_]+$');
+    final rxUrl = RegExp(r'^https?://', caseSensitive: false);
     final emojis = <({String shortcode, String url})>[];
     final seen = <String>{};
     for (final t in e.tags) {
@@ -932,6 +997,7 @@ class NostrController {
         final sc = t[1];
         final url = t[2];
         if (sc.isEmpty || url.isEmpty || seen.contains(sc)) continue;
+        if (!rxShortcode.hasMatch(sc) || !rxUrl.hasMatch(url)) continue;
         seen.add(sc);
         emojis.add((shortcode: sc, url: url));
         if (emojis.length >= 120) break;
@@ -1423,12 +1489,16 @@ class NostrController {
     final nym = e.tagValue('n');
     final away = e.tagValue('away');
     final avatar = e.tagValue('avatar-update');
-    // Shop cosmetics: the PWA's `shop-update` tag is a cache-bust flag and the
-    // real items come from the backend; the native build reads the inlined
-    // shop-style/flair/supporter tags (see PresenceCosmetics). When a
-    // `shop-update` arrives without inlined tags, the cosmetics are cleared.
+    // Shop cosmetics: the `shop-update` presence tag is a pure cache-bust flag
+    // (the ONLY shop tag the protocol carries — `publishShopUpdate`,
+    // nostr-core.js:2876-2885). The real items live in D1: on an inbound flag
+    // we drop the cached record and force-refresh the sender's `shop-status`
+    // (users.js:1221-1223 `invalidateShopCache` → shop.js:302-313).
     final hasShopUpdate =
         e.tagsNamed('shop-update').any((t) => t.length > 1 && t[1] == '1');
+    if (hasShopUpdate) {
+      _ref.read(otherUsersShopProvider.notifier).invalidate(e.pubkey);
+    }
     _ref.read(appStateProvider.notifier).setUserPresence(
           pubkey: e.pubkey,
           status: userStatusFromString(statusStr),
@@ -1443,22 +1513,6 @@ class NostrController {
           stampLastSeen: false,
           avatarUrl: avatar,
           hasAvatarTag: avatar != null,
-          shopUpdate: hasShopUpdate,
-          shopStyle: e.tagValue('shop-style'),
-          shopFlair: e.tagValue('shop-flair'),
-          isSupporter: e.tagsNamed('shop-supporter')
-              .any((t) => t.length > 1 && t[1] == '1'),
-          // Inlined special cosmetics + Genesis edition (one `shop-cosmetic` tag
-          // per active cosmetic; a `shop-edition` tag carries the Genesis number).
-          // The PWA's canonical source is the backend `shop-status` fetch
-          // (active.cosmetics/active.editions); these inlined tags let presence
-          // carry them without a round-trip. See CROSS-FILE NEED for the fetch.
-          shopCosmetics: e
-              .tagsNamed('shop-cosmetic')
-              .where((t) => t.length > 1 && t[1].isNotEmpty)
-              .map((t) => t[1])
-              .toList(),
-          shopEdition: int.tryParse(e.tagValue('shop-edition') ?? ''),
         );
 
     // Resolve this user's D1 profile so their custom avatar replaces the
@@ -1632,9 +1686,203 @@ class NostrController {
         if (u.senderVerified) _callSignalHandler?.call(rumor);
       case EventKind.friendPresence: // 25054 — friends-only private presence
         if (u.senderVerified) _onFriendPresence(rumor, appState);
+      case EventKind.appData: // 30078 — settings transfer / own settings sync
+        if (u.senderVerified) _onSettingsRumor(rumor, u);
       default:
         break;
     }
+  }
+
+  /// Routes a gift-wrapped kind-30078 rumor (pms.js:840-890): a peer's
+  /// user-to-user settings transfer (`d` = `nym-settings-transfer-…`) becomes a
+  /// pending offer; our OWN `nymchat-settings-<section>` wrap (published live
+  /// by another of our devices) is auto-applied when newer than what we've
+  /// already applied — the PWA never prompts for its own sections.
+  void _onSettingsRumor(Map<String, dynamic> rumor, GiftWrapUnwrapped u) {
+    final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+    final tags = _tags(rumor);
+    final dTag = _tagValue(tags, 'd') ?? '';
+    final senderPubkey = rumor['pubkey'] as String? ?? '';
+
+    // Inbound user-to-user settings transfer (shop.js:1837
+    // `handleSettingsTransferEvent`).
+    if (dTag.startsWith('nym-settings-transfer-') && senderPubkey != self) {
+      _handleSettingsTransferRumor(rumor, tags, u, self);
+      return;
+    }
+
+    // Live cross-device settings section from OUR other device: apply when
+    // strictly newer than both the per-section applied ts and the stored sync
+    // ts (pms.js:858-888) — never re-surfaced as a manual offer.
+    final isOwn = self.isNotEmpty && senderPubkey == self;
+    final isCoreSettings =
+        dTag == 'nymchat-settings' || dTag.startsWith('nymchat-settings-');
+    if (isOwn && isCoreSettings && dTag != 'nymchat-settings') {
+      try {
+        final decoded = jsonDecode(rumor['content'] as String? ?? '');
+        if (decoded is! Map) return;
+        final rumorTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
+        final kv = _ref.read(keyValueStoreProvider);
+        final lastTs = int.tryParse(
+                kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
+            0;
+        if (rumorTs > (_appliedSectionTs[dTag] ?? 0) && rumorTs >= lastTs) {
+          _appliedSectionTs[dTag] = rumorTs;
+          if (rumorTs > lastTs) {
+            kv.setString(StorageKeys.lastSettingsSyncTs, '$rumorTs');
+          }
+          _applySyncedSettings(Map<String, dynamic>.from(decoded));
+        }
+      } catch (_) {
+        // Malformed settings blob — ignore.
+      }
+    }
+  }
+
+  /// Per-section applied-ts guard for live settings wraps (the PWA's
+  /// `_appliedSectionTs`, pms.js:877).
+  final Map<String, int> _appliedSectionTs = <String, int>{};
+
+  /// Surfaces an inbound user-to-user settings-transfer rumor as a pending
+  /// offer (shop.js:1837-1867): the `settings-transfer-to` tag must name us,
+  /// the payload must carry `fromPubkey` + `settings`, the rumor author must
+  /// equal `fromPubkey`, and previously-dismissed / already-pending event ids
+  /// are dropped. The user resolves it via [acceptUserSettingsTransfer] /
+  /// [rejectUserSettingsTransfer] in the settings modal.
+  void _handleSettingsTransferRumor(
+    Map<String, dynamic> rumor,
+    List<List<String>> tags,
+    GiftWrapUnwrapped u,
+    String self,
+  ) {
+    final transferTo = _tagValue(tags, 'settings-transfer-to');
+    if (transferTo == null || transferTo != self) return;
+
+    Map<String, dynamic> data;
+    try {
+      final decoded = jsonDecode(rumor['content'] as String? ?? '');
+      if (decoded is! Map) return;
+      data = Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return;
+    }
+    final fromPubkey = data['fromPubkey'] as String? ?? '';
+    final settings = data['settings'];
+    if (fromPubkey.isEmpty || settings is! Map) return;
+    if ((rumor['pubkey'] as String? ?? '') != fromPubkey) return;
+
+    final eventId = u.wrapId;
+    if (_dismissedTransferEvents().contains(eventId)) return;
+    final notifier = _ref.read(pendingUserSettingsTransfersProvider.notifier);
+    if (notifier.containsEventId(eventId)) return;
+
+    final short8 =
+        fromPubkey.length >= 8 ? fromPubkey.substring(0, 8) : fromPubkey;
+    final fromNym = data['fromNym'] as String? ?? '$short8...';
+    notifier.add(UserSettingsTransfer(
+      eventId: eventId,
+      fromPubkey: fromPubkey,
+      fromNym: fromNym,
+      nickname: data['nickname'] as String?,
+      avatarUrl: data['avatarUrl'] as String?,
+      settings: Map<String, dynamic>.from(settings),
+      transferredAt: (data['transferredAt'] as num?)?.toInt() ??
+          ((rumor['created_at'] as num?)?.toInt() ?? 0),
+    ));
+
+    _emitSystemMessage(
+        'Settings received from $short8...! Approve from settings modal.');
+  }
+
+  /// The persisted dismissed-transfer event ids (`nym_dismissed_transfers`,
+  /// app.js:553 / shop.js:1992).
+  Set<String> _dismissedTransferEvents() {
+    final kv = _ref.read(keyValueStoreProvider);
+    final raw = kv.getString(StorageKeys.dismissedTransfers);
+    if (raw == null || raw.isEmpty) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.whereType<String>().toSet();
+    } catch (_) {}
+    return <String>{};
+  }
+
+  /// Persists [eventId] as dismissed (shop.js `dismissTransferEvent`).
+  void _dismissTransferEvent(String eventId) {
+    final set = _dismissedTransferEvents()..add(eventId);
+    _ref.read(keyValueStoreProvider).setString(
+        StorageKeys.dismissedTransfers, jsonEncode(set.toList()));
+  }
+
+  /// Accepts an inbound user-to-user settings transfer (shop.js:1869-1899
+  /// `acceptSettingsTransfer`): applies the sender's nickname (persisted +
+  /// republished to our kind-0 profile), avatar, and full settings payload,
+  /// then republishes our own sync so the change propagates to our other
+  /// devices. Persists the dismissal so the offer never resurfaces.
+  Future<bool> acceptUserSettingsTransfer(String eventId) async {
+    final notifier = _ref.read(pendingUserSettingsTransfersProvider.notifier);
+    final transfer = notifier.removeByEventId(eventId);
+    if (transfer == null) return false;
+    final identity = _identity;
+
+    final nickname = transfer.nickname;
+    final avatarUrl = transfer.avatarUrl;
+    if (identity != null && avatarUrl != null && avatarUrl.isNotEmpty) {
+      // Avatar applies locally (`userAvatars.set` + `nym_avatar_url`,
+      // shop.js:1880-1884).
+      _ref
+          .read(keyValueStoreProvider)
+          .setString(StorageKeys.avatarUrl, avatarUrl);
+      _ref.read(appStateProvider.notifier).setUserPresence(
+            pubkey: identity.pubkey,
+            status: _ref.read(appStateProvider).users[identity.pubkey]?.status ??
+                UserStatus.online,
+            avatarUrl: avatarUrl,
+            hasAvatarTag: true,
+            stampLastSeen: false,
+          );
+    }
+    if (identity != null && nickname != null && nickname.isNotEmpty) {
+      // Nickname → identity + kind-0 republish (`this.nym = transfer.nickname`
+      // + `saveToNostrProfile`, shop.js:1872-1878); the avatar rides the same
+      // kind-0 when present.
+      await saveProfile(
+        name: nickname,
+        picture: (avatarUrl != null && avatarUrl.isNotEmpty)
+            ? avatarUrl
+            : null,
+      );
+    }
+
+    // Full settings payload through the same apply path as cross-device sync
+    // (the PWA routes it through `applyNostrSettings`), then republish our own
+    // sync (`saveSyncedSettings`).
+    _applySyncedSettings(transfer.settings);
+    final lightning = transfer.settings['lightningAddress'];
+    if (lightning is String && lightning.isNotEmpty && identity != null) {
+      _ref.read(keyValueStoreProvider).setString(
+          StorageKeys.lightningAddressFor(identity.pubkey), lightning);
+    }
+    syncSettings();
+
+    _dismissTransferEvent(eventId);
+    _emitSystemMessage(
+        'Settings from ${transfer.fromNym} applied successfully!');
+    return true;
+  }
+
+  /// Rejects an inbound user-to-user settings transfer (shop.js:1984-1990):
+  /// drops the offer and persists the dismissal in `nym_dismissed_transfers`.
+  bool rejectUserSettingsTransfer(String eventId) {
+    final notifier = _ref.read(pendingUserSettingsTransfersProvider.notifier);
+    final transfer = notifier.removeByEventId(eventId);
+    _dismissTransferEvent(eventId);
+    if (transfer != null) {
+      _emitSystemMessage(
+          'Settings transfer from ${transfer.fromNym} rejected.');
+      return true;
+    }
+    return false;
   }
 
   /// Ingests an inbound friends-only presence rumor (kind 25054,
@@ -1752,6 +2000,22 @@ class NostrController {
           !_ref.read(appStateProvider).isFriend(m.pubkey)) {
         return;
       }
+    }
+    // Nymbot replies may lead with a <think> reasoning block — split it into
+    // its own field for ANY verified-bot sender at ingest (`handleGiftWrapDM`,
+    // pms.js:1255-1265, the one path every bot reply flows through), so
+    // previews/search see only the visible reply and the renderer shows the
+    // collapsed Reasoning section no matter how the wrap arrived (relay echo,
+    // archive/backlog restore, delegated-signer accounts).
+    if (!m.isOwn && isVerifiedBot(m.pubkey)) {
+      final tm = RegExp(r'^\s*<think>([\s\S]*?)<\/think>\s*',
+              caseSensitive: false)
+          .firstMatch(m.content);
+      if (tm != null && m.content.substring(tm.end).trim().isNotEmpty) {
+        m.thinking = tm.group(1)?.trim();
+        m.content = m.content.substring(tm.end);
+      }
+      m.isBot = true;
     }
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
@@ -2205,6 +2469,12 @@ class NostrController {
       Map<String, dynamic> rumor, AppStateNotifier appState) {
     // Reactions land in app_state's reaction store via a synthetic event.
     final tags = _tags(rumor);
+    // Register any NIP-30 custom emoji declared on the rumor (the PWA ingests
+    // EVERY unwrapped DM rumor's tags before the kind-7 routing, pms.js:898)
+    // so a private custom-emoji reaction resolves to its image.
+    if (tags.isNotEmpty) {
+      _ref.read(liveCustomEmojiProvider.notifier).ingestEmojiTags(tags);
+    }
     final target = _tagValue(tags, 'e');
     if (target == null) return;
     final pubkey = rumor['pubkey'] as String? ?? '';
@@ -2223,6 +2493,11 @@ class NostrController {
         ['e', target],
         ['p', targetAuthor.isNotEmpty ? targetAuthor : pubkey],
         if (action) ['action', 'remove'],
+        // Forward the rumor's NIP-30 emoji declarations so downstream
+        // consumers of the synthetic event keep them (pms.js keeps the full
+        // rumor tags through `handleReaction`).
+        for (final t in tags)
+          if (t.length >= 3 && t[0] == 'emoji') ['emoji', t[1], t[2]],
       ],
       content: content,
     );
@@ -2310,6 +2585,12 @@ class NostrController {
     // Ignore the receipt we just published ourselves echoing back.
     if (_ownPublishedZapIds.contains(event.id)) return;
     if (_ref.read(appStateProvider).blockedUsers.contains(event.pubkey)) return;
+
+    // Archive channel/pm (keyed on the e tag) and profile receipts (keyed on
+    // the recipient pubkey) to D1 so `zap-get` backfill can serve them
+    // (zaps.js:1164 `if (boltTag) this._archiveZapReceipt(…)`; the scope +
+    // e-tag gating lives inside [ZapArchive.archive]).
+    if (event.tagValue('bolt11') != null) _zapArchive?.archive(event);
 
     final info = ZapLogic.parseReceipt(event);
     if (info == null) {
@@ -2795,15 +3076,53 @@ class NostrController {
     }
 
     if (view.kind == ViewKind.pm) {
+      // Bot `?` control commands are handled entirely on-device and intercepted
+      // BEFORE any echo/encrypt/publish (pms.js:1581-1591): they are never
+      // encrypted, published, shown as bubbles, or stored — `?git` can carry a
+      // GitHub access token that must never reach the relays.
+      if (isVerifiedBot(view.id)) {
+        if (botPMCommandRe.hasMatch(trimmed)) {
+          unawaited(_ref
+              .read(botChatControllerProvider.notifier)
+              .handleBotPMCommand(trimmed));
+          return;
+        }
+        // A normal message to the bot routes through the engine's send path so
+        // exactly ONE bot-addressed wrap is published and its id rides the paid
+        // request (`sendPM` → `sendNIP17PM` → `_handleBotPM(content, wrapped)`,
+        // pms.js:1595-1598). The engine echoes the message into the canonical
+        // store itself — publishing here via `publishPM` (which never surfaces
+        // its wrap ids) would make the observer build and publish a SECOND
+        // bot-addressed wrap just to have an eventId for the worker.
+        unawaited(_ref
+            .read(botChatControllerProvider.notifier)
+            .sendUserBotPM(trimmed));
+        return;
+      }
       final nymMessageId = PmLogic.generateSharedEventId();
       final echo = appState.sendLocal(trimmed, nymMessageId: nymMessageId);
       if (service == null || identity == null) return;
-      final rumor = PmLogic.buildPmRumor(
+      final base = PmLogic.buildPmRumor(
         selfPubkey: identity.pubkey,
         recipientPubkey: view.id,
         content: trimmed,
         nymMessageId: nymMessageId,
       );
+      // buildPmRumor has no extra-tag seam, so append the NIP-30 declarations
+      // for any known custom `:shortcode:` in the body to the rumor we just
+      // built (pms.js:313 spreads `...customEmojiTagsForContent(content)`).
+      final emojiTags = _ref
+          .read(liveCustomEmojiProvider.notifier)
+          .emojiTagsForContent(trimmed);
+      final rumor = emojiTags.isEmpty
+          ? base
+          : UnsignedEvent(
+              pubkey: base.pubkey,
+              createdAt: base.createdAt,
+              kind: base.kind,
+              tags: [...base.tags, ...emojiTags],
+              content: base.content,
+            );
       try {
         await service.publishPM(
           rumor: rumor,
@@ -2813,11 +3132,15 @@ class NostrController {
         // Queue for automatic re-send until a delivery receipt acks it
         // (pms.js `trackPendingDM`). Cleared in [_onReceiptOrTyping] the moment
         // a receipt for this `nymMessageId` lands, or dropped after the cap.
-        _trackPendingDm(
-          nymMessageId: nymMessageId,
-          rumor: rumor,
-          recipientPubkey: view.id,
-        );
+        // The verified bot never sends receipts (the engine advances delivery
+        // locally), so its PMs are never queued for auto-resend.
+        if (!isVerifiedBot(view.id)) {
+          _trackPendingDm(
+            nymMessageId: nymMessageId,
+            rumor: rumor,
+            recipientPubkey: view.id,
+          );
+        }
       } catch (_) {
         // Publish failed → flip the bubble to the failed "!" state (F02; the
         // channel branch already does this — PMs were silently left "✓ sent").
@@ -2845,6 +3168,11 @@ class NostrController {
         content: trimmed,
         nymMessageId: nymMessageId,
         ephemeralPk: next.pk,
+        // NIP-30 declarations for any known custom `:shortcode:` in the body
+        // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`).
+        extraTags: _ref
+            .read(liveCustomEmojiProvider.notifier)
+            .emojiTagsForContent(trimmed),
       );
       await service.publishGroupMessage(
         rumor: rumor,
@@ -2852,6 +3180,37 @@ class NostrController {
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
       );
+    }
+  }
+
+  /// Keypair-mode save side effects (app.js:3873-3890, the `saveSettings`
+  /// random-keypair block, gated on `!isNostrLoggedIn()`):
+  ///   * random/hardcore → remove the saved `nym_session_nsec` so the next
+  ///     reload generates a fresh keypair;
+  ///   * persistent → save the CURRENT keypair's nsec when none is stored, so
+  ///     the identity the user is using right now survives reload (instead of
+  ///     a stale pre-random keypair resurrecting from the keystore).
+  Future<void> _onKeypairModeChanged(String mode) async {
+    final identity = _identity;
+    // Durable logins never touch the ephemeral session key (the PWA skips the
+    // whole block for logged-in users).
+    if (identity == null || identity.loginMethod != null) return;
+    final secure = SecureStore();
+    try {
+      if (mode == 'random' || mode == 'hardcore') {
+        await secure.remove(SecretKeys.sessionNsec);
+      } else {
+        final existing = await secure.get(SecretKeys.sessionNsec);
+        if ((existing == null || existing.isEmpty) &&
+            identity.privkey != null) {
+          await secure.set(
+            SecretKeys.sessionNsec,
+            bech32.encodeNsecBytes(identity.privkey!),
+          );
+        }
+      }
+    } catch (_) {
+      // Best-effort (matches the PWA's silent try/catch around nsecEncode).
     }
   }
 
@@ -2903,6 +3262,8 @@ class NostrController {
     oldService.rotateIdentity(rotated, signer);
     _identity = rotated;
     _signer = signer;
+    // Re-scope the per-pubkey settings reads (image blur) to the new identity.
+    _ref.read(settingsProvider.notifier).activePubkey = rotated.pubkey;
 
     // Refresh the sidebar (header avatar seed + nym) without wiping the
     // conversation — the native `updateSidebarAvatar`. (NOT goLive, which would
@@ -3353,9 +3714,10 @@ class NostrController {
   /// Clears all cached channels / PMs / profiles / reactions (settings.js
   /// "Clear cache"). Flushes any pending dirty writes first so an in-flight
   /// debounce can't immediately re-persist what we just wiped, drops the dirty
-  /// sets, then wipes the store. Also clears the in-memory hydrated profile /
-  /// reaction caches via the cache wipe; the live app_state is untouched (the
-  /// PWA clears the persisted cache, not the open session).
+  /// sets, wipes the store, then mirrors the wipe in the OPEN SESSION too —
+  /// the PWA clears `nym.messages` / `nym.pmMessages` / `nym.reactions` /
+  /// `nym.userBios` and empties the rendered `#messages` after `resetCache`
+  /// (app.js:4013-4030) so the UI immediately reflects the cleared state.
   Future<void> clearCache() async {
     final cache = _cache;
     if (cache == null || !cache.isOpen) return;
@@ -3366,6 +3728,24 @@ class NostrController {
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
     await cache.wipe();
+    // In-memory mirror (app.js:4013-4030): `messages` holds channel + PM +
+    // group histories (the PWA's `messages` + `pmMessages`), `reactions` is
+    // the tally map, and the users' `about` fields are the PWA's `userBios`.
+    final appState = _ref.read(appStateProvider);
+    appState.messages.clear();
+    appState.reactions.clear();
+    for (final u in appState.users.values) {
+      u.profile?.about = null;
+    }
+    // The PWA also wipes the session dedup sets (`processedPMEventIds` /
+    // `deletedEventIds`, app.js:4021-4022) — here `_seenIds` /
+    // `_seenNymMessageIds` — so relay backlog can re-ingest the wiped
+    // conversations instead of being dropped as already-seen duplicates.
+    _ref.read(appStateProvider.notifier).clearSessionDedup();
+    // Publish the mutated state (an empty hydrate is a bare
+    // `state = state.copyWith()` republish) so every open conversation
+    // re-renders from the now-empty store — the PWA's emptied `#messages`.
+    _ref.read(appStateProvider.notifier).hydrateReactions(const {});
   }
 
   /// Wipes the on-device PM + group-chat cache (the shared `pms` table). Called
@@ -3551,7 +3931,16 @@ class NostrController {
       eventId: GroupLogic.generateGroupId(),
     );
 
-    // If we were viewing the group, fall back to the default channel.
+    // Stamp the group conversation's read watermark to now and drop its unread
+    // badge (groups.js:1818-1821: `channelLastRead.set(groupConvKey, now)` +
+    // `unreadCounts.delete` + persist), so a later re-invite can't resurrect a
+    // stale unread count. `clearUnread` also fires the watermark persistence.
+    appState.clearUnread(GroupLogic.groupStorageKey(groupId));
+
+    // If we were viewing the group, fall back to the last-viewed channel
+    // (groups.js:1843-1845 `switchChannel(this.currentChannel || 'nymchat')` —
+    // `currentChannel` is nulled while a group is open, so this resolves to
+    // the default channel exactly like the PWA).
     if (_ref.read(appStateProvider).view.kind == ViewKind.group &&
         _ref.read(appStateProvider).view.id == groupId) {
       appState.switchView(ChatView.channel('nymchat'));
@@ -3981,6 +4370,18 @@ class NostrController {
 
     final kind = originalKind ?? _viewDeletionKind(state);
 
+    // Locate the channel (if any) holding this message BEFORE the local
+    // removal, so the D1 purge can name it (nostr-core.js:1862-1873 scans the
+    // in-memory store for the message id).
+    String? channelName;
+    for (final entry in state.messages.entries) {
+      if (!entry.key.startsWith('#')) continue;
+      if (entry.value.any((m) => m.id == messageId)) {
+        channelName = entry.key.substring(1);
+        break;
+      }
+    }
+
     appState.removeMessage(messageId);
     _markDirty(view.storageKey);
 
@@ -3994,6 +4395,26 @@ class NostrController {
     );
     final signed = await _signer!.sign(unsigned);
     await service.pool.publish(signed);
+
+    // Mirror the NIP-09 deletion into the D1 archive (`_propagateDeletionToD1`,
+    // nostr-core.js:1858-1885): the channel copy via the PUBLIC `channel-delete`
+    // (the signed kind-5 IS the authorization, storage.js:1123-1150) and our
+    // own archived gift wrap via the authed `pm-delete` (storage.js:945-961) —
+    // otherwise the "deleted" message resurrects on the next D1 rehydration.
+    final sync = _storageSync;
+    if (sync != null) {
+      if (channelName != null) {
+        unawaited(sync.channelDelete(channelName, signed.toJson()));
+      }
+      // PM/group wraps we archived are keyed by their gift-wrap event ids;
+      // gate on the same archive-allowed check the PWA uses
+      // (`_pmArchiveAllowed`: durable identity + cachePMs).
+      if (kind == '${EventKind.giftWrap}' &&
+          sync.durableIdentity &&
+          _ref.read(settingsProvider).cachePMs) {
+        unawaited(sync.pmDelete([messageId]));
+      }
+    }
     _emitSystemMessage('Deletion request sent to relays');
     return true;
   }
@@ -4027,22 +4448,16 @@ class NostrController {
   PresenceStatusMode get _statusMode =>
       presenceStatusModeFrom(_ref.read(settingsProvider).showStatus);
 
-  /// The self user's active shop cosmetics, read from the shop controller so a
-  /// presence `shop-update` carries renderable flair (see PresenceCosmetics).
-  PresenceCosmetics _selfCosmetics() {
-    final active = _ref.read(shopControllerProvider).active;
-    return PresenceCosmetics(
-      style: active.style,
-      flair: active.flair.isNotEmpty ? active.flair.last : null,
-      supporter: active.supporter,
-    );
-  }
-
   /// Publishes our presence (kind-30078 nym-presence). [status] is our real
   /// status; the service computes the public status from [_statusMode]. Always
-  /// carries the avatar + shop-update tags so others can render our latest
-  /// avatar/flair from the single replaceable event.
-  Future<void> publishPresence(String status, {String awayMessage = ''}) async {
+  /// carries the avatar tag so others can render our latest avatar from the
+  /// single replaceable event. [shopUpdate] adds the one-off
+  /// `['shop-update','1']` cache-bust flag — ONLY set right after our active
+  /// shop items change (`publishShopUpdate`, nostr-core.js:2876-2885); routine
+  /// presence never carries it (nostr-core.js:2743-2751), so peers aren't
+  /// forced into a fresh D1 `shop-status` fetch on every broadcast.
+  Future<void> publishPresence(String status,
+      {String awayMessage = '', bool shopUpdate = false}) async {
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
@@ -4054,8 +4469,7 @@ class NostrController {
       awayMessage: awayMessage,
       mode: _statusMode,
       avatarUrl: (avatar != null && avatar.isNotEmpty) ? avatar : null,
-      shopUpdate: true,
-      cosmetics: _selfCosmetics(),
+      shopUpdate: shopUpdate,
     );
     _lastPresenceBroadcast = DateTime.now().millisecondsSinceEpoch;
 
@@ -4470,6 +4884,12 @@ class NostrController {
     if (service == null || identity == null) return false;
     final appState = _ref.read(appStateProvider.notifier);
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // NIP-30 declarations for a custom `:shortcode:` reaction — the PWA
+    // spreads `...customEmojiTagsForContent(emoji)` onto BOTH the group and
+    // 1:1 rumors, add and remove alike (reactions.js:1018-1041, 1139-1161).
+    final emojiTags = _ref
+        .read(liveCustomEmojiProvider.notifier)
+        .emojiTagsForContent(emoji);
 
     // Group message reaction: gift-wrap to all members with ['g',groupId].
     final view = _ref.read(appStateProvider).view;
@@ -4486,6 +4906,7 @@ class NostrController {
           ['e', messageId],
           ['k', '14'],
           if (remove) ['action', 'remove'],
+          ...emojiTags,
         ],
         content: emoji,
       );
@@ -4507,6 +4928,7 @@ class NostrController {
         ['p', target],
         ['k', '1059'],
         if (remove) ['action', 'remove'],
+        ...emojiTags,
       ],
       content: emoji,
     );
@@ -4710,6 +5132,36 @@ class NostrController {
     return entry;
   }
 
+  /// Column-open side effects WITHOUT switching the active view — the PWA's
+  /// `_cvSubscribeChannel` (columns.js:520-540), fired for every channel column
+  /// seeded/added/repurposed by the columns deck:
+  ///   * register + persist the channel (`addChannel` + `userJoinedChannels`),
+  ///   * restore its D1 history (`channelRestoreFromD1` →
+  ///     [_backfillChannelArchive]),
+  ///   * connect the geohash's geo relays (`connectToGeoRelays`) — the native
+  ///     relay pool owns reconnection, so the PWA's `startGeoRelayKeepAlive` /
+  ///     `ensureDefaultRelaysConnected` have no separate counterpart here, and
+  ///     channel messages arrive on the always-on shared channel subscription
+  ///     (`loadChannelFromRelays`'s job in the PWA),
+  ///   * (re)subscribe the typing/receipt feed when this column IS the active
+  ///     conversation ([NostrService.subscribeChannelTyping] is single-sub —
+  ///     latest-wins — so a background column must not steal the focused
+  ///     column's feed).
+  void subscribeChannelColumn(String channel, {String geohash = ''}) {
+    addChannel(channel, geohash: geohash);
+    final key = geohash.isNotEmpty ? geohash : channel;
+    // D1 archive restore (throttled/idempotent inside; no-op pre-boot).
+    unawaited(_backfillChannelArchive(key));
+    if (isChannelGeohash(key)) {
+      unawaited(_service?.connectGeoRelaysForGeohash(key) ?? Future.value());
+    }
+    final view = _ref.read(appStateProvider).view;
+    if (view.kind == ViewKind.channel &&
+        view.id.toLowerCase() == key.toLowerCase()) {
+      _subscribeActiveChannelTyping();
+    }
+  }
+
   /// Removes [key] (not `#nymchat`) and persists (`removeChannel`).
   bool removeChannel(String key) {
     final ok = _ref.read(appStateProvider.notifier).removeChannel(key);
@@ -4731,6 +5183,16 @@ class NostrController {
     _persistSet(StorageKeys.hiddenChannels,
         _ref.read(appStateProvider).hiddenChannels);
     return ok;
+  }
+
+  /// Un-hides [key] and persists `nym_hidden_channels` (the mirror of
+  /// [hideChannel] — `toggleHideChannel`'s remove branch + `saveHiddenChannels`,
+  /// channels.js). Callers should use this instead of the bare
+  /// [AppStateNotifier.unhideChannel] so the un-hide survives a relaunch.
+  void unhideChannel(String key) {
+    _ref.read(appStateProvider.notifier).unhideChannel(key);
+    _persistSet(StorageKeys.hiddenChannels,
+        _ref.read(appStateProvider).hiddenChannels);
   }
 
   /// Blocks [key] (not `#nymchat`) and persists `nym_blocked_channels`.
@@ -4987,6 +5449,9 @@ class NostrController {
       if (_ownPublishedZapIds.length > 500) {
         _ownPublishedZapIds.remove(_ownPublishedZapIds.first);
       }
+      // Archive our own published channel receipt to D1 (zaps.js:1562
+      // `_archiveZapReceipt(signed, …)`) so other clients' backfill sees it.
+      _zapArchive?.archive(signed);
     }
   }
 
@@ -5099,7 +5564,17 @@ class NostrController {
         for (final key in pmKeys) {
           final msgs = state.messages[key];
           if (msgs != null) {
-            await cache.savePmMessages(key, _capPm(msgs),
+            // Transient Nymbot info bubbles never persist (the PWA's
+            // `_displayBotInfoMessage`/help/welcome rows are display-only —
+            // pms.js persists real messages via `persistPMMessages` but never
+            // these synthetic ids).
+            final persistable = msgs
+                .where((m) =>
+                    !m.id.startsWith('nymbot-info-') &&
+                    !m.id.startsWith('nymbot-help-') &&
+                    m.id != 'nymbot-welcome')
+                .toList();
+            await cache.savePmMessages(key, _capPm(persistable),
                 enabled: cachePms, executor: txn);
           }
         }
@@ -5170,6 +5645,8 @@ class NostrController {
         ));
     api.activateApiSocket();
     _storageSync = sync;
+    _zapArchive?.dispose();
+    _zapArchive = ZapArchive(sync);
 
     // N26: republish the notification read-state wrap whenever the seen-keys map
     // grows here (a notification read/dismissed), the native equivalent of the
@@ -5182,6 +5659,31 @@ class NostrController {
     _ref.read(otherUsersShopProvider.notifier).selfPubkey =
         identity.pubkey.toLowerCase();
 
+    // Broadcast the one-off `['shop-update','1']` presence after our active
+    // shop items change (shop.js:428 → `publishShopUpdate`,
+    // nostr-core.js:2876-2885) so peers drop their cached record and re-fetch
+    // our D1 `shop-status`. PWA status choice: online when enabled, else the
+    // payload's mode gate broadcasts `hidden`.
+    final shop = _ref.read(shopControllerProvider.notifier);
+    shop.onActiveItemsPublished =
+        () => unawaited(publishPresence('online', shopUpdate: true));
+
+    // Publish the server's pre-signed gift/transfer `giftEvent` DM to the DM
+    // relays so the recipient learns of the item immediately (shop.js:1349/
+    // 1748 `sendDMToRelays(['EVENT', data.giftEvent])`).
+    shop.giftEventPublisher = (giftEvent) {
+      try {
+        final ev = NostrEvent.fromJson(giftEvent);
+        unawaited(_service?.pool.publishDm(ev) ?? Future<int>.value(0));
+      } catch (_) {
+        // Malformed gift event — dropped exactly like a PWA relay miss.
+      }
+    };
+
+    // Surface reconciliation results as system chat lines (shop.js
+    // `displaySystemMessage` inside `_reconcileShopEntry`).
+    shop.onSystemMessage = _emitSystemMessage;
+
     // Fire a debounced encrypted-settings publish whenever a synced setting
     // changes (the PWA's `nostrSettingsSave()` peppered through every setter).
     _ref.read(settingsProvider.notifier).onSyncedChange = syncSettings;
@@ -5190,6 +5692,11 @@ class NostrController {
     // per-open `channelRestoreFromD1` in `switchChannel`, plus the ephemeral
     // group inbox). Best-effort; gated/idempotent inside the handler.
     _ref.read(appStateProvider.notifier).onViewOpened = _onViewOpened;
+
+    // Persist inbound / engine-injected PM+group messages on insert (the PWA's
+    // per-insert `persistPMMessages`, pms.js:1307) — covers the Nymbot thread,
+    // whose messages arrive via `ingestPMMessage` outside any send path.
+    _ref.read(appStateProvider.notifier).onPmMessageIngested = _markDirty;
 
     // Persist the closed-PM set on every mutation so a deleted PM stays deleted
     // across a relaunch (F02; pms.js `nym_closed_pms` / `nym_closed_pm_times`).
@@ -5244,20 +5751,64 @@ class NostrController {
         markVisibleChannelMessagesRead();
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
+        // PM-scope zap badges for the rendered group backlog (messages.js:3112
+        // gathers the rendered ids → `_backfillZapReceipts`, pm scope).
+        _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
       case ViewKind.pm:
         // Send a read receipt to the peer for each of their loaded messages
         // (PWA `openPM` → read-receipt send, pms.js:3015-3019; F02 blocker —
         // `sendReadReceipt` previously had zero callers). Scope-gated + deduped.
         markVisiblePmMessagesRead(view.id);
+        // PM-scope zap badges for the rendered conversation (messages.js:3112).
+        _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
     }
+  }
+
+  /// Backfills archived kind-9735 receipts for every message currently loaded
+  /// under [storageKey] — the native `_backfillZapReceipts` (zaps.js:5-27,
+  /// called with the rendered ids at messages.js:3112-3120). [scope] is `'pm'`
+  /// for PM/group conversations, `'channel'` otherwise. PM entries also push
+  /// the shared `nymMessageId` when it differs from the wrap id (the PWA's
+  /// `m.isPM && m.nymMessageId` branch). Each returned receipt rides the same
+  /// handler live receipts take ([_onPublicZapReceipt] = `handleZapReceipt`).
+  void _backfillZapReceiptsFor(String storageKey, {required String scope}) {
+    final archive = _zapArchive;
+    if (archive == null) return;
+    final msgs = _ref.read(appStateProvider).messages[storageKey];
+    if (msgs == null || msgs.isEmpty) return;
+    final ids = <String>[];
+    for (final m in msgs) {
+      if (m.id.isNotEmpty) ids.add(m.id);
+      final shared = m.nymMessageId;
+      if (scope == 'pm' &&
+          shared != null &&
+          shared.isNotEmpty &&
+          shared != m.id) {
+        ids.add(shared);
+      }
+    }
+    if (ids.isEmpty) return;
+    final appState = _ref.read(appStateProvider.notifier);
+    unawaited(archive.backfill(
+      ids,
+      scope,
+      (receipt) => _onPublicZapReceipt(receipt, appState),
+    ));
   }
 
   /// App returned to the foreground. Re-hydrate the open conversation from D1 so
   /// the active channel/group immediately catches up on anything missed while
   /// backgrounded — the native equivalent of the PWA's `visibilitychange →
   /// backfillFromD1OnReconnect`. Live relay feeds resume via the service's own
-  /// socket reconnect, so this only needs the per-view archive top-up.
-  void onAppResumed() => _onViewOpened(_ref.read(appStateProvider).view);
+  /// socket reconnect, so this only needs the per-view archive top-up. Also
+  /// re-checks pending shop purchases (the PWA's visibility/connect trigger,
+  /// relays.js:490) and clears the focused at-bottom column's unread badge in
+  /// columns mode (`_cvMarkVisibleColumnsRead`, relays.js:532/584).
+  void onAppResumed() {
+    _onViewOpened(_ref.read(appStateProvider).view);
+    _ref.read(appStateProvider.notifier).markVisibleColumnsRead();
+    unawaited(_reconcileShopPurchases());
+  }
 
   /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
   /// 60s freshness window lives in [StorageSync.channelGet]; this set just
@@ -5371,6 +5922,11 @@ class NostrController {
           // Skip a malformed archived event (mirrors the PWA's per-event catch).
         }
       }
+      // Zap-badge backfill for the hydrated history (`_backfillZapReceipts`
+      // with the rendered ids, messages.js:3112-3120; channel scope).
+      // `channel-get` streams zaps rows only within the channel window — this
+      // also recovers receipts on older cached messages.
+      _backfillZapReceiptsFor('#$channelKey', scope: 'channel');
     } catch (_) {
       // Best-effort: live subscription continues regardless.
     } finally {
@@ -5417,6 +5973,22 @@ class NostrController {
     if (sync == null) return;
     await _mergeRemoteSettings(sync);
     await _restorePmArchive(sync);
+    // Profile-zap backfill for ourselves (relays.js:2819-2820:
+    // `_backfillZapReceiptsFromD1([this.pubkey], 'profile')`) — profile
+    // receipts are keyed on the recipient pubkey, not an event id.
+    final selfPk = _identity?.pubkey;
+    if (selfPk != null && _zapArchive != null) {
+      final appState = _ref.read(appStateProvider.notifier);
+      unawaited(_zapArchive!.backfill(
+        [selfPk],
+        'profile',
+        (receipt) => _onPublicZapReceipt(receipt, appState),
+      ));
+    }
+    // Custom-emoji hydration from D1 (`_emojiRestoreFromD1`, emoji.js:198) —
+    // packs archived by the relay-pool worker but no longer on relays still
+    // appear. Runs alongside the live kind-30030 relay subscription.
+    unawaited(_restoreEmojiFromD1(sync));
     // Load the user's own shop record (owned + active cosmetics) from D1 so their
     // purchased flair/style applies on a fresh device (PWA `loadShopFromServer`,
     // shop.js:358). Local-key only (remote signers can't auth the read).
@@ -5424,6 +5996,94 @@ class NostrController {
     if (id != null && id.privkey != null) {
       unawaited(_ref.read(shopControllerProvider.notifier).loadFromServer(
           ShopIdentity(pubkey: id.pubkey, privkey: id.privkey)));
+      // Finalize any shop purchase that settled while the app was closed (the
+      // PWA fires `reconcilePendingPurchases` on connect, relays.js:490).
+      unawaited(_reconcileShopPurchases());
+    }
+  }
+
+  // --- Shop NIP-57 receipt fallback (shop.js `_listenForShopReceipt`) --------
+
+  Subscription? _shopReceiptSub;
+  Timer? _shopReceiptTimer;
+  Completer<bool>? _shopReceiptCompleter;
+
+  /// Fallback payment detection for a shop buy whose invoice has neither a
+  /// LUD-21 `verify` nor a `serverVerify` URL (shop.js:1483-1511
+  /// `_listenForShopReceipt` + zaps.js:1181-1189): REQ `kinds:[9735]`,
+  /// `#p:[bot pubkey]`, `since: now-60`, `limit: 25`, and match the receipt's
+  /// `bolt11` tag against the invoice [bolt11] (case-insensitive). Completes
+  /// `true` when the matching receipt lands, `false` on the 180s timeout (the
+  /// modal then shows the "Payment not detected yet" status). A new call
+  /// replaces any previous wait; [clearShopReceiptWait] cancels it (modal
+  /// closed / verify path took over).
+  Future<bool> listenForShopReceipt(String bolt11) {
+    clearShopReceiptWait();
+    final completer = Completer<bool>();
+    _shopReceiptCompleter = completer;
+    final service = _service;
+    if (service == null || bolt11.isEmpty) {
+      completer.complete(false);
+      _shopReceiptCompleter = null;
+      return completer.future;
+    }
+    final want = bolt11.toLowerCase();
+    final sub = service.pool.subscribe([
+      NostrFilter(
+        kinds: const [EventKind.zapReceipt],
+        since: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 60,
+        limit: 25,
+        tags: {
+          'p': const [nymbotPubkey],
+        },
+      ),
+    ]);
+    _shopReceiptSub = sub;
+    sub.events.listen((event) {
+      final bolt = event.tagValue('bolt11');
+      if (bolt == null || bolt.toLowerCase() != want) return;
+      if (_shopReceiptCompleter == completer && !completer.isCompleted) {
+        clearShopReceiptWait(result: true);
+      }
+    }, onError: (_) {});
+    // 180s timeout (shop.js:1499 `setTimeout(…, 180000)`).
+    _shopReceiptTimer = Timer(const Duration(seconds: 180), () {
+      if (_shopReceiptCompleter == completer && !completer.isCompleted) {
+        clearShopReceiptWait(result: false);
+      }
+    });
+    return completer.future;
+  }
+
+  /// Cancels the pending shop-receipt wait (shop.js `_clearShopReceiptWait`),
+  /// closing the REQ and the timer. [result] resolves an in-flight
+  /// [listenForShopReceipt] future (defaults to false = not detected).
+  void clearShopReceiptWait({bool result = false}) {
+    _shopReceiptSub?.close();
+    _shopReceiptSub = null;
+    _shopReceiptTimer?.cancel();
+    _shopReceiptTimer = null;
+    final completer = _shopReceiptCompleter;
+    _shopReceiptCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(result);
+    }
+  }
+
+  /// Re-checks persisted pending shop purchases against `shop-check` and claims
+  /// any that settled (shop.js `reconcilePendingPurchases`, triggered on
+  /// connect + foreground from relays.js:490). Local-key identities only (the
+  /// claim needs NIP-98 auth). Best-effort.
+  Future<void> _reconcileShopPurchases() async {
+    final id = _identity;
+    if (id == null || id.privkey == null) return;
+    try {
+      await _ref.read(shopControllerProvider.notifier).reconcilePendingPurchases(
+            ShopIdentity(pubkey: id.pubkey, privkey: id.privkey),
+            gifterNym: id.nym,
+          );
+    } catch (_) {
+      // Left for the next foreground (shop.js:1412).
     }
   }
 
@@ -5498,6 +6158,26 @@ class NostrController {
       }
     }
 
+    // Theme + color mode (applyNostrSettings, app.js:6105-6117): `s.theme` →
+    // `applyTheme` + `nym_theme`, `s.colorMode` → `nym_color_mode` +
+    // `applyColorMode`. Native parses to the typed enums (unknown theme ids
+    // fall back to bitchat, matching `Settings.fromStore`).
+    final theme = p['theme'];
+    if (theme is String && theme.isNotEmpty) {
+      try {
+        c.setTheme(NymThemeKey.fromId(theme));
+      } catch (_) {}
+    }
+    final cm = p['colorMode'];
+    if (cm is String && cm.isNotEmpty) {
+      try {
+        c.setColorMode(cm == 'light'
+            ? ColorMode.light
+            : cm == 'dark'
+                ? ColorMode.dark
+                : ColorMode.auto);
+      } catch (_) {}
+    }
     str('sound', c.setSound);
     boolean('autoscroll', c.setAutoscroll);
     boolean('showTimestamps', c.setShowTimestamps);
@@ -5508,12 +6188,39 @@ class NostrController {
     boolean('columnsWallpaper', c.setColumnsWallpaper);
     str('nickStyle', c.setNickStyle);
     str('wallpaperType', c.setWallpaperType);
-    integer('textSize', c.setTextSize);
+    // Text size only applies within the PWA's accepted range (app.js:6310:
+    // `>= 12 && <= 28` — out-of-range values are ignored, not clamped).
+    final textSize = p['textSize'];
+    if (textSize is num && textSize >= 12 && textSize <= 28) {
+      try {
+        c.setTextSize(textSize.toInt());
+      } catch (_) {}
+    }
     boolean('transparencyEnabled', c.setTransparencyEnabled);
     boolean('dmForwardSecrecyEnabled', c.setDmForwardSecrecy);
     integer('dmTTLSeconds', c.setDmTtlSeconds);
-    str('readReceiptsScope', c.setReadReceiptsScope);
-    str('typingIndicatorsScope', c.setTypingIndicatorsScope);
+    // Indicator scopes are validated against the five valid values, with the
+    // legacy `*Enabled` boolean fallback (applyNostrSettings, app.js:6165-6190)
+    // — an out-of-enum value must never reach the settings dropdowns.
+    void scope(String scopeKey, String enabledKey, void Function(String) set) {
+      final v = p[scopeKey];
+      if (v is String && Settings.indicatorScopes.contains(v)) {
+        try {
+          set(v);
+        } catch (_) {}
+        return;
+      }
+      final enabled = p[enabledKey];
+      if (enabled is bool) {
+        try {
+          set(enabled ? 'everywhere' : 'disabled');
+        } catch (_) {}
+      }
+    }
+
+    scope('readReceiptsScope', 'readReceiptsEnabled', c.setReadReceiptsScope);
+    scope('typingIndicatorsScope', 'typingIndicatorsEnabled',
+        c.setTypingIndicatorsScope);
     str('acceptPMs', c.setAcceptPMs);
     str('acceptCalls', c.setAcceptCalls);
     boolean('groupChatPMOnlyMode', c.setGroupChatPMOnlyMode);
@@ -5531,13 +6238,63 @@ class NostrController {
       } catch (_) {}
     }
     boolean('gesturesEnabled', c.setGesturesEnabled);
-    str('swipeLeftAction', c.setSwipeLeftAction);
-    str('swipeRightAction', c.setSwipeRightAction);
-    integer('swipeThreshold', c.setSwipeThreshold);
-    str('swipeReactEmoji', c.setSwipeReactEmoji);
+    // Swipe actions/threshold/emoji apply only when valid (applyNostrSettings,
+    // app.js:6204-6224: VALID_SWIPE_ACTIONS list, threshold 30-120, emoji 1-8
+    // chars) — a legacy/corrupt value must not break the Mobile dropdowns.
+    const validSwipeActions = [
+      'quote', 'translate', 'copy', 'react', 'zap', 'slap', 'hug', 'none',
+    ];
+    final swipeLeft = p['swipeLeftAction'];
+    if (swipeLeft is String && validSwipeActions.contains(swipeLeft)) {
+      try {
+        c.setSwipeLeftAction(swipeLeft);
+      } catch (_) {}
+    }
+    final swipeRight = p['swipeRightAction'];
+    if (swipeRight is String && validSwipeActions.contains(swipeRight)) {
+      try {
+        c.setSwipeRightAction(swipeRight);
+      } catch (_) {}
+    }
+    final swipeThreshold = p['swipeThreshold'];
+    if (swipeThreshold is num &&
+        swipeThreshold >= 30 &&
+        swipeThreshold <= 120) {
+      try {
+        c.setSwipeThreshold(swipeThreshold.toInt());
+      } catch (_) {}
+    }
+    final swipeEmoji = p['swipeReactEmoji'];
+    if (swipeEmoji is String &&
+        swipeEmoji.isNotEmpty &&
+        swipeEmoji.length <= 8) {
+      try {
+        c.setSwipeReactEmoji(swipeEmoji);
+      } catch (_) {}
+    }
     boolean('sortByProximity', c.setSortByProximity);
     boolean('lowDataMode', c.setLowDataMode);
     boolean('cachePMs', c.setCachePMs);
+    // Favorite custom emoji packs / default emoji categories replace the local
+    // lists so an unfavorite on one device propagates (applyNostrSettings,
+    // app.js:6447-6476). Stored as the same JSON arrays the pickers'
+    // `EmojiFavoritesStore` reads (`nym_emoji_pack_favorites` /
+    // `nym_emoji_category_favorites`).
+    final kvStore = _ref.read(keyValueStoreProvider);
+    final packFavs = p['emojiPackFavorites'];
+    if (packFavs is List) {
+      try {
+        kvStore.setString(StorageKeys.emojiPackFavorites,
+            jsonEncode(packFavs.whereType<String>().toList()));
+      } catch (_) {}
+    }
+    final catFavs = p['emojiCategoryFavorites'];
+    if (catFavs is List) {
+      try {
+        kvStore.setString(StorageKeys.emojiCategoryFavorites,
+            jsonEncode(catFavs.whereType<String>().toList()));
+      } catch (_) {}
+    }
     // showStatus arrives as bool|'friends' (settings.js normalization).
     final ss = p['showStatus'];
     if (ss is bool) {
@@ -5561,27 +6318,64 @@ class NostrController {
             );
       } catch (_) {}
     }
+    // Tutorial / bot-PM markers (applyNostrSettings, app.js:6083-6098):
+    // `tutorialSeen` / `botPmWelcomed` only ever flip ON (seen on any device →
+    // suppressed everywhere), and `botPmClearedAt` is monotonic — a `?clear`
+    // on another device hides this device's pre-clear Nymbot history too.
+    // SETTINGS-SYNC seam (inbound apply of the ?clear/welcome push).
+    if (p['tutorialSeen'] == true) {
+      try {
+        kvStore.setString(StorageKeys.tutorialSeen, 'true');
+      } catch (_) {}
+    }
+    final botCleared = p['botPmClearedAt'];
+    try {
+      _ref.read(botChatControllerProvider.notifier).applySyncedMarkers(
+            welcomed: p['botPmWelcomed'] == true,
+            clearedAtSec: botCleared is num ? botCleared.toInt() : 0,
+          );
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------
-  // Pending settings transfers (inbound cross-device settings offers). The PWA
-  // auto-applies remote settings; the native UI instead surfaces each newer
-  // section as an accept/decline offer so the user opts in. Data lives in
-  // [pendingSettingsTransfersProvider]; these methods populate + resolve it.
+  // Cross-device settings sections published after boot. The PWA AUTO-APPLIES
+  // remote settings (settingsLoadFromD1, settings.js:781-850, and live
+  // nym-sync gift wraps) — it never surfaces its own sections as manual
+  // accept/decline offers. The "Pending Settings Transfers" list is reserved
+  // for USER-TO-USER transfers ([pendingUserSettingsTransfersProvider]).
   // ---------------------------------------------------------------------------
 
-  /// Re-fetches the inbound settings-transfer offers (sections in D1 newer than
-  /// our last applied sync ts) and publishes them to
-  /// [pendingSettingsTransfersProvider]. Best-effort; no-op without storage sync.
+  /// Fetches any settings sections in D1 newer than our last applied sync ts
+  /// and AUTO-APPLIES them oldest→newest (so the newest values win), advancing
+  /// the stored sync ts — the PWA's `settingsLoadFromD1` behavior. Called when
+  /// the settings modal opens; best-effort; no-op without storage sync.
   Future<void> refreshPendingSettingsTransfers() async {
     final sync = _storageSync;
     if (sync == null) return;
     try {
       final sinceMs = _lastSettingsSyncMs();
-      final offers = await sync.settingsTransfersSince(sinceMs);
-      _ref
-          .read(pendingSettingsTransfersProvider.notifier)
-          .setOffers(offers);
+      final sections = await sync.settingsTransfersSince(sinceMs);
+      if (sections.isEmpty) return;
+      // Oldest→newest so the most recently saved values win
+      // (settings.js:826-828 sorts sections by updatedAt ascending).
+      final ordered = [...sections]
+        ..sort((a, b) => a.updatedAt.compareTo(b.updatedAt));
+      var newestSec = 0;
+      for (final s in ordered) {
+        _applySyncedSettings(s.payload);
+        final sec = s.updatedAt ~/ 1000;
+        if (sec > newestSec) newestSec = sec;
+      }
+      final kv = _ref.read(keyValueStoreProvider);
+      final lastSec = int.tryParse(
+              kv.getString(StorageKeys.lastSettingsSyncTs) ?? '0') ??
+          0;
+      if (newestSec > lastSec) {
+        kv.setString(StorageKeys.lastSettingsSyncTs, '$newestSec');
+      }
+      // The accept/decline offer list stays empty — the PWA has no such UX for
+      // its own sections.
+      _ref.read(pendingSettingsTransfersProvider.notifier).clear();
     } catch (_) {
       // Best-effort.
     }
@@ -5627,11 +6421,18 @@ class NostrController {
 
   /// Debounced encrypted-settings publish (`_debouncedNostrSettingsSave`, 5s).
   /// Call after any synced-setting change. No-op when storage sync is
-  /// unavailable. The PWA also skips ephemeral random/hardcore keypair modes;
-  /// here a missing signer (no local/remote auth) simply no-ops the upload.
+  /// unavailable, or for an EPHEMERAL identity running in 'random'/'hardcore'
+  /// keypair mode (`saveSyncedSettings`, settings.js:54-61 — the keypair
+  /// changes every session/message, so publishing settings-set rows under each
+  /// throwaway pubkey would be useless; the hardcore warning even promises
+  /// "Settings will not sync across devices").
   void syncSettings() {
     final sync = _storageSync;
     if (sync == null) return;
+    if (_identity?.loginMethod == null) {
+      final mode = _ref.read(settingsProvider.notifier).keypairMode;
+      if (mode == 'random' || mode == 'hardcore') return;
+    }
     _settingsSyncTimer?.cancel();
     _settingsSyncTimer = Timer(const Duration(seconds: 5), () {
       unawaited(_flushSettingsSync(sync));
@@ -5660,6 +6461,34 @@ class NostrController {
             .read(notificationHistoryProvider.notifier)
             .seenNotificationsForSync(),
       );
+    } catch (_) {
+      // Best-effort.
+    }
+  }
+
+  /// Hydrates the deduped custom-emoji set from the D1 archive (`emoji-get` —
+  /// `_emojiRestoreFromD1`, emoji.js:198-222): each returned kind-30030 pack /
+  /// own kind-10030 list is signature-verified (the PWA's
+  /// `_verifyRelayEventAsync`) and routed through the SAME ingest handlers the
+  /// live relay subscription uses ([_ingestEmojiPack] / [_ingestUserEmojiList],
+  /// which dedup newest-wins), so a pack arriving from both sources applies
+  /// once. Throttling (10 min) lives in [StorageSync.emojiGet]. Best-effort.
+  Future<void> _restoreEmojiFromD1(StorageSync sync) async {
+    try {
+      final events = await sync.emojiGet();
+      for (final raw in events) {
+        try {
+          final event = NostrEvent.fromJson(raw);
+          if (!schnorr.verifyEvent(event)) continue;
+          if (event.kind == EventKind.emojiPack) {
+            _ingestEmojiPack(event);
+          } else if (event.kind == EventKind.userEmojiList) {
+            _ingestUserEmojiList(event);
+          }
+        } catch (_) {
+          // Skip a malformed archived pack.
+        }
+      }
     } catch (_) {
       // Best-effort.
     }
@@ -5815,6 +6644,11 @@ class NostrController {
           final url = data['url'];
           if (url is String && url.isNotEmpty) {
             onProgress?.call(1.0);
+            // Replicate to the OTHER servers in the background via Blossom
+            // `mirror` (the server pulls the blob from the primary URL) —
+            // the bytes upload once, like the PWA (`_mirrorBlobBackground`,
+            // users.js:583/640-661).
+            unawaited(_mirrorBlobBackground(url, server, authHeader));
             return url;
           }
         } catch (e) {
@@ -5825,6 +6659,35 @@ class NostrController {
       api.dispose();
     }
     return null;
+  }
+
+  /// Mirrors an uploaded blob to the remaining Blossom servers through the
+  /// proxy's `action=mirror` (users.js:508-513 `_getBlossomMirrorUrl`;
+  /// proxy.js `handleBlossomMirror`): a PUT of `{url: <primaryUrl>}` carrying
+  /// the SAME kind-24242 `t:upload` auth header the primary upload used
+  /// (the PWA signs the mirror auth with `'upload'` too, users.js:642).
+  /// Best-effort and fully backgrounded — a mirror failure never affects the
+  /// already-returned primary URL.
+  Future<void> _mirrorBlobBackground(
+    String primaryUrl,
+    String excludeServer,
+    String authHeader,
+  ) async {
+    final remaining =
+        kBlossomServers.where((s) => s != excludeServer).toList();
+    if (remaining.isEmpty) return;
+    final api = ApiClient();
+    try {
+      await Future.wait(remaining.map((server) async {
+        try {
+          await api.mirrorBlob(primaryUrl, server, authHeader);
+        } catch (e) {
+          debugPrint('Blossom mirror to $server failed: $e');
+        }
+      }));
+    } finally {
+      api.dispose();
+    }
   }
 
   /// Shares [bytes] as a P2P file: builds the offer via [P2PService.shareFile],
@@ -6080,24 +6943,82 @@ class NostrController {
 
   /// True when [text] in a CHANNEL view should be routed to Nymbot instead of
   /// published as a normal message: a `?` command or an `@Nymbot` mention
-  /// (messages.js:2381). PM/group views never intercept (the channel bot
-  /// commands aren't wired for the paid PM surface — commands.js:438).
+  /// (messages.js:2381), detected on the non-quoted body since a quote prepend
+  /// can hide the prefix (the PWA checks `rawInput`), or a reply-quote of a
+  /// Nymbot message (`isNymbotReply`, messages.js:2383). PM/group views never
+  /// intercept (the channel bot commands aren't wired for the paid PM surface —
+  /// commands.js:438).
   bool shouldRouteToBot(String text) {
     final state = _ref.read(appStateProvider);
     if (state.view.kind != ViewKind.channel) return false;
-    return isBotCommand(text) || isNymbotMention(text);
+    if (isBotCommand(text) || isNymbotMention(text)) return true;
+    final body = _quoteBody(text);
+    if (body != text.trim() && (isBotCommand(body) || isNymbotMention(body))) {
+      return true;
+    }
+    return _quotedNymbotAuthor(text) != null && body.isNotEmpty;
   }
 
-  /// Routes a channel message to Nymbot: resolves `@Nymbot …` to `?ask …`
-  /// (commands.js:14), gathers the channel geohash + recent messages + active
-  /// users for the AI-aware commands, POSTs via [NymbotService.sendPublicCommand],
-  /// and surfaces the reply as a bot message in the channel.
-  ///
-  /// In the PWA the worker returns a *signed* event the client publishes to
-  /// relays, so the reply arrives back through the channel subscription. Here we
-  /// surface the reply text directly. TODO(verify): the native worker contract
-  /// returns `{event}`; if a future flow needs the relay round-trip, publish the
-  /// returned event instead of injecting locally.
+  /// The non-quoted remainder of a composed message (the PWA's
+  /// `nonQuotedText`, messages.js:138): every line not starting with `>`,
+  /// joined and trimmed.
+  static String _quoteBody(String text) => text
+      .split('\n')
+      .where((l) => !l.startsWith('>'))
+      .join('\n')
+      .trim();
+
+  /// The quoted author when the message replies to a Nymbot message
+  /// (`/^nymbot(?:#[a-f0-9]{4})?$/i` on the quote author, commands.js:28),
+  /// else null.
+  static String? _quotedNymbotAuthor(String text) {
+    final m = RegExp(r'^>\s*@([^:]+):').firstMatch(text);
+    if (m == null) return null;
+    final author = m.group(1)!.trim();
+    return RegExp(r'^nymbot(#[a-f0-9]{4})?$', caseSensitive: false)
+            .hasMatch(author)
+        ? author
+        : null;
+  }
+
+  /// Ports `_extractQuoteChain` (messages.js:103-143): parses the leading
+  /// `> @Author: text` / `> continuation` quote lines of a composed message
+  /// into `[{author, text}]` conversation entries for the worker's `?ask` /
+  /// `?guess` reply-chain context.
+  static List<Map<String, String>> _extractQuoteChain(String text) {
+    final conversation = <Map<String, String>>[];
+    String? author;
+    var buf = <String>[];
+    for (final line in text.split('\n')) {
+      final m = RegExp(r'^>\s*@([^:]+):\s*(.*)').firstMatch(line);
+      if (m != null) {
+        if (author != null) {
+          conversation.add({'author': author, 'text': buf.join('\n').trim()});
+        }
+        author = m.group(1)!.trim();
+        buf = [m.group(2) ?? ''];
+      } else if (line.startsWith('>') && author != null) {
+        buf.add(line.replaceFirst(RegExp(r'^>\s?'), ''));
+      } else if (author != null) {
+        conversation.add({'author': author, 'text': buf.join('\n').trim()});
+        author = null;
+        buf = [];
+      }
+    }
+    if (author != null) {
+      conversation.add({'author': author, 'text': buf.join('\n').trim()});
+    }
+    return conversation;
+  }
+
+  /// Routes a channel message to Nymbot: resolves `@Nymbot …` / a reply-quote
+  /// of a Nymbot message to `?ask`/`?guess` (commands.js:14-35), gathers the
+  /// channel key + reply-chain `conversation` + recent messages + active users
+  /// for the AI-aware commands, POSTs the command to `/api/bot`, and publishes
+  /// the worker-SIGNED reply event verbatim to the relay pool (`data.event`,
+  /// commands.js:196-224) — the reply then renders when it arrives back
+  /// through the channel subscription, exactly like the PWA, so every
+  /// participant sees it with the verified-bot signature and `nymquote` intact.
   Future<void> routeToBot(String rawText) async {
     final state = _ref.read(appStateProvider);
     final view = state.view;
@@ -6106,15 +7027,30 @@ class NostrController {
       return;
     }
 
-    // @Nymbot mention → ?ask <question> (commands.js:14).
-    var content = rawText.trim();
+    // Command detection runs on the non-quoted body (the PWA uses `rawInput`;
+    // a quote prepend would hide the `?` prefix).
+    final body = _quoteBody(rawText);
+    var content = body.isNotEmpty ? body : rawText.trim();
+
+    // @Nymbot mention → ?ask <question> (commands.js:14-26). A bare @Nymbot
+    // with a quote uses the quoted text as the question (commands.js:19-25).
     if (!isBotCommand(content) && isNymbotMention(content)) {
       final question = stripNymbotMention(content);
-      if (question.isEmpty) {
-        await _sendMessageContent(rawText); // nothing to ask
-        return;
+      if (question.isNotEmpty) {
+        content = '?ask $question';
+      } else {
+        final chain = _extractQuoteChain(rawText);
+        final quoted = chain.isNotEmpty ? (chain.first['text'] ?? '') : '';
+        if (quoted.isNotEmpty) content = '?ask $quoted';
       }
-      content = '?ask $question';
+    }
+
+    // Reply to a Nymbot message without an explicit command → ?ask, or ?guess
+    // when the quoted message carries a wordplay game token (commands.js:28-35).
+    if (_quotedNymbotAuthor(rawText) != null && !content.startsWith('?')) {
+      final hasGameToken =
+          RegExp(r'\[gc:[A-Za-z0-9+/=]+\]').hasMatch(rawText);
+      content = (hasGameToken ? '?guess ' : '?ask ') + content;
     }
 
     final parsed = parseBotCommand(content);
@@ -6123,15 +7059,23 @@ class NostrController {
       return;
     }
 
-    final isGeo = state.channels
-        .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
-    final geohash = isGeo ? view.id : null;
+    // The PWA passes `this.currentGeohash` — the raw channel key for BOTH
+    // geohash and named channels (the worker's `isGeohashName` decides the
+    // reply kind/tag, bot.js:1826-1832).
+    final channelKey =
+        view.id.startsWith('#') ? view.id.substring(1) : view.id;
     final storageKey = view.storageKey;
     final cmd = parsed.name;
 
+    // Reply-chain conversation context for ?ask / ?guess (commands.js:42-45).
+    var conversation = const <Map<String, String>>[];
+    if (cmd == 'ask' || cmd == 'guess') {
+      conversation = _extractQuoteChain(rawText);
+    }
+
     // Channel context for the AI-aware commands (commands.js:46-191).
-    List<Map<String, dynamic>>? channelMessages;
-    List<Map<String, dynamic>>? activeUsers;
+    var channelMessages = const <Map<String, dynamic>>[];
+    var activeUsers = const <Map<String, dynamic>>[];
     const aiCommands = {'ask', 'summarize'};
     const memoryCommands = {'top', 'last', 'seen', 'who'};
     if (aiCommands.contains(cmd) || memoryCommands.contains(cmd)) {
@@ -6150,42 +7094,33 @@ class NostrController {
         : null;
 
     try {
-      final service = _ref.read(nymbotServiceProvider);
-      final reply = await service.sendPublicCommand(
-        cmd,
-        parsed.args,
-        geohash: geohash,
-        senderNym: senderNym,
-        publishedContent: rawText,
-        channelMessages: channelMessages,
-        activeUsers: activeUsers,
-      );
-      _injectBotReply(reply, geohash: geohash, channelKey: view.id);
+      // Body mirrors commands.js:196: `{command, args, geohash, conversation,
+      // senderNym, publishedContent, channelMessages, activeUsers}` (public —
+      // no auth). The worker returns `{event}`: a SIGNED kind-20000/23333
+      // event from the verified bot key.
+      final api = _api ??= ApiClient();
+      final data = await api.botAction({
+        'command': cmd,
+        'args': parsed.args,
+        'geohash': channelKey,
+        'conversation': conversation,
+        if (senderNym != null) 'senderNym': senderNym,
+        'publishedContent': rawText,
+        'channelMessages': channelMessages,
+        'activeUsers': activeUsers,
+      });
+      final event = data['event'];
+      if (event is Map) {
+        // Publish the worker-signed event VERBATIM (`['EVENT', data.event]`,
+        // commands.js:203-216); it arrives back via the channel subscription.
+        final botEvent =
+            NostrEvent.fromJson(Map<String, dynamic>.from(event));
+        await _service?.pool.publish(botEvent);
+      }
     } catch (e) {
       debugPrint('Nymbot command failed: $e');
       _emitSystemMessage('Nymbot is unavailable right now.');
     }
-  }
-
-  /// Injects Nymbot's reply as a verified-bot channel message via the public
-  /// `ingestEvent` path (a synthetic signed-looking event from [nymbotPubkey]).
-  void _injectBotReply(String reply,
-      {String? geohash, required String channelKey}) {
-    if (reply.trim().isEmpty) return;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final isGeo = geohash != null && geohash.isNotEmpty;
-    final event = NostrEvent(
-      pubkey: nymbotPubkey,
-      createdAt: nowSec,
-      kind: isGeo ? EventKind.geoChannel : EventKind.namedChannel,
-      tags: [
-        ['n', 'Nymbot'],
-        [isGeo ? 'g' : 'd', isGeo ? geohash : channelKey],
-      ],
-      content: reply,
-    );
-    event.id = event.computeId();
-    _ref.read(appStateProvider.notifier).ingestEvent(event);
   }
 
   /// Recent channel messages mapped to the worker's context shape
@@ -6219,7 +7154,12 @@ class NostrController {
     return out;
   }
 
-  /// Active users in the channel mapped to `{nym,pubkey}` (commands.js:155/185).
+  /// Active users in the channel mapped to the worker's context shape. The
+  /// AI-command path ([allUsers] false) carries the user's active shop `flair`
+  /// (comma-joined, `flair-` prefix stripped) and `style` (`style-` prefix
+  /// stripped) from `getUserShopItems(pubkey)` (commands.js:154-160); the
+  /// in-memory commands (top/last/seen/who) send bare `{nym,pubkey}` entries
+  /// (commands.js:183-188).
   List<Map<String, dynamic>> _botActiveUsers(AppState state, String channelId,
       {required bool allUsers}) {
     final rawName =
@@ -6230,14 +7170,42 @@ class NostrController {
           user.channels.any((c) =>
               c == rawName || c.startsWith(rawName) || rawName.startsWith(c));
       if (inChannel && user.nym.isNotEmpty) {
-        out.add({
+        final entry = <String, dynamic>{
           'nym':
               '${stripPubkeySuffix(user.nym)}#${getPubkeySuffix(pubkey)}',
           'pubkey': pubkey,
-        });
+        };
+        if (!allUsers) {
+          final items = _shopItemsFor(pubkey);
+          entry['flair'] = (items != null && items.flair.isNotEmpty)
+              ? items.flair
+                  .map((f) => f.replaceFirst('flair-', ''))
+                  .join(',')
+              : null;
+          entry['style'] = (items != null &&
+                  items.style != null &&
+                  items.style!.isNotEmpty)
+              ? items.style!.replaceFirst('style-', '')
+              : null;
+        }
+        out.add(entry);
       }
     });
     return out;
+  }
+
+  /// A user's active shop items as a `{style, flair[]}` view for the bot
+  /// context — self from the live shop state, others from the D1-backed
+  /// `shop-status` cache (the PWA's `getUserShopItems(pubkey)`).
+  ({String? style, List<String> flair})? _shopItemsFor(String pubkey) {
+    final self = _identity?.pubkey;
+    if (self != null && pubkey == self) {
+      final active = _ref.read(shopControllerProvider).active;
+      return (style: active.style, flair: active.flair);
+    }
+    final other = _ref.read(otherUsersShopProvider)[pubkey.toLowerCase()];
+    if (other == null) return null;
+    return (style: other.style, flair: other.flair);
   }
 
   /// Binds the private Nymbot chat to the live identity (so the paid PM surface
@@ -6249,17 +7217,37 @@ class NostrController {
     // Pass the privkey so the bot controller can build per-action NIP-98 auth
     // for paid requests (PWA `_signBotAuth`). Null for delegated signers
     // (ext/nip46) — those fall back to the pre-supplied auth blob.
-    _ref.read(botChatControllerProvider.notifier).bind(
-          pubkey: identity.pubkey,
-          privkey: identity.privkey,
-        );
+    final bot = _ref.read(botChatControllerProvider.notifier);
+    bot.bind(
+      pubkey: identity.pubkey,
+      privkey: identity.privkey,
+    );
+    // `?clear`'s server-visible legs beyond clear-history: the D1 PM-archive
+    // purge (`_purgeBotPMArchive` via pm-delete, pms.js:1900) and the debounced
+    // synced-settings push of the cleared-at / welcomed markers
+    // (`_debouncedNostrSettingsSave`, pms.js:1878/1903).
+    bot.pmArchivePurger = purgeBotPmArchive;
+    bot.settingsSyncRequester = syncSettings;
     return true;
+  }
+
+  /// Best-effort removal of the Nymbot conversation's encrypted wraps from the
+  /// D1 PM archive so a cleared thread can't be restored on any device —
+  /// `_purgeBotPMArchive` (pms.js:1881-1891). Gated like the PWA's
+  /// `_pmArchiveAllowed` (durable identity + cachePMs); [StorageSync.pmDelete]
+  /// filters to 64-hex ids and chunks to the server's 200-id cap.
+  Future<void> purgeBotPmArchive(List<String> wrapIds) async {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    if (!_ref.read(settingsProvider).cachePMs) return;
+    await sync.pmDelete(wrapIds);
   }
 
   Future<void> dispose() async {
     _flushTimer?.cancel();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
+    clearShopReceiptWait();
     if (_p2pSub != null) {
       _service?.pool.closeSubscription(_p2pSub!);
       _p2pSub = null;
@@ -6448,6 +7436,89 @@ class PendingSettingsTransfersNotifier
   }
 
   /// Clears all pending offers (e.g. on logout).
+  void clear() => state = const [];
+}
+
+/// An inbound USER-TO-USER settings transfer (a gift-wrapped kind-30078 with a
+/// `nym-settings-transfer-…` d-tag from another user), the PWA's
+/// `pendingSettingsTransfers` entry shape (shop.js:1851-1859). Rendered in the
+/// settings modal's "Pending Settings Transfers" list with the sender nym,
+/// `Verified sender key: <first16>…<last8>`, the localized date, and an
+/// `Includes: nickname, avatar, preferences` summary.
+class UserSettingsTransfer {
+  const UserSettingsTransfer({
+    required this.eventId,
+    required this.fromPubkey,
+    required this.fromNym,
+    required this.settings,
+    required this.transferredAt,
+    this.nickname,
+    this.avatarUrl,
+  });
+
+  /// The gift-wrap event id (the PWA keys accept/reject/dismiss on it).
+  final String eventId;
+
+  /// Sender pubkey (64-hex), verified against the rumor author.
+  final String fromPubkey;
+
+  /// Sender display nym (falls back to `<first8>...` of the pubkey).
+  final String fromNym;
+
+  /// Optional nickname to adopt on accept.
+  final String? nickname;
+
+  /// Optional avatar URL to adopt on accept.
+  final String? avatarUrl;
+
+  /// The flat transferable settings payload (PWA `_buildSettingsPayload`
+  /// minus device-local keys).
+  final Map<String, dynamic> settings;
+
+  /// Sender wall-clock (unix seconds) of the transfer.
+  final int transferredAt;
+}
+
+/// Holds the inbound user-to-user settings transfers awaiting Accept/Reject —
+/// the feature the PWA's "Pending Settings Transfers" list actually shows
+/// (shop.js `renderPendingSettingsTransfers`). Populated live by the
+/// controller's gift-wrap handler; resolved via
+/// [NostrController.acceptUserSettingsTransfer] /
+/// [NostrController.rejectUserSettingsTransfer].
+final pendingUserSettingsTransfersProvider = StateNotifierProvider<
+    PendingUserSettingsTransfersNotifier, List<UserSettingsTransfer>>((ref) {
+  return PendingUserSettingsTransfersNotifier();
+});
+
+/// StateNotifier backing [pendingUserSettingsTransfersProvider].
+class PendingUserSettingsTransfersNotifier
+    extends StateNotifier<List<UserSettingsTransfer>> {
+  PendingUserSettingsTransfersNotifier() : super(const []);
+
+  bool containsEventId(String eventId) =>
+      state.any((t) => t.eventId == eventId);
+
+  /// Appends a new pending transfer (dedup is the caller's job).
+  void add(UserSettingsTransfer transfer) {
+    state = List.unmodifiable([...state, transfer]);
+  }
+
+  /// Removes and returns the transfer with [eventId], or null if absent.
+  UserSettingsTransfer? removeByEventId(String eventId) {
+    UserSettingsTransfer? found;
+    final next = <UserSettingsTransfer>[];
+    for (final t in state) {
+      if (found == null && t.eventId == eventId) {
+        found = t;
+      } else {
+        next.add(t);
+      }
+    }
+    if (found != null) state = List.unmodifiable(next);
+    return found;
+  }
+
+  /// Clears all pending transfers (e.g. on logout).
   void clear() => state = const [];
 }
 

@@ -417,9 +417,20 @@ void main() {
       expect(goldLight.glowBlurFor(bubble: false), 12.0);
     });
 
-    test('every aura/special resolves a light variant (0/7 → 7/7)', () {
+    test('only GOLD resolves a distinct light variant; the rest keep dark', () {
+      // The PWA ships a `body.light-mode` aura rule ONLY for gold
+      // (styles-themes-responsive.css:923-931); every other aura/special has
+      // no light override and must resolve its dark values in light mode.
+      final goldDark = resolveCosmeticAuras(withAura('cosmetic-aura-gold')).single;
+      final goldLight =
+          resolveCosmeticAuras(withAura('cosmetic-aura-gold'), isLight: true)
+              .single;
+      final goldChanged = goldLight.insetColor != goldDark.insetColor ||
+          goldLight.glowColor != goldDark.glowColor ||
+          goldLight.borderAccent != goldDark.borderAccent;
+      expect(goldChanged, isTrue,
+          reason: 'gold carries the sole light-mode aura rule');
       for (final id in [
-        'cosmetic-aura-gold',
         'cosmetic-aura-neon',
         'cosmetic-aura-rainbow',
         'cosmetic-aura-phoenix',
@@ -429,11 +440,12 @@ void main() {
       ]) {
         final dark = resolveCosmeticAuras(withAura(id)).single;
         final light = resolveCosmeticAuras(withAura(id), isLight: true).single;
-        // A light entry exists and differs from the dark one somewhere visible.
-        final changed = light.insetColor != dark.insetColor ||
-            light.glowColor != dark.glowColor ||
-            light.borderAccent != dark.borderAccent;
-        expect(changed, isTrue, reason: '$id should have a distinct light tone');
+        expect(light.insetColor, dark.insetColor,
+            reason: '$id has no light-mode CSS rule');
+        expect(light.glowColor, dark.glowColor,
+            reason: '$id has no light-mode CSS rule');
+        expect(light.borderAccent, dark.borderAccent,
+            reason: '$id has no light-mode CSS rule');
       }
     });
 

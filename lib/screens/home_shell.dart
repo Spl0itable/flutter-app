@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -10,6 +13,8 @@ import '../features/calls/call_overlay.dart';
 import '../features/calls/call_providers.dart';
 import '../features/calls/incoming_call.dart';
 import '../features/nymbot/bot_credits_modal.dart';
+import '../features/nymbot/nymbot_providers.dart'
+    show BotBuyRequest, botBuyRequestProvider, botChatControllerProvider;
 import '../features/onboarding/tutorial_overlay.dart';
 import '../services/location/geolocation.dart';
 import '../state/app_state.dart';
@@ -57,9 +62,19 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// knows whether opening/closing the drawer is meaningful.
   bool _narrow = false;
 
-  /// Accumulated rightward travel of an in-progress left-edge open-swipe
-  /// (`setupMobileGestures`, ui-context.js:5-32). Reset at each drag start/end.
-  double _edgeSwipeDx = 0;
+  /// The sidebar edge-swipe threshold: a DEDICATED constant, `this.
+  /// swipeThreshold = 50` (app.js:1053-1054) — NOT the user-tunable message
+  /// `settings.swipeThreshold` (default 60, options 40-100).
+  static const double _sidebarSwipeThreshold = 50;
+
+  /// The touch pointer being tracked by the edge-swipe listener, or null when
+  /// no touch is armed. The PWA's `swipeStartX` doubles as this flag — it is
+  /// non-null only while a touch that began at `clientX < 50` is down and has
+  /// not yet toggled the drawer (ui-context.js:8-30).
+  int? _edgeSwipePointer;
+
+  /// Global x of the arming touch-down (the PWA's `swipeStartX`).
+  double _edgeSwipeStartX = 0;
 
   @override
   void initState() {
@@ -71,7 +86,29 @@ class HomeShellState extends ConsumerState<HomeShell>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(callServiceProvider);
       _maybeBootProximityLocation();
+      // Bot engine boot for an identity that was ready before the shell
+      // mounted (the selfPubkey listener in build covers later logins).
+      _bindBotEngine();
     });
+  }
+
+  /// Keeps the private Nymbot engine alive from boot and binds it to the live
+  /// identity: reading the provider registers its app-state observer (so `?`
+  /// commands and bot replies work even when the bot screen was never opened),
+  /// `bindBotChat` wires the paid-auth identity, and the once-per-device
+  /// proactive first-contact PM fires — the PWA's post-hydration
+  /// `_maybeSendBotWelcomePM` (app.js:5655-5661).
+  void _bindBotEngine() {
+    if (ref.read(appStateProvider).selfPubkey.isEmpty) return;
+    // Reading the provider instantiates the engine + its observer.
+    final engine = ref.read(botChatControllerProvider.notifier);
+    final nostr = ref.read(nostrControllerProvider);
+    nostr.bindBotChat();
+    // Route paid-auth signing through the ACTIVE signer (local or NIP-46
+    // remote) — the PWA's `_signBotAuth` generic dispatch (pms.js:1649-1679),
+    // so money actions sign fresh per request on remote-signer accounts too.
+    engine.attachSigner(nostr.signer);
+    unawaited(engine.maybeSendBotWelcomePM());
   }
 
   /// Boot-time GPS fetch (the PWA's app.js:6855 startup branch): if proximity
@@ -134,6 +171,44 @@ class HomeShellState extends ConsumerState<HomeShell>
     if (prev != _drawerOpen) setState(() => _drawerOpen = prev);
   }
 
+  // --- Left-edge swipe (`setupMobileGestures`, ui-context.js:5-32) ----------
+  // Raw pointer listeners, NOT gesture-arena recognizers: the PWA binds
+  // passive document-level touchstart/touchmove with no axis locking, so the
+  // gesture fires on ANY touch (even a sloppy diagonal one that is also
+  // scrolling the list) and never steals events from what's underneath —
+  // message swipe-left still works inside the edge zone (the message gesture
+  // itself abandons only RIGHT swipes starting there, messages.js:2196-2201).
+
+  /// `touchstart`: only a touch landing within 50px of the left edge arms the
+  /// gesture (`if (touch.clientX < 50) this.swipeStartX = touch.clientX`).
+  void _edgePointerDown(PointerDownEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    if (_edgeSwipePointer != null) return;
+    if (e.position.dx >= 50) return;
+    _edgeSwipePointer = e.pointer;
+    _edgeSwipeStartX = e.position.dx;
+  }
+
+  /// `touchmove`: net rightward displacement from the touch-down point
+  /// (`swipeDistance = clientX - swipeStartX`) past the fixed 50px threshold
+  /// calls `toggleSidebar()`, then tracking stops for the rest of the touch
+  /// (ui-context.js:16-25). Toggle, not open: the same left-edge right-swipe
+  /// CLOSES an open drawer.
+  void _edgePointerMove(PointerMoveEvent e) {
+    if (e.pointer != _edgeSwipePointer) return;
+    if (e.position.dx - _edgeSwipeStartX > _sidebarSwipeThreshold) {
+      _edgeSwipePointer = null;
+      setState(() => _drawerOpen = !_drawerOpen);
+    }
+  }
+
+  /// `touchend`/`touchcancel` → `this.swipeStartX = null` (unconditionally —
+  /// the PWA resets on any touch lift, ui-context.js:27-29).
+  void _edgePointerEnd(PointerEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    _edgeSwipePointer = null;
+  }
+
   @override
   Widget build(BuildContext context) {
     // Always-mounted "Gift Nymbot Credits" listener (PWA `showBotCreditsModal`
@@ -145,7 +220,9 @@ class HomeShellState extends ConsumerState<HomeShell>
       if (next == null) return;
       // Consume immediately so a rebuild can't re-open the modal.
       ref.read(giftCreditsRequestProvider.notifier).consume();
-      ref.read(nostrControllerProvider).bindBotChat();
+      final nostr = ref.read(nostrControllerProvider);
+      nostr.bindBotChat();
+      ref.read(botChatControllerProvider.notifier).attachSigner(nostr.signer);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         BotCreditsModal.show(
@@ -155,6 +232,34 @@ class HomeShellState extends ConsumerState<HomeShell>
           giftRecipientNym: next.nym,
         );
       });
+    });
+
+    // Always-mounted `?buy` / out-of-credits listener: the engine posts the
+    // request from ANY surface (bot screen, canonical PM view, columns) and the
+    // shell opens the shared credits modal with the right tier preselected
+    // (PWA `showBotCreditsModal(null, tier)`, pms.js:2413/2478).
+    ref.listen<BotBuyRequest?>(botBuyRequestProvider, (prev, next) {
+      if (next == null) return;
+      ref.read(botBuyRequestProvider.notifier).consume();
+      final nostr = ref.read(nostrControllerProvider);
+      nostr.bindBotChat();
+      ref.read(botChatControllerProvider.notifier).attachSigner(nostr.signer);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        BotCreditsModal.show(
+          context,
+          colors: context.nym,
+          initialTier: next.tier,
+        );
+      });
+    });
+
+    // Bind the bot engine + fire the proactive welcome PM once an identity
+    // lands (login after the shell mounted).
+    ref.listen<String>(appStateProvider.select((s) => s.selfPubkey),
+        (prev, next) {
+      if (next.isEmpty || next == prev) return;
+      _bindBotEngine();
     });
 
     final c = context.nym;
@@ -221,63 +326,53 @@ class HomeShellState extends ConsumerState<HomeShell>
   }
 
   Widget _mobile(BuildContext context, bool useColumns) {
-    return Stack(
+    // The edge-swipe gesture is phone-only (`if (window.innerWidth <= 768)`,
+    // ui-context.js:6).
+    final phone = MediaQuery.of(context).size.width <= 768;
+    // Left-edge swipe to TOGGLE the drawer (`setupMobileGestures`,
+    // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
+    // a touch starting within 50px of the left edge that travels right past
+    // the fixed 50px threshold calls `toggleSidebar()`. A raw Listener over
+    // the whole shell mirrors the PWA's passive document-level touch
+    // listeners: it never enters the gesture arena, so it cannot lose the
+    // swipe to the vertical scrollable (no axis lock) and never swallows the
+    // gestures underneath it (message swipe-left still works from the edge).
+    // Because it wraps the drawer too, it fires either way and toggles an
+    // open drawer closed, like the PWA's document listener.
+    final stack = Stack(
       children: [
         Positioned.fill(
           child: _content(context, useColumns, compact: true),
         ),
 
-        // Left-edge swipe to open the drawer (`setupMobileGestures`,
-        // ui-context.js:5-32): only on phones (innerWidth <= 768, NOT tablets),
-        // a touch starting within 50px of the left edge that travels right past
-        // the swipe threshold toggles the sidebar. A 50px-wide strip mirrors the
-        // `clientX < 50` arming; only horizontal drags are claimed, so vertical
-        // scroll + message swipe (which itself defers left-edge swipes) are
-        // unaffected. Present only while closed.
-        if (!_drawerOpen && MediaQuery.of(context).size.width <= 768)
-          Positioned(
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: 50,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragStart: (_) => _edgeSwipeDx = 0,
-              onHorizontalDragUpdate: (d) {
-                _edgeSwipeDx += d.delta.dx;
-                final threshold =
-                    ref.read(settingsProvider).swipeThreshold.toDouble();
-                if (_edgeSwipeDx > threshold && !_drawerOpen) {
-                  _edgeSwipeDx = 0;
-                  setState(() => _drawerOpen = true);
-                }
-              },
-              onHorizontalDragEnd: (_) => _edgeSwipeDx = 0,
-              onHorizontalDragCancel: () => _edgeSwipeDx = 0,
-            ),
-          ),
-
-        // Dim backdrop (`.mobile-overlay`). With solid-ui (default ON) the alpha
-        // is mode-dependent: dark 0.6, light 0.35
-        // (styles-themes-responsive.css:1638-1646). Tap to close.
-        IgnorePointer(
-          ignoring: !_drawerOpen,
-          child: AnimatedOpacity(
-            duration: NymMotion.slide,
-            opacity: _drawerOpen ? 1 : 0,
-            child: GestureDetector(
-              onTap: () => setState(() => _drawerOpen = false),
-              child: Container(
-                color: Colors.black
-                    .withValues(alpha: context.nym.isLight ? 0.35 : 0.6),
+        // Dim backdrop (`.mobile-overlay`): rgba(0,0,0,0.6) that snaps between
+        // display:none/block with NO fade (styles-shell.css:1-14). Only with
+        // solid-ui (default ON — Transparency off) does light mode drop the
+        // alpha to 0.35 (`body.solid-ui.light-mode .mobile-overlay`,
+        // styles-themes-responsive.css:1638-1646); with Transparency enabled
+        // it stays 0.6 in both modes. Tap to close.
+        if (_drawerOpen)
+          GestureDetector(
+            onTap: () => setState(() => _drawerOpen = false),
+            child: Container(
+              color: Colors.black.withValues(
+                alpha: ref.watch(settingsProvider
+                            .select((s) => s.solidUi)) &&
+                        context.nym.isLight
+                    ? 0.35
+                    : 0.6,
               ),
             ),
           ),
-        ),
 
-        // Off-canvas drawer: translateX(-100%) → 0 over 150ms linear.
+        // Off-canvas drawer: translateX(-100%) → 0 over 150ms linear. Under
+        // OS reduce-motion the PWA's global kill-switch forces the transition
+        // to 0.01ms (`@media (prefers-reduced-motion: reduce)`,
+        // styles-themes-responsive.css:1846-1856) — snap instantly.
         AnimatedSlide(
-          duration: NymMotion.slide,
+          duration: MediaQuery.of(context).disableAnimations
+              ? Duration.zero
+              : NymMotion.slide,
           curve: Curves.linear,
           offset: _drawerOpen ? Offset.zero : const Offset(-1, 0),
           child: SizedBox(
@@ -285,7 +380,10 @@ class HomeShellState extends ConsumerState<HomeShell>
             height: double.infinity,
             // `.sidebar.open { box-shadow: 10px 0 40px rgba(0,0,0,0.5) }` — a
             // directional (rightward-only) drop shadow, not a Material ambient
-            // elevation (styles-themes-responsive.css:198-201).
+            // elevation (styles-themes-responsive.css:198-201). The edge-swipe
+            // Listener above wraps the drawer too, so a left-edge right-swipe
+            // over the open drawer toggles it CLOSED, like the PWA's
+            // document-level listener.
             child: DecoratedBox(
               decoration: BoxDecoration(
                 boxShadow: _drawerOpen
@@ -298,14 +396,35 @@ class HomeShellState extends ConsumerState<HomeShell>
                       ]
                     : const [],
               ),
-              child: Sidebar(
-                compact: true,
-                onItemSelected: () => setState(() => _drawerOpen = false),
+              // The off-canvas drawer additionally gets `border-left: 1px
+              // solid var(--glass-border)` on top of the base border-right
+              // (styles-themes-responsive.css:179-192 and 442-455). Painted as
+              // a foreground hairline because the Sidebar fills itself with
+              // bgSecondary.
+              child: DecoratedBox(
+                position: DecorationPosition.foreground,
+                decoration: BoxDecoration(
+                  border: Border(
+                    left: BorderSide(color: context.nym.glassBorder),
+                  ),
+                ),
+                child: Sidebar(
+                  compact: true,
+                  onItemSelected: () => setState(() => _drawerOpen = false),
+                ),
               ),
             ),
           ),
         ),
       ],
+    );
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: phone ? _edgePointerDown : null,
+      onPointerMove: phone ? _edgePointerMove : null,
+      onPointerUp: phone ? _edgePointerEnd : null,
+      onPointerCancel: phone ? _edgePointerEnd : null,
+      child: stack,
     );
   }
 }
@@ -338,6 +457,7 @@ class _AmbientGlowPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
     final rect = Offset.zero & size;
 
     // Corner glow colors per variant. CSS specificity ties resolve by source
@@ -359,39 +479,49 @@ class _AmbientGlowPainter extends CustomPainter {
       glow80 = c.secondary.withValues(alpha: 0.03);
     }
 
-    // `radial-gradient(ellipse at 20% 20%, color 0%, transparent 50%)`. Flutter
-    // stretches the radial to the rect (→ ellipse); stops [0,0.5] put the fade
-    // halfway out, matching CSS `transparent 50%`. radius 1.0 ≈ farthest-corner.
-    void corner(Alignment center, Color color) {
+    // Each CSS layer is `radial-gradient(ellipse at f% f%, ...)` with the
+    // default farthest-corner extent: an ellipse with the farthest-side aspect
+    // ratio (m·w : m·h, where m = max(f, 1-f)) uniformly scaled to pass
+    // through the farthest corner at offset (m·w, m·h) from the center — so
+    // radii √2·m·w × √2·m·h. Flutter's RadialGradient shader is circular, so
+    // stretch a circle of radius rx with a y-scale local matrix about the
+    // center to get the viewport-shaped ellipse.
+    void ellipseGradient(double f, List<Color> colors, List<double> stops) {
+      final center = Offset(size.width * f, size.height * f);
+      final m = math.max(f, 1 - f);
+      final rx = math.sqrt2 * m * size.width;
+      final ry = math.sqrt2 * m * size.height;
+      final matrix = Matrix4.identity()
+        ..translateByDouble(center.dx, center.dy, 0, 1)
+        ..scaleByDouble(1.0, ry / rx, 1, 1)
+        ..translateByDouble(-center.dx, -center.dy, 0, 1);
       canvas.drawRect(
         rect,
         Paint()
-          ..shader = RadialGradient(
-            center: center,
-            radius: 1.0,
-            colors: [color, color.withValues(alpha: 0)],
-            stops: const [0.0, 0.5],
-          ).createShader(rect),
+          ..shader = ui.Gradient.radial(
+            center,
+            rx,
+            colors,
+            stops,
+            TileMode.clamp,
+            matrix.storage,
+          ),
       );
     }
 
-    corner(const Alignment(-0.6, -0.6), glow20); // 20% 20%
-    corner(const Alignment(0.6, 0.6), glow80); // 80% 80%
+    // `radial-gradient(ellipse at 20% 20%, color 0%, transparent 50%)`: the
+    // fade ends halfway to the farthest-corner ellipse (mirrored at 80% 80%).
+    ellipseGradient(0.2, [glow20, glow20.withValues(alpha: 0)], const [0, 0.5]);
+    ellipseGradient(0.8, [glow80, glow80.withValues(alpha: 0)], const [0, 0.5]);
 
-    // Center vignette (dark non-ghost only): rgba(0,0,0,0) center → 0.2 edge.
+    // Center vignette (dark non-ghost only): rgba(0,0,0,0) at the center →
+    // black 0.2 at 100%, i.e. full strength only at the exact viewport
+    // corners (farthest-corner extent).
     if (!isGhost && !c.isLight) {
-      canvas.drawRect(
-        rect,
-        Paint()
-          ..shader = RadialGradient(
-            center: Alignment.center,
-            radius: 0.75,
-            colors: [
-              const Color(0x00000000),
-              Colors.black.withValues(alpha: 0.2),
-            ],
-            stops: const [0.0, 1.0],
-          ).createShader(rect),
+      ellipseGradient(
+        0.5,
+        [const Color(0x00000000), Colors.black.withValues(alpha: 0.2)],
+        const [0, 1],
       );
     }
   }

@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +12,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
 import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
+import '../../features/messages/inline_network_image.dart';
 import '../../features/settings/about_screen.dart';
 import '../../features/p2p/p2p_models.dart';
 import '../../features/p2p/p2p_service.dart';
@@ -23,6 +26,7 @@ import '../../features/zaps/zap_badge.dart';
 import '../../features/zaps/zap_modal.dart';
 import '../../models/message.dart';
 import '../../models/settings.dart';
+import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -108,6 +112,72 @@ String formatRelativeTime(DateTime t, {DateTime? now}) {
   return t.year == ref.year ? '$mo ${t.day}' : '$mo ${t.day}, ${t.year}';
 }
 
+/// Sentinel prefix marking a `/groupinfo` rich system row. The PWA renders
+/// `cmdGroupInfo` as an HTML `.group-info` block INSIDE a system pill
+/// (`displaySystemMessage(html, 'system', {html:true})`, groups.js:3487-3525);
+/// here the composer encodes the structured payload into the system message's
+/// content via [encodeGroupInfoSystemMessage] and [MessageRow] decodes +
+/// renders the block (title / count / avatar member rows / owner-mod-you
+/// labels, styles-components.css:1050-1089).
+const String kGroupInfoSystemPrefix = '\u0000group-info\u0000';
+
+/// One `/groupinfo` member row: the pubkey plus its role labels
+/// (`owner`/`mod`/`you`), already ordered owner → mods → members (each block
+/// alphabetized) like `cmdGroupInfo`'s sort.
+typedef GroupInfoMember = ({String pubkey, List<String> labels});
+
+/// The decoded `/groupinfo` payload (group name, member count, ordered rows).
+typedef GroupInfoPayload = ({
+  String name,
+  int count,
+  List<GroupInfoMember> members,
+});
+
+/// Encodes a `/groupinfo` payload into a system-message content string (see
+/// [kGroupInfoSystemPrefix]).
+String encodeGroupInfoSystemMessage(GroupInfoPayload info) {
+  return kGroupInfoSystemPrefix +
+      jsonEncode({
+        'name': info.name,
+        'count': info.count,
+        'members': [
+          for (final m in info.members)
+            {'pk': m.pubkey, 'labels': m.labels},
+        ],
+      });
+}
+
+/// Decodes a system-message content string produced by
+/// [encodeGroupInfoSystemMessage]; null for any other content.
+GroupInfoPayload? decodeGroupInfoSystemMessage(String content) {
+  if (!content.startsWith(kGroupInfoSystemPrefix)) return null;
+  try {
+    final decoded =
+        jsonDecode(content.substring(kGroupInfoSystemPrefix.length));
+    if (decoded is! Map) return null;
+    final rawMembers = decoded['members'];
+    return (
+      name: (decoded['name'] as String?) ?? '',
+      count: (decoded['count'] as num?)?.toInt() ?? 0,
+      members: <GroupInfoMember>[
+        if (rawMembers is List)
+          for (final m in rawMembers)
+            if (m is Map && m['pk'] is String)
+              (
+                pubkey: m['pk'] as String,
+                labels: <String>[
+                  if (m['labels'] is List)
+                    for (final l in m['labels'] as List)
+                      if (l is String) l,
+                ],
+              ),
+      ],
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Abbreviates a count for badges/footers (a 1:1 port of `abbreviateNumber`,
 /// `users.js:2069-2073`): `<1000` verbatim, `1.2k` / `12k`, `1.2M`.
 String abbreviateNumber(int n) {
@@ -142,14 +212,25 @@ class MessageRow extends ConsumerStatefulWidget {
     this.showAvatar = true,
     this.showName = true,
     this.inGroup = false,
+    this.columnsMode = false,
     this.onReactionPicker,
     this.bubbleAnchorKey,
+    this.swipeAvatarDx,
   });
 
   final Message message;
   final Settings settings;
   final List<MessageReaction> reactions;
   final bool mentioned;
+
+  /// This row renders inside a columns-deck `.cv-list` (`body.columns-mode`,
+  /// styles-columns.css). IRC rows stack vertically (`.cv-list .message
+  /// { flex-direction: column; gap: 5px }` — flex children are blockified, so
+  /// time / author / content each take their own line, the content full-width
+  /// with an extra 5px `margin-top`, :27-49), and the desktop hover-button
+  /// pair stacks vertically (`.msg-hover-buttons { flex-direction: column }`,
+  /// :80-82). The single-chat view never sets this.
+  final bool columnsMode;
 
   /// Bubble layout: when set (the LAST message of a [MessageGroup]), keys the
   /// rounded bubble container so the group's gliding avatar can bottom-align to
@@ -179,6 +260,13 @@ class MessageRow extends ConsumerStatefulWidget {
   /// When null the add-reaction / "more" affordances are no-ops.
   final ValueChanged<Message>? onReactionPicker;
 
+  /// Bubble layout: live swipe-translation channel for the group's sticky
+  /// avatar. [MessageGroup] supplies it for the LAST bubble of an others'
+  /// group only — the PWA slides the `.message-group-avatar` together with
+  /// that message during a swipe (`findGroupAvatar`, messages.js:2151-2160 +
+  /// 2216-2219). Null everywhere else.
+  final ValueNotifier<double>? swipeAvatarDx;
+
   @override
   ConsumerState<MessageRow> createState() => _MessageRowState();
 }
@@ -187,10 +275,27 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   bool _showTranslation = false;
   String? _translateLangOverride;
 
+  /// Desktop row hover (`@media(hover:hover) .message:hover`, styles-chat.css
+  /// :124-132): drives the IRC row hover tint and the `.msg-hover-buttons`
+  /// opacity. Only ever set on hover-capable (non-touch) platforms.
+  bool _hovered = false;
+
   /// Refreshes the in-bubble relative time ("2m ago") on a cadence, mirroring
   /// `_ensureBubbleRelativeTimer` / `_refreshBubbleRelativeTimes`
   /// (`messages.js:1051,3347`).
   Timer? _relativeTimer;
+
+  /// Whether this row plays the `bubble-snap-in` entrance when it mounts. The
+  /// PWA adds `.bubble-snap` to a LIVE-appended message that bubble-groups onto
+  /// the previous one — never while bulk-appending or for historical restores
+  /// (`messages.js:1043-1048`). Flutter list rows also mount when old history
+  /// scrolls into view, so "live append" is approximated as a message created
+  /// within the last few seconds. Latched on the FIRST build so later rebuilds
+  /// (or the 30s relative-time tick) can't replay it.
+  late final bool _snapIn = widget.grouped &&
+      widget.settings.useBubbles &&
+      !widget.message.isHistorical &&
+      DateTime.now().difference(widget.message.dateTime).inMilliseconds < 5000;
 
   @override
   void dispose() {
@@ -244,6 +349,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return z != null && z.totalSats > 0;
   }
 
+  /// Whether the `.msg-hover-buttons` pair renders for this message: only above
+  /// the mobile breakpoint (`isMobile = innerWidth <= 768`, messages.js:768)
+  /// and only for messages with a usable reaction id (`isValidEventId`: a PM's
+  /// `nymMessageId`, else a canonical 64-hex event id — messages.js:764-767).
+  bool _hoverButtonsEligible(BuildContext context) {
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return false;
+    }
+    if (message.isPM && (message.nymMessageId?.isNotEmpty ?? false)) {
+      return true;
+    }
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false)
+        .hasMatch(message.id);
+  }
+
   /// Starts (once) a low-frequency timer that re-renders the in-bubble relative
   /// time. Recent messages tick every ~10s; older ones drift slowly, so a 30s
   /// cadence is plenty (the PWA refreshes on a similar interval).
@@ -260,12 +380,19 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   /// The author's active message-style decoration. The supporter badge also
   /// adds a gold "supporter-style" treatment to the message body
-  /// (`.message.supporter-style`); an explicit style takes precedence.
+  /// (`.message.supporter-style`) — and the PWA applies BOTH classes when a
+  /// style is active too (`_applyShopClassesToMessage`, shop.js:485-495), so
+  /// the two cascade together: supporter's gold text/row wash composes over
+  /// the style per [composeSupporterStyle].
   MessageStyleDecoration? _styleDecoration(BuildContext context) {
     final cos = _cosmetics;
     final isLight = context.nym.isLight;
     final styled = messageStyleDecoration(cos.styleId, isLight: isLight);
-    if (styled != null) return styled;
+    if (styled != null) {
+      return cos.supporter
+          ? composeSupporterStyle(styled, cos.styleId!, isLight: isLight)
+          : styled;
+    }
     if (cos.supporter) {
       return isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
     }
@@ -277,6 +404,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// (the PWA swaps gold — and a derived tone for the rest — in `light-mode`).
   List<CosmeticAura> _resolveAuras(BuildContext context) =>
       resolveCosmeticAuras(_cosmetics, isLight: context.nym.isLight);
+
+  /// True when the message element carries a `style-…` class — the PWA adds the
+  /// RAW active style id as a class (`messageEl.classList.add(activeStyle)`), so
+  /// any active `style-…` item trips the `:not([class*="style-"])` cosmetic
+  /// gates (hologram fill/sheen, frost fill, cosmic bubble starfield, gold
+  /// bubble wash — styles-features.css:1163/1192/1203/3699). `supporter-style`
+  /// does NOT match `[class*="style-"]` (no trailing hyphen).
+  bool get _styleClassActive =>
+      _cosmetics.styleId?.startsWith('style-') ?? false;
 
   /// The flair + supporter badges that follow the author nym.
   Widget _nymBadges(BuildContext context, {double flairSize = 16}) {
@@ -419,13 +555,40 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // cosmetic-redacted (`shop.js:498-512`): the REAL text shows for 10s, then a
     // `.cosmetic-redacted-message` translucent bar replaces it (bg white@0.15,
     // radius-xs, min-width 120, min-height 1.2em, content hidden).
+    final Widget body;
     if (_cosmetics.isRedacted) {
-      return _RedactedReveal(
+      body = _RedactedReveal(
         fontSize: fontSize,
         child: _content(context, color, fontSize, deco: deco, bubble: bubble),
       );
+    } else {
+      body = _content(context, color, fontSize, deco: deco, bubble: bubble);
     }
-    return _content(context, color, fontSize, deco: deco, bubble: bubble);
+    // A bot reply whose model exposed its chain of thought PREPENDS the
+    // collapsed `.bot-think` "💭 Reasoning" section INSIDE `.message-content`,
+    // before the formatted body (`formattedContent =
+    // _renderBotThinkingHtml(message.thinking) + formattedContent`,
+    // messages.js:796-797) — gated on `message.isBot ||
+    // isVerifiedBot(message.pubkey)`.
+    final thinking = message.thinking;
+    if (thinking != null &&
+        thinking.trim().isNotEmpty &&
+        (message.isBot ||
+            ref.read(nostrControllerProvider).isVerifiedBot(message.pubkey))) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _BotThinkSection(
+            reasoning: thinking,
+            // `.bot-think { font-size: 0.88em }` of the user text size.
+            fontSize: settings.textSize.toDouble() * 0.88,
+          ),
+          body,
+        ],
+      );
+    }
+    return body;
   }
 
   @override
@@ -436,6 +599,57 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isMeAction) return _buildActionMessage(context);
     Widget row =
         settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
+    // Hover-capable (non-touch) devices: track `.message:hover` for the IRC row
+    // tint (read by [_buildIrc]) and overlay the `.msg-hover-buttons` pair —
+    // quick-react + translate — at the row's top-right (`right:10; top:5`,
+    // styles-chat.css:357-364; the buttons resolve against the positioned
+    // `.message` row since `.message-content` is static). The buttons render
+    // only above the mobile breakpoint and for messages with a usable reaction
+    // id (`isValidEventId && !isMobile`, messages.js:764-779); they fade with
+    // the row hover (opacity 0→1 over --transition).
+    final p = Theme.of(context).platform;
+    final touchPlatform =
+        p == TargetPlatform.android || p == TargetPlatform.iOS;
+    if (!touchPlatform) {
+      final withButtons = _hoverButtonsEligible(context);
+      Widget hoverChild = row;
+      if (withButtons) {
+        hoverChild = Stack(
+          clipBehavior: Clip.none,
+          children: [
+            row,
+            Positioned(
+              top: 5,
+              right: 10,
+              child: IgnorePointer(
+                ignoring: !_hovered,
+                child: AnimatedOpacity(
+                  opacity: _hovered ? 1 : 0,
+                  duration: NymMotion.transition,
+                  curve: NymMotion.curve,
+                  child: _MsgHoverButtons(
+                    onReact: widget.onReactionPicker == null
+                        ? null
+                        : () => widget.onReactionPicker!.call(message),
+                    onTranslate: () =>
+                        setState(() => _showTranslation = true),
+                    // `body.columns-mode .msg-hover-buttons { flex-direction:
+                    // column }` (styles-columns.css:80-82) — the pair stacks
+                    // vertically to fit the 360px column.
+                    vertical: widget.columnsMode,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+      row = MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: hoverChild,
+      );
+    }
     // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
     // current conversation is dimmed (`messages.js:652-656`). Own messages are
     // never flooded.
@@ -451,23 +665,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return _ScrollFlashOverlay(active: flashing, child: row);
   }
 
-  /// A centered `.system-message` (or `.action-message`) pill injected into the
-  /// conversation flow (`styles-chat.css:1334-1360`). Text-dim, rounded-20,
-  /// `white@0.03` bg, glass border, `textSize-3`; the action variant is
-  /// purple-italic. When the row carries a [Message.systemAction] (e.g. the spam
+  /// A centered `.system-message` pill injected into the conversation flow
+  /// (`styles-chat.css:1334-1349`). Text-dim, rounded-20, `white@0.03` bg,
+  /// glass border, `textSize-3`. The `.action-message` variant is a bare
+  /// left-aligned purple-italic line — no pill, no centering
+  /// (`styles-chat.css:1357-1360`). When the row carries a
+  /// [Message.systemAction] (e.g. the spam
   /// false-positive notice) an inline action button is rendered under the text.
   Widget _buildSystemMessage(BuildContext context) {
     final c = context.nym;
     final isAction = message.kind == MessageKind.action;
     final size = settings.textSize.toDouble() - 3;
-    // `.action-message` is BARE purple-italic text — no pill bg/border/radius
-    // (`styles-chat.css:1357-1360`), distinct from `.system-message`.
+    // `.action-message` is BARE purple-italic text — no pill bg/border/radius,
+    // no centering and no `margin: 10px auto` (`styles-chat.css:1357-1360`):
+    // `displaySystemMessage(msg,'action')` REPLACES the className, dropping
+    // the `.system-message` base, so an action row is a plain full-width
+    // left-aligned block (messages.js:1515).
     final text = Text(
       message.content,
-      textAlign: TextAlign.center,
+      textAlign: isAction ? TextAlign.start : TextAlign.center,
       style: TextStyle(
         color: isAction ? c.purple : c.textDim,
-        fontSize: size,
+        // `.action-message` sets no font-size, so it inherits the container's
+        // fixed 14px (`.messages-container`, styles-shell.css:943); only
+        // `.system-message` scales with the user text size.
+        fontSize: isAction ? 14 : size,
         fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
         // `.system-message { font-weight: 450 }` (w500 is the nearest weight).
         fontWeight: isAction ? FontWeight.w400 : FontWeight.w500,
@@ -475,36 +697,157 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ),
     );
     final action = message.systemAction;
-    // The pill body: just the text, or text + an inline action button (the
-    // `.spam-false-positive-btn` of messages.js:645).
-    final Widget pillChild = action == null
-        ? text
-        : Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              text,
-              const SizedBox(height: 8),
-              _SystemActionButton(
-                label: action.label,
-                onTap: () => _runSystemAction(context, action),
-              ),
-            ],
-          );
+    // A `/groupinfo` row carries a structured payload instead of plain text —
+    // render the PWA's `.group-info` block inside the pill (groups.js:3520-3523
+    // emits it via `displaySystemMessage(html, 'system', {html:true})`).
+    final groupInfo =
+        isAction ? null : decodeGroupInfoSystemMessage(message.content);
+    // The pill body: the group-info block, just the text, or text + an inline
+    // action button (the `.spam-false-positive-btn` of messages.js:645).
+    final Widget pillChild = groupInfo != null
+        ? _groupInfoBlock(context, groupInfo, size)
+        : action == null
+            ? text
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  text,
+                  const SizedBox(height: 8),
+                  _SystemActionButton(
+                    label: action.label,
+                    onTap: () => _runSystemAction(context, action),
+                  ),
+                ],
+              );
+    // `.action-message` has no padding/margin of its own — a bare block div
+    // in the message flow, left-aligned at full width.
+    if (isAction) {
+      return Align(alignment: Alignment.centerLeft, child: text);
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
-        child: isAction
-            ? text
-            : Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.03),
-                  border: Border.all(color: c.glassBorder),
-                  borderRadius: const BorderRadius.all(Radius.circular(20)),
-                ),
-                child: pillChild,
-              ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: pillChild,
+        ),
       ),
+    );
+  }
+
+  /// The `/groupinfo` `.group-info` block (styles-components.css:1050-1089 +
+  /// groups.js:3487-3525): a `Group: "name"` title (w600, 2px below-gap), a
+  /// `Members (N)` count line (12px text-dim, 6px gap), then one row per
+  /// member — 22px avatar, base nym + muted `#suffix`, flair badges, and a
+  /// 10px primary@0.8 `owner`/`mod`/`you` label — the rows 5px apart
+  /// (`.group-info-members { gap: 5px }`). Nyms/avatars resolve live from
+  /// `usersProvider` so late-arriving profiles fill in (the PWA's
+  /// `ensureListProfiles`).
+  Widget _groupInfoBlock(
+      BuildContext context, GroupInfoPayload info, double size) {
+    final c = context.nym;
+    final users = ref.watch(usersProvider);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // `.group-info-title { font-weight: 600; margin-bottom: 2px }` —
+        // inherits the pill's text-dim + `textSize − 3`.
+        Text(
+          'Group: "${info.name}"',
+          style: TextStyle(
+            color: c.textDim,
+            fontSize: size,
+            fontWeight: FontWeight.w600,
+            height: 1.3,
+          ),
+        ),
+        const SizedBox(height: 2),
+        // `.group-info-count { color: --text-dim; font-size: 12px;
+        // margin-bottom: 6px }`.
+        Text(
+          'Members (${info.count})',
+          style: TextStyle(color: c.textDim, fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        for (var i = 0; i < info.members.length; i++) ...[
+          if (i > 0) const SizedBox(height: 5),
+          _groupInfoMemberRow(context, users, info.members[i], size),
+        ],
+      ],
+    );
+  }
+
+  /// One `.group-info-member` row: 22px `.avatar-message`, then the
+  /// `.group-info-nym` (base nym + `.nym-suffix` + flair) and the optional
+  /// `.group-info-label`, 6px apart.
+  Widget _groupInfoMemberRow(
+    BuildContext context,
+    Map<String, User> users,
+    GroupInfoMember member,
+    double size,
+  ) {
+    final c = context.nym;
+    final pk = member.pubkey;
+    final nym = users[pk]?.nym;
+    final baseNym = (nym != null && nym.isNotEmpty)
+        ? stripPubkeySuffix(nym)
+        : 'anon';
+    final suffix = getPubkeySuffix(pk);
+    final nymStyle = TextStyle(color: c.textDim, fontSize: size, height: 1.3);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        NymAvatar(
+          seed: pk,
+          size: 22,
+          imageUrl: users[pk]?.profile?.picture,
+        ),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text.rich(
+            TextSpan(children: [
+              TextSpan(text: baseNym, style: nymStyle),
+              if (suffix.isNotEmpty)
+                TextSpan(
+                  text: '#$suffix',
+                  // `.nym-suffix`: opacity 0.7, 0.9em, weight 100.
+                  style: nymStyle.copyWith(
+                    color: c.textDim.withValues(alpha: 0.7),
+                    fontSize: size * 0.9,
+                    fontWeight: FontWeight.w100,
+                  ),
+                ),
+            ]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        // Flair / supporter badges follow the nym (`getFlairForUser`); the
+        // in-chat `.flair-badge` is 20px.
+        CosmeticNymBadges(
+          cosmetics: ref.watch(userCosmeticsProvider(pk)),
+          flairSize: 20,
+          supporterHeight: 20,
+        ),
+        if (member.labels.isNotEmpty) ...[
+          const SizedBox(width: 6),
+          // `.group-info-label { font-size: 10px; color: --primary;
+          // opacity: 0.8 }`.
+          Text(
+            member.labels.join(', '),
+            style: TextStyle(
+              color: c.primary.withValues(alpha: 0.8),
+              fontSize: 10,
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -659,6 +1002,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
     Color? bg;
     Color? barColor;
+    // The accent bar's glow (`::before` box-shadow) — secondary@0.4 for a
+    // mention, magenta for the PM-hover bar below.
+    Color? barGlow = widget.mentioned ? c.secondaryA(0.4) : null;
     if (self) {
       bg = c.secondaryA(0.05);
       // `.message.self::before` accent bar: white@0.3 dark; light-mode →
@@ -670,81 +1016,91 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       bg = c.secondaryA(0.06);
       barColor = c.secondary;
     }
+    // `@media(hover:hover) .message:hover { background: rgba(255,255,255,0.03) }`
+    // (styles-chat.css:124-127) — it sits AFTER `.message.self`/`.mentioned` in
+    // the sheet, so the hover tint REPLACES those fills while hovered. A PM row
+    // hovers magenta (`.message.pm:hover`, :105-107, higher specificity); light
+    // mode flips everything to black@0.03 (`body.light-mode .message:hover`,
+    // styles-themes-responsive.css:555-559, loaded last). Bubble mode paints no
+    // hover tint (`body.chat-bubbles .message:hover { background: none }`).
+    // Aura/style backgrounds below still win (styles-features.css loads later).
+    if (_hovered) {
+      bg = c.isLight
+          ? Colors.black.withValues(alpha: 0.03)
+          : (message.isPM
+              ? const Color(0x0AFF00FF) // rgba(255,0,255,0.04)
+              : Colors.white.withValues(alpha: 0.03));
+      // `.message.pm:hover::before` (styles-chat.css:111-122): a 3px × 60%
+      // rounded `--purple` accent bar with a `0 0 8px rgba(255,0,255,0.3)`
+      // glow. Its specificity beats `.self`/`.mentioned`'s ::before bars, and
+      // no light-mode rule overrides the pseudo-element, so it applies in both
+      // themes (only the hover BACKGROUND flips to black@0.03 in light mode).
+      if (message.isPM) {
+        barColor = c.purple;
+        barGlow = const Color(0x4DFF00FF); // rgba(255,0,255,0.3)
+      }
+    }
     // A 135deg gradient painted on the IRC row (supporter's gold wash + the
     // gold/neon/phoenix/cosmic aura gradients). Takes precedence over the flat
     // [bg] in the row decoration below.
     List<Color>? bgGradient;
-    // IRC layout paints the message-style accents on the row itself
+    // IRC layout paints the SUPPORTER accents on the row itself
     // (`body:not(.chat-bubbles) .message.supporter-style { background; border-left }`).
+    // The style CONTENT plates (satoshi/eclipse/crt `.message-content`
+    // backgrounds) belong to the content box below, never the row.
     if (deco?.borderAccent != null) {
       barColor = deco!.borderAccent;
-      // Supporter paints a gold linear-gradient on the IRC row (not a flat fill);
-      // a plain style background (none today in IRC) would use contentBackground.
       bgGradient = deco.backgroundGradient ?? bgGradient;
-      if (deco.backgroundGradient == null) bg = deco.contentBackground ?? bg;
     }
-    // Special cosmetic auras also paint a left bar + background tint on the row.
-    // The PWA paints `background: linear-gradient(135deg,…)` on the IRC row for
-    // gold/neon/phoenix/cosmic, and a flat fill for frost — read BOTH here (the
-    // old code read only `aura.background`, dropping the 4 gradient auras).
+    // Special cosmetic auras split by scope. gold/neon/phoenix/cosmic are
+    // ROW-scoped in IRC — `body:not(.chat-bubbles) .message.cosmetic-aura-*`
+    // paints the 3px left bar, inset ring, glow and 135deg gradient on the
+    // whole row (styles-features.css:1099-1186). frost/rainbow/hologram target
+    // `.message-content` in EVERY layout (:1121-1139, :1141-1167, :1197-1211),
+    // so they decorate the content box below — never the time/author columns.
+    // The IRC border-left is the discriminator: exactly the row-scoped four
+    // carry one.
     final auras = _resolveAuras(context);
-    final strongestAura = auras.isNotEmpty ? auras.last : null;
-    if (strongestAura?.borderAccent != null) {
-      barColor = strongestAura!.borderAccent;
+    final rowAuras = [
+      for (final a in auras)
+        if (a.borderAccent != null) a,
+    ];
+    final contentAuras = [
+      for (final a in auras)
+        if (a.borderAccent == null) a,
+    ];
+    final rowAura = rowAuras.isNotEmpty ? rowAuras.last : null;
+    if (rowAura != null) {
+      barColor = rowAura.borderAccent;
+      bgGradient = rowAura.gradient ?? bgGradient;
     }
-    if (strongestAura?.gradient != null) {
-      bgGradient = strongestAura!.gradient;
-    } else if (strongestAura?.background != null) {
-      bg = strongestAura!.background;
-    }
-    // The aura whose overlay (prism ring / hologram sheen) must paint on the IRC
-    // row — the same painter the bubble path uses (was bubble-only, so IRC
-    // rainbow/hologram rendered nothing but a glow).
-    final overlayAura =
-        auras.where((a) => a.hasOverlay && (a.prismRing || a.hologram)).isNotEmpty
-            ? auras.firstWhere((a) => a.prismRing || a.hologram)
-            : null;
-    // The watermark + whether it tiles edge-only — both read off the SAME aura
-    // (the first with a watermark) so a frost+other combination stays consistent.
-    final styleWatermark = deco?.watermark;
-    final CosmeticAura? auraWatermark = styleWatermark != null
-        ? null
-        : auras.where((a) => a.watermark != null).fold<CosmeticAura?>(
-            null, (prev, a) => prev ?? a);
-    final watermark = styleWatermark ?? auraWatermark?.watermark;
-    final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
+    // The cosmic starfield is part of the IRC ROW background
+    // (`body:not(.chat-bubbles) .message.cosmetic-aura-cosmic { background:
+    // gradient, url(starfield) }`, :1179-1186, no style gate) — it tiles the
+    // whole row, unlike the content-scoped `--style-pattern` textures.
+    final CosmeticAura? rowWatermarkAura = rowAuras
+        .where((a) => a.watermark != null)
+        .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
 
-    // The `.message` flex-wrap row: `.message-time` (FIRST), then
-    // `.message-author`, then `.message-content` — mirroring the PWA HTML order
-    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
-    // own lines (`.message-translation` width:100%, `.group-readers`/
-    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
-    // into the outer Column below so they span the whole message, right-aligned,
-    // rather than being clamped to the content's width.
-    final messageRow = Wrap(
-      crossAxisAlignment: WrapCrossAlignment.start,
-      spacing: 10,
-      runSpacing: 4,
-      children: [
-        // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
-        // the FIRST element, the left column, BEFORE the author. The clock
-        // reserves a 50px column so author/content left-edges line up.
-        if (settings.showTimestamps)
-          ConstrainedBox(
+    // The three `.message` flex items, in PWA HTML order (messages.js:936-938):
+    // `.message-time` (FIRST), `.message-author`, `.message-content`.
+    // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
+    // the clock reserves a 50px column so author/content left-edges line up.
+    final Widget? timeItem = settings.showTimestamps
+        ? ConstrainedBox(
             constraints: const BoxConstraints(minWidth: 50),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // `data-action="showFullTimestamp"`: tapping the clock shows the
-                // full date+time popup (messages.js:936-938, showTimestampPopup).
-                Tooltip(
-                  message: formatFullTimestamp(message.dateTime,
+                // `data-action="showFullTimestamp"`: tapping the clock opens
+                // the styled `.timestamp-popup` (messages.js:936-938,
+                // showTimestampPopup); hovering tints it `--primary` and shows
+                // the glass `.message-time:hover::after` tooltip.
+                _TimestampText(
+                  label: formatTime(message.dateTime, settings.timeFormat),
+                  fullTimestamp: formatFullTimestamp(message.dateTime,
                       settings.timeFormat, settings.dateFormat),
-                  triggerMode: TooltipTriggerMode.tap,
-                  child: Text(
-                    formatTime(message.dateTime, settings.timeFormat),
-                    style: TextStyle(color: c.textDim, fontSize: 12),
-                  ),
+                  fontSize: 12,
                 ),
                 // `.crypto-lock-irc`: the verification lock sits inside
                 // `.message-time` after the clock (PM/group only).
@@ -752,63 +1108,209 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   CryptoVerifiedBadge(state: _cryptoState!),
               ],
             ),
+          )
+        : null;
+    final authorItem = ConstrainedBox(
+      // `.message-author { min-width: 120px }` and NO max-width — the author
+      // flex item grows to its natural width and the wrapping `.message` row
+      // reflows the content around it (styles-chat.css:691-698). The Wrap
+      // bounds it at the row width, matching the flex container.
+      constraints: const BoxConstraints(minWidth: 120),
+      child: GestureDetector(
+        onTap: () => _openContextMenu(context),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // IRC author leads with an 18px inline avatar (`.avatar-message`,
+            // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
+            NymAvatar(
+                seed: message.pubkey, size: 18, imageUrl: _authorPicture),
+            const SizedBox(width: 4),
+            Flexible(
+              child: _authorLine(
+                c,
+                self: self,
+                size: fontSize,
+                // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                flairSize: 20,
+                brackets: true,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    // ---- The `.message-content` box ----
+    // Everything that targets `.message-content` decorates THIS box, not the
+    // row: the satoshi/eclipse/crt background plates (+ satoshi's own
+    // `padding: 10px 15px`), the tiled `--style-pattern` watermark
+    // (`.message-content::before` at `inset: 0` of the CONTENT element,
+    // styles-features.css:966-990) and the content-scoped cosmetics. The
+    // reactions row is a `.message` sibling (reactions.js:475), so it sits
+    // OUTSIDE the plate.
+    Widget contentBody = _bodyContent(
+        context, _bitchatColor(c) ?? c.text, fontSize,
+        deco: deco);
+    // The style plate (`.message.style-X .message-content { background }` —
+    // satoshi orange@.2 / light rgba(196,122,21,.1); eclipse rgba(18,14,28,.72)
+    // and crt rgba(10,8,2,.82) in BOTH themes, :545-552 + :1289-1299 +
+    // themes:899-901). Supporter's wash is bubble-only, so it returns null
+    // here. The frost icy fill applies ONLY when no message style is active
+    // (`.message:not([class*="style-"]).cosmetic-frost .message-content`,
+    // :1163-1166).
+    Color? contentFill = deco?.contentBackgroundFor(bubble: false);
+    if (contentFill == null && !_styleClassActive) {
+      contentFill = contentAuras
+          .where((a) => a.background != null)
+          .fold<Color?>(null, (prev, a) => prev ?? a.background);
+    }
+    // The content watermark: the style `--style-pattern` tile, else a
+    // content-scoped aura texture (frost's 18px edge snowflakes, :1149-1161).
+    final styleWatermark = deco?.watermark;
+    final CosmeticAura? contentWatermarkAura = styleWatermark != null
+        ? null
+        : contentAuras.where((a) => a.watermark != null).fold<CosmeticAura?>(
+            null, (prev, a) => prev ?? a);
+    final contentWatermark = styleWatermark ?? contentWatermarkAura?.watermark;
+    final contentEdgeWatermark = contentWatermarkAura?.edgeWatermark ?? false;
+    // Content-scoped aura glows (frost 10px / rainbow 16px / hologram 18px)
+    // sit on the content box, as does the overlay painter for the prism ring,
+    // hologram sheen and frost/hologram inset rings — the same painter the
+    // bubble path uses.
+    final contentShadows = <BoxShadow>[
+      for (final a in contentAuras)
+        if (a.glowColorFor(bubble: false) != null &&
+            a.glowBlurFor(bubble: false) > 0)
+          BoxShadow(
+            color: a.glowColorFor(bubble: false)!,
+            blurRadius: a.glowBlurFor(bubble: false),
           ),
-        ConstrainedBox(
-          // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
-          // the author flows inline and the line wraps. We keep a generous cap
-          // so the fixed badges (a ~116px supporter pill + flair/verified/friend)
-          // always fit and the nym ellipsizes within the remainder; the message
-          // body wraps to the next run when the author is wide.
-          constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
-          child: GestureDetector(
-            onTap: () => _openContextMenu(context),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // IRC author leads with an 18px inline avatar (`.avatar-message`,
-                // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
-                NymAvatar(
-                    seed: message.pubkey, size: 18, imageUrl: _authorPicture),
-                const SizedBox(width: 4),
-                Flexible(
-                  child: _authorLine(
-                    c,
-                    self: self,
-                    size: fontSize,
-                    // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
-                    flairSize: 20,
-                    brackets: true,
+    ];
+    final contentOverlays = contentAuras.where((a) => a.hasOverlay).toList();
+    final contentOverlayAura =
+        contentOverlays.isNotEmpty ? contentOverlays.first : null;
+    if (contentFill != null ||
+        contentWatermark != null ||
+        contentShadows.isNotEmpty ||
+        contentOverlayAura != null ||
+        deco?.contentPadding != null) {
+      Widget inner = contentBody;
+      if (contentWatermark != null || contentOverlayAura != null) {
+        inner = Stack(
+          children: [
+            if (contentWatermark != null)
+              Positioned.fill(
+                  child: StyleWatermarkLayer(
+                      watermark: contentWatermark,
+                      edgeOnly: contentEdgeWatermark)),
+            contentBody,
+            if (contentOverlayAura != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(
+                    painter: CosmeticOverlayPainter(
+                      aura: contentOverlayAura,
+                      // `.message-content` has no border-radius in IRC (the
+                      // `::before`/`::after` `border-radius: inherit` resolves
+                      // to 0), so the box is square.
+                      radius: BorderRadius.zero,
+                      bubble: false,
+                      // Drops the hologram iridescent fill + sheen when a
+                      // `style-…` class is active (`:not([class*="style-"])
+                      // .cosmetic-bubble-hologram`, styles-features.css:
+                      // 1203-1211) — the ring/glow stay.
+                      styleActive: _styleClassActive,
+                    ),
                   ),
                 ),
-              ],
-            ),
-          ),
+              ),
+          ],
+        );
+      }
+      contentBody = Container(
+        // Columns mode stretches the content to the column
+        // (`.cv-list .message-content { width: 100% }`); in the wrap row the
+        // box hugs the content like the PWA's shrink-wrapped satoshi plate.
+        width: widget.columnsMode ? double.infinity : null,
+        padding: deco?.contentPadding,
+        decoration: BoxDecoration(
+          color: contentFill,
+          boxShadow: contentShadows.isEmpty ? null : contentShadows,
         ),
-        ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width - 220,
+        // Clip the tiled watermark / painted overlays to the box.
+        clipBehavior: (contentWatermark != null || contentOverlayAura != null)
+            ? Clip.antiAlias
+            : Clip.none,
+        child: inner,
+      );
+    }
+    final contentColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        contentBody,
+        // Reactions row renders only when reactions OR zaps exist (the PWA
+        // `updateMessageReactions` early-returns on an empty reaction set,
+        // removing the row entirely unless zaps remain). The zap badge sits
+        // at its front; the `.add-reaction-btn` (smiley-plus) is appended at
+        // the end but ONLY on rows that already carry reactions — the first
+        // react on a bare message is still via long-press quick-react.
+        if (reactions.isNotEmpty || _hasZaps)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: _reactionsRow(context),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
-                  deco: deco),
-              // Reactions row renders only when reactions OR zaps exist (the PWA
-              // `updateMessageReactions` early-returns on an empty reaction set,
-              // removing the row entirely unless zaps remain). The zap badge sits
-              // at its front; the `.add-reaction-btn` (smiley-plus) is appended at
-              // the end but ONLY on rows that already carry reactions — the first
-              // react on a bare message is still via long-press quick-react.
-              if (reactions.isNotEmpty || _hasZaps)
-                Padding(
-                  padding: const EdgeInsets.only(top: 5),
-                  child: _reactionsRow(context),
-                ),
-            ],
-          ),
-        ),
       ],
     );
+
+    // The `.message` flex-wrap row: time, author, content flow inline
+    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
+    // own lines (`.message-translation` width:100%, `.group-readers`/
+    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
+    // into the outer Column below so they span the whole message, right-aligned,
+    // rather than being clamped to the content's width.
+    //
+    // COLUMNS MODE (`body.columns-mode:not(.chat-bubbles) .cv-list .message
+    // { flex-direction: column; gap: 5px }`, styles-columns.css:27-49): the
+    // flex children are blockified (`display:inline` on time/author computes
+    // to block for a flex item), so the row STACKS — time, then author 5px
+    // below, then the content 10px below the author (the 5px column gap plus
+    // `.message-content { margin-top: 5px }`) at `width: 100%` of the column.
+    final Widget messageRow;
+    if (widget.columnsMode) {
+      messageRow = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (timeItem != null) ...[
+            timeItem,
+            const SizedBox(height: 5), // `gap: 5px`
+          ],
+          authorItem,
+          // `gap: 5px` + `.message-content { margin-top: 5px }`.
+          const SizedBox(height: 10),
+          // `.message-content { width: 100% }` — full column width.
+          SizedBox(width: double.infinity, child: contentColumn),
+        ],
+      );
+    } else {
+      messageRow = Wrap(
+        crossAxisAlignment: WrapCrossAlignment.start,
+        // `.message { gap: 10px }` — the single-value CSS gap applies to BOTH
+        // axes, so wrapped runs are also 10px apart.
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          if (timeItem != null) timeItem,
+          authorItem,
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width - 220,
+            ),
+            child: contentColumn,
+          ),
+        ],
+      );
+    }
 
     // The message body + the full-width siblings the PWA wraps below it. The
     // `.message-translation` (`width:100%`) and `.group-readers`/
@@ -859,25 +1361,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // centered, `border-radius:0 3px 3px 0`; mentions add a secondary glow.
     final body = Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      child: watermark != null
+      child: rowWatermarkAura != null
           ? Stack(
               children: [
                 Positioned.fill(
                     child: StyleWatermarkLayer(
-                        watermark: watermark, edgeOnly: edgeWatermark)),
+                        watermark: rowWatermarkAura.watermark!,
+                        edgeOnly: rowWatermarkAura.edgeWatermark)),
                 rowChildren,
               ],
             )
           : rowChildren,
     );
-    // The IRC row inset ring is approximated by a 1px border — but suppress it
-    // for an overlay aura (prism/hologram), whose ring the painter strokes (else
-    // a double ring). gold/neon/phoenix/cosmic keep the border approximation.
-    final rowRing = (strongestAura?.insetColor != null &&
-            strongestAura != overlayAura)
-        ? strongestAura!.insetColor
-        : null;
-    final rowGlowBlur = strongestAura?.glowBlurFor(bubble: false) ?? 0;
+    // The row-scoped auras' inset ring (gold/neon/phoenix/cosmic — `inset 0 0 0
+    // 1px <ring>` on the row) is approximated by a 1px border; the
+    // content-scoped rings (frost/hologram) are stroked by the content box's
+    // painter above.
+    final rowRing = rowAura?.insetColor;
+    final rowGlowColor = rowAura?.glowColorFor(bubble: false);
+    final rowGlowBlur = rowAura?.glowBlurFor(bubble: false) ?? 0;
     final hasBg = bg != null || bgGradient != null;
     final content = Container(
       // `.message` is a block-level flex row filling `.messages-container` (no
@@ -903,14 +1405,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // The bubble path routes these through CosmeticOverlayPainter/_decorate
         // Bubble; here we approximate the inset ring with a 1px border.
         border: rowRing != null ? Border.all(color: rowRing, width: 1) : null,
-        boxShadow:
-            (strongestAura?.glowColor != null && rowGlowBlur > 0)
-                ? [
-                    BoxShadow(
-                        color: strongestAura!.glowColor!,
-                        blurRadius: rowGlowBlur),
-                  ]
-                : null,
+        boxShadow: (rowGlowColor != null && rowGlowBlur > 0)
+            ? [BoxShadow(color: rowGlowColor, blurRadius: rowGlowBlur)]
+            : null,
       ),
       clipBehavior: hasBg ? Clip.antiAlias : Clip.none,
       child: barColor != null
@@ -933,8 +1430,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                             topRight: Radius.circular(3),
                             bottomRight: Radius.circular(3),
                           ),
-                          boxShadow: widget.mentioned
-                              ? [BoxShadow(color: c.secondaryA(0.4), blurRadius: 8)]
+                          boxShadow: barGlow != null
+                              ? [BoxShadow(color: barGlow, blurRadius: 8)]
                               : null,
                         ),
                       ),
@@ -945,40 +1442,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             )
           : body,
     );
-    // The prism ring / holographic sheen — the same painter the bubble uses,
-    // now wired into the IRC ROW (rainbow/hologram in IRC previously rendered
-    // only a glow). Painted over the full row bounds (clipped to the row radius)
-    // so the ring sits at the row edge, not inside the content padding.
-    final decorated = overlayAura == null
-        ? content
-        : Stack(
-            children: [
-              content,
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: ClipRRect(
-                    borderRadius: NymRadius.rsm,
-                    child: CustomPaint(
-                      painter: CosmeticOverlayPainter(
-                        aura: overlayAura,
-                        radius: NymRadius.rsm,
-                        bubble: false,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
+    // The prism ring / hologram sheen / frost ring are CONTENT-scoped in every
+    // layout (`.message.cosmetic-* .message-content`, styles-features.css:
+    // 1121-1211) — they're painted by the content box above, so the row itself
+    // carries no overlay painter.
     return _SwipeToAct(
       settings: settings,
       onAction: (a) => _dispatchSwipeAction(context, a),
       // Desktop double-click → quote-reply (setupDoubleClickToReply).
       onDoubleTap: _quoteReply,
-      onLongPress: () => _onMessageLongPress(context),
+      // Quick-react popup anchored to the PRESS POINT (ui-context.js:1330).
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
       // Desktop right-click → context menu (PWA `contextmenu` handler).
       onSecondaryTap: () => _openContextMenu(context),
-      child: decorated,
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
+      child: content,
     );
   }
 
@@ -996,22 +1474,46 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // The aura gradient is painted as the bubble FILL only for auras whose PWA
     // bubble actually has a background (gold). neon/phoenix/cosmic are
     // box-shadow-only in the bubble (their gradient is the IRC row's only), so
-    // they must NOT over-paint a fill here. (P1#4.)
-    final bubbleGradient = (lastAura != null && lastAura.bubblePaintsGradient)
+    // they must NOT over-paint a fill here (P1#4) — and even gold's wash is
+    // gated on NO active message style (`body.chat-bubbles .message:not(
+    // [class*="style-"]).cosmetic-aura-gold .message-content`,
+    // styles-features.css:3699-3701): a styled bubble keeps only the ring/glow.
+    final bubbleGradient = (lastAura != null &&
+            lastAura.bubblePaintsGradient &&
+            !_styleClassActive)
         ? lastAura.bubbleFillGradient
         : null;
     // `.message-content` bubble fill. Dark mode: self primary@0.25, others
     // white@0.14. Light mode (`body.light-mode.chat-bubbles`): self primary@0.20,
     // others/PM black@0.10 — a translucent *white* over a light surface is
-    // invisible, so the PWA flips others to a dark wash. A style/aura background
-    // still takes precedence.
-    final bubbleColor = deco?.contentBackground ??
-        lastAura?.background ??
-        (self
-            ? c.primaryA(c.isLight ? 0.20 : 0.25)
-            : (c.isLight
-                ? const Color(0x1A000000) // black @ 0.10
-                : Colors.white.withValues(alpha: 0.14)));
+    // invisible, so the PWA flips others to a dark wash. The style background
+    // takes precedence via its BUBBLE-layout resolution (`contentBackgroundFor`):
+    // light satoshi's rgba(247,147,26,.12) bubble override
+    // (styles-themes-responsive.css:1417-1419) and aurora's fully TRANSPARENT
+    // replacement fill (styles-features.css:3675-3686, the gradient clips to the
+    // text over a `linear-gradient(transparent, transparent)` border-box layer).
+    // The frost flat wash applies only when no message style is active
+    // (`.message:not([class*="style-"]).cosmetic-frost`, :1163-1166).
+    //
+    // SELF + fire/ice: `body.chat-bubbles .message.self.style-fire/.style-ice
+    // .message-content { background: rgb(from var(--primary) r g b / 0.25)
+    // !important }` (styles-features.css:3708-3711) — five class selectors in
+    // the LAST-loaded stylesheet, so it beats the light-mode rgba(0,0,0,.08)
+    // fill (themes:1412-1415) and the supporter bubble wash: a self fire/ice
+    // bubble keeps primary@0.25 in BOTH themes; only other users' bubbles get
+    // the style override.
+    final selfFireIce = self &&
+        (_cosmetics.styleId == 'style-fire' ||
+            _cosmetics.styleId == 'style-ice');
+    final bubbleColor = selfFireIce
+        ? c.primaryA(0.25)
+        : deco?.contentBackgroundFor(bubble: true) ??
+            (_styleClassActive ? null : lastAura?.background) ??
+            (self
+                ? c.primaryA(c.isLight ? 0.20 : 0.25)
+                : (c.isLight
+                    ? const Color(0x1A000000) // black @ 0.10
+                    : Colors.white.withValues(alpha: 0.14)));
     final radius = _bubbleRadius(self);
 
     // The bubble interior = the body, THEN the `.bubble-time-inner` (the
@@ -1044,21 +1546,24 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               if (message.isEdited)
                 Text(
                   '(edited) ',
+                  // `.edited-indicator` base (styles-chat.css:1549-1554): 10px
+                  // italic text-dim AT OPACITY 0.7 — the in-bubble variant
+                  // (`.bubble-time-inner .edited-indicator`) inherits it.
                   style: TextStyle(
-                      color: c.textDim,
+                      color: c.textDim.withValues(alpha: 0.7),
                       fontSize: 10,
                       fontStyle: FontStyle.italic),
                 ),
               // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-              // Tapping it shows the full date+time popup (showTimestampPopup).
-              Tooltip(
-                message: formatFullTimestamp(
+              // Tapping it opens the styled `.timestamp-popup`
+              // (showTimestampPopup); hover tints it `--primary`
+              // (`.clickable-timestamp:hover`).
+              _TimestampText(
+                label: formatRelativeTime(message.dateTime),
+                fullTimestamp: formatFullTimestamp(
                     message.dateTime, settings.timeFormat, settings.dateFormat),
-                triggerMode: TooltipTriggerMode.tap,
-                child: Text(
-                  formatRelativeTime(message.dateTime),
-                  style: TextStyle(color: c.textDim, fontSize: 10, height: 1),
-                ),
+                fontSize: 10,
+                height: 1,
               ),
               // `.crypto-lock-bubble`: the verification lock follows the in-bubble
               // time (PM/group only).
@@ -1072,35 +1577,26 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Re-render the relative time on a cadence (cheap; matches the PWA timer).
     _ensureRelativeTimer();
 
-    final bubble = _SwipeToAct(
-      settings: settings,
-      onAction: (a) => _dispatchSwipeAction(context, a),
-      // Desktop double-click → quote-reply (setupDoubleClickToReply).
-      onDoubleTap: _quoteReply,
-      onLongPress: () => _onMessageLongPress(context),
-      // Desktop right-click → context menu (PWA `contextmenu` handler).
-      onSecondaryTap: () => _openContextMenu(context),
-      child: ConstrainedBox(
-        // `.message-content` bubble: `min-width:180px; max-width:85%`.
-        constraints: BoxConstraints(
-          minWidth: 180,
-          maxWidth: MediaQuery.of(context).size.width * 0.85,
-        ),
-        child: _decorateBubble(
-          radius: radius,
-          bubbleColor: bubbleColor,
-          glow: deco?.glow,
-          // Only gold paints its gradient as the bubble fill; neon/phoenix/
-          // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
-          gradient: bubbleGradient,
-          auras: auras,
-          // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
-          // — rendered as a 1px secondary@0.25 inner border on the bubble.
-          mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-            child: innerContent,
-          ),
+    final bubble = ConstrainedBox(
+      // `.message-content` bubble: `min-width:180px; max-width:85%`.
+      constraints: BoxConstraints(
+        minWidth: 180,
+        maxWidth: MediaQuery.of(context).size.width * 0.85,
+      ),
+      child: _decorateBubble(
+        radius: radius,
+        bubbleColor: bubbleColor,
+        glow: deco?.glow,
+        // Only gold paints its gradient as the bubble fill; neon/phoenix/
+        // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
+        gradient: bubbleGradient,
+        auras: auras,
+        // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
+        // — rendered as a 1px secondary@0.25 inner border on the bubble.
+        mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+          child: innerContent,
         ),
       ),
     );
@@ -1170,6 +1666,58 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       ],
     );
 
+    // `body.chat-bubbles .message.cosmetic-aura-gold { box-shadow: none;
+    // background: linear-gradient(135deg, rgba(255,215,0,0.05), transparent) }`
+    // (styles-themes-responsive.css:1551-1554): bubble mode ADDITIONALLY paints
+    // a faint 135deg gold wash across the whole `.message` ROW behind a
+    // gold-aura user's bubble. The rule carries no theme gate and has no light
+    // override, so it applies in both themes.
+    Widget rowStack = stack;
+    if (auras.any((a) => a.id == 'cosmetic-aura-gold')) {
+      rowStack = DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0x0DFFD700), // rgba(255,215,0,.05)
+              Color(0x00FFD700), // transparent
+            ],
+          ),
+        ),
+        child: stack,
+      );
+    }
+
+    // The swipe / long-press / double-tap surface is the whole `.message` row:
+    // the PWA binds `setupSwipeToReply` to `.message` and translates the FULL
+    // row — name + bubble + translation + readers + reactions all slide with
+    // the finger (messages.js:2165-2214) — not just the rounded bubble. The
+    // `.swipe-reply-indicator` chip is likewise positioned off this row's edge.
+    final swiped = _SwipeToAct(
+      settings: settings,
+      onAction: (a) => _dispatchSwipeAction(context, a),
+      // Desktop double-click → quote-reply (setupDoubleClickToReply).
+      onDoubleTap: _quoteReply,
+      // Quick-react popup anchored to the PRESS POINT (ui-context.js:1330).
+      onLongPressStart: (d) => _onMessageLongPress(context, d.globalPosition),
+      // Desktop right-click → context menu (PWA `contextmenu` handler).
+      onSecondaryTap: () => _openContextMenu(context),
+      avatarDx: widget.swipeAvatarDx,
+      swipeReactEmojiUrl: _swipeReactEmojiUrl,
+      child: rowStack,
+    );
+
+    // `bubble-snap-in` (styles-features.css:3453-3471): a newly-appended
+    // consecutive bubble enters with a 240ms cubic-bezier(0.34,1.56,0.64,1)
+    // overshoot — translateY(-6px)/scale(0.94)/opacity 0 → an over-shot
+    // +2px/1.02 at 55% → settle. Transform-origin bottom-left, bottom-right for
+    // self; disabled under `prefers-reduced-motion: reduce`.
+    Widget rowBody = swiped;
+    if (_snapIn && !MediaQuery.of(context).disableAnimations) {
+      rowBody = _BubbleSnapIn(self: self, child: rowBody);
+    }
+
     // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
     // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
     // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
@@ -1184,7 +1732,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // and the single gliding [_StickyGroupAvatar], laying every bubble of the
     // run in one `.message-group-stack` column beside it.
     if (widget.inGroup) {
-      return Padding(padding: vPad, child: stack);
+      return Padding(padding: vPad, child: rowBody);
     }
 
     // Legacy standalone path (direct [MessageRow] use, not via [MessageGroup]):
@@ -1212,7 +1760,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           ),
           const SizedBox(width: 6),
         ],
-        Flexible(child: stack),
+        Flexible(child: rowBody),
       ],
     );
     return Padding(
@@ -1240,10 +1788,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
     for (final a in auras) {
       // Inset ring (approximated as a tight 0-blur spread inside the box via a
-      // border below) + the outer glow (the bubble blur, e.g. gold 12px not 18).
+      // border below) + the outer glow at the bubble's colour + blur (light
+      // gold: 10px rgba(180,140,0,.15), themes:929-932 — not the IRC .12/12px).
       final blur = a.glowBlurFor(bubble: true);
-      if (a.glowColor != null && blur > 0) {
-        shadows.add(BoxShadow(color: a.glowColor!, blurRadius: blur));
+      final glowColor = a.glowColorFor(bubble: true);
+      if (glowColor != null && blur > 0) {
+        shadows.add(BoxShadow(color: glowColor, blurRadius: blur));
       }
     }
     // The strongest inset ring (last aura) is drawn as a hairline inner border
@@ -1257,12 +1807,19 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             : null;
 
     // Watermark from the active style or a frost/cosmic aura — and whether that
-    // watermark tiles edge-only (frost) rather than across the whole box.
+    // watermark tiles edge-only (frost) rather than across the whole box. The
+    // cosmic BUBBLE starfield only tiles when no message style is active
+    // (`body.chat-bubbles .message:not([class*="style-"]).cosmetic-aura-cosmic
+    // .message-content`, styles-features.css:1192-1195); frost's edge snowflakes
+    // (`.cosmetic-frost .message-content::after`, :1149-1161) carry no such gate.
     final styleWatermark = _styleDecoration(context)?.watermark;
     final CosmeticAura? auraWatermark = styleWatermark != null
         ? null
-        : auras.where((a) => a.watermark != null).fold<CosmeticAura?>(
-            null, (prev, a) => prev ?? a);
+        : auras
+            .where((a) =>
+                a.watermark != null &&
+                (a.edgeWatermark || !_styleClassActive))
+            .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
     final watermark = styleWatermark ?? auraWatermark?.watermark;
     final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
 
@@ -1306,6 +1863,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     painter: CosmeticOverlayPainter(
                       aura: overlayAura,
                       radius: radius,
+                      // Drops the hologram iridescent fill + sheen when a
+                      // `style-…` class is active (`:not([class*="style-"])
+                      // .cosmetic-bubble-hologram`, styles-features.css:
+                      // 1203-1211) — only the ring/glow remain.
+                      styleActive: _styleClassActive,
                     ),
                   ),
                 ),
@@ -1325,12 +1887,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       (message.isGroup || _isChannelMessage) &&
       message.readers.isNotEmpty;
 
-  /// A channel message: not a PM, not a group, with a 64-hex geohash (the PWA
-  /// gate `message.geohash && /^[0-9a-f]{64}$/`).
+  /// A channel message: not a PM, not a group, with a geohash set and a
+  /// canonical 64-hex EVENT id (the PWA gate `message.geohash && message.id &&
+  /// /^[0-9a-f]{64}$/i.test(message.id)`, messages.js:826-828).
   bool get _isChannelMessage {
     if (message.isPM || message.isGroup) return false;
-    final g = message.geohash ?? '';
-    return RegExp(r'^[0-9a-f]{64}$').hasMatch(g);
+    if ((message.geohash ?? '').isEmpty) return false;
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false)
+        .hasMatch(message.id);
   }
 
   /// A right-aligned row of up to 3 overlapping 14px reader avatars + a `+N`
@@ -1345,7 +1909,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final c = context.nym;
     final users = ref.watch(usersProvider);
     return GestureDetector(
-      onLongPress: () => _showSeenBy(context),
+      onLongPress: () {
+        // The PWA buzzes (nymHapticTap = 30ms vibrate) as the 500ms reader
+        // long-press fires (groups.js:2759-2763, 2806-2810). A real 30ms
+        // motor pulse reads as a solid tap — mediumImpact, not the barely
+        // perceptible lightImpact.
+        HapticFeedback.mediumImpact();
+        _showSeenBy(context);
+      },
       child: Padding(
         padding: const EdgeInsets.only(top: 3, right: 4),
         child: Row(
@@ -1403,6 +1974,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       anchorRect: _globalRectOfContext(context) ?? Rect.zero,
       emoji: '👁',
       reactors: reactors,
+      // "Click user row to open their context menu" (`_showReadersModalFromMap`,
+      // groups.js:2861-2869): close the modal, then
+      // `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`.
+      onTapReactor: (r) => _openReactorContextMenu(context, r),
     );
   }
 
@@ -1438,30 +2013,42 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  Future<void> _toggleReaction(BuildContext context, MessageReaction r) async {
+  void _toggleReaction(BuildContext context, MessageReaction r) {
     final controller = ref.read(nostrControllerProvider);
     final view = ref.read(currentViewProvider);
     final kind = inferOriginalKind(message, view: view);
     final wasReacted = r.userReacted;
-    final ok = await controller.toggleReaction(
+    // toggleReaction applies its optimistic local update synchronously (before
+    // its first await); the signing/encryption/publish continues unawaited.
+    unawaited(controller.toggleReaction(
       message.id,
       r.emoji,
       target: reactionTargetFor(message),
       kind: kind,
-    );
-    // Burst on add (not on removal), mirroring `_burstOnBadge` after sendReaction.
-    if (ok && !wasReacted && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
-      HapticFeedback.selectionClick();
+    ));
+    // Buzz + burst on add (not removal) the INSTANT the reaction lands in
+    // local state — the PWA fires `nymHapticTap` and `_burstOnBadge` right
+    // after the optimistic add, BEFORE any network publish (reactions.js:
+    // 955-977). Re-reading state confirms the add went through (a rate-limited
+    // toggle skips the local update and stays silent, reactions.js:946).
+    if (!wasReacted && _selfReactedLocally(r.emoji)) {
+      HapticFeedback.mediumImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, r.emoji);
     }
   }
 
+  /// True when local state now carries our own [emoji] reaction on this
+  /// message — i.e. `toggleReaction`'s optimistic add actually happened.
+  bool _selfReactedLocally(String emoji) {
+    final list = ref.read(appStateProvider).reactions[message.id] ?? const [];
+    return list.any((x) => x.emoji == emoji && x.userReacted);
+  }
+
   void _showReactors(BuildContext context, MessageReaction r, Rect rect) {
     // Long-press on a reaction badge buzzes before the reactors modal opens
-    // (`nymHapticTap`, reactions.js:526).
-    HapticFeedback.selectionClick();
+    // (`nymHapticTap` = a 30ms vibrate, reactions.js:526).
+    HapticFeedback.mediumImpact();
     // The real reactor map (`reactorsFor` → pubkey → nym), each row carrying its
     // avatar picture so the modal loads faces (mirrors `showReactorsModal`).
     final app = ref.read(appStateProvider);
@@ -1488,20 +2075,49 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       anchorRect: rect,
       emoji: r.emoji,
       reactors: reactors,
+      // "Click user row to open their context menu" (`showReactorsModal`,
+      // reactions.js:656-663): the modal closes itself, then the PWA calls
+      // `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`.
+      onTapReactor: (entry) => _openReactorContextMenu(context, entry),
     );
   }
 
-  void _onMessageLongPress(BuildContext context) {
-    // The PWA buzzes as the quick-react popup is built (`nymHapticTap`,
-    // ui-context.js:1279); a raw GestureDetector.onLongPress is otherwise silent.
-    HapticFeedback.selectionClick();
-    final rect = _globalRectOfContext(context);
+  /// Opens a reactor/reader row's user context menu — the PWA's
+  /// `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`
+  /// (reactions.js:656-663, groups.js:2861-2869): no message/content attached
+  /// and NOT profile-only.
+  void _openReactorContextMenu(BuildContext context, ReactorEntry r) {
+    final app = ref.read(appStateProvider);
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: r.pubkey,
+        nym: r.nym,
+        isSelf: r.pubkey == app.selfPubkey,
+      ),
+    );
+  }
+
+  void _onMessageLongPress(BuildContext context, Offset at) {
+    // The PWA buzzes as the quick-react popup is built (`nymHapticTap` = a
+    // 30ms vibrate, ui-context.js:1279); a raw long-press is otherwise silent.
+    HapticFeedback.mediumImpact();
+    // The popup centers on the PRESS POINT (clientX/clientY), 55px above the
+    // finger (ui-context.js:1330-1347) — NOT on the message rect. A zero-size
+    // anchor at the touch point reproduces `left = clientX - w/2, top =
+    // clientY - 55` exactly.
+    final rect = Rect.fromCenter(center: at, width: 0, height: 0);
     // Quick-react row = recents-first, padded with the six defaults
     // (`_messageQuickReactDefaults`), deduped (ctx-menu F7).
     final recents = ref.read(recentEmojisProvider);
     showQuickReactPopup(
       context,
-      anchorRect: rect ?? Rect.zero,
+      anchorRect: rect,
+      // The dim-scrim spotlight cutout is the PRESSED MESSAGE's bounds (the
+      // `.long-press-highlight` row stays bright while the scroller dims,
+      // styles-features.css:2848-2863) — distinct from the press-point anchor
+      // the pill positions against.
+      spotlightRect: _globalRectOfContext(context),
       emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
@@ -1520,24 +2136,37 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  Future<void> _quickReact(BuildContext context, String emoji) async {
+  void _quickReact(BuildContext context, String emoji) {
     final controller = ref.read(nostrControllerProvider);
     final view = ref.read(currentViewProvider);
     final already = reactions.any((r) => r.emoji == emoji && r.userReacted);
     // Record the pick into the shared recents store (reactions.js bump).
     ref.read(recentEmojisProvider.notifier).record(emoji);
-    final ok = await controller.toggleReaction(
+    unawaited(controller.toggleReaction(
       message.id,
       emoji,
       target: reactionTargetFor(message),
       kind: inferOriginalKind(message, view: view),
-    );
-    if (ok && !already && context.mounted) {
-      // The PWA buzzes on every successful add (`nymHapticTap`, reactions.js:968).
-      HapticFeedback.selectionClick();
+    ));
+    // Buzz + burst with the optimistic local add, BEFORE any signing/publish
+    // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977).
+    if (!already && _selfReactedLocally(emoji)) {
+      HapticFeedback.mediumImpact();
       final center = _globalCenterOfContext(context);
       if (center != null) ReactionBurst.play(context, center, emoji);
     }
+  }
+
+  /// Resolves `settings.swipeReactEmoji` to a custom-emoji image URL when it
+  /// is a known `:shortcode:` — the swipe ACTIONS 'react' icon renders the
+  /// custom-emoji IMAGE in that case (messages.js:2066-2074). Null → the text
+  /// glyph. Exact-case lookup, like the PWA's `customEmojis.has(m[1])`.
+  String? get _swipeReactEmojiUrl {
+    final m =
+        RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(settings.swipeReactEmoji);
+    if (m == null) return null;
+    final code = m.group(1)!;
+    return ref.watch(liveCustomEmojiProvider.select((s) => s.codeToUrl[code]));
   }
 
   /// Runs the committed swipe action (`_getSwipeActionConfig(action).run`,
@@ -1572,7 +2201,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         _quickReact(context, settings.swipeReactEmoji);
         return;
       case 'zap':
-        if (message.isOwn || message.pubkey.isEmpty) return;
+        if (message.pubkey.isEmpty) return;
+        // Zapping your own message prints a system notice rather than
+        // silently no-opping (messages.js:2090-2093).
+        if (message.isOwn) {
+          ref
+              .read(appStateProvider.notifier)
+              .addSystemMessage('Cannot zap your own message');
+          return;
+        }
         _zapMessage(context, baseNym);
         return;
       case 'slap':
@@ -1590,18 +2227,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
   }
 
-  /// Opens the zap modal for this message's author (the swipe `zap` action and a
-  /// 1:1 mirror of `quick_context_items._zap`): resolves the author's lightning
-  /// address from `usersProvider`, or emits a system message when none is set.
+  /// Opens the zap modal for this message's author (the swipe `zap` action,
+  /// messages.js:2086-2106): posts the PWA's "Checking if @X can receive
+  /// zaps..." system note, does a FRESH lightning-address resolve
+  /// (`fetchLightningAddressForUser` — cache first, then a kind-0 profile
+  /// fetch awaited up to 4s) rather than trusting the local cache, then either
+  /// opens the modal, reports "cannot receive zaps", or — on a resolve error —
+  /// "Failed to check if @X can receive zaps".
   Future<void> _zapMessage(BuildContext context, String baseNym) async {
-    final lnAddr =
-        ref.read(usersProvider)[message.pubkey]?.profile?.lightningAddress;
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.addSystemMessage('Checking if @$baseNym can receive zaps...');
+    final String? lnAddr;
+    try {
+      lnAddr = await ref
+          .read(nostrControllerProvider)
+          .resolveLightningAddressForZap(message.pubkey);
+    } catch (_) {
+      notifier.addSystemMessage('Failed to check if @$baseNym can receive zaps');
+      return;
+    }
     if (lnAddr == null || lnAddr.isEmpty) {
-      ref.read(appStateProvider.notifier).addSystemMessage(
+      notifier.addSystemMessage(
           '@$baseNym cannot receive zaps (no lightning address set)');
       return;
     }
-    if (!context.mounted) return;
+    if (!context.mounted || !mounted) return;
     await ZapModal.show(
       context,
       recipientPubkey: message.pubkey,
@@ -1860,7 +2510,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 /// A single `.reaction-badge` pill. Tappable (toggle) with a long-press to show
 /// the reactor list; reports its global bounds to the callbacks for anchoring.
 /// User-reacted badges get a soft glow halo (`box-shadow 0 0 10px primary@0.1`)
-/// and the pill presses/pops on tap (`active scale(0.95)`).
+/// and the pill presses/pops on tap (`active scale(0.95)`). Desktop hover lifts
+/// it (`.reaction-badge:hover`, styles-chat.css:429-433: primary@0.08 bg,
+/// primary@0.3 border, scale 1.05); the later-in-sheet `.user-reacted` rule
+/// keeps its own bg/border on hover, so only the lift applies then. No hover
+/// tooltip: the `[title]:hover::after` reactor-names rule is dead CSS — the PWA
+/// never sets a `title` on badges ("No tooltip — long-press shows reactors
+/// modal instead", reactions.js:512).
 class _ReactionBadge extends StatefulWidget {
   const _ReactionBadge({
     required this.reaction,
@@ -1877,6 +2533,7 @@ class _ReactionBadge extends StatefulWidget {
 
 class _ReactionBadgeState extends State<_ReactionBadge> {
   bool _pressed = false;
+  bool _hover = false;
 
   Rect _rect(BuildContext context) {
     final box = context.findRenderObject() as RenderBox?;
@@ -1884,42 +2541,105 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
     return box.localToGlobal(Offset.zero) & box.size;
   }
 
+  /// Whole-string `:shortcode:` — only this shape can become a custom-emoji
+  /// image in a badge (`renderReactionEmoji`, emoji.js:342-351).
+  static final RegExp _rxWholeToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final r = widget.reaction;
-    return GestureDetector(
-      onTap: () => widget.onTap(_rect(context)),
-      onLongPress: () => widget.onLongPress(_rect(context)),
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) => setState(() => _pressed = false),
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.95 : 1.0,
-        duration: const Duration(milliseconds: 120),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: r.userReacted
-                ? c.primaryA(0.12)
-                : Colors.white.withValues(alpha: 0.05),
-            borderRadius: const BorderRadius.all(Radius.circular(20)),
-            border: Border.all(
-              color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+    return RawGestureDetector(
+      // The PWA cancels the badge's pending 500ms reactors-modal hold on the
+      // FIRST `touchmove` (reactions.js:543-549) — the same tight pre-fire
+      // slop as the message quick-react hold — so a slow scroll started on a
+      // badge never pops the modal. A plain `onLongPress` would tolerate the
+      // framework's ~18px kTouchSlop drift instead.
+      gestures: <Type, GestureRecognizerFactory>{
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (rec) => rec
+            ..onLongPressStart = (_) => widget.onLongPress(_rect(context)),
+        ),
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: () => widget.onTap(_rect(context)),
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) => setState(() => _pressed = false),
+          onTapCancel: () => setState(() => _pressed = false),
+          child: AnimatedScale(
+            // `:active scale(0.95)` beats `:hover scale(1.05)` (later in sheet).
+            // `.reaction-badge { transition: all 0.2s }` — 200ms CSS-default
+            // `ease`, and the bg/border animate too (AnimatedContainer below).
+            scale: _pressed ? 0.95 : (_hover ? 1.05 : 1.0),
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.ease,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.ease,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                // `.user-reacted` (439-443) sits AFTER `:hover` (429-433) at
+                // equal specificity, so its bg/border win while hovered.
+                color: r.userReacted
+                    ? c.primaryA(0.12)
+                    : (_hover
+                        ? c.primaryA(0.08)
+                        : Colors.white.withValues(alpha: 0.05)),
+                borderRadius: const BorderRadius.all(Radius.circular(20)),
+                border: Border.all(
+                  color: r.userReacted
+                      ? c.primaryA(0.35)
+                      : (_hover ? c.primaryA(0.3) : c.glassBorder),
+                ),
+                boxShadow: r.userReacted
+                    ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
+                    : null,
+              ),
+              // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
+              // stays `--text` even when user-reacted (only bg/border/glow change —
+              // `styles-chat.css:439-443`). The emoji goes through the PWA's
+              // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
+              // `:shortcode:` reaction can render as its custom-emoji image, at the
+              // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
+              // (styles-chat.css:854-859, margin 0). The pill lays out as
+              // `display:flex; align-items:center; gap:3px` — with an image the
+              // count is a separate flex item 3px away; with plain text the PWA's
+              // text nodes merge into one `"emoji count"` run, so render that as a
+              // single Text.
+              child: _rxWholeToken.hasMatch(r.emoji)
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InlineEmojiText(
+                          text: r.emoji,
+                          style: TextStyle(color: c.text, fontSize: 12),
+                          wholeStringOnly: true,
+                          emojiSize: 12 * 1.45,
+                          emojiMargin: EdgeInsets.zero,
+                          // The badge pill is `display: flex; align-items: center`
+                          // (styles-chat.css:414-426), so the img is a flex-
+                          // centered item — `.custom-emoji-reaction`'s
+                          // `vertical-align` is inert here.
+                          emojiAlignment: PlaceholderAlignment.middle,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          abbreviateNumber(r.count),
+                          style: TextStyle(color: c.text, fontSize: 12),
+                        ),
+                      ],
+                    )
+                  : Text(
+                      '${r.emoji} ${abbreviateNumber(r.count)}',
+                      style: TextStyle(color: c.text, fontSize: 12),
+                    ),
             ),
-            boxShadow: r.userReacted
-                ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
-                : null,
-          ),
-          // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
-          // stays `--text` even when user-reacted (only bg/border/glow change —
-          // `styles-chat.css:439-443`). Routed through [InlineEmojiText] so a
-          // NIP-30 `:shortcode:` reaction renders as its custom-emoji image, not
-          // literal text; unicode reactions stay a plain styled Text.
-          child: InlineEmojiText(
-            text: '${r.emoji} ${abbreviateNumber(r.count)}',
-            style: TextStyle(color: c.text, fontSize: 12),
-            emojiSize: 18,
           ),
         ),
       ),
@@ -2089,6 +2809,107 @@ class _RedactedRevealState extends State<_RedactedReveal> {
   }
 }
 
+/// The collapsed "💭 Reasoning" details block a bot reply prepends inside its
+/// bubble/content (`.bot-think`, styles-chat.css:1193-1237 + messages.js
+/// :796-797, 1415-1418): margin 2px 0 8px, bg secondary@0.08, a 1px glass
+/// border with a 3px primary@0.45 left accent, radius-xs (8); the summary row
+/// (5px 10px, text-dim, a ▸ that rotates 90° while open over `--transition`)
+/// grows a 1px glass-border bottom divider while open; the body is 8px 10px
+/// italic text-dim at line-height 1.5, capped at 320px with its own scroll.
+/// The whole block renders at 0.88em of the user text size.
+class _BotThinkSection extends StatefulWidget {
+  const _BotThinkSection({
+    required this.reasoning,
+    required this.fontSize,
+  });
+
+  final String reasoning;
+
+  /// 0.88 × the user text-size setting (`.bot-think { font-size: 0.88em }`).
+  final double fontSize;
+
+  @override
+  State<_BotThinkSection> createState() => _BotThinkSectionState();
+}
+
+class _BotThinkSectionState extends State<_BotThinkSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final fs = widget.fontSize;
+    final side = BorderSide(color: c.glassBorder);
+    return Container(
+      // `.bot-think { margin: 2px 0 8px }`.
+      margin: const EdgeInsets.only(top: 2, bottom: 8),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.08),
+        borderRadius: NymRadius.rxs,
+        border: Border(
+          top: side,
+          right: side,
+          bottom: side,
+          left: BorderSide(color: c.primaryA(0.45), width: 3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              // `[open] summary { border-bottom: 1px solid var(--glass-border) }`.
+              decoration: _expanded
+                  ? BoxDecoration(border: Border(bottom: side))
+                  : null,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // `summary::before` ▸ marker (rotates 90° when open;
+                  // `--transition`: 0.25s cubic-bezier(0.4,0,0.2,1)).
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.fastOutSlowIn,
+                    turns: _expanded ? 0.25 : 0,
+                    child: Text('▸',
+                        style: TextStyle(color: c.textDim, fontSize: fs)),
+                  ),
+                  const SizedBox(width: 6),
+                  // `.bot-think summary` has no font-weight (normal/w400).
+                  Text('💭 Reasoning',
+                      style: TextStyle(
+                          color: c.textDim,
+                          fontSize: fs,
+                          fontWeight: FontWeight.w400)),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            // `.bot-think-body`: italic dim, capped at 320px with its own scroll.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                child: Text(
+                  widget.reasoning,
+                  style: TextStyle(
+                      color: c.textDim,
+                      fontSize: fs,
+                      height: 1.5,
+                      fontStyle: FontStyle.italic),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// The `.message-scroll-flash` highlight pulse (`styles-chat.css:1285-1306`): a
 /// non-interactive primary-tinted overlay (`::after`, primary@0.18 fill + 1px
 /// primary@0.5 border, radius-sm) that fades in then out over the
@@ -2174,12 +2995,309 @@ class _ScrollFlashOverlayState extends State<_ScrollFlashOverlay>
   }
 }
 
+/// `.msg-hover-buttons` (styles-chat.css:357-402, messages.js:771-779): the
+/// two quick-action buttons shown at a message's top-right while the row is
+/// hovered on a hover-capable device — a smiley reaction-picker button
+/// (`reactionShowPicker`) and a translate button (`translateHoverMessage`),
+/// 4px apart. The host fades the pair with the row hover.
+class _MsgHoverButtons extends StatelessWidget {
+  const _MsgHoverButtons({
+    required this.onReact,
+    required this.onTranslate,
+    this.vertical = false,
+  });
+
+  /// Opens the full reaction picker; null (no picker host) leaves the button
+  /// rendered but inert, like a PWA row whose picker action can't resolve.
+  final VoidCallback? onReact;
+  final VoidCallback onTranslate;
+
+  /// Columns mode stacks the pair vertically (`body.columns-mode
+  /// .msg-hover-buttons { flex-direction: column }`, styles-columns.css:80-82).
+  final bool vertical;
+
+  @override
+  Widget build(BuildContext context) {
+    final children = [
+      // `.reaction-btn` — the 20×20 smiley-plus glyph (same path as the
+      // add-reaction pill's icon).
+      _HoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
+      // `.msg-hover-buttons { gap: 4px }`.
+      SizedBox(width: vertical ? 0 : 4, height: vertical ? 4 : 0),
+      // `.translate-msg-btn` (`title="Translate"`).
+      _HoverActionButton(
+        svg: NymIcons.translate,
+        onTap: onTranslate,
+        tooltip: 'Translate',
+      ),
+    ];
+    return vertical
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: children,
+          )
+        : Row(mainAxisSize: MainAxisSize.min, children: children);
+  }
+}
+
+/// One `.reaction-btn` / `.translate-msg-btn` (styles-chat.css:366-402): bg
+/// rgba(20,20,35,0.8), 1px `--glass-border`, radius-xs, padding 4px 8px,
+/// 16px glyph filled `--text`; hover → bg white@0.08 + border primary@0.3.
+/// Light mode flips the rest fill to white@0.85 with a black@0.08 border
+/// (styles-themes-responsive.css:1184-1187).
+class _HoverActionButton extends StatefulWidget {
+  const _HoverActionButton({
+    required this.svg,
+    required this.onTap,
+    this.tooltip,
+  });
+  final String svg;
+  final VoidCallback? onTap;
+  final String? tooltip;
+
+  @override
+  State<_HoverActionButton> createState() => _HoverActionButtonState();
+}
+
+class _HoverActionButtonState extends State<_HoverActionButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final restFill = c.isLight
+        ? const Color(0xD9FFFFFF) // rgba(255,255,255,0.85)
+        : const Color(0xCC141423); // rgba(20,20,35,0.8)
+    final restBorder = c.isLight
+        ? Colors.black.withValues(alpha: 0.08)
+        : c.glassBorder;
+    final btn = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color:
+                _hover ? Colors.white.withValues(alpha: 0.08) : restFill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+                color: _hover ? c.primaryA(0.3) : restBorder),
+          ),
+          child: NymSvgIcon(widget.svg, size: 16, color: c.text),
+        ),
+      ),
+    );
+    return widget.tooltip != null
+        ? Tooltip(message: widget.tooltip!, child: btn)
+        : btn;
+  }
+}
+
+/// The tappable message timestamp (`.clickable-timestamp`, messages.js:936-938).
+/// Hover tints it `--primary` over 120ms (`.clickable-timestamp:hover`,
+/// styles-chat.css:596-604) and shows the glass full-timestamp tooltip
+/// (`.message-time:hover::after`, styles-components.css:1637-1657: bg
+/// rgba(20,20,35,0.9) dark / white@0.92 light, glass / black@0.08 border,
+/// radius-xs, padding 5px 10px, 11px, shadow-sm, 6px above). Tapping opens the
+/// anchored `.timestamp-popup` (`showTimestampPopup`, messages.js:3367-3390):
+/// a `.reactors-modal`-chromed panel whose `.timestamp-popup-body` is 13px
+/// `--text` at 10px 14px, nowrap — right-aligned to the timestamp and flipped
+/// above/below by available head-room, dismissed on the next tap.
+class _TimestampText extends StatefulWidget {
+  const _TimestampText({
+    required this.label,
+    required this.fullTimestamp,
+    required this.fontSize,
+    this.height,
+  });
+
+  final String label;
+  final String fullTimestamp;
+  final double fontSize;
+  final double? height;
+
+  @override
+  State<_TimestampText> createState() => _TimestampTextState();
+}
+
+class _TimestampTextState extends State<_TimestampText> {
+  bool _hover = false;
+  OverlayEntry? _popup;
+
+  @override
+  void dispose() {
+    _popup?.remove();
+    _popup = null;
+    super.dispose();
+  }
+
+  void _closePopup() {
+    _popup?.remove();
+    _popup = null;
+  }
+
+  /// `showTimestampPopup` placement (messages.js:3377-3384): right-aligned to
+  /// the timestamp (`right = max(4, innerWidth - rect.right)`), 6px ABOVE it
+  /// when there is head-room (`rect.top > approxHeight(90) + 20`), else 6px
+  /// below. The PWA closes it on outside click / scroll; here the full-screen
+  /// barrier closes it on the next tap or drag.
+  void _openPopup() {
+    _closePopup();
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final rect = box.localToGlobal(Offset.zero) & box.size;
+    final overlay = Overlay.of(context);
+    final screen = MediaQuery.of(context).size;
+    final right =
+        (screen.width - rect.right).clamp(4.0, double.infinity);
+    final above = rect.top > 110;
+    final entry = OverlayEntry(
+      builder: (ctx) {
+        final c = ctx.nym;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _closePopup,
+                onPanStart: (_) => _closePopup(),
+              ),
+            ),
+            Positioned(
+              right: right,
+              top: above ? null : rect.bottom + 6,
+              bottom: above ? screen.height - rect.top + 6 : null,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  // `.reactors-modal { min-width:160; max-width:240 }`.
+                  constraints:
+                      const BoxConstraints(minWidth: 160, maxWidth: 240),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: c.bgSecondary,
+                    borderRadius: NymRadius.rmd,
+                    border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.08)
+                          : c.glassBorder,
+                    ),
+                    // dark: shadow-lg + shadow-glow + a 1px white@0.05 ring;
+                    // light: `0 8px 32px rgba(0,0,0,0.12)`.
+                    boxShadow: c.isLight
+                        ? const [
+                            BoxShadow(
+                                color: Color(0x1F000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                          ]
+                        : [
+                            const BoxShadow(
+                                color: Color(0x80000000),
+                                offset: Offset(0, 8),
+                                blurRadius: 32),
+                            BoxShadow(
+                                color: c.primaryA(0.1), blurRadius: 20),
+                            const BoxShadow(
+                                color: Color(0x0DFFFFFF), spreadRadius: 1),
+                          ],
+                  ),
+                  // `.timestamp-popup-body`: 13px --text, nowrap.
+                  child: Text(
+                    widget.fullTimestamp,
+                    softWrap: false,
+                    style: TextStyle(color: c.text, fontSize: 13),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    _popup = entry;
+    overlay.insert(entry);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _openPopup,
+        child: Tooltip(
+          message: widget.fullTimestamp,
+          // Hover-only (mouse): tap opens the styled popup instead, and
+          // long-press belongs to the message quick-react hold.
+          triggerMode: TooltipTriggerMode.manual,
+          waitDuration: Duration.zero,
+          preferBelow: false,
+          verticalOffset: 14,
+          padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: c.isLight
+                ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
+                : const Color(0xE6141423), // rgba(20,20,35,0.9)
+            borderRadius: NymRadius.rxs,
+            border: Border.all(
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.08)
+                  : c.glassBorder,
+            ),
+            // `--shadow-sm: 0 2px 8px rgba(0,0,0,0.3)`.
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x4D000000),
+                  offset: Offset(0, 2),
+                  blurRadius: 8),
+            ],
+          ),
+          // The ::after inherits `.message-time`'s text-dim (dark); light
+          // pins `color: var(--text)`.
+          textStyle: TextStyle(
+              fontSize: 11, color: c.isLight ? c.text : c.textDim),
+          child: AnimatedDefaultTextStyle(
+            // `.clickable-timestamp { transition: color 120ms ease }`.
+            duration: const Duration(milliseconds: 120),
+            curve: Curves.ease,
+            style: TextStyle(
+              color: _hover ? c.primary : c.textDim,
+              fontSize: widget.fontSize,
+              height: widget.height,
+            ),
+            child: Text(widget.label),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// The in-message P2P file-offer card (`.file-offer`, `messages.js:851-917`,
 /// `styles-features.css:2087-2290`). Header = category-coloured doc icon + name
 /// + meta (`size • type • Torrent?`); status block flips between
 /// seeding/unseeded (own) and Download / inline-progress / "No longer available"
 /// (peer). Driven live by [P2PService] (a [ChangeNotifier]) keyed by offerId.
-class FileOfferCard extends StatelessWidget {
+///
+/// Stateful because the PWA's DOM persists across status flips: a peer card
+/// rendered while the offer was still seeded KEEPS its `.file-offer-btn`, so
+/// when the offer goes unseeded mid-view the existing button flips to
+/// "Unavailable" with `.unavailable` (`updateFileOfferUI`, p2p.js:858-874);
+/// only a fresh render of an already-unseeded offer shows the bare
+/// `.file-offer-unseeded` dot row (messages.js:876-882).
+class FileOfferCard extends StatefulWidget {
   const FileOfferCard({
     super.key,
     required this.offer,
@@ -2201,6 +3319,21 @@ class FileOfferCard extends StatelessWidget {
   /// Both null (PM/group/no channel) → no tag. F06-B3.
   final String? seedGeohash;
   final String? seedChannelName;
+
+  @override
+  State<FileOfferCard> createState() => _FileOfferCardState();
+}
+
+class _FileOfferCardState extends State<FileOfferCard> {
+  FileOffer get offer => widget.offer;
+  bool get isOwn => widget.isOwn;
+  P2PService get service => widget.service;
+
+  /// True once this mounted card has rendered the offer in a SEEDED state —
+  /// the analogue of the PWA card whose actions div already exists when the
+  /// unseeded status arrives (`updateFileOfferUI` mutates the button in place
+  /// rather than swapping to the dot row).
+  bool _sawSeeded = false;
 
   /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
   /// The PWA uses ONE generic file glyph and only re-tints the stroke per
@@ -2240,11 +3373,17 @@ class FileOfferCard extends StatelessWidget {
         for (final t in service.transfers) {
           if (t.offerId == offer.offerId) transfer = t;
         }
+        // Latch the "rendered while seeded" state (the PWA card whose actions
+        // div pre-exists an unseeded flip). Internal flag only — the same
+        // build reads it, so no setState needed.
+        if (!unseeded) _sawSeeded = true;
 
         return Container(
-          constraints: const BoxConstraints(maxWidth: 320),
+          // `.file-offer { max-width: 350px; margin: 8px 0 }`
+          // (styles-features.css:2048-2055).
+          constraints: const BoxConstraints(maxWidth: 350),
+          margin: const EdgeInsets.symmetric(vertical: 8),
           // `.file-offer { padding: 14px; border-radius: var(--radius-md)=16 }`
-          // (styles-features.css:2051-2052).
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: Colors.white.withValues(alpha: 0.04),
@@ -2301,7 +3440,6 @@ class FileOfferCard extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
               _status(context, c, unseeded: unseeded, transfer: transfer),
             ],
           ),
@@ -2316,145 +3454,294 @@ class FileOfferCard extends StatelessWidget {
     required bool unseeded,
     required P2PTransfer? transfer,
   }) {
-    // Own offer: seeding (green dot + Stop) or no-longer-seeding (grey dot).
+    // Own offer: seeding (pulsing primary dot + Stop) or no-longer-seeding.
     if (isOwn) {
       if (unseeded) {
-        return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer seeding',
-            dim: true);
+        return _dotRow(c, 'No longer seeding');
       }
-      return Row(
-        children: [
-          _dot(c.primary),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text('Seeding - available for download',
-                style: TextStyle(color: c.primary, fontSize: 11)),
-          ),
-          _StopBtn(
-              onTap: () => service.stopSeeding(offer.offerId,
-                  geohash: seedGeohash, channelName: seedChannelName)),
-        ],
+      // `.file-offer-seeding`: gap 6, --primary 11px, margin-top 8; the dot
+      // pulses opacity 1↔0.5 on a 1.5s loop (`animation: pulse 1.5s infinite`,
+      // styles-features.css:2204-2226).
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          children: [
+            _SeedingDot(color: c.primary),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text('Seeding - available for download',
+                  style: TextStyle(color: c.primary, fontSize: 11)),
+            ),
+            _StopBtn(
+                onTap: () => service.stopSeeding(offer.offerId,
+                    geohash: widget.seedGeohash,
+                    channelName: widget.seedChannelName)),
+          ],
+        ),
       );
     }
-    // Peer offer, no longer available.
-    if (unseeded) {
-      return _dotRow(c, c.danger.withValues(alpha: 0.6), 'No longer available',
-          dim: true);
+    // Peer offer first rendered ALREADY unseeded → the bare dot row
+    // (messages.js:876-882). A card that saw the offer seeded keeps its
+    // button and flips it to "Unavailable" below (`updateFileOfferUI`).
+    if (unseeded && !_sawSeeded) {
+      return _dotRow(c, 'No longer available');
     }
-    // Active transfer → inline progress bar.
-    if (transfer != null && transfer.status != P2PStatus.complete) {
-      final pct = transfer.progress;
-      final failed = transfer.status == P2PStatus.error;
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (failed)
-            _OfferBtn(
-              label: 'Retry',
-              color: c.primary,
-              onTap: () => service.requestFile(offer.offerId),
-            )
-          else ...[
-            // `.file-offer-progress-bar`: 5px track white@0.05, radius 10;
-            // `.file-offer-progress-fill`: `linear-gradient(90deg, secondary,
-            // primary)`, radius 10 (styles-features.css:2139-2152). A
-            // LinearProgressIndicator can't gradient, so paint a Stack +
-            // FractionallySizedBox like p2p_transfers_modal `_TransferRow`.
-            ClipRRect(
-              borderRadius: const BorderRadius.all(Radius.circular(10)),
-              child: SizedBox(
-                height: 5,
-                child: Stack(
-                  children: [
-                    Container(color: Colors.white.withValues(alpha: 0.05)),
-                    FractionallySizedBox(
-                      widthFactor: (pct / 100).clamp(0.0, 1.0),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          borderRadius:
-                              const BorderRadius.all(Radius.circular(10)),
-                          gradient: LinearGradient(
-                            colors: [c.secondary, c.primary],
-                          ),
+
+    // Peer offer: the `.file-offer-btn` stays visible through the WHOLE
+    // lifecycle (p2p.js:238-247, 632-646, 858-874) —
+    //   rest      → "Download" / "Download (Torrent)"
+    //   request   → "Connecting..." + `.downloading` (secondary border/text,
+    //               inert) with the progress block appearing BELOW it
+    //   complete  → "Downloaded" (base tint restored, inert); the progress
+    //               block (with its final status line) STAYS
+    //   error     → "Retry" (base tint, re-requests); progress line = message
+    //   unseeded  → "Unavailable" + `.unavailable` (opacity 0.4, text-dim)
+    final active = transfer != null &&
+        (transfer.status == P2PStatus.connecting ||
+            transfer.status == P2PStatus.transferring);
+    // Base tint: primary, or secondary for `.torrent-btn`.
+    final base = offer.isTorrent ? c.secondary : c.primary;
+    final Widget button;
+    if (unseeded) {
+      button = _OfferBtn(
+        label: 'Unavailable',
+        textColor: c.textDim,
+        borderColor: c.textDim,
+        fillColor: base.withValues(alpha: 0.08),
+        opacity: 0.4,
+        onTap: null,
+      );
+    } else if (active) {
+      // `.file-offer-btn.downloading`: border + text --secondary (the fill
+      // keeps the base class tint), default cursor.
+      button = _OfferBtn(
+        label: 'Connecting...',
+        textColor: c.secondary,
+        borderColor: c.secondary,
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.complete) {
+      button = _OfferBtn(
+        label: 'Downloaded',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: null,
+      );
+    } else if (transfer != null && transfer.status == P2PStatus.error) {
+      button = _OfferBtn(
+        label: 'Retry',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    } else {
+      button = _OfferBtn(
+        label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
+        textColor: base,
+        borderColor: base.withValues(alpha: 0.25),
+        fillColor: base.withValues(alpha: 0.08),
+        onTap: () => service.requestFile(offer.offerId),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // `.file-offer-actions { margin-top: 10px }`.
+        Padding(padding: const EdgeInsets.only(top: 10), child: button),
+        // `.file-offer-progress { margin-top: 10px }` — revealed on request
+        // and never re-hidden (its final status line stays after completion).
+        if (transfer != null) ...[
+          const SizedBox(height: 10),
+          // `.file-offer-progress-bar`: 5px track white@0.05, radius 10;
+          // `.file-offer-progress-fill`: `linear-gradient(90deg, secondary,
+          // primary)`, radius 10 (styles-features.css:2139-2152). A
+          // LinearProgressIndicator can't gradient, so paint a Stack +
+          // FractionallySizedBox like p2p_transfers_modal `_TransferRow`.
+          ClipRRect(
+            borderRadius: const BorderRadius.all(Radius.circular(10)),
+            child: SizedBox(
+              height: 5,
+              child: Stack(
+                children: [
+                  Container(color: Colors.white.withValues(alpha: 0.05)),
+                  FractionallySizedBox(
+                    widthFactor: (transfer.progress / 100).clamp(0.0, 1.0),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius:
+                            const BorderRadius.all(Radius.circular(10)),
+                        gradient: LinearGradient(
+                          colors: [c.secondary, c.primary],
                         ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              transfer.message ?? 'Connecting...',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: c.textDim, fontSize: 11),
-            ),
-          ],
+          ),
+          // `.file-offer-progress-text`: centered text-dim 11px, 4px below.
+          // Mid-transfer it reads `<pct>% • <speed>/s` (updateTransferProgress,
+          // p2p.js:606-622: pct at 1 decimal, speed = bytesReceived/elapsed);
+          // any other status shows the last status message.
+          const SizedBox(height: 4),
+          Text(
+            _progressText(transfer),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
         ],
-      );
-    }
-    if (transfer != null && transfer.status == P2PStatus.complete) {
-      // The PWA reverts the completed button to the primary-tinted
-      // `.file-offer-btn` (NOT a special secondary colour; p2p.js:641).
-      return _OfferBtn(label: 'Downloaded', color: c.primary, onTap: null);
-    }
-    // Available → Download / Download (Torrent).
-    return _OfferBtn(
-      label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
-      color: offer.isTorrent ? c.secondary : c.primary,
-      onTap: () => service.requestFile(offer.offerId),
+      ],
     );
   }
 
-  Widget _dot(Color color) => Container(
-        width: 8,
-        height: 8,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      );
+  /// The `.file-offer-progress-text` line: `"<pct>% • <speed>/s"` while
+  /// chunks flow (`updateTransferProgress`), else the transfer's last status
+  /// message (`updateTransferStatus`), defaulting to "Connecting...".
+  String _progressText(P2PTransfer transfer) {
+    if (transfer.status == P2PStatus.transferring) {
+      final elapsed = (DateTime.now().millisecondsSinceEpoch -
+              transfer.startTime) /
+          1000;
+      final speed = elapsed > 0
+          ? (transfer.bytesReceived / elapsed).round()
+          : 0;
+      return '${transfer.progress.toStringAsFixed(1)}% • '
+          '${formatFileSize(speed)}/s';
+    }
+    return transfer.message ?? 'Connecting...';
+  }
 
-  Widget _dotRow(NymColors c, Color dotColor, String label,
-      {bool dim = false}) {
-    return Opacity(
-      opacity: dim ? 0.7 : 1,
-      child: Row(
-        children: [
-          _dot(dotColor),
-          const SizedBox(width: 6),
-          Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
-        ],
+  /// `.file-offer-unseeded` (styles-features.css:2228-2244): text-dim 11px row
+  /// at opacity 0.7, 8px below the header, led by an 8px danger dot at
+  /// opacity 0.6.
+  Widget _dotRow(NymColors c, String label) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Opacity(
+        opacity: 0.7,
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: c.danger.withValues(alpha: 0.6),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// `.file-offer-btn` — a full-width tinted action pill (Download / Retry /
-/// Downloaded). A null [onTap] renders a disabled (terminal) state.
-class _OfferBtn extends StatelessWidget {
-  const _OfferBtn({required this.label, required this.color, this.onTap});
-  final String label;
+/// `.file-offer-seeding-dot` — an 8px `--primary` dot pulsing opacity 1↔0.5 on
+/// a 1.5s loop (`animation: pulse 1.5s infinite`, keyframes at
+/// styles-features.css:2214-2226; default `ease` timing per segment).
+class _SeedingDot extends StatefulWidget {
+  const _SeedingDot({required this.color});
   final Color color;
+
+  @override
+  State<_SeedingDot> createState() => _SeedingDotState();
+}
+
+class _SeedingDotState extends State<_SeedingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1500),
+  )..repeat();
+
+  // `@keyframes pulse { 0%,100% → 1; 50% → 0.5 }` with CSS `ease` per segment.
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 1.0, end: 0.5).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 0.5, end: 1.0).chain(CurveTween(curve: Curves.ease)),
+      weight: 50,
+    ),
+  ]).animate(_ctrl);
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(
+          color: widget.color,
+          shape: BoxShape.circle,
+        ),
+      ),
+    );
+  }
+}
+
+/// `.file-offer-btn` — a full-width action pill (Download / Connecting... /
+/// Downloaded / Retry / Unavailable): 12px w500 label, 8px 12px padding,
+/// radius-xs (styles-features.css:2106-2118), tinted per state. A null [onTap]
+/// renders an inert state (the PWA nulls `onclick` + default cursor).
+class _OfferBtn extends StatelessWidget {
+  const _OfferBtn({
+    required this.label,
+    required this.textColor,
+    required this.borderColor,
+    required this.fillColor,
+    this.opacity = 1,
+    this.onTap,
+  });
+  final String label;
+  final Color textColor;
+  final Color borderColor;
+  final Color fillColor;
+
+  /// `.file-offer-btn.unavailable { opacity: 0.4 }`.
+  final double opacity;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          border: Border.all(color: color.withValues(alpha: 0.25)),
-          // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
-          borderRadius: const BorderRadius.all(Radius.circular(8)),
-        ),
-        child: Text(
-          label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: color,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
+      child: Opacity(
+        opacity: opacity,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+          decoration: BoxDecoration(
+            color: fillColor,
+            border: Border.all(color: borderColor),
+            // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
+            borderRadius: const BorderRadius.all(Radius.circular(8)),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: textColor,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ),
@@ -2558,11 +3845,20 @@ class MessageGroup extends ConsumerStatefulWidget {
     super.key,
     required this.entries,
     required this.settings,
+    this.columnsMode = false,
     this.onReactionPicker,
   });
 
   final List<MessageGroupEntry> entries;
   final Settings settings;
+
+  /// This group renders inside a columns-deck `.cv-list` (`body.columns-mode`).
+  /// Forwarded to every [MessageRow] (IRC rows stack vertically, hover buttons
+  /// stack) and — on desktop (>768px) — drops the self group's 14px right
+  /// padding so own bubbles sit flush with the column scroller's 10px padding
+  /// (`@media (min-width: 769px) body.columns-mode.chat-bubbles .message-group.
+  /// group-self { padding-right: 0 }`, styles-columns.css:58-62).
+  final bool columnsMode;
   final ValueChanged<Message>? onReactionPicker;
 
   @override
@@ -2573,6 +3869,19 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
   /// Anchors the gliding avatar to the LAST bubble (kept stable across rebuilds
   /// so the keyed bubble subtree isn't torn down each frame).
   final GlobalKey _bubbleKey = GlobalKey();
+
+  /// Live swipe translation of the group's LAST bubble. The PWA slides the
+  /// `.message-group-avatar` together with that message while it is swiped
+  /// (`findGroupAvatar` — the stack's last child — messages.js:2151-2160, then
+  /// `avatarEl.style.transform = translateX(...)`, :2216-2219, springing back
+  /// over the same 0.25s ease-out).
+  final ValueNotifier<double> _avatarDx = ValueNotifier<double>(0);
+
+  @override
+  void dispose() {
+    _avatarDx.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2594,6 +3903,7 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
               settings: settings,
               reactions: entries[i].reactions,
               mentioned: entries[i].mentioned,
+              columnsMode: widget.columnsMode,
               grouped: useBubbles && i > 0,
               showName: !(useBubbles && i > 0),
               showAvatar: false,
@@ -2601,6 +3911,11 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
               onReactionPicker: onReactionPicker,
               // The LAST bubble anchors the gliding avatar (others-bubble path).
               bubbleAnchorKey: i == entries.length - 1 ? _bubbleKey : null,
+              // …and drags that avatar along while it is swiped (the swiped
+              // message must be the stack's LAST child, `findGroupAvatar`).
+              swipeAvatarDx: useBubbles && !self && i == entries.length - 1
+                  ? _avatarDx
+                  : null,
             ),
         ];
 
@@ -2629,10 +3944,15 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
     );
 
     // Self group: `group-self` is `padding: 0 14px`, row-reversed, no avatar —
-    // each row already right-aligns its own content.
+    // each row already right-aligns its own content. Desktop columns mode drops
+    // the RIGHT padding so own bubbles sit flush with the column scroller's
+    // 10px padding (`@media (min-width: 769px) body.columns-mode.chat-bubbles
+    // .message-group.group-self { padding-right: 0 }`, styles-columns.css:58-62).
     if (self) {
+      final flushRight = widget.columnsMode &&
+          MediaQuery.of(context).size.width > NymDimens.mobileBreakpoint;
       return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14),
+        padding: EdgeInsets.only(left: 14, right: flushRight ? 0 : 14),
         child: stack,
       );
     }
@@ -2648,6 +3968,10 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(6, 0, 14, 0),
       child: Stack(
+        // The PWA clips a swiped row (and its off-edge indicator chip) only at
+        // the SCROLLER (`.messages-container { overflow-x: hidden }`), never at
+        // the group box — so the chip may paint over the group's padding.
+        clipBehavior: Clip.none,
         children: [
           Padding(
             padding: const EdgeInsets.only(left: 38),
@@ -2658,11 +3982,20 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
             top: 0,
             bottom: 0,
             width: 32,
-            child: _StickyGroupAvatar(
-              pubkey: first.pubkey,
-              imageUrl: picture,
-              bubbleKey: _bubbleKey,
-              onTap: () => _openAvatarMenu(context, ref, last),
+            // Swiping the group's LAST bubble slides the avatar with it
+            // (messages.js:2216-2219); only the 32px gutter re-renders.
+            child: ValueListenableBuilder<double>(
+              valueListenable: _avatarDx,
+              builder: (context, dx, child) => Transform.translate(
+                offset: Offset(dx, 0),
+                child: child,
+              ),
+              child: _StickyGroupAvatar(
+                pubkey: first.pubkey,
+                imageUrl: picture,
+                bubbleKey: _bubbleKey,
+                onTap: () => _openAvatarMenu(context, ref, last),
+              ),
             ),
           ),
         ],
@@ -2845,36 +4178,157 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
   }
 }
 
+/// The `bubble-snap-in` entrance a live consecutive bubble plays as it lands
+/// (`body.chat-bubbles .message.bubble-snap { animation: bubble-snap-in 240ms
+/// cubic-bezier(0.34, 1.56, 0.64, 1) both; transform-origin: bottom left }`,
+/// self → `bottom right`; styles-features.css:3453-3471). Keyframes:
+///   0%   translateY(-6px) scale(0.94) opacity 0
+///   55%  translateY(2px)  scale(1.02) opacity 1
+///   80%  translateY(-1px) scale(0.995)
+///   100% identity
+/// CSS eases each keyframe segment with the animation's timing function, so
+/// every tween below chains the same overshoot cubic.
+class _BubbleSnapIn extends StatefulWidget {
+  const _BubbleSnapIn({required this.self, required this.child});
+
+  /// Self bubbles snap from the bottom-RIGHT corner (`.bubble-snap.self`).
+  final bool self;
+  final Widget child;
+
+  @override
+  State<_BubbleSnapIn> createState() => _BubbleSnapInState();
+}
+
+class _BubbleSnapInState extends State<_BubbleSnapIn>
+    with SingleTickerProviderStateMixin {
+  /// `cubic-bezier(0.34, 1.56, 0.64, 1)` — the overshoot ease.
+  static const Cubic _overshoot = Cubic(0.34, 1.56, 0.64, 1);
+
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 240),
+  )..forward();
+
+  late final Animation<double> _dy = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: -6.0, end: 2.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 2.0, end: -1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 25, // 55% → 80%
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: -1.0, end: 0.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20, // 80% → 100%
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _scale = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.94, end: 1.02).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 1.02, end: 0.995).chain(CurveTween(curve: _overshoot)),
+      weight: 25,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 0.995, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20,
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.0, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 45),
+  ]).animate(_c);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, child) => Opacity(
+        // The overshoot cubic exceeds 1.0 mid-segment; opacity must clamp.
+        opacity: _opacity.value.clamp(0.0, 1.0),
+        child: Transform.translate(
+          offset: Offset(0, _dy.value),
+          child: Transform.scale(
+            scale: _scale.value,
+            alignment: widget.self
+                ? Alignment.bottomRight // `.bubble-snap.self`
+                : Alignment.bottomLeft,
+            child: child,
+          ),
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
 /// Swipe-to-act wrapper around a message row (`setupSwipeToReply`,
-/// messages.js:2129-2278). A dominantly-horizontal drag follows the finger (the
-/// content slides up to 100px), reveals a directional action icon, fires a
-/// threshold haptic once, and on release past the threshold runs the configured
-/// action; a short swipe springs back. Also hosts double-tap-to-reply
-/// (`setupDoubleClickToReply`, messages.js:2280-2307).
+/// messages.js:2129-2278). A dominantly-horizontal TOUCH drag follows the
+/// finger (the content slides up to 100px, all travel measured from the
+/// touch-down point), reveals the directional `.swipe-reply-indicator` chip
+/// riding 40px off the row's edge, fires a threshold haptic, and on release
+/// past the threshold runs the action locked in at claim time; a short swipe
+/// springs back over 0.25s ease-out with the chip lingering 250ms. Also hosts
+/// long-press → quick-react (press-point anchored) and DESKTOP double-click →
+/// quote-reply (`setupDoubleClickToReply` bails on touch devices,
+/// messages.js:2284-2285).
 ///
 /// Mirrors the PWA constants: SWIPE_START 16px, EDGE_ZONE 50px (a right-swipe
 /// starting near the left screen edge is abandoned so the drawer-open gesture
-/// wins), follow cap 100px, threshold clamped 30-120. Armed only on touch
-/// platforms with `gesturesEnabled` (desktop keeps right-click + double-tap; the
-/// PWA likewise only attaches the touch handlers on touch devices).
+/// wins), follow cap 100px, threshold clamped 30-120. The drag recognizer
+/// accepts TOUCH pointers only — the PWA binds `touchstart`/`touchmove`, so
+/// any touch screen gets the gesture and mouse drags never do — and is gated
+/// on `gesturesEnabled` (messages.js:2141-2148, 2163-2164).
 class _SwipeToAct extends StatefulWidget {
   const _SwipeToAct({
     required this.settings,
     required this.onAction,
     required this.onDoubleTap,
-    required this.onLongPress,
+    required this.onLongPressStart,
     required this.onSecondaryTap,
+    this.avatarDx,
+    this.swipeReactEmojiUrl,
     required this.child,
   });
 
   final Settings settings;
 
   /// Runs the committed action string ('quote'/'translate'/'copy'/'react'/
-  /// 'zap'/'slap'/'hug'/'none').
+  /// 'zap'/'slap'/'hug').
   final ValueChanged<String> onAction;
   final VoidCallback onDoubleTap;
-  final VoidCallback onLongPress;
+
+  /// Long-press with the press point (`details.globalPosition`) — the PWA
+  /// anchors the quick-react pill to the touch coordinates (ui-context.js:1330).
+  final GestureLongPressStartCallback onLongPressStart;
   final VoidCallback onSecondaryTap;
+
+  /// When this row is the LAST bubble of an others' group, the group's
+  /// `.message-group-avatar` translation channel: written with the live signed
+  /// dx so the avatar slides with the message (messages.js:2151-2160,
+  /// 2216-2219). Its presence also selects the `-past-avatar` indicator inset
+  /// (left -86px) for right swipes (messages.js:2221-2225).
+  final ValueNotifier<double>? avatarDx;
+
+  /// Resolved custom-emoji image URL for the 'react' indicator when
+  /// `swipeReactEmoji` is a known `:shortcode:` (messages.js:2066-2074);
+  /// null → the emoji text glyph.
+  final String? swipeReactEmojiUrl;
   final Widget child;
 
   @override
@@ -2887,29 +4341,44 @@ class _SwipeToActState extends State<_SwipeToAct>
   static const double _edgeZone = 50; // EDGE_ZONE
   static const double _followCap = 100; // max |translateX|
 
+  /// The actions `_getSwipeActionConfig` knows (messages.js:2031-2126). At
+  /// claim time a direction resolving to anything else — including 'none' —
+  /// abandons the gesture outright (messages.js:2202-2206): the row never
+  /// moves, no indicator, no haptic.
+  static const Set<String> _knownActions = {
+    'quote', 'translate', 'copy', 'react', 'zap', 'slap', 'hug',
+  };
+
   // Created in initState (NOT a lazy `late final = …`): a row that is never
   // swiped would otherwise first touch `_settle` in dispose(), lazily creating
   // a ticker during teardown and throwing. (Caught by `flutter test`.)
   late final AnimationController _settle;
 
-  double _dx = 0;
-  bool _active = false; // a horizontal-dominant drag has been claimed
-  bool _abandoned = false; // started in the left edge zone (defer to drawer)
-  bool _thresholdFired = false; // one-shot threshold haptic latch
-  double _startX = 0; // global x where the drag began (for EDGE_ZONE)
+  double _dx = 0; // applied translation (signed by the locked direction)
+  double _travel = 0; // raw finger dx accumulated since touch-down
+  int _dir = 0; // LOCKED at claim (messages.js:2195): -1 left, +1 right
+  String _action = 'none'; // resolved once at claim for the locked direction
+  bool _active = false; // the gesture has been claimed
+  bool _abandoned = false; // edge zone / action 'none' — gesture given up
+  bool _thresholdFired = false; // threshold haptic latch (re-arms below)
+  bool _indicatorLit = false; // `.visible` — frozen at release for the linger
+  double _startX = 0; // global x of the touch-down (for EDGE_ZONE)
+  double _startY = 0; // global y of the touch-down (for the axis test)
 
   @override
   void initState() {
     super.initState();
     _settle = AnimationController(
       vsync: this,
-      // `transition: transform 0.25s ease-out` on release (messages.js:2253).
+      // `transition: transform 0.25s ease-out` on release (messages.js:2253);
+      // the indicator lingers this long too (`setTimeout(remove, 250)`).
       duration: const Duration(milliseconds: 250),
     );
   }
 
   @override
   void dispose() {
+    widget.avatarDx?.value = 0;
     _settle.dispose();
     super.dispose();
   }
@@ -2918,60 +4387,85 @@ class _SwipeToActState extends State<_SwipeToAct>
   double get _threshold =>
       widget.settings.swipeThreshold.clamp(30, 120).toDouble();
 
-  bool get _enabled {
-    if (!widget.settings.gesturesEnabled) return false;
-    final p = Theme.of(context).platform;
-    return p == TargetPlatform.android || p == TargetPlatform.iOS;
+  void _setDx(double v) {
+    setState(() => _dx = v);
+    // The group avatar slides in lockstep (messages.js:2216-2219).
+    widget.avatarDx?.value = v;
   }
 
   void _onStart(DragStartDetails d) {
     _active = false;
     _abandoned = false;
     _thresholdFired = false;
+    _indicatorLit = false;
+    _dir = 0;
+    _action = 'none';
+    _travel = 0;
+    // DragStartBehavior.down → this IS the touch-down point (PWA startX/startY).
     _startX = d.globalPosition.dx;
+    _startY = d.globalPosition.dy;
     _settle.stop();
-    _dx = 0;
+    if (_dx != 0) _setDx(0);
   }
 
   void _onUpdate(DragUpdateDetails d) {
     if (_abandoned) return;
-    final next = _dx + d.delta.dx;
-    // Claim the gesture once travel passes the start threshold. A RIGHT swipe
-    // (next > 0) that began within EDGE_ZONE of the left edge is abandoned so
-    // the sidebar-open edge-swipe wins (messages.js:2198-2201).
-    if (!_active && next.abs() > _swipeStart) {
-      if (next > 0 && _startX < _edgeZone) {
+    // All travel is measured from the touch-down point — the PWA's
+    // `dx = clientX - startX` (messages.js:2189). DragStartBehavior.down
+    // delivers the pre-arena-slop travel too, so no hidden ~18px is added on
+    // top of SWIPE_START/threshold.
+    _travel += d.delta.dx;
+    if (!_active) {
+      if (_travel.abs() <= _swipeStart) return;
+      // Axis-dominance test: the PWA only claims when horizontal travel
+      // dominates vertical by 1.5x — `absDx > dy * 1.5` — re-evaluated on
+      // every move until claimed (messages.js:2194), so a diagonal drag is
+      // left to the scroller rather than starting a swipe.
+      final dy = (d.globalPosition.dy - _startY).abs();
+      if (_travel.abs() <= dy * 1.5) return;
+      // Direction is locked HERE and never re-derived — dragging back across
+      // the origin cannot flip the indicator/action (messages.js:2194-2202).
+      final dir = _travel < 0 ? -1 : 1;
+      // Defer to the sidebar-open gesture: right swipes that began within
+      // EDGE_ZONE of the left edge (messages.js:2196-2201).
+      if (dir > 0 && _startX < _edgeZone) {
         _abandoned = true;
         return;
       }
+      final action = dir < 0
+          ? widget.settings.swipeLeftAction
+          : widget.settings.swipeRightAction;
+      // 'none' (or unknown) → abandon: no translation, no haptic
+      // (messages.js:2202-2206).
+      if (!_knownActions.contains(action)) {
+        _abandoned = true;
+        return;
+      }
+      _dir = dir;
+      _action = action;
       _active = true;
     }
-    if (!_active) {
-      _dx = next;
-      return;
-    }
-    // Follow the finger, capped at ±100px (messages.js:2212-2219).
-    final double capped = next.clamp(-_followCap, _followCap).toDouble();
-    final pastNow = capped.abs() >= _threshold;
-    final wasPast = _dx.abs() >= _threshold;
-    if (pastNow && !_thresholdFired) {
-      // One-shot threshold haptic (messages.js:2239-2241).
-      HapticFeedback.selectionClick();
+    // Follow the finger: `swipeDistance = min(|dx|, 100)`, signed by the
+    // LOCKED direction (messages.js:2212-2213).
+    final double dist = _travel.abs().clamp(0.0, _followCap);
+    final past = dist >= _threshold;
+    if (past && !_thresholdFired) {
+      // Threshold haptic — `nymHapticTap` = a 30ms vibrate
+      // (messages.js:2239-2241, inline-bindings.js:106-115).
+      HapticFeedback.mediumImpact();
       _thresholdFired = true;
+    } else if (!past) {
+      _thresholdFired = false; // re-arms if the finger retreats (:2242-2244)
     }
-    setState(() => _dx = capped);
-    // Keep the latch honest if the user retreats back under the threshold.
-    if (!pastNow && wasPast) _thresholdFired = false;
+    _indicatorLit = past;
+    _setDx(_dir * dist);
   }
 
   void _onEnd(DragEndDetails d) {
-    final committed = _active && !_abandoned && _dx.abs() >= _threshold;
-    if (committed) {
-      // dx < 0 (swipe LEFT) → swipeLeftAction; dx > 0 (swipe RIGHT) → right.
-      final action = _dx < 0
-          ? widget.settings.swipeLeftAction
-          : widget.settings.swipeRightAction;
-      widget.onAction(action);
+    // Commit when the (capped) travel sits past the threshold at release
+    // (messages.js:2249-2253); the action is the one locked at claim.
+    if (_active && !_abandoned && _dx.abs() >= _threshold) {
+      widget.onAction(_action);
     }
     _springBack();
   }
@@ -2984,24 +4478,28 @@ class _SwipeToActState extends State<_SwipeToAct>
     _thresholdFired = false;
     final from = _dx;
     if (from == 0) {
-      setState(() {});
+      setState(() {
+        _dir = 0;
+        _indicatorLit = false;
+      });
       return;
     }
-    final anim =
-        CurvedAnimation(parent: _settle, curve: Curves.easeOut);
-    void tick() => setState(() => _dx = from * (1 - anim.value));
+    final anim = CurvedAnimation(parent: _settle, curve: Curves.easeOut);
+    void tick() => _setDx(from * (1 - anim.value));
     anim.addListener(tick);
     _settle.forward(from: 0).whenCompleteOrCancel(() {
       anim.removeListener(tick);
-      if (mounted) setState(() => _dx = 0);
+      if (!mounted) return;
+      // The chip lingered through the 250ms spring-back — remove it now
+      // (`setTimeout(() => indicator.remove(), 250)`, messages.js:2257-2259).
+      setState(() {
+        _dx = 0;
+        _dir = 0;
+        _indicatorLit = false;
+      });
+      widget.avatarDx?.value = 0;
     });
   }
-
-  /// The action that WOULD fire for the current drag direction — drives the
-  /// revealed indicator icon.
-  String get _pendingAction => _dx < 0
-      ? widget.settings.swipeLeftAction
-      : widget.settings.swipeRightAction;
 
   String? _actionSvg(String action) {
     switch (action) {
@@ -3024,55 +4522,190 @@ class _SwipeToActState extends State<_SwipeToAct>
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final gestures = GestureDetector(
-      onDoubleTap: widget.onDoubleTap,
-      onLongPress: widget.onLongPress,
-      onSecondaryTap: widget.onSecondaryTap,
-      onHorizontalDragStart: _enabled ? _onStart : null,
-      onHorizontalDragUpdate: _enabled ? _onUpdate : null,
-      onHorizontalDragEnd: _enabled ? _onEnd : null,
-      onHorizontalDragCancel: _enabled ? _onCancel : null,
-      child: Transform.translate(
-        offset: Offset(_dx, 0),
-        child: widget.child,
-      ),
-    );
-    if (_dx == 0) return gestures;
+  /// The `.swipe-reply-indicator` chip (styles-chat.css:1592-1667): a 32px
+  /// `primary@0.15` circle holding the action glyph — SVG icons 16px tinted
+  /// `--primary`, the react emoji 23px text, a custom-emoji image 28px. It is
+  /// a CHILD of the translated row, positioned 40px OUTSIDE the edge the row
+  /// is leaving (`right:-40px` for left swipes, `left:-40px` for right swipes,
+  /// `left:-86px` past the group avatar), vertically centered — so it FOLLOWS
+  /// the finger. Opacity 0 until the drag passes the threshold, then 1 over
+  /// 0.15s ease (`.visible`).
+  Widget _buildIndicator(BuildContext context) {
     final c = context.nym;
-    final action = _pendingAction;
-    if (action == 'none') return gestures;
-    final past = _dx.abs() >= _threshold;
-    final color = past ? c.primary : c.textDim;
-    final svg = _actionSvg(action);
-    final indicator = action == 'react'
-        ? Text(widget.settings.swipeReactEmoji,
-            style: const TextStyle(fontSize: 20))
-        : (svg != null
-            ? NymSvgIcon(svg, size: 22, color: color)
-            : const SizedBox.shrink());
-    // The icon trails into view from the edge the content is leaving: a LEFT
-    // swipe (dx<0) reveals it on the right; a RIGHT swipe (dx>0) on the left.
-    final onRight = _dx < 0;
-    return Stack(
-      children: [
-        // Vertically centered against the row via top:0/bottom:0 + Center.
-        Positioned(
-          top: 0,
-          bottom: 0,
-          left: onRight ? null : 12,
-          right: onRight ? 12 : null,
-          child: Center(
-            child: AnimatedOpacity(
-              opacity: past ? 1 : 0.5,
-              duration: const Duration(milliseconds: 120),
-              child: indicator,
+    Widget glyph;
+    if (_action == 'react') {
+      final fallback = Text(
+        widget.settings.swipeReactEmoji,
+        style: const TextStyle(fontSize: 23, height: 1),
+      );
+      final url = widget.swipeReactEmojiUrl;
+      // `.swipe-react-emoji-img` custom emoji render at 28px, contain-fit.
+      glyph = url == null
+          ? fallback
+          : InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
+              width: 28,
+              height: 28,
+              fit: BoxFit.contain,
+              retryOnError: true,
+              errorChild: fallback,
+            );
+    } else {
+      final svg = _actionSvg(_action);
+      glyph = svg == null
+          ? const SizedBox.shrink()
+          : NymSvgIcon(svg, size: 16, color: c.primary);
+    }
+    // Right swipes on a bubble that sits beside the group avatar park the chip
+    // PAST the avatar (`swipe-reply-indicator-past-avatar`, left:-86px).
+    final pastAvatar = _dir > 0 && widget.avatarDx != null;
+    return Positioned(
+      top: 0,
+      bottom: 0,
+      right: _dir < 0 ? -40 : null,
+      left: _dir < 0 ? null : (pastAvatar ? -86 : -40),
+      child: Center(
+        child: AnimatedOpacity(
+          opacity: _indicatorLit ? 1 : 0,
+          // `transition: opacity 0.15s ease`.
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.ease,
+          child: Container(
+            width: 32,
+            height: 32,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              // `background: rgb(from var(--primary) r g b / 0.15)`.
+              color: c.primaryA(0.15),
             ),
+            child: glyph,
           ),
         ),
-        gestures,
-      ],
+      ),
     );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // The chip exists from the moment the gesture is claimed until 250ms after
+    // release (transparent below the threshold), riding INSIDE the translated
+    // subtree so it moves with the finger.
+    Widget body = widget.child;
+    if (_dir != 0) {
+      body = Stack(
+        clipBehavior: Clip.none,
+        children: [
+          widget.child,
+          _buildIndicator(context),
+        ],
+      );
+    }
+
+    final p = Theme.of(context).platform;
+    final touchPlatform =
+        p == TargetPlatform.android || p == TargetPlatform.iOS;
+    Widget result = GestureDetector(
+      // The PWA's long-press / dblclick surface is the whole `.message` row —
+      // including the blank run beside a narrow bubble — so empty areas must
+      // hit-test too.
+      behavior: HitTestBehavior.translucent,
+      // dblclick quote-reply is DESKTOP-ONLY: the PWA bails on touch devices
+      // (`if ('ontouchstart' in window) return`, messages.js:2284-2285). Not
+      // registering it on touch also spares every tap the double-tap
+      // disambiguation delay.
+      onDoubleTap: touchPlatform ? null : widget.onDoubleTap,
+      onSecondaryTap: widget.onSecondaryTap,
+      child: Transform.translate(
+        offset: Offset(_dx, 0),
+        child: body,
+      ),
+    );
+
+    // The 500ms quick-react hold, with the PWA's tight cancel slop: ANY
+    // `touchmove` / a >5px mouse move kills the pending hold
+    // (`MSG_LONG_PRESS_MOVE_THRESHOLD = 5` + the unconditional touchmove
+    // cancel, ui-context.js:1600-1650) — NOT the framework's default ~18px
+    // kTouchSlop drift, which would still pop the menu on a slow scroll.
+    result = RawGestureDetector(
+      behavior: HitTestBehavior.translucent,
+      gestures: <Type, GestureRecognizerFactory>{
+        _TightLongPressGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+            _TightLongPressGestureRecognizer>(
+          () => _TightLongPressGestureRecognizer(debugOwner: this),
+          (r) => r..onLongPressStart = widget.onLongPressStart,
+        ),
+      },
+      child: result,
+    );
+
+    // The swipe claims TOUCH pointers only (the PWA binds touchstart/touchmove
+    // — any touch screen gets it, mouse drags never do), with travel measured
+    // from the touch-down point (DragStartBehavior.down) so SWIPE_START and
+    // the action threshold match the PWA's finger distances exactly.
+    if (widget.settings.gesturesEnabled) {
+      result = RawGestureDetector(
+        behavior: HitTestBehavior.translucent,
+        gestures: <Type, GestureRecognizerFactory>{
+          HorizontalDragGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+              HorizontalDragGestureRecognizer>(
+            () => HorizontalDragGestureRecognizer(
+              supportedDevices: const {PointerDeviceKind.touch},
+            ),
+            (r) => r
+              ..dragStartBehavior = DragStartBehavior.down
+              ..onStart = _onStart
+              ..onUpdate = _onUpdate
+              ..onEnd = _onEnd
+              ..onCancel = _onCancel,
+          ),
+        },
+        child: result,
+      );
+    }
+    return result;
+  }
+}
+
+/// A [LongPressGestureRecognizer] with the PWA's tighter pre-fire cancel slop
+/// for the message quick-react hold (ui-context.js:1598-1650): the PWA cancels
+/// the pending 500ms timer on ANY `touchmove` and on a mouse move past
+/// `MSG_LONG_PRESS_MOVE_THRESHOLD = 5` px — far tighter than the framework's
+/// default ~18px kTouchSlop drift. Browsers only emit a `touchmove` once the
+/// touch actually moves, so the same 5px displacement reads as "the finger
+/// moved" for touch too (and stays robust against sub-pixel sensor jitter).
+/// Movement AFTER the 500ms deadline no longer matters (the popup is already
+/// up), so the check applies only before the deadline elapses.
+class _TightLongPressGestureRecognizer extends LongPressGestureRecognizer {
+  _TightLongPressGestureRecognizer({super.debugOwner});
+
+  /// `MSG_LONG_PRESS_MOVE_THRESHOLD` (ui-context.js:1600).
+  static const double _moveThreshold = 5;
+
+  Offset _downPosition = Offset.zero;
+  Duration _downTime = Duration.zero;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    if (event.pointer == primaryPointer) {
+      _downPosition = event.position;
+      _downTime = event.timeStamp;
+    }
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent &&
+        event.pointer == primaryPointer &&
+        state == GestureRecognizerState.possible &&
+        event.timeStamp - _downTime < (deadline ?? kLongPressTimeout) &&
+        (event.position - _downPosition).distance > _moveThreshold) {
+      // Same rejection path the built-in pre-accept slop check takes.
+      resolve(GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      return;
+    }
+    super.handleEvent(event);
   }
 }

@@ -234,11 +234,14 @@ class _NostrLoginModalState extends ConsumerState<NostrLoginModal> {
       children: [
         ModalChrome.formLabel(c, 'Paste your nsec'),
         const SizedBox(height: 8),
-        TextField(
-          controller: _nsecController,
-          obscureText: true,
-          style: TextStyle(color: c.textBright, fontSize: 15),
-          decoration: ModalChrome.inputDecoration(c, 'nsec1...'),
+        ModalChrome.focusRing(
+          c,
+          child: TextField(
+            controller: _nsecController,
+            obscureText: true,
+            style: TextStyle(color: c.textBright, fontSize: 15),
+            decoration: ModalChrome.inputDecoration(c, 'nsec1...'),
+          ),
         ),
         if (_error != null) ...[
           const SizedBox(height: 5),

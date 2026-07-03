@@ -1,11 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/constants/relays.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
@@ -13,6 +16,7 @@ import '../../features/identity/modal_chrome.dart';
 import '../../services/api/api_client.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import 'cosmetics.dart' show CosmeticAura, cosmeticAuraFor;
 import 'shop_catalog.dart';
 import 'shop_controller.dart';
 import 'shop_models.dart';
@@ -26,11 +30,34 @@ ShopIdentity? _shopIdentity(WidgetRef ref) {
   return ShopIdentity(pubkey: id.pubkey, privkey: id.privkey);
 }
 
+/// The `nym#suffix` gifter tag attached to shop-claim / shop-transfer so the
+/// recipient's notification DM names the gifter (shop.js:1329, 1745).
+String? _gifterNym(WidgetRef ref) {
+  final id = ref.read(nostrControllerProvider).identity;
+  if (id == null) return null;
+  return '${stripPubkeySuffix(id.nym)}#${getPubkeySuffix(id.pubkey)}';
+}
+
+/// A human-readable backend error: the server `{error}` from an [ApiException]
+/// body, else the exception text (mirrors the PWA surfacing `e.message`).
+String _errorMessage(Object e) {
+  if (e is ApiException) {
+    try {
+      final j = jsonDecode(e.body);
+      if (j is Map && j['error'] is String && (j['error'] as String).isNotEmpty) {
+        return j['error'] as String;
+      }
+    } catch (_) {}
+    return 'Request failed (${e.statusCode})';
+  }
+  return e.toString();
+}
+
 /// The flair shop (`#shopModal`, docs/specs/04 §3). Tabs: Message Styles /
 /// Nickname Flair / Special Items / Limited & Bundles / My Items. Each item is
 /// a card with a cosmetic preview, price, and a Buy / Activate action. Buy opens
-/// a Lightning-invoice QR flow (backend stubbed). A recovery-code field restores
-/// purchases.
+/// the real Lightning-invoice QR flow (`shop-buy-invoice` → detection →
+/// `shop-claim`). A recovery-code field restores purchases via `shop-redeem`.
 class ShopModal extends ConsumerStatefulWidget {
   const ShopModal({super.key});
 
@@ -49,6 +76,24 @@ class ShopModal extends ConsumerStatefulWidget {
 class _ShopModalState extends ConsumerState<ShopModal> {
   ShopTab _tab = ShopTab.styles;
   final _recoveryController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Refresh the authoritative record on EVERY open so gifted/transferred/
+    // redeemed items appear (shop.js `openShop` → `loadShopFromServer`,
+    // shop.js:659-674 — fire-and-forget; the cached record renders meanwhile).
+    // Also settle any pending purchase that was paid while the app was closed
+    // (shop.js `reconcilePendingPurchases`, run on foreground in the PWA).
+    final identity = _shopIdentity(ref);
+    if (identity != null) {
+      final ctrl = ref.read(shopControllerProvider.notifier);
+      unawaited(ctrl.loadFromServer(identity));
+      unawaited(
+        ctrl.reconcilePendingPurchases(identity, gifterNym: _gifterNym(ref)),
+      );
+    }
+  }
 
   @override
   void dispose() {
@@ -122,6 +167,9 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       width: double.infinity,
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
+        // `body.light-mode .shop-header { background: rgba(0,0,0,0.02) }`
+        // (styles-themes-responsive.css:644-646); no fill in dark mode.
+        color: c.isLight ? const Color(0x05000000) : null,
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: Column(
@@ -207,11 +255,12 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   }
 
   Future<void> _restore() async {
+    // No client-side format gate and NO case-folding: the PWA sends any
+    // trimmed non-empty code to the server verbatim (shop.js:1662-1669).
     final code = _recoveryController.text.trim();
-    if (!ShopController.isValidRecoveryCode(code)) {
-      if (!mounted) return;
+    if (code.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Invalid recovery code.')),
+        const SnackBar(content: Text('Enter a recovery code')),
       );
       return;
     }
@@ -223,14 +272,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     } else {
       try {
         // Real `shop-redeem` round-trip (shop.js restorePurchases).
-        final itemId = await ctrl.redeem(code, identity: identity);
-        message = itemId != null
-            ? 'Purchase restored!'
-            : 'Unknown recovery code.';
-      } catch (_) {
-        // Backend host unreachable in this environment — tolerate gracefully.
-        // TODO(verify): live `/api/storage` redeem.
-        message = 'Could not reach the server. Try again later.';
+        await ctrl.redeem(code, identity: identity);
+        message = '✅ Shop item restored successfully!';
+      } catch (e) {
+        message = '❌ Restore failed: ${_errorMessage(e)}';
       }
     }
     if (!mounted) return;
@@ -311,10 +356,6 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     );
   }
 
-  /// Fixed card width (mirrors the PWA `.shop-items` flex columns); cards size to
-  /// their content height so taller inventory/bundle cards don't overflow.
-  static const double _cardWidth = 214;
-
   Widget _body(NymColors c) {
     final state = ref.watch(shopControllerProvider);
     if (_tab == ShopTab.inventory) {
@@ -330,12 +371,20 @@ class _ShopModalState extends ConsumerState<ShopModal> {
     );
   }
 
-  /// A wrapping row of item cards (PWA `.shop-items` flex-wrap).
-  Widget _cardWrap(NymColors c, ShopState state, List<ShopItem> items) {
+  /// A wrapping row of item cards (PWA `.shop-items` flex-wrap). [cardBuilder]
+  /// customises the card (limited availability / inventory variants); defaults
+  /// to the plain shop card.
+  Widget _cardWrap(
+    NymColors c,
+    ShopState state,
+    List<ShopItem> items, {
+    Widget Function(ShopItem item)? cardBuilder,
+  }) {
     // PWA `.shop-items { grid-template-columns: repeat(auto-fill,
     // minmax(200px,1fr)); gap: 20px }` (styles-features.css:116-121): as many
     // >=200px columns as fit the width, each stretching to share the row equally
-    // — a fluid grid, not fixed 214px cards with a ragged right edge.
+    // — a fluid grid, not fixed 214px cards with a ragged right edge. The SAME
+    // grid renders every tab (limited/bundles/inventory included).
     const gap = 20.0;
     const minCard = 200.0;
     return LayoutBuilder(
@@ -349,7 +398,12 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           runSpacing: gap,
           children: [
             for (final item in items)
-              SizedBox(width: cardW, child: _card(c, state, item)),
+              SizedBox(
+                width: cardW,
+                child: cardBuilder != null
+                    ? cardBuilder(item)
+                    : _card(c, state, item),
+              ),
           ],
         );
       },
@@ -400,21 +454,12 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           if (ShopCatalog.limited.isNotEmpty) ...[
             _categoryTitle(c, 'Limited Editions'),
             const SizedBox(height: 12),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: [
-                for (final item in ShopCatalog.limited)
-                  SizedBox(
-                    width: _cardWidth,
-                    child: _card(
-                      c,
-                      state,
-                      item,
-                      availability: ctrl.availability(item),
-                    ),
-                  ),
-              ],
+            _cardWrap(
+              c,
+              state,
+              ShopCatalog.limited,
+              cardBuilder: (item) =>
+                  _card(c, state, item, availability: ctrl.availability(item)),
             ),
             const SizedBox(height: 24),
           ],
@@ -493,16 +538,11 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           const SizedBox(height: 8),
           _categoryTitle(c, 'All Purchased Items'),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              for (final item in owned)
-                SizedBox(
-                  width: _cardWidth,
-                  child: _card(c, state, item, inventory: true),
-                ),
-            ],
+          _cardWrap(
+            c,
+            state,
+            owned,
+            cardBuilder: (item) => _card(c, state, item, inventory: true),
           ),
         ],
       ),
@@ -605,13 +645,14 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           "Enter the recipient's hex pubkey (64 characters). You pay for the "
           'item and it lands directly in their inventory.',
       selfPubkey: identity?.pubkey,
-      selfMessage: 'Use Buy to purchase an item for yourself.',
+      // shop.js:1650 — the exact self-gift rejection copy.
+      selfMessage: 'Use GET to buy an item for yourself.',
       // Gift modal: "Continue" CTA + price row (shop.js:1620, 1630).
       ctaLabel: 'Continue',
       showPrice: true,
     );
     if (recipient == null || !mounted) return;
-    await showDialog<bool>(
+    final granted = await showDialog<bool>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.7),
       builder: (_) => _InvoiceDialog(
@@ -620,7 +661,10 @@ class _ShopModalState extends ConsumerState<ShopModal> {
         recipientPubkey: recipient,
       ),
     );
-    if (mounted) {
+    // Only a settled claim confirms the gift (the PWA's "Gift sent!" comes from
+    // `_renderShopSuccess` after shop-claim, shop.js:1579) — a cancelled or
+    // failed payment must NOT report success.
+    if (granted == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Gift sent: ${item.name}')),
       );
@@ -645,25 +689,33 @@ class _ShopModalState extends ConsumerState<ShopModal> {
           "Enter the recipient's hex pubkey (64 characters). The item will be "
           'revoked from your inventory and assigned to theirs.',
       selfPubkey: identity.pubkey,
-      selfMessage: 'You already own this item.',
+      // shop.js:1731 — the exact self-transfer rejection copy.
+      selfMessage: 'Cannot transfer to yourself.',
       // Transfer modal: "Confirm" CTA + no price (shop.js:1698-1702, 1711).
       ctaLabel: 'Confirm',
       showPrice: false,
     );
     if (recipient == null || !mounted) return;
     try {
-      await ref
-          .read(shopControllerProvider.notifier)
-          .transfer(item.id, recipient, identity: identity);
+      await ref.read(shopControllerProvider.notifier).transfer(
+            item.id,
+            recipient,
+            identity: identity,
+            gifterNym: _gifterNym(ref),
+          );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${item.name} transferred.')),
+          SnackBar(
+            content: Text(
+              '${item.name} transferred to ${recipient.substring(0, 8)}...',
+            ),
+          ),
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Transfer failed: $e')),
+          SnackBar(content: Text('Transfer failed: ${_errorMessage(e)}')),
         );
       }
     }
@@ -740,11 +792,6 @@ class _ShopItemCard extends StatelessWidget {
   /// Sample edition stamped on a flair preview (e.g. Genesis #69 in the
   /// limited tab); only affects the preview, not real ownership.
   final int? sampleEdition;
-
-  /// Gates the inventory TRANSFER action: a bundle has no single recovery code
-  /// to transfer, so only single owned items expose Transfer. (GIFT on the shop
-  /// tabs is handled in [_actions], where bundles ARE giftable per the PWA.)
-  bool get _giftable => item.type != 'bundle';
 
   bool get _isBundle => item.type == 'bundle';
 
@@ -828,19 +875,18 @@ class _ShopItemCard extends StatelessWidget {
           ),
           // Per-card description — the PWA renders `.shop-item-description` on
           // EVERY card type (styles/flair/special/limited/bundle/inventory;
-          // shop.js:737,757,800,877,908,1022), not just the inventory tab.
+          // shop.js:737,757,800,877,908,1022). `.shop-item-description` has NO
+          // text-align rule → left-aligned (only icon/name centre).
           const SizedBox(height: 4),
           Text(
             item.description,
-            textAlign: TextAlign.center,
             style: TextStyle(color: c.textDim, fontSize: 12),
           ),
-          // Inventory: acquired date (F9).
+          // Inventory: acquired date (F9) — `.nm-shop-4` is left-aligned too.
           if (inventory && ownedItem != null) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 10),
             Text(
               'Acquired: ${_formatDate(ownedItem!.timestamp)}',
-              textAlign: TextAlign.center,
               style: TextStyle(color: c.textDim, fontSize: 10),
             ),
           ],
@@ -851,80 +897,68 @@ class _ShopItemCard extends StatelessWidget {
             const SizedBox(height: 8),
           ],
           // Preview region: bundle chips (F6) or the standard item preview (F4).
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-            alignment: Alignment.center,
-            // `.shop-item-preview { min-height: 50px }` (styles-features.css:181-193).
-            constraints: const BoxConstraints(minHeight: 50),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.03),
-              border: Border.all(color: c.glassBorder),
-              borderRadius: NymRadius.rsm,
+          // Inventory cards render NO preview box (renderInventoryTab shows only
+          // icon/name/description/acquired/button/code/transfer) EXCEPT the
+          // supporter card's badge preview row (shop.js:1048).
+          if (!inventory || item.type == 'supporter')
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              alignment: Alignment.center,
+              // `.shop-item-preview { min-height: 50px }` (styles-features.css:181-193).
+              constraints: const BoxConstraints(minHeight: 50),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.03),
+                border: Border.all(color: c.glassBorder),
+                borderRadius: NymRadius.rsm,
+              ),
+              child: _isBundle
+                  ? ShopBundlePreview(item: item)
+                  : (sampleEdition != null && item.type == 'nickname-flair'
+                      ? _flairSamplePreview(c)
+                      // The inventory supporter card shows a single supporter-badge
+                      // preview row (shop.js:1048), not the full special preview.
+                      : (inventory && item.type == 'supporter'
+                          ? const SupporterBadge()
+                          : ShopItemPreview(item: item, bubble: bubble))),
             ),
-            child: _isBundle
-                ? ShopBundlePreview(item: item)
-                : (sampleEdition != null && item.type == 'nickname-flair'
-                    ? _flairSamplePreview(c)
-                    // The inventory supporter card shows a single supporter-badge
-                    // preview row (shop.js:1048), not the full special preview.
-                    : (inventory && item.type == 'supporter'
-                        ? const SupporterBadge()
-                        : ShopItemPreview(item: item, bubble: bubble))),
-          ),
-          const SizedBox(height: 10),
-          if (_blockedByAvailability)
-            // Limited soon/ended/soldout: the PWA replaces the whole footer with
-            // just the availability label — NO price row, no buttons
-            // (shop.js:870, the `else` footer branch).
-            Text(
-              availability!.label,
-              style: TextStyle(color: c.textDim, fontSize: 12),
-            )
-          else
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // `.shop-price-amount`: ⚡ {price} sats — lightning, 16px bold
-                // (styles-features.css:204-208).
-                Row(
-                  children: [
-                    // `.shop-price-amount` prefixes a literal "⚡" emoji in the PWA
-                    // (`<span class="shop-price-amount">⚡ ${price} sats</span>`).
-                    const Text('⚡',
-                        style: TextStyle(
-                            fontSize: 16, color: Color(0xFFF7931A))),
-                    const SizedBox(width: 2),
-                    Text(
-                      '${item.price} sats',
-                      style: const TextStyle(
-                        color: Color(0xFFF7931A),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ],
-                ),
-                Flexible(
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: _actions(c),
-                  ),
-                ),
-              ],
-            ),
-          // Inventory: recovery code + transfer (F9).
-          if (inventory && owned) ...[
-            if (ownedItem?.code != null && ownedItem!.code!.isNotEmpty)
-              RecoveryCodeRow(code: ownedItem!.code!),
-            if (_giftable) ...[
-              const SizedBox(height: 8),
+          if (inventory) ...[
+            // Inventory has NO price footer (shop.js:1008-1067): a full-width
+            // ACTIVATE (`.shop-buy-btn nm-shop-5` — the orange buy pill at
+            // `width:100%; margin-top:10px`), then the recovery code, then
+            // TRANSFER TO PUBKEY for EVERY purchase (bundles included).
+            if (item.type != 'bundle') ...[
+              const SizedBox(height: 10),
               SizedBox(
                 width: double.infinity,
-                child: _PillButton(
-                    label: 'TRANSFER TO PUBKEY', onTap: onTransfer),
+                child: _OrangePillButton(
+                  label: active ? 'DEACTIVATE' : 'ACTIVATE',
+                  onTap: onActivate,
+                ),
               ),
             ],
-          ],
+            if (ownedItem?.code != null && ownedItem!.code!.isNotEmpty)
+              RecoveryCodeRow(code: ownedItem!.code!),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: _TransferButton(onTap: onTransfer),
+            ),
+          ] else
+            // `.shop-item-price`: the footer bar under a 1px glass hairline
+            // (`margin-top:10px; padding-top:10px; border-top:1px solid
+            // var(--glass-border)`, styles-features.css:195-202), children
+            // spread by `justify-content: space-between`.
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              padding: const EdgeInsets.only(top: 10),
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: c.glassBorder)),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: _footerChildren(c),
+              ),
+            ),
         ],
       ),
     );
@@ -948,38 +982,58 @@ class _ShopItemCard extends StatelessWidget {
     );
   }
 
-  Widget _actions(NymColors c) {
-    // Bundles are never individually owned/activatable — always BUY + GIFT
-    // (_renderBundleCard → _shopItemActionsHtml, shop.js:911).
-    if (_isBundle) {
-      return _buyGiftRow();
+  /// The `.shop-item-price` footer children, spread space-between. PWA order
+  /// (shop.js:704-719): price, then BUY, then GIFT — GIFT reuses the same
+  /// orange `.shop-buy-btn` styling as BUY.
+  List<Widget> _footerChildren(NymColors c) {
+    // Limited soon/ended/soldout: only the availability label, styled like the
+    // price (`<span class="shop-price-amount">${avail.label}</span>`,
+    // shop.js:871) — lightning orange 16px bold, no buttons.
+    if (_blockedByAvailability) {
+      return [
+        Text(
+          availability!.label,
+          style: const TextStyle(
+            color: Color(0xFFF7931A),
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+          ),
+        ),
+      ];
     }
-    // Inventory tab is the only place ACTIVATE lives (shop.js renderInventory);
-    // on the shop tabs an owned item shows GIFT (regular) or nothing (limited),
-    // never ACTIVATE.
-    if (inventory) {
-      return _ActivateButton(active: active, onTap: onActivate, item: item);
-    }
-    if (owned) {
+    // `.shop-price-amount`: ⚡ {price} sats — lightning, 16px bold
+    // (styles-features.css:204-208). Flexible + scale-down so a long price
+    // shrinks (the PWA flex row does the same) instead of overflowing.
+    final price = Flexible(
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        alignment: Alignment.centerLeft,
+        child: Text(
+          '⚡ ${item.price} sats',
+          style: const TextStyle(
+            color: Color(0xFFF7931A),
+            fontWeight: FontWeight.bold,
+            fontSize: 16,
+          ),
+        ),
+      ),
+    );
+    if (owned && !_isBundle) {
       // `_shopItemOwnedHtml(item, allowGift)`: regular owned → price + GIFT
       // (allowGift true); limited owned → price only (allowGift false,
       // shop.js:869).
-      return availability != null
-          ? const SizedBox.shrink()
-          : _PillButton(label: 'GIFT', onTap: onGift);
+      return [
+        price,
+        if (availability == null) _OrangePillButton(label: 'GIFT', onTap: onGift),
+      ];
     }
-    // Not owned: BUY + GIFT (`_shopItemActionsHtml` always shows both).
-    return _buyGiftRow();
+    // Not owned (and every bundle): price, BUY, GIFT (`_shopItemActionsHtml`).
+    return [
+      price,
+      _OrangePillButton(label: 'BUY', onTap: onBuy),
+      _OrangePillButton(label: 'GIFT', onTap: onGift),
+    ];
   }
-
-  Widget _buyGiftRow() => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _PillButton(label: 'GIFT', onTap: onGift),
-          const SizedBox(width: 6),
-          _BuyButton(onTap: onBuy),
-        ],
-      );
 
   /// The flair preview with a stamped sample edition (Genesis #69), used in the
   /// limited tab (`_renderLimitedCard`).
@@ -993,11 +1047,10 @@ class _ShopItemCard extends StatelessWidget {
     );
   }
 
-  /// `M/D/YYYY` from a ms-epoch timestamp (matches the inventory acquired date).
-  static String _formatDate(int msEpoch) {
-    final d = DateTime.fromMillisecondsSinceEpoch(msEpoch);
-    return '${d.month}/${d.day}/${d.year}';
-  }
+  /// Locale-formatted acquired date (`new Date(ts*1000).toLocaleDateString()`,
+  /// shop.js:1024).
+  static String _formatDate(int msEpoch) =>
+      DateFormat.yMd().format(DateTime.fromMillisecondsSinceEpoch(msEpoch));
 }
 
 /// The `✓ OWNED` corner pill on a purchased card (`.shop-item.purchased::after`,
@@ -1028,11 +1081,49 @@ class _OwnedBadge extends StatelessWidget {
   }
 }
 
-/// A small outlined pill action (Gift / Transfer), styled like the Bitcoin-orange
-/// Buy button but in the muted secondary accent.
-class _PillButton extends StatelessWidget {
-  const _PillButton({required this.label, required this.onTap});
+/// The `.shop-buy-btn` orange pill (styles-features.css:210-224): gradient
+/// `rgba(247,147,26,.15)→.08`, border `rgba(247,147,26,.35)`, lightning text,
+/// radius 20, padding `6px 16px`. BUY, GIFT and the inventory ACTIVATE all use
+/// this exact styling in the PWA (GIFT's `.shop-gift-btn` adds no rules).
+class _OrangePillButton extends StatelessWidget {
+  const _OrangePillButton({required this.label, required this.onTap});
   final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0x26F7931A), Color(0x14F7931A)],
+          ),
+          border: Border.all(color: const Color(0x59F7931A)),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Color(0xFFF7931A),
+            fontWeight: FontWeight.w500,
+            fontSize: 13,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `TRANSFER TO PUBKEY` button (`.shop-buy-btn .shop-transfer-btn
+/// .nm-shop-8`, no-inline.css:115): full width, green gradient
+/// `rgba(0,255,170,.12)→.05`, border `rgba(0,255,170,.3)`, bright text.
+class _TransferButton extends StatelessWidget {
+  const _TransferButton({required this.onTap});
   final VoidCallback onTap;
 
   @override
@@ -1041,17 +1132,23 @@ class _PillButton extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        alignment: Alignment.center,
         decoration: BoxDecoration(
-          border: Border.all(color: c.secondaryA(0.4)),
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0x1F00FFAA), Color(0x0D00FFAA)],
+          ),
+          border: Border.all(color: const Color(0x4D00FFAA)),
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          label,
+          'TRANSFER TO PUBKEY',
           style: TextStyle(
-            color: c.secondary,
+            color: c.textBright,
             fontWeight: FontWeight.w500,
-            fontSize: 12,
+            fontSize: 13,
           ),
         ),
       ),
@@ -1088,9 +1185,22 @@ class _ActiveItemsPreview extends ConsumerWidget {
     final isGenesis = flairId == 'flair-genesis';
     final edition = flairId != null ? active.editions[flairId] : null;
 
-    // Author line: <nym#suffix> + flair + supporter badge. Genesis bolds the
-    // nym (suffix stays w400); redacted dims the author.
-    final authorColor = redacted ? c.textDim : c.secondary;
+    // The active-items "Preview" renders a real `.message.self.shop-preview-message`
+    // (shop.js:944-965), which the PWA styles by the user's layout — so the
+    // demo content switches between the bubble and IRC treatments too.
+    final bubble = ref.watch(settingsProvider.select((s) => s.useBubbles));
+
+    // Author line (shop.js:963): `<nym<span nym-suffix>#sfx</span>${flairHtml}
+    // ${supporterBadge}<nym-bracket>&gt;` — the flair + supporter badges sit
+    // INSIDE the brackets, before the closing `>`. Brackets are hidden in
+    // chat-bubbles mode (`body.chat-bubbles .nym-bracket { display:none }`).
+    // The author carries the USER colour class — the self author colour (the
+    // theme primary; the bitchat self class is likewise the theme orange), not
+    // the secondary accent. Genesis bolds the nym (suffix stays w400); redacted
+    // dims the author (`.message-author.cosmetic-redacted`).
+    final authorColor = redacted
+        ? (c.isLight ? const Color(0xBF1A1A1A) : const Color(0xCCFFFFFF))
+        : c.primary;
     final author = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1098,14 +1208,14 @@ class _ActiveItemsPreview extends ConsumerWidget {
           child: Text.rich(
             TextSpan(children: [
               TextSpan(
-                text: '<$nym',
+                text: '${bubble ? '' : '<'}$nym',
                 style: TextStyle(
                   color: authorColor,
                   fontWeight: isGenesis ? FontWeight.w700 : FontWeight.w600,
                 ),
               ),
               TextSpan(
-                text: '#$suffix>',
+                text: '#$suffix',
                 style: TextStyle(color: authorColor, fontWeight: FontWeight.w400),
               ),
             ]),
@@ -1116,15 +1226,14 @@ class _ActiveItemsPreview extends ConsumerWidget {
           // standard size, styles-features.css:316-320).
           FlairBadge(flairId: flairId, edition: edition),
         if (supporter) const SupporterBadge(),
+        if (!bubble)
+          Text('>',
+              style:
+                  TextStyle(color: authorColor, fontWeight: FontWeight.w400)),
       ],
     );
 
-    // The active-items "Preview" renders a real `.message.self.shop-preview-message`
-    // (shop.js:944-965), which the PWA styles by the user's layout — so the
-    // demo content switches between the bubble and IRC treatments too.
-    final bubble = ref.watch(settingsProvider.select((s) => s.useBubbles));
-
-    // Content bubble: active style's text treatment + cosmetic aura.
+    // Content bubble: active style's text treatment + cosmetic auras.
     Widget content;
     if (redacted) {
       content = ShopCosmeticBubblePreview(
@@ -1150,19 +1259,22 @@ class _ActiveItemsPreview extends ConsumerWidget {
         style: TextStyle(color: c.text, fontSize: 12),
       );
     }
-    // Wrap in the first active aura cosmetic's bubble decoration, if any.
-    if (cosmetics.isNotEmpty &&
-        ShopCatalog.cosmeticVisuals.containsKey(cosmetics.first)) {
-      final v = ShopCatalog.cosmeticVisuals[cosmetics.first]!;
-      content = Container(
+    // Compose ALL active aura cosmetics onto the preview (the PWA stacks every
+    // `cosmetic-X` class on the message): gradients, rings, prism/hologram and
+    // the frost/cosmic watermark tiles — the same mode-aware auras the chat
+    // bubble uses (only gold has a PWA light override).
+    final auras = <CosmeticAura>[
+      for (final x in cosmetics)
+        if (cosmeticAuraFor(x, isLight: c.isLight) != null)
+          cosmeticAuraFor(x, isLight: c.isLight)!,
+    ];
+    if (auras.isNotEmpty) {
+      content = ShopAuraBubble(
+        auras: auras,
+        bubble: bubble,
+        // The style/supporter content already draws its own bubble surface.
+        defaultFill: active.style == null && !supporter && !redacted,
         padding: const EdgeInsets.all(2),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          border: v.borderLeft != null
-              ? Border(left: BorderSide(color: v.borderLeft!, width: 3))
-              : null,
-          boxShadow: v.boxShadows,
-        ),
         child: content,
       );
     }
@@ -1193,8 +1305,10 @@ class _ActiveItemsPreview extends ConsumerWidget {
 
 /// The supporter content line ("This is how your messages look." in gold),
 /// rendered over the layout-appropriate supporter surface: a gold wash + left
-/// bar in IRC, a flat gold fill on a rounded bubble in chat-bubbles mode (matches
-/// [_SupporterStyleBubble]).
+/// bar in IRC, a flat gold fill on a rounded bubble in chat-bubbles mode
+/// (matches the supporter demo bubble). Light mode: text `#8a6d00`, no glow;
+/// wash `rgba(180,140,0,.06→.02)` + `#b8960a` bar; bubble `rgba(180,150,0,.08)`
+/// (styles-themes-responsive.css:934-947, 1421).
 class _SupporterContentLine extends StatelessWidget {
   const _SupporterContentLine({this.bubble = true});
 
@@ -1202,33 +1316,47 @@ class _SupporterContentLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const text = Text(
+    final isLight = context.nym.isLight;
+    final text = Text(
       'This is how your messages look.',
       style: TextStyle(
-        color: Color(0xFFFFD700),
+        color: isLight ? const Color(0xFF8A6D00) : const Color(0xFFFFD700),
         fontSize: 12,
-        shadows: [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
+        shadows: isLight
+            ? null
+            : const [Shadow(color: Color(0x40FFD700), blurRadius: 8)],
       ),
     );
     if (!bubble) {
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [Color(0x0DFFD700), Color(0x05FFD700)], // gold@.05 → @.02
+            colors: isLight
+                ? const [Color(0x0FB48C00), Color(0x05B48C00)] // .06 → .02
+                : const [Color(0x0DFFD700), Color(0x05FFD700)], // .05 → .02
           ),
-          border: Border(left: BorderSide(color: Color(0xFFFFD700), width: 3)),
+          border: Border(
+            left: BorderSide(
+              color: isLight
+                  ? const Color(0xFFB8960A)
+                  : const Color(0xFFFFD700),
+              width: 3,
+            ),
+          ),
         ),
         child: text,
       );
     }
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      decoration: const BoxDecoration(
-        color: Color(0x1FFFD700), // gold@.12
-        borderRadius: BorderRadius.only(
+      decoration: BoxDecoration(
+        color: isLight
+            ? const Color(0x14B49600) // rgba(180,150,0,.08)
+            : const Color(0x1FFFD700), // gold@.12
+        borderRadius: const BorderRadius.only(
           topLeft: Radius.circular(4),
           topRight: Radius.circular(16),
           bottomLeft: Radius.circular(16),
@@ -1494,84 +1622,12 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
   }
 }
 
-class _BuyButton extends StatelessWidget {
-  const _BuyButton({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0x26F7931A), Color(0x14F7931A)],
-          ),
-          border: Border.all(color: const Color(0x59F7931A)),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: const Text(
-          'BUY',
-          style: TextStyle(
-            color: Color(0xFFF7931A),
-            fontWeight: FontWeight.w500,
-            fontSize: 13,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ActivateButton extends StatelessWidget {
-  const _ActivateButton({
-    required this.active,
-    required this.onTap,
-    required this.item,
-  });
-  final bool active;
-  final VoidCallback onTap;
-  final ShopItem item;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    // Bundles aren't toggleable; show an owned chip instead.
-    if (item.type == 'bundle') {
-      return Text('Owned',
-          style: TextStyle(color: c.secondary, fontSize: 12));
-    }
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        decoration: BoxDecoration(
-          color: active ? c.secondaryA(0.18) : Colors.transparent,
-          border: Border.all(color: c.secondaryA(0.4)),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          // PWA toggles the verb ACTIVATE/DEACTIVATE (shop.js:1032-1051), not an
-          // "Active" state chip.
-          active ? 'DEACTIVATE' : 'ACTIVATE',
-          style: TextStyle(color: c.secondary, fontSize: 12),
-        ),
-      ),
-    );
-  }
-}
-
 /// The Lightning-invoice dialog shown when buying. Fetches a real
 /// `shop-buy-invoice` bolt11 (shop.js `generateShopPaymentInvoice`), shows its
-/// QR + copy + open-wallet, then polls `shop-check` (2s × 180) and on payment
-/// runs `shop-claim` to grant the item, mirroring `handleShopPaymentSuccess`.
-///
-/// TODO(verify): the live `/api/storage` host is unreachable in this
-/// environment, so the network call may fail — the dialog surfaces the error
-/// and offers a manual "I've paid" fallback that grants locally.
+/// QR + copy + open-wallet, detects payment (LUD-21 verify poll / `shop-check`
+/// / receipt window — see [_InvoiceDialogState._startPolling]) and on payment
+/// runs `shop-claim`, mirroring `handleShopPaymentSuccess`. The item is never
+/// granted client-side: the "I've paid" fallback re-verifies via `shop-check`.
 class _InvoiceDialog extends ConsumerStatefulWidget {
   const _InvoiceDialog({
     required this.item,
@@ -1617,6 +1673,12 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    // Close any pending NIP-57 receipt REQ (shop.js `_clearShopReceiptWait`,
+    // fired whenever the zap modal goes away).
+    ref.read(nostrControllerProvider).clearShopReceiptWait();
+    // Release the invoice back to the reconciliation path (a payment settled
+    // after this dialog dies is claimed on the next foreground/shop open).
+    ref.read(shopControllerProvider.notifier).activeInvoiceId = null;
     _api.dispose();
     super.dispose();
   }
@@ -1633,12 +1695,28 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       return;
     }
     try {
+      // The invoice/zap comment ('Nickname flair: Crown (gift)') + the signed
+      // NIP-57 zap request riding the payment (shop.js:1211-1216).
+      final comment = ShopController.purchaseComment(
+        widget.item,
+        gift: widget.recipientPubkey != null,
+      );
+      final zapRequest = ShopController.buildShopZapRequest(
+        identity: identity,
+        botPubkey: NostrController.nymbotPubkey,
+        relays: RelayConfig.defaultRelays,
+        amountSats: widget.item.price,
+        comment: comment,
+      );
       final inv = await _ctrl.buy(
         widget.item.id,
         identity: identity,
         recipientPubkey: widget.recipientPubkey,
+        comment: comment,
+        zapRequest: zapRequest,
       );
       if (!mounted) return;
+      _ctrl.activeInvoiceId = inv.invoiceId;
       setState(() {
         _invoice = inv;
         _phase = _BuyPhase.invoice;
@@ -1646,58 +1724,172 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       _startPolling(inv, identity);
     } catch (e) {
       if (!mounted) return;
-      // Backend unreachable in this environment — fall back to the manual
-      // confirmation path. TODO(verify): live `/api/storage` shop-buy-invoice.
       setState(() {
         _phase = _BuyPhase.error;
-        _status = 'Could not reach the server.';
+        _status = 'Failed: ${_errorMessage(e)}';
       });
     }
   }
 
+  /// Payment detection, branch-for-branch with shop.js:1235-1240:
+  ///   * LUD-21 `verify` URL → poll it directly every 1s × 180
+  ///     (`checkShopPayment`),
+  ///   * `serverVerify` → poll `shop-check` every 2s × 180
+  ///     (`checkShopPaymentViaServer`),
+  ///   * neither → wait for the NIP-57 kind-9735 receipt on relays, matched by
+  ///     bolt11 (`_listenForShopReceipt`, shop.js:1483-1511 + zaps.js:1181-1189;
+  ///     180s timeout).
   void _startPolling(ShopInvoice inv, ShopIdentity identity) {
-    if (inv.invoiceId.isEmpty) return;
-    var checks = 0;
-    // shop.js checkShopPaymentViaServer: every 2s, up to 180 (~6 min).
-    _pollTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
-      checks++;
-      final paid = await _ctrl.checkPaid(inv.invoiceId, identity: identity);
-      if (!mounted) return;
-      if (paid) {
-        t.cancel();
+    final verify = inv.verify;
+    if (verify != null && verify.isNotEmpty) {
+      var checks = 0;
+      _pollTimer = Timer.periodic(const Duration(seconds: 1), (t) async {
+        checks++;
+        var paid = false;
+        try {
+          final res = await _api.proxiedJsonFetch(verify);
+          final data = jsonDecode(res.body);
+          paid = data is Map && (data['settled'] == true || data['paid'] == true);
+        } catch (_) {
+          // keep polling (shop.js:1280)
+        }
+        if (!mounted || _settling) return;
+        if (paid) {
+          t.cancel();
+          await _claim(inv, identity);
+        } else if (checks >= 180) {
+          t.cancel();
+          setState(() {
+            _phase = _BuyPhase.error;
+            _status = '⏱️ Payment timeout - please check your wallet';
+          });
+        }
+      });
+      return;
+    }
+    if (inv.serverVerify) {
+      if (inv.invoiceId.isEmpty) return;
+      var checks = 0;
+      _pollTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+        checks++;
+        final paid = await _ctrl.checkPaid(inv.invoiceId, identity: identity);
+        if (!mounted || _settling) return;
+        if (paid) {
+          t.cancel();
+          await _claim(inv, identity);
+        } else if (checks >= 180) {
+          t.cancel();
+          setState(() {
+            _phase = _BuyPhase.error;
+            _status = 'Payment not detected yet — if you paid, tap "I\'ve '
+                'paid" or reopen the shop shortly.';
+          });
+        }
+      });
+      return;
+    }
+    // Receipt mode (no verify, no serverVerify): subscribe to the bot's zap
+    // receipts and auto-claim when one matches this invoice's bolt11
+    // (shop.js `_listenForShopReceipt` → zaps.js:1181-1189 →
+    // `handleShopPaymentSuccess`); false = the 180s timeout fired, then the
+    // PWA's receipt-timeout copy (shop.js:1499-1510).
+    //
+    // PARITY GAP (needs nostr_controller.dart): `listenForShopReceipt`
+    // completes with a bare bool, so the matched kind-9735 event can't be
+    // forwarded into `_claim(receipt: …)` the way the PWA sends `inv.receipt`
+    // with shop-claim (shop.js:1189 `currentShopInvoice.receipt = event`,
+    // :1545). Once it surfaces the event JSON, pass it here.
+    unawaited(() async {
+      final detected = await ref
+          .read(nostrControllerProvider)
+          .listenForShopReceipt(inv.pr);
+      if (!mounted || _settling) return;
+      if (detected) {
         await _claim(inv, identity);
-      } else if (checks >= 180) {
-        t.cancel();
+      } else {
         setState(() {
           _phase = _BuyPhase.error;
-          _status = 'Payment timeout - please check your wallet';
+          _status =
+              'Payment not detected yet — if you paid, reopen the shop shortly.';
         });
       }
-    });
+    }());
   }
 
-  Future<void> _claim(ShopInvoice inv, ShopIdentity identity) async {
-    setState(() => _phase = _BuyPhase.claiming);
+  /// True once a claim is under way / settled — late poll ticks must not
+  /// overwrite the claiming/success view.
+  bool get _settling =>
+      _phase == _BuyPhase.claiming || _phase == _BuyPhase.paid;
+
+  /// [receipt] is the matched NIP-57 kind-9735 receipt event when the
+  /// receipt-mode listener detected the payment — the PWA attaches it to
+  /// shop-claim (`_claimShopPurchase(inv.invoiceId, inv.receipt)`,
+  /// shop.js:1545); the verify/serverVerify/manual paths claim without one.
+  Future<void> _claim(
+    ShopInvoice inv,
+    ShopIdentity identity, {
+    Map<String, dynamic>? receipt,
+  }) async {
+    // Stop any detection loop still running (e.g. the manual "I've paid" path
+    // confirms while the periodic poll is live), and close a pending receipt
+    // REQ (shop.js `handleShopPaymentSuccess` → `_clearShopReceiptWait()`).
+    _pollTimer?.cancel();
+    ref.read(nostrControllerProvider).clearShopReceiptWait();
+    setState(() {
+      _phase = _BuyPhase.claiming;
+      _status = 'Confirming purchase...';
+    });
     try {
-      final data = await _ctrl.claim(inv.invoiceId, identity: identity);
+      final data = await _ctrl.claim(
+        inv.invoiceId,
+        identity: identity,
+        receipt: receipt,
+        gifterNym: _gifterNym(ref),
+      );
       if (!mounted) return;
       _captureSuccess(data);
       // A limited purchase changes remaining supply; force a refresh next view.
       if (widget.item.maxSupply != null) _ctrl.invalidateSupply();
+      // The success view NEVER auto-dismisses — the PWA waits for the Close
+      // button so a recovery code can be saved (`_renderShopSuccess`).
       setState(() => _phase = _BuyPhase.paid);
-      // shop.js: don't auto-close while a recovery code is on screen — the user
-      // must tap Close to dismiss so they can save it. With no code (e.g. a
-      // gift), auto-close after 2s.
-      if (!_hasRecoveryReveal) {
-        Future<void>.delayed(const Duration(seconds: 2), () {
-          if (mounted) Navigator.of(context).pop(true);
-        });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _phase = _BuyPhase.error;
+        _status = 'Purchase confirmation failed: ${_errorMessage(e)}';
+      });
+    }
+  }
+
+  /// "I've paid": immediately re-check the invoice server-side and, if the bot
+  /// wallet confirms payment, finalize the claim — the PWA's
+  /// `manualCheckPayment` (zaps.js:707-736). NEVER grants without the server.
+  Future<void> _manualCheck() async {
+    final identity = widget.identity;
+    final inv = _invoice;
+    if (identity == null || inv == null || inv.invoiceId.isEmpty) return;
+    setState(() {
+      _phase = _BuyPhase.claiming;
+      _status = 'Checking payment...';
+    });
+    try {
+      final paid = await _ctrl.checkPaid(inv.invoiceId, identity: identity);
+      if (!mounted) return;
+      if (paid) {
+        await _claim(inv, identity);
+        return;
       }
+      setState(() {
+        _phase = _BuyPhase.error;
+        _status =
+            'Not paid yet — complete the payment in your wallet, then tap again.';
+      });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _phase = _BuyPhase.error;
-        _status = 'Claim failed - your payment is safe, try restoring later.';
+        _status = 'Could not check yet — try again in a moment.';
       });
     }
   }
@@ -1729,13 +1921,6 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
     }
   }
 
-  /// True when the success view shows a recovery code (single or bundle) that
-  /// must be saved before dismissing.
-  bool get _hasRecoveryReveal =>
-      !_isGift &&
-      ((_successCode != null && _successCode!.isNotEmpty) ||
-          _bundleCodes.isNotEmpty);
-
   Future<void> _copy() async {
     final pr = _invoice?.pr;
     if (pr != null) await Clipboard.setData(ClipboardData(text: pr));
@@ -1753,35 +1938,10 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
     }
   }
 
-  /// Offline fallback for the unreachable-backend case: grant locally, then show
-  /// the same success reveal (recovery code + edition) as the online path so the
-  /// user can still save their code. Gifts land in the recipient's inventory, so
-  /// a gift grants nothing here and just closes.
-  Future<void> _manualConfirm() async {
-    if (widget.recipientPubkey != null) {
-      _isGift = true;
-      if (mounted) Navigator.of(context).pop(true);
-      return;
-    }
-    await _ctrl.claimAfterPayment(widget.item.id);
-    if (widget.item.maxSupply != null) _ctrl.invalidateSupply();
-    // Surface the locally-granted code + edition from the persisted record.
-    final granted = ref.read(shopControllerProvider).owned[widget.item.id];
-    _successCode = granted?.code;
-    _successEdition = granted?.edition;
-    _successEditionMax = granted?.editionMax;
-    if (!mounted) return;
-    setState(() => _phase = _BuyPhase.paid);
-    if (!_hasRecoveryReveal) {
-      Future<void>.delayed(const Duration(seconds: 2), () {
-        if (mounted) Navigator.of(context).pop(true);
-      });
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final recipient = widget.recipientPubkey;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(20),
@@ -1800,8 +1960,11 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // `${recipientPubkey ? 'Gifting' : 'Purchasing'}:
+                    // <strong>${item.name}</strong>` (shop.js:1172-1174).
                     Text(
-                      'Purchasing ${widget.item.name}',
+                      '${recipient != null ? 'Gifting' : 'Purchasing'}: '
+                      '${widget.item.name}',
                       style: TextStyle(
                         color: c.text,
                         fontSize: 16,
@@ -1809,8 +1972,13 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
                       ),
                     ),
                     const SizedBox(height: 4),
-                    Text('${widget.item.price} sats',
-                        style: TextStyle(color: c.textDim, fontSize: 13)),
+                    // `Price: N sats — gift to <pk8>...` (`.nm-shop-9`:
+                    // 12px, warning colour).
+                    Text(
+                      'Price: ${widget.item.price} sats'
+                      '${recipient != null ? ' — gift to ${recipient.substring(0, 8)}...' : ''}',
+                      style: TextStyle(color: c.warning, fontSize: 12),
+                    ),
                     const SizedBox(height: 16),
                     ..._phaseBody(c),
                   ],
@@ -1840,13 +2008,16 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
           const SizedBox(height: 8),
           const CircularProgressIndicator(),
           const SizedBox(height: 12),
-          Text('Payment received — unlocking...',
+          // 'Confirming purchase...' (handleShopPaymentSuccess) or the manual
+          // check's 'Checking payment...' (manualCheckPayment).
+          Text(_status.isNotEmpty ? _status : 'Confirming purchase...',
               style: TextStyle(color: c.textDim, fontSize: 12)),
         ];
       case _BuyPhase.paid:
         return [
           const SizedBox(height: 8),
-          const Text('✅', style: TextStyle(fontSize: 32)),
+          // `.nm-shop-10 { font-size: 24px }` — the ✅ glyph.
+          const Text('✅', style: TextStyle(fontSize: 24)),
           const SizedBox(height: 8),
           Text(
             _isGift ? 'Gift sent!' : 'Purchase successful!',
@@ -1910,15 +2081,17 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
                   child: Text('Close', style: TextStyle(color: c.textDim)),
                 ),
               ),
-              Expanded(
-                child: FilledButton(
-                  style: FilledButton.styleFrom(backgroundColor: c.primary),
-                  // TODO(verify): manual grant fallback while the live backend
-                  // is unreachable here.
-                  onPressed: _manualConfirm,
-                  child: const Text("I've paid"),
+              // "I've paid" re-verifies via shop-check → shop-claim
+              // (manualCheckPayment) — the item is NEVER granted client-side.
+              // Only offered when an invoice actually exists.
+              if (_invoice != null && _invoice!.invoiceId.isNotEmpty)
+                Expanded(
+                  child: FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: c.primary),
+                    onPressed: _manualCheck,
+                    child: const Text("I've paid"),
+                  ),
                 ),
-              ),
             ],
           ),
         ];
@@ -1955,7 +2128,19 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
             ],
           ),
           const SizedBox(height: 8),
-          _cancelButton(c),
+          // The zap modal footer: Cancel + the revealed "I've paid" action
+          // (zaps.js:964-969) for a manual server-side re-check.
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _cancelButton(c),
+              if (_invoice!.invoiceId.isNotEmpty)
+                TextButton(
+                  onPressed: _manualCheck,
+                  child: Text("I've paid", style: TextStyle(color: c.primary)),
+                ),
+            ],
+          ),
         ];
     }
   }

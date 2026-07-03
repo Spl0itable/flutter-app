@@ -172,27 +172,71 @@ class _ZapBadgeState extends ConsumerState<ZapBadge>
   }
 
   /// The `.zap-badge-shock` box-shadow flash (`@keyframes zapBadgeShock`,
-  /// styles-features.css:467): no glow at rest, ramping to a gold+cyan flare
-  /// near 20% of the pulse, then a softer orange glow that fades out. Driven by
-  /// the same `_shock` controller as the scale.
+  /// styles-features.css:467-473). box-shadow is keyed at 0/20/60/100% (the
+  /// 40% keyframe omits it), each segment eased with the animation's
+  /// `ease-out`:
+  ///   0%   0 0 10px orange(247,147,26)@.5
+  ///   20%  0 0 18px gold(255,216,107)@.95 + 0 0 26px cyan(159,232,255)@.7
+  ///   60%  0 0 16px orange@.9
+  ///   100% 0 0 10px orange@.5
+  /// CSS pads the shorter lists with transparent zero shadows, so the cyan
+  /// companion fades in to the 20% flare and back out by 60%. Driven by the
+  /// same `_shock` controller as the scale.
   List<BoxShadow> _shockGlow() {
     if (!_shock.isAnimating) return const [];
     final t = _shock.value;
-    // Envelope: 0 → 1 by t=0.2, then decays to 0 by t=1 (peak flare at 20%).
-    final env = t < 0.2 ? (t / 0.2) : (1 - (t - 0.2) / 0.8);
-    final e = env.clamp(0.0, 1.0);
+    const orange = Color(0xFFF7931A);
+    const gold = Color(0xFFFFD86B);
+    const cyan = Color(0xFF9FE8FF);
+    final Color main;
+    final double mainBlur;
+    final double cyanAlpha;
+    final double cyanBlur;
+    if (t < 0.20) {
+      final f = Curves.easeOut.transform(t / 0.20);
+      main = _shadowLerp(
+          orange.withValues(alpha: 0.5), gold.withValues(alpha: 0.95), f);
+      mainBlur = 10 + 8 * f;
+      cyanAlpha = 0.7 * f;
+      cyanBlur = 26 * f;
+    } else if (t < 0.60) {
+      final f = Curves.easeOut.transform((t - 0.20) / 0.40);
+      main = _shadowLerp(
+          gold.withValues(alpha: 0.95), orange.withValues(alpha: 0.9), f);
+      mainBlur = 18 - 2 * f;
+      cyanAlpha = 0.7 * (1 - f);
+      cyanBlur = 26 * (1 - f);
+    } else {
+      final f = Curves.easeOut.transform((t - 0.60) / 0.40);
+      main = _shadowLerp(
+          orange.withValues(alpha: 0.9), orange.withValues(alpha: 0.5), f);
+      mainBlur = 16 - 6 * f;
+      cyanAlpha = 0;
+      cyanBlur = 0;
+    }
     return [
-      // Gold core (rgb 255,216,107 = #FFD86B) — peaks at .95, blur 10→18.
-      BoxShadow(
-        color: const Color(0xFFFFD86B).withValues(alpha: 0.5 + 0.45 * e),
-        blurRadius: 10 + 8 * e,
-      ),
-      // Cyan companion (rgb 159,232,255 = #9FE8FF) — only at the flare, to .7.
-      BoxShadow(
-        color: const Color(0xFF9FE8FF).withValues(alpha: 0.7 * e),
-        blurRadius: 26 * e,
-      ),
+      BoxShadow(color: main, blurRadius: mainBlur),
+      if (cyanAlpha > 0)
+        BoxShadow(
+          color: cyan.withValues(alpha: cyanAlpha),
+          blurRadius: cyanBlur,
+        ),
     ];
+  }
+
+  /// CSS interpolates shadow colors with premultiplied alpha; [Color.lerp] is
+  /// straight-alpha, so lerp the premultiplied components and divide back out.
+  static Color _shadowLerp(Color a, Color b, double t) {
+    final alpha = a.a + (b.a - a.a) * t;
+    if (alpha <= 0) return const Color(0x00000000);
+    double ch(double ca, double cb) =>
+        (ca * a.a + (cb * b.a - ca * a.a) * t) / alpha;
+    return Color.from(
+      alpha: alpha,
+      red: ch(a.r, b.r),
+      green: ch(a.g, b.g),
+      blue: ch(a.b, b.b),
+    );
   }
 
   /// Resolves the author's lightning address and opens the zap modal, mirroring
@@ -335,17 +379,19 @@ class _ZapBadgeShock {
   static _ZapBadgeShock at(double t, bool animating) {
     if (!animating) return const _ZapBadgeShock(1, 0);
     // Keyframes: 0%(1,0) 20%(1.25,-1) 40%(1.12,2) 60%(1.18,-1) 100%(1,0).
+    // `animation: zapBadgeShock 0.55s ease-out` — the timing function applies
+    // per keyframe segment.
     if (t < 0.20) {
-      final f = t / 0.20;
+      final f = Curves.easeOut.transform(t / 0.20);
       return _ZapBadgeShock(_l(1, 1.25, f), _l(0, -1, f));
     } else if (t < 0.40) {
-      final f = (t - 0.20) / 0.20;
+      final f = Curves.easeOut.transform((t - 0.20) / 0.20);
       return _ZapBadgeShock(_l(1.25, 1.12, f), _l(-1, 2, f));
     } else if (t < 0.60) {
-      final f = (t - 0.40) / 0.20;
+      final f = Curves.easeOut.transform((t - 0.40) / 0.20);
       return _ZapBadgeShock(_l(1.12, 1.18, f), _l(2, -1, f));
     } else {
-      final f = (t - 0.60) / 0.40;
+      final f = Curves.easeOut.transform((t - 0.60) / 0.40);
       return _ZapBadgeShock(_l(1.18, 1, f), _l(-1, 0, f));
     }
   }
@@ -454,38 +500,104 @@ class _ZapBurstWidgetState extends State<_ZapBurstWidget>
     );
   }
 
+  /// `animation: zapBurst 0.6s cubic-bezier(0.2, 1.4, 0.5, 1)` — in CSS the
+  /// timing function applies PER keyframe segment, and the 1.4 y control point
+  /// overshoots each segment's target before settling.
+  static const Cubic _kBurstCurve = Cubic(0.2, 1.4, 0.5, 1);
+
   /// The `.zap-burst` 40×40 SVG bolt (`@keyframes zapBurst`, 0.6s of the 0.8s
-  /// window): scale 0→1.6→1.05→1.35→0.5, rotate -12°→6°→-7°→5°→0°, drifting up
-  /// ~16px (translate -50%→-90% of its 40px box), opacity 0→1→…→0.
+  /// window): scale 0→1.6→1.05→1.35→0.5, rotate -12°→6°→-7°→5°→0°, opacity
+  /// 0→1→…→0, each segment eased with the overshooting [_kBurstCurve]. The
+  /// upward jump (translate -50%→-90% of the 40px box) is only keyed on the
+  /// final 45%→100% segment.
+  ///
+  /// `filter` is keyed only at 15% (`brightness(2.2)`) and 45%
+  /// (`brightness(1.8)`); the implicit 0%/100% keys hold the element's
+  /// drop-shadow filter. drop-shadow↔brightness is a mismatched filter list,
+  /// which CSS interpolates DISCRETELY (flip at eased progress 0.5), while
+  /// 15%→45% interpolates brightness 2.2→1.8 smoothly — so the glow is
+  /// replaced by a brightness flash for the middle of the burst.
   Widget _buildFlash() {
     final t = (_c.value * 800 / 600).clamp(0.0, 1.0);
     double scale;
     double rotDeg;
     double opacity;
+    double yShift = 0;
     if (t < 0.15) {
-      final f = t / 0.15;
-      scale = _l(0, 1.6, f);
-      rotDeg = _l(-12, 6, f);
-      opacity = _l(0, 1, f);
+      final f = _kBurstCurve.transform(t / 0.15);
+      scale = _u(0, 1.6, f);
+      rotDeg = _u(-12, 6, f);
+      opacity = _u(0, 1, f);
     } else if (t < 0.30) {
-      final f = (t - 0.15) / 0.15;
-      scale = _l(1.6, 1.05, f);
-      rotDeg = _l(6, -7, f);
+      final f = _kBurstCurve.transform((t - 0.15) / 0.15);
+      scale = _u(1.6, 1.05, f);
+      rotDeg = _u(6, -7, f);
       opacity = 1;
     } else if (t < 0.45) {
-      final f = (t - 0.30) / 0.15;
-      scale = _l(1.05, 1.35, f);
-      rotDeg = _l(-7, 5, f);
+      final f = _kBurstCurve.transform((t - 0.30) / 0.15);
+      scale = _u(1.05, 1.35, f);
+      rotDeg = _u(-7, 5, f);
       opacity = 1;
     } else {
-      final f = (t - 0.45) / 0.55;
-      scale = _l(1.35, 0.5, f);
-      rotDeg = _l(5, 0, f);
-      opacity = _l(1, 0, f);
+      final f = _kBurstCurve.transform((t - 0.45) / 0.55);
+      scale = _u(1.35, 0.5, f);
+      rotDeg = _u(5, 0, f);
+      opacity = _u(1, 0, f);
+      // translate(-50%,-50%) → translate(-50%,-90%): -40% of 40px = -16px.
+      yShift = _u(0, -16, f);
     }
-    // -50%→-90% of the 40px box ⇒ up to -16px upward drift over t.
-    final yShift = _l(0, -16, t);
+
+    // filter keys: drop-shadows(0%) → brightness(2.2)@15% →
+    // brightness(1.8)@45% → drop-shadows(100%).
+    double brightness = 1;
+    var dropShadow = true;
+    if (t < 0.15) {
+      if (_kBurstCurve.transform(t / 0.15) >= 0.5) {
+        brightness = 2.2;
+        dropShadow = false;
+      }
+    } else if (t < 0.45) {
+      brightness = _u(2.2, 1.8, _kBurstCurve.transform((t - 0.15) / 0.30));
+      dropShadow = false;
+    } else {
+      if (_kBurstCurve.transform((t - 0.45) / 0.55) < 0.5) {
+        brightness = 1.8;
+        dropShadow = false;
+      }
+    }
+
     const box = 40.0;
+    // `.zap-burst svg { fill: #ffd86b }` (24×24 bolt path, reused).
+    Widget bolt = const SizedBox(
+      width: box,
+      height: box,
+      child: CustomPaint(painter: _BoltPainter(Color(0xFFFFD86B))),
+    );
+    if (dropShadow) {
+      // drop-shadow(0 0 10px rgba(247,147,26,.9)) +
+      // drop-shadow(0 0 18px rgba(159,232,255,.55)) — the bolt glow.
+      bolt = DecoratedBox(
+        decoration: const BoxDecoration(
+          boxShadow: [
+            BoxShadow(color: Color(0xE6F7931A), blurRadius: 10),
+            BoxShadow(color: Color(0x8C9FE8FF), blurRadius: 18),
+          ],
+        ),
+        child: bolt,
+      );
+    } else {
+      // brightness(k): multiply RGB by k, alpha untouched. It REPLACES the
+      // drop-shadow filter while active (mismatched lists don't combine).
+      bolt = ColorFiltered(
+        colorFilter: ColorFilter.matrix(<double>[
+          brightness, 0, 0, 0, 0, //
+          0, brightness, 0, 0, 0, //
+          0, 0, brightness, 0, 0, //
+          0, 0, 0, 1, 0, //
+        ]),
+        child: bolt,
+      );
+    }
     return Positioned(
       left: widget.center.dx - box / 2,
       top: widget.center.dy - box / 2 + yShift,
@@ -495,20 +607,7 @@ class _ZapBurstWidgetState extends State<_ZapBurstWidget>
           angle: rotDeg * math.pi / 180,
           child: Transform.scale(
             scale: scale,
-            // drop-shadow(0 0 10px rgba(247,147,26,.9)) +
-            // drop-shadow(0 0 18px rgba(159,232,255,.55)) — the bolt glow.
-            child: Container(
-              width: box,
-              height: box,
-              decoration: const BoxDecoration(
-                boxShadow: [
-                  BoxShadow(color: Color(0xE6F7931A), blurRadius: 10),
-                  BoxShadow(color: Color(0x8C9FE8FF), blurRadius: 18),
-                ],
-              ),
-              // `.zap-burst svg { fill: #ffd86b }` (24×24 bolt path, reused).
-              child: const CustomPaint(painter: _BoltPainter(Color(0xFFFFD86B))),
-            ),
+            child: bolt,
           ),
         ),
       ),
@@ -526,13 +625,14 @@ class _ZapBurstWidgetState extends State<_ZapBurstWidget>
       final double prog; // 0..1 fraction of the (dx,dy) travel
       final double scaleY;
       final double opacity;
+      // `animation: zapBolt 0.5s ease-out` — eased per keyframe segment.
       if (raw < 0.40) {
-        final f = raw / 0.40;
+        final f = Curves.easeOut.transform(raw / 0.40);
         prog = _l(0, 0.5, f);
         scaleY = _l(0, 1, f);
         opacity = 1;
       } else {
-        final f = (raw - 0.40) / 0.60;
+        final f = Curves.easeOut.transform((raw - 0.40) / 0.60);
         prog = _l(0.5, 1, f);
         scaleY = _l(1, 0.2, f);
         opacity = _l(1, 0, f);
@@ -576,4 +676,8 @@ class _ZapBurstWidgetState extends State<_ZapBurstWidget>
 
   static double _l(double a, double b, double t) =>
       a + (b - a) * t.clamp(0.0, 1.0);
+
+  /// Unclamped lerp — the overshooting [_kBurstCurve] drives values past
+  /// their keyframe targets (CSS bezier overshoot).
+  static double _u(double a, double b, double t) => a + (b - a) * t;
 }

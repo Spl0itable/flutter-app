@@ -182,6 +182,16 @@ class PoolFrame {
 
   /// `["CLOSE",subId]`
   static String close(String subId) => jsonEncode(<dynamic>['CLOSE', subId]);
+
+  /// `["KIND_BLACKLIST",{"wss://relay":[kind,…],…}]` — tells the pool worker
+  /// to skip a relay for REQs whose kinds it has rejected
+  /// (`_sendKindBlacklistToWorkers`, relays.js:2413-2421; server side at
+  /// relay-pool.js:1541-1550).
+  static String kindBlacklist(Map<String, Set<int>> config) =>
+      jsonEncode(<dynamic>[
+        'KIND_BLACKLIST',
+        {for (final e in config.entries) e.key: e.value.toList()},
+      ]);
 }
 
 /// Sealed parse result for an INBOUND wrapped pool frame. Note the wrapped
@@ -219,21 +229,28 @@ sealed class PoolMessage {
           sourceRelay,
         );
       case 'OK':
-        // ["OK", id, accepted, reason, relayUrl?]
+        // ["OK", id, accepted, reason, relayUrl?] — the trailing url is the
+        // proxy's per-relay attribution (relays.js:3771).
         if (arr.length < 3) return null;
         return PoolOk(
           arr[1]?.toString() ?? '',
           arr[2] == true,
           arr.length > 3 ? (arr[3]?.toString() ?? '') : '',
+          arr.length > 4 ? arr[4]?.toString() : null,
         );
       case 'EOSE':
         // ["EOSE", subId]
         if (arr.length < 2) return null;
         return PoolEose(arr[1]?.toString() ?? '');
       case 'CLOSED':
-        // ["CLOSED", subId, reason, relayUrl?]
+        // ["CLOSED", subId, reason, relayUrl?] — proxy-attributed like OK
+        // (relays.js:3862-3866).
         if (arr.length < 2) return null;
-        return PoolClosed(arr[1]?.toString() ?? '');
+        return PoolClosed(
+          arr[1]?.toString() ?? '',
+          arr.length > 2 ? (arr[2]?.toString() ?? '') : '',
+          arr.length > 3 ? arr[3]?.toString() : null,
+        );
       case 'POOL:PING':
         // ["POOL:PING", ts] — keepalive; ts ignored, just bumps liveness.
         return const PoolPing();
@@ -278,10 +295,13 @@ class PoolEvent extends PoolMessage {
 }
 
 class PoolOk extends PoolMessage {
-  const PoolOk(this.id, this.accepted, this.message);
+  const PoolOk(this.id, this.accepted, this.message, [this.relayUrl]);
   final String id;
   final bool accepted;
   final String message;
+
+  /// The proxy's per-relay attribution (`wss://…`), when present.
+  final String? relayUrl;
 }
 
 class PoolEose extends PoolMessage {
@@ -290,8 +310,12 @@ class PoolEose extends PoolMessage {
 }
 
 class PoolClosed extends PoolMessage {
-  const PoolClosed(this.subId);
+  const PoolClosed(this.subId, [this.reason = '', this.relayUrl]);
   final String subId;
+  final String reason;
+
+  /// The proxy's per-relay attribution (`wss://…`), when present.
+  final String? relayUrl;
 }
 
 class PoolPing extends PoolMessage {
@@ -573,6 +597,24 @@ class RelayPoolProxy implements PoolTransport {
   /// REQ→EOSE latency exactly once and can drop [_reqSentAt] when all are in.
   final Map<String, Set<String>> _eosedShards = {};
 
+  // --- Per-relay unsupported-kind blacklist (KIND_BLACKLIST frame) -----------
+
+  /// relayUrl → kinds that relay has rejected (`_relayUnsupportedKinds`).
+  /// Pushed to every pool worker as a `KIND_BLACKLIST` frame so it skips the
+  /// relay for REQs whose kinds are all in its set (relay-pool.js:15) — a pure
+  /// bandwidth/CPU optimization.
+  final Map<String, Set<int>> _relayUnsupportedKinds = {};
+
+  /// Recently-published event id → kind (`_sentEventKinds`, cap 1000), so an
+  /// attributed OK rejection can be mapped back to the event's kind
+  /// (relays.js:2383-2394).
+  final Map<String, int> _sentEventKinds = {};
+
+  /// subId → kinds its filters requested (`_subKinds`, cap 2000), so a CLOSED
+  /// rejection without an explicit kind blacklists the whole REQ's kinds
+  /// (relays.js:2333-2349).
+  final Map<String, Set<int>> _subKinds = {};
+
   // --- Public surface (matches RelayPool) -----------------------------------
 
   /// Total relays the proxy reports as connected across all shards (deduped).
@@ -689,6 +731,7 @@ class RelayPoolProxy implements PoolTransport {
     // latency (keyed by shard id — the proxy's per-relay unit).
     _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
     _eosedShards[id] = <String>{};
+    _trackSubKinds(id, filters);
     sub.startEose();
     final frame = PoolFrame.req(id, filters);
     for (final sock in _sockets) {
@@ -715,6 +758,9 @@ class RelayPoolProxy implements PoolTransport {
   /// inbound OK).
   @override
   Future<int> publish(NostrEvent event) async {
+    // Remember the kind so an attributed OK rejection can blacklist it
+    // (`_trackSentEventKind` on every plain EVENT send, relays.js:3271/3381).
+    _trackSentEventKind(event);
     return _broadcast(PoolFrame.event(event));
   }
 
@@ -802,6 +848,7 @@ class RelayPoolProxy implements PoolTransport {
     _activeFilters[id] = filters;
     _reqSentAt[id] = DateTime.now().millisecondsSinceEpoch;
     _eosedShards[id] = <String>{};
+    _trackSubKinds(id, filters);
     final frame = PoolFrame.req(id, filters);
     for (final sock in _sockets) {
       sock.send(frame);
@@ -895,9 +942,102 @@ class RelayPoolProxy implements PoolTransport {
   /// The geo relay urls currently sharded onto the pool (for inspection/tests).
   List<String> get geoRelayUrls => List.unmodifiable(_geoRelayUrls);
 
+  // --- Per-relay unsupported-kind blacklist helpers ---------------------------
+
+  /// Remembers the kinds a REQ's filters ask for so a later CLOSED rejection
+  /// can blacklist them (`_trackSubKinds`, relays.js:2334-2349).
+  void _trackSubKinds(String subId, List<NostrFilter> filters) {
+    final kinds = <int>{};
+    for (final f in filters) {
+      final k = f.kinds;
+      if (k != null) kinds.addAll(k);
+    }
+    if (kinds.isEmpty) return;
+    _subKinds.remove(subId);
+    _subKinds[subId] = kinds;
+    if (_subKinds.length > 2000) {
+      _subKinds.remove(_subKinds.keys.first);
+    }
+  }
+
+  /// Remembers a published event's kind so an attributed OK rejection can be
+  /// mapped back to it (`_trackSentEventKind`, relays.js:2383-2394).
+  void _trackSentEventKind(NostrEvent event) {
+    if (event.id.isEmpty) return;
+    _sentEventKinds.remove(event.id);
+    _sentEventKinds[event.id] = event.kind;
+    if (_sentEventKinds.length > 1000) {
+      _sentEventKinds.remove(_sentEventKinds.keys.first);
+    }
+  }
+
+  /// True when a rejection [reason] indicates the relay doesn't support the
+  /// event/filter kind (`_isUnsupportedKind`, relays.js:4012-4017).
+  static bool _isUnsupportedKind(String reason) =>
+      RegExp(r'kinds?\s*not\s*supported', caseSensitive: false)
+          .hasMatch(reason) ||
+      RegExp(r'\bNIP[\s\-_:]*\d+\b', caseSensitive: false).hasMatch(reason) ||
+      RegExp(r'\bkinds?[\s\-_:]*\d+\b', caseSensitive: false).hasMatch(reason);
+
+  /// Pulls the explicit kind number out of a rejection [reason] when present
+  /// (`_extractUnsupportedKind`, relays.js:2351-2358).
+  static int? _extractUnsupportedKind(String reason) {
+    var m = RegExp(r'\bNIP[\s\-_:]*(\d+)\b', caseSensitive: false)
+        .firstMatch(reason);
+    if (m != null) return int.tryParse(m.group(1)!);
+    m = RegExp(r'\bkinds?[\s\-_:]*(\d+)\b', caseSensitive: false)
+        .firstMatch(reason);
+    if (m != null) return int.tryParse(m.group(1)!);
+    return null;
+  }
+
+  /// Records a CLOSED-subscription kind rejection for [relayUrl]: the explicit
+  /// kind from the reason when present, else every kind the REQ asked for
+  /// (`_recordUnsupportedKindRejection`, relays.js:2360-2381).
+  void _recordUnsupportedKindRejection(
+      String? relayUrl, String subId, String reason) {
+    if (relayUrl == null || !relayUrl.startsWith('wss://')) return;
+    final specific = _extractUnsupportedKind(reason);
+    final kinds = specific != null ? {specific} : _subKinds[subId];
+    if (kinds == null || kinds.isEmpty) return;
+    final set = _relayUnsupportedKinds.putIfAbsent(relayUrl, () => <int>{});
+    var added = false;
+    for (final k in kinds) {
+      if (set.add(k)) added = true;
+    }
+    if (added) _sendKindBlacklistToWorkers();
+  }
+
+  /// Records an OK event-publish kind rejection for [relayUrl] using the
+  /// published event's remembered kind (`_recordEventKindRejection`,
+  /// relays.js:2396-2411).
+  void _recordEventKindRejection(String? relayUrl, String eventId) {
+    if (relayUrl == null || !relayUrl.startsWith('wss://')) return;
+    if (eventId.isEmpty) return;
+    final kind = _sentEventKinds[eventId];
+    if (kind == null) return;
+    final set = _relayUnsupportedKinds.putIfAbsent(relayUrl, () => <int>{});
+    if (set.add(kind)) _sendKindBlacklistToWorkers();
+  }
+
+  /// Pushes the current blacklist to every open shard socket
+  /// (`_sendKindBlacklistToWorkers`, relays.js:2413-2421).
+  void _sendKindBlacklistToWorkers() {
+    if (_relayUnsupportedKinds.isEmpty) return;
+    final frame = PoolFrame.kindBlacklist(_relayUnsupportedKinds);
+    for (final sock in _sockets) {
+      sock.send(frame);
+    }
+  }
+
   // --- Shard socket callbacks -----------------------------------------------
 
   void _onShardConnected(_ShardSocket sock) {
+    // Push the accumulated per-relay unsupported-kind blacklist right after
+    // the RELAYS config, before any REQ (relays.js:2086-2092 on pool open).
+    if (_relayUnsupportedKinds.isNotEmpty) {
+      sock.send(PoolFrame.kindBlacklist(_relayUnsupportedKinds));
+    }
     // Re-issue every active subscription on the (re)connected shard.
     for (final entry in _activeFilters.entries) {
       sock.send(PoolFrame.req(entry.key, entry.value));
@@ -975,11 +1115,22 @@ class RelayPoolProxy implements PoolTransport {
       case PoolEose(:final subId):
         _stampShardLatency(subId, sock.shard.id);
         _subscriptions[subId]?.onEose(sock.shard.id);
-      case PoolClosed(:final subId):
+      case PoolClosed(:final subId, :final reason, :final relayUrl):
+        // A kind-flavored CLOSED reason feeds the per-relay kind blacklist
+        // (relays.js:3877-3878).
+        if (_isUnsupportedKind(reason)) {
+          _recordUnsupportedKindRejection(relayUrl, subId, reason);
+        }
         _stampShardLatency(subId, sock.shard.id);
         _subscriptions[subId]?.onEose(sock.shard.id);
-      case PoolOk():
+      case PoolOk(:final id, :final message, :final relayUrl):
         // Publish ACK; publish() does not await per-relay OK in proxy mode.
+        // A kind-flavored reason feeds the per-relay kind blacklist
+        // (relays.js:3775-3776 — the PWA checks the reason regardless of the
+        // accepted flag) so the worker skips that relay for the kind.
+        if (_isUnsupportedKind(message)) {
+          _recordEventKindRejection(relayUrl, id);
+        }
         break;
       case PoolStatus(:final latency):
         // connectedRelays already updated on the socket. Fold this worker's

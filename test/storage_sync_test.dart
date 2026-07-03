@@ -67,13 +67,24 @@ void main() {
       for (final b in bodies) {
         expect(b['action'], 'settings-set');
         expect(b['pubkey'], _pub);
-        expect(b['category'], startsWith('nymchat-settings-'));
+        // The D1 column is the opaque per-account hash
+        // `nymchat-<sha256(pubkey:d1:dTag)>` (settings.js:177-190), NOT the
+        // cleartext section d-tag.
+        expect(b['category'], matches(RegExp(r'^nymchat-[0-9a-f]{64}$')));
         expect(b['blob'], isA<String>());
         expect((b['blob'] as String).isNotEmpty, true);
         expect(b['contentHash'], isA<String>());
         expect(b['auth'], isA<Map>());
         expect((b['auth'] as Map)['kind'], 27235);
       }
+      // The appearance section rides under its hashed column, with the real
+      // category recoverable from `__cat` inside the encrypted blob.
+      final appearanceCat = sync.d1Category('nymchat-settings-appearance');
+      final appearance =
+          bodies.firstWhere((b) => b['category'] == appearanceCat);
+      final plain =
+          await _signer.nip44Decrypt(_pub, appearance['blob'] as String);
+      expect((jsonDecode(plain) as Map)['__cat'], 'nymchat-settings-appearance');
     });
 
     test('synced keys land in their PWA section; device-local keys never sync',
@@ -154,7 +165,9 @@ void main() {
         pinnedLandingChannelJson: '{"type":"geohash","geohash":"u4pr"}',
       );
       expect(second, contains('channels'));
-      expect(bodies.any((b) => b['category'] == 'nymchat-settings-channels'),
+      expect(
+          bodies.any((b) =>
+              b['category'] == sync.d1Category('nymchat-settings-channels')),
           true);
     });
 

@@ -1,15 +1,14 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
 import '../../models/message.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/context_menu/interaction_hooks.dart';
-import '../emoji/emoji_picker.dart';
+import 'enhanced_emoji_modal.dart';
 import 'reaction_burst.dart';
 
 /// Breakpoint below which the picker centres (PWA `window.innerWidth <= 768`).
@@ -42,48 +41,54 @@ void showReactionPicker(
 
   showDialog<void>(
     context: context,
-    barrierColor: const Color(0x66000000),
+    // The PWA appends the `.enhanced-emoji-modal` straight to <body> with no
+    // backdrop; an outside click closes it (ui-context.js:1106-1112).
+    barrierColor: Colors.transparent,
     builder: (dialogCtx) {
-      final card = Container(
-        constraints: const BoxConstraints(maxWidth: 360, maxHeight: 420),
-        width: anchored ? 360 : screen.width * 0.9,
-        decoration: BoxDecoration(
-          color: context.nym.bgSecondary,
-          border: Border.all(color: context.nym.glassBorder),
-          borderRadius: NymRadius.rmd,
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: EmojiPicker(
-          recents: recents,
-          onSelect: (emoji) async {
-            Navigator.of(dialogCtx).maybePop();
-            // Record the pick into the shared recents store (F7) so the
-            // "Recently Used" section reflects it next time.
-            ref.read(recentEmojisProvider.notifier).record(emoji);
-            final controller = ref.read(nostrControllerProvider);
-            final view = ref.read(currentViewProvider);
-            final already = (ref.read(reactionsProvider)[message.id] ??
-                    const <MessageReaction>[])
-                .any((r) => r.emoji == emoji && r.userReacted);
-            final ok = await controller.toggleReaction(
-              message.id,
-              emoji,
-              target: reactionTargetFor(message),
-              kind: inferOriginalKind(message, view: view),
-            );
-            if (ok && !already && context.mounted) {
+      // `.enhanced-emoji-modal`: width 350, max-height 400
+      // (styles-components.css:1203-1217); the mobile branch overrides via
+      // inline style to max-width 90% / max-height 80vh (reactions.js:834-836;
+      // the inline max-height wins over the class's 400px).
+      final card = EnhancedEmojiModal(
+        width: anchored ? 350 : math.min(350, screen.width * 0.9),
+        height: anchored ? 400 : screen.height * 0.8,
+        recents: recents,
+        onClose: () => Navigator.of(dialogCtx).maybePop(),
+        onSelect: (emoji) async {
+          Navigator.of(dialogCtx).maybePop();
+          // Record the pick into the shared recents store (F7) so the
+          // "Recently Used" section reflects it next time.
+          ref.read(recentEmojisProvider.notifier).record(emoji);
+          final controller = ref.read(nostrControllerProvider);
+          final view = ref.read(currentViewProvider);
+          final already = (ref.read(reactionsProvider)[message.id] ??
+                  const <MessageReaction>[])
+              .any((r) => r.emoji == emoji && r.userReacted);
+          final ok = await controller.toggleReaction(
+            message.id,
+            emoji,
+            target: reactionTargetFor(message),
+            kind: inferOriginalKind(message, view: view),
+          );
+          if (ok && !already) {
+            // Every add path buzzes: `sendReaction` fires `nymHapticTap` (the
+            // shared 30ms vibrate) right after the optimistic add
+            // (reactions.js:968) — including picks from this enhanced picker.
+            HapticFeedback.mediumImpact();
+            if (context.mounted) {
               final box = context.findRenderObject() as RenderBox?;
               if (box != null && box.hasSize) {
-                ReactionBurst.play(
-                    context, box.localToGlobal(box.size.center(Offset.zero)), emoji);
+                ReactionBurst.play(context,
+                    box.localToGlobal(box.size.center(Offset.zero)), emoji);
               }
             }
-          },
-        ),
+          }
+        },
       );
 
       if (!anchored) {
-        return Center(child: Padding(padding: const EdgeInsets.all(16), child: card));
+        // Mobile: `top:50%;left:50%;transform:translate(-50%,-50%)`.
+        return Center(child: card);
       }
       return _AnchoredPicker(anchorRect: anchorRect, screen: screen, child: card);
     },
@@ -92,8 +97,9 @@ void showReactionPicker(
 
 /// Positions [child] next to [anchorRect] on desktop, mirroring the PWA's
 /// `showEnhancedReactionPicker` desktop math (reactions.js:838-846): below when
-/// `spaceBelow > 450 || spaceBelow > spaceAbove`, else above; right-aligned when
-/// the trigger sits past mid-screen, each edge clamped to 10px.
+/// `spaceBelow > 450 || spaceBelow > spaceAbove`, else above; when the trigger
+/// sits past mid-screen `right: min(innerWidth - rect.right, 10)`, else
+/// `left: max(rect.left, 10)`.
 class _AnchoredPicker extends StatelessWidget {
   const _AnchoredPicker({
     required this.anchorRect,
@@ -118,7 +124,7 @@ class _AnchoredPicker extends StatelessWidget {
     final double? left =
         rightAlign ? null : math.max(anchorRect.left, 10.0);
     final double? right = rightAlign
-        ? math.max(screen.width - anchorRect.right, 10.0)
+        ? math.min(screen.width - anchorRect.right, 10.0)
         : null;
 
     return Stack(

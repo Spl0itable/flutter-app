@@ -32,24 +32,35 @@ class ModalChrome {
         color: c.bgSecondary,
         borderRadius: NymRadius.rxl,
         border: Border.all(color: c.glassBorder),
-        boxShadow: [
-          // shadow-lg
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
-            blurRadius: 32,
-            offset: const Offset(0, 8),
-          ),
-          // shadow-glow (primary/0.1)
-          BoxShadow(
-            color: c.primary.withValues(alpha: 0.1),
-            blurRadius: 20,
-          ),
-          // 0 0 0 1px white/0.05 ring
-          BoxShadow(
-            color: Colors.white.withValues(alpha: 0.05),
-            spreadRadius: 1,
-          ),
-        ],
+        // `body.light-mode .modal-content { box-shadow: 0 8px 40px
+        // rgba(0,0,0,0.12) }` — a single soft shadow, no glow/white ring
+        // (styles-themes-responsive.css:1050-1052).
+        boxShadow: c.isLight
+            ? const [
+                BoxShadow(
+                  color: Color(0x1F000000), // black @ 0.12
+                  blurRadius: 40,
+                  offset: Offset(0, 8),
+                ),
+              ]
+            : [
+                // shadow-lg
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.5),
+                  blurRadius: 32,
+                  offset: const Offset(0, 8),
+                ),
+                // shadow-glow (primary/0.1)
+                BoxShadow(
+                  color: c.primary.withValues(alpha: 0.1),
+                  blurRadius: 20,
+                ),
+                // 0 0 0 1px white/0.05 ring
+                BoxShadow(
+                  color: Colors.white.withValues(alpha: 0.05),
+                  spreadRadius: 1,
+                ),
+              ],
       ),
       clipBehavior: Clip.antiAlias,
       child: child,
@@ -89,7 +100,10 @@ class ModalChrome {
 
   /// The `.send-btn` translucent primary pill. [danger] swaps to the
   /// `.send-btn.danger` palette (danger/0.1 fill, danger/0.35 border, danger
-  /// text). [enabled] false → opacity 0.35.
+  /// text). [enabled] false → opacity 0.35. Hover (`:hover:not(:disabled)`,
+  /// styles-chat.css:1936-1938) lifts the fill to primary/0.18 + a `0 0 15px
+  /// primary/0.1` glow (danger: 0.18 / 0.15, styles-components.css:2386-2389;
+  /// light mode uses the same palette, styles-themes-responsive.css:617-625).
   static Widget sendButton(
     NymColors c,
     String label,
@@ -98,61 +112,24 @@ class ModalChrome {
     bool fullWidth = false,
     Widget? child,
   }) {
-    final fill = danger ? c.danger.withValues(alpha: 0.1) : c.primaryA(0.1);
-    final border = danger ? c.danger.withValues(alpha: 0.35) : c.primaryA(0.3);
-    final fg = danger ? c.danger : c.primary;
-    final enabled = onTap != null;
-    final btn = Opacity(
-      opacity: enabled ? 1 : 0.35,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          height: 42,
-          padding: const EdgeInsets.symmetric(horizontal: 22),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: fill,
-            borderRadius: NymRadius.rsm,
-            border: Border.all(color: border),
-          ),
-          child: child ??
-              Text(
-                label.toUpperCase(),
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.5,
-                ),
-              ),
-        ),
-      ),
+    final btn = _SendButton(
+      c: c,
+      label: label,
+      onTap: onTap,
+      danger: danger,
+      child: child,
     );
     return fullWidth ? SizedBox(width: double.infinity, child: btn) : btn;
   }
 
-  /// The `.icon-btn`: bordered translucent uppercase pill.
+  /// The `.icon-btn`: bordered translucent uppercase pill. Light mode flips to
+  /// bg black/0.03, border black/0.1 and a `--primary` label
+  /// (styles-themes-responsive.css:595-599); hover is primary/0.12 fill +
+  /// primary/0.3 border + primary label + glow in dark
+  /// (styles-shell.css:930-935), black/0.06 fill + solid primary border in
+  /// light (styles-themes-responsive.css:601-605).
   static Widget iconButton(NymColors c, String label, VoidCallback? onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
-          borderRadius: NymRadius.rxs,
-          border: Border.all(color: c.glassBorder),
-        ),
-        child: Text(
-          label.toUpperCase(),
-          style: TextStyle(
-            color: c.text,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.8,
-          ),
-        ),
-      ),
-    );
+    return _IconButton(c: c, label: label, onTap: onTap);
   }
 
   /// The `.form-label`: 11px textDim UPPERCASE ls1.2 w600.
@@ -168,10 +145,15 @@ class ModalChrome {
     );
   }
 
-  /// The `.form-input` decoration: white/0.05 fill, glass border, radius 12,
-  /// padding 11/14, with the focus glow approximated by a thicker primary/0.3
-  /// border on focus (Flutter has no multi-layer input shadow).
+  /// The `.form-input` decoration (styles-components.css:229-255): white/0.05
+  /// fill, glass border, radius 12, padding 11/14; focus keeps a 1px border at
+  /// primary/0.3 and lifts the fill to white/0.07. Light mode forces bg
+  /// black/0.04 + border black/0.1 `!important` (no focus lift), while the
+  /// light `:focus` rule still wins the border back to primary/0.3
+  /// (styles-themes-responsive.css:561-568, 1087-1092). Wrap the field in
+  /// [focusRing] for the outer `0 0 0 3px` glow.
   static InputDecoration inputDecoration(NymColors c, String hint) {
+    final baseBorder = c.isLight ? const Color(0x1A000000) : c.glassBorder;
     return InputDecoration(
       isDense: true,
       hintText: hint.isEmpty ? null : hint,
@@ -179,20 +161,35 @@ class ModalChrome {
       contentPadding:
           const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
       filled: true,
-      fillColor: Colors.white.withValues(alpha: 0.05),
+      // Dark: white@.05 → .07 on focus; light: black@.04 `!important`, so the
+      // focus bump never applies.
+      fillColor: WidgetStateColor.resolveWith(
+        (states) => c.isLight
+            ? const Color(0x0A000000)
+            : Colors.white.withValues(
+                alpha: states.contains(WidgetState.focused) ? 0.07 : 0.05),
+      ),
       border: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.glassBorder),
+        borderSide: BorderSide(color: baseBorder),
       ),
       enabledBorder: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.glassBorder),
+        borderSide: BorderSide(color: baseBorder),
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: NymRadius.rsm,
-        borderSide: BorderSide(color: c.primaryA(0.3), width: 2),
+        borderSide: BorderSide(color: c.primaryA(0.3)),
       ),
     );
+  }
+
+  /// Wraps a `.form-input`/`.form-select` field with the `:focus` outer glow
+  /// ring — `box-shadow: 0 0 0 3px primary/0.06` (light mode: primary/0.1;
+  /// styles-components.css:253, styles-themes-responsive.css:1087-1092). A
+  /// hard-edged ring (spread 3, no blur), toggled by descendant focus.
+  static Widget focusRing(NymColors c, {required Widget child}) {
+    return _FocusRing(c: c, child: child);
   }
 
   /// A plain centered "or" divider (`.nm-h-25`): 12px text-dim, margin 16 0, NO
@@ -214,6 +211,202 @@ class ModalChrome {
         final uri = Uri.parse('https://web.nymchat.app/$path');
         launchUrl(uri, mode: LaunchMode.externalApplication);
       };
+  }
+}
+
+/// The `.form-input:focus` glow ring host: watches descendant focus (the
+/// wrapped TextField / dropdown) and paints `0 0 0 3px primary/0.06` (light
+/// `primary/0.1`) around it while focused.
+class _FocusRing extends StatefulWidget {
+  const _FocusRing({required this.c, required this.child});
+  final NymColors c;
+  final Widget child;
+
+  @override
+  State<_FocusRing> createState() => _FocusRingState();
+}
+
+class _FocusRingState extends State<_FocusRing> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    return Focus(
+      skipTraversal: true,
+      includeSemantics: false,
+      onFocusChange: (f) => setState(() => _focused = f),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: NymRadius.rsm,
+          boxShadow: _focused
+              ? [
+                  BoxShadow(
+                    color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                    spreadRadius: 3,
+                  ),
+                ]
+              : null,
+        ),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// `.send-btn` host with the desktop hover treatment
+/// (`transition: all var(--transition)`, styles-chat.css:1920-1943).
+class _SendButton extends StatefulWidget {
+  const _SendButton({
+    required this.c,
+    required this.label,
+    required this.onTap,
+    required this.danger,
+    this.child,
+  });
+
+  final NymColors c;
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+  final Widget? child;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    final danger = widget.danger;
+    final enabled = widget.onTap != null;
+    // `:hover:not(:disabled)` — 0.1 → 0.18 fill; border stays put.
+    final hovered = _hover && enabled;
+    final fill = danger
+        ? c.danger.withValues(alpha: hovered ? 0.18 : 0.1)
+        : c.primaryA(hovered ? 0.18 : 0.1);
+    final border = danger ? c.danger.withValues(alpha: 0.35) : c.primaryA(0.3);
+    final fg = danger ? c.danger : c.primary;
+    return Opacity(
+      opacity: enabled ? 1 : 0.35,
+      child: MouseRegion(
+        // `.send-btn:disabled { cursor: not-allowed }`.
+        cursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.forbidden,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            height: 42,
+            padding: const EdgeInsets.symmetric(horizontal: 22),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: fill,
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: border),
+              // `0 0 15px primary/0.1` (danger: danger/0.15).
+              boxShadow: hovered
+                  ? [
+                      BoxShadow(
+                        color: danger
+                            ? c.danger.withValues(alpha: 0.15)
+                            : c.primaryA(0.1),
+                        blurRadius: 15,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: widget.child ??
+                Text(
+                  widget.label.toUpperCase(),
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.icon-btn` host — dark/light rest + hover palettes
+/// (styles-shell.css:911-935, styles-themes-responsive.css:595-605).
+class _IconButton extends StatefulWidget {
+  const _IconButton(
+      {required this.c, required this.label, required this.onTap});
+
+  final NymColors c;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  State<_IconButton> createState() => _IconButtonState();
+}
+
+class _IconButtonState extends State<_IconButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    // Rest: white/0.05 fill + glass border + `--text` label in dark;
+    // black/0.03 fill + black/0.1 border + `--primary` label in light.
+    // Hover: primary/0.12 fill + primary/0.3 border in dark; black/0.06 fill
+    // + solid primary border in light — label is primary either way, and the
+    // base `.icon-btn:hover` glow (`0 0 15px primary/0.1`) applies in both.
+    final Color fill;
+    final Color border;
+    final Color fg;
+    if (_hover) {
+      fill = c.isLight ? const Color(0x0F000000) : c.primaryA(0.12);
+      border = c.isLight ? c.primary : c.primaryA(0.3);
+      fg = c.primary;
+    } else {
+      fill = c.subtleFill;
+      border = c.isLight ? const Color(0x1A000000) : c.glassBorder;
+      fg = c.isLight ? c.primary : c.text;
+    }
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(color: border),
+            boxShadow: _hover
+                ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 15)]
+                : null,
+          ),
+          child: Text(
+            widget.label.toUpperCase(),
+            style: TextStyle(
+              color: fg,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

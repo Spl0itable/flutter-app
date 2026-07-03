@@ -101,19 +101,32 @@ class FormGroup extends StatelessWidget {
     this.label,
     required this.child,
     this.hint,
+    this.amberHint,
     this.warning,
+    this.footer,
   });
 
   final String? label;
   final Widget child;
   final String? hint;
+
+  /// A plain amber `.form-hint.nm-h-59` line (`color: var(--warning-color,
+  /// #f0a030); margin-top: 4px`, no-inline.css:77) — un-boxed hint text, used
+  /// by e.g. the hardcore-keypair warning (index.html hardcoreKeypairWarning).
+  final String? amberHint;
   final String? warning;
+
+  /// Optional trailing widget rendered after the hint(s), inside the group —
+  /// e.g. the "Reset columns to defaults" button that follows the Chat View
+  /// hint in the PWA markup (index.html `.nm-h-58`).
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 18),
+      // `.form-group { margin-bottom: 20px }`.
+      padding: const EdgeInsets.only(bottom: 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -132,10 +145,22 @@ class FormGroup extends StatelessWidget {
           ],
           child,
           if (hint != null) ...[
-            const SizedBox(height: 6),
+            // `.form-hint { margin-top: 5px }`.
+            const SizedBox(height: 5),
             Text(
               hint!,
               style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
+            ),
+          ],
+          if (amberHint != null) ...[
+            const SizedBox(height: 4),
+            // `.nm-h-59`: plain form-hint text in the amber warning color
+            // (`var(--warning-color, #f0a030)` — the variable is undefined in
+            // the PWA CSS, so the #f0a030 fallback always applies). No box.
+            Text(
+              amberHint!,
+              style: const TextStyle(
+                  color: Color(0xFFF0A030), fontSize: 11, height: 1.4),
             ),
           ],
           if (warning != null) ...[
@@ -153,6 +178,10 @@ class FormGroup extends StatelessWidget {
                 style: TextStyle(color: c.danger, fontSize: 11, height: 1.4),
               ),
             ),
+          ],
+          if (footer != null) ...[
+            const SizedBox(height: 12),
+            footer!,
           ],
         ],
       ),
@@ -195,14 +224,18 @@ class FormSelect<T> extends StatelessWidget {
 
   Widget _field(NymColors c) {
     return Container(
-      // `.form-select { background: rgba(255,255,255,.05); padding: 11px 14px }`.
+      // `.form-select { background: rgba(255,255,255,.05); padding: 11px 14px }`;
+      // light mode forces `background: rgba(0,0,0,.04) !important; border-color:
+      // rgba(0,0,0,.1) !important` (styles-themes-responsive.css:560-568).
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
         color: c.isLight
-            ? c.bg
+            ? const Color(0x0A000000)
             : Colors.white.withValues(alpha: 0.05),
         borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.glassBorder),
+        border: Border.all(
+          color: c.isLight ? const Color(0x1A000000) : c.glassBorder,
+        ),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<T>(
@@ -211,8 +244,13 @@ class FormSelect<T> extends StatelessWidget {
           isDense: true,
           dropdownColor: c.bgTertiary,
           iconEnabledColor: c.textDim,
-          // `.form-select { color: var(--text-bright); font-size: 15px }`.
-          style: TextStyle(color: c.text, fontSize: 15),
+          // Inputs/selects force neutral text: `color: #ffffff !important`
+          // dark / `#000000 !important` light, 15px
+          // (styles-themes-responsive.css:570-592, styles-components.css:236).
+          style: TextStyle(
+            color: c.isLight ? Colors.black : Colors.white,
+            fontSize: 15,
+          ),
           borderRadius: NymRadius.rsm,
           padding: const EdgeInsets.symmetric(vertical: 11),
           items: [
@@ -242,8 +280,15 @@ class FormSelect<T> extends StatelessWidget {
   }
 }
 
-/// A `.form-input` single-line text field.
-class FormInput extends StatelessWidget {
+/// A `.form-input` text field (or `.form-textarea` when [maxLines] > 1).
+///
+/// Mirrors styles-components.css:229-255 + the theme input overrides
+/// (styles-themes-responsive.css:560-592): bg white@.05 dark (focus → .07) /
+/// black@.04 light (`!important`, so no focus lift), text forced pure
+/// white/black at 15px, glass border (focus → primary@.3 in dark; light keeps
+/// the `!important` rgba(0,0,0,.1) border), and a `0 0 0 3px` primary@.06
+/// focus ring.
+class FormInput extends StatefulWidget {
   const FormInput({
     super.key,
     this.controller,
@@ -252,6 +297,9 @@ class FormInput extends StatelessWidget {
     this.onChanged,
     this.focusNode,
     this.onTap,
+    this.prefix,
+    this.maxLines = 1,
+    this.maxLength,
   });
 
   final TextEditingController? controller;
@@ -261,36 +309,134 @@ class FormInput extends StatelessWidget {
   final FocusNode? focusNode;
   final VoidCallback? onTap;
 
+  /// Optional leading in-field icon (the PWA's `.settings-search-icon`: a 16px
+  /// glyph inset at the left with the input's text starting at 36px).
+  final Widget? prefix;
+
+  /// > 1 renders the `.form-textarea` variant (e.g. the About contact box).
+  final int maxLines;
+
+  /// HTML `maxlength=` equivalent — hard cap with no visible counter (the PWA
+  /// attribute renders none).
+  final int? maxLength;
+
+  @override
+  State<FormInput> createState() => _FormInputState();
+}
+
+class _FormInputState extends State<FormInput> {
+  FocusNode? _internalNode;
+  bool _focused = false;
+
+  FocusNode get _node => widget.focusNode ?? (_internalNode ??= FocusNode());
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(_onFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant FormInput oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode != widget.focusNode) {
+      (oldWidget.focusNode ?? _internalNode)?.removeListener(_onFocusChange);
+      _node.addListener(_onFocusChange);
+      _onFocusChange();
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.focusNode?.removeListener(_onFocusChange);
+    _internalNode?.dispose();
+    super.dispose();
+  }
+
+  void _onFocusChange() {
+    final focused = _node.hasFocus;
+    if (focused != _focused) setState(() => _focused = focused);
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return TextField(
-      controller: controller,
-      focusNode: focusNode,
-      onTap: onTap,
-      onSubmitted: onSubmitted,
-      onChanged: onChanged,
-      style: TextStyle(color: c.text, fontSize: 13),
-      cursorColor: c.isLight ? Colors.black : Colors.white,
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: hint,
-        hintStyle: TextStyle(color: c.textDim, fontSize: 13),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        filled: true,
-        fillColor: c.bg.withValues(alpha: c.isLight ? 1 : 0.4),
-        border: OutlineInputBorder(
-          borderRadius: NymRadius.rsm,
-          borderSide: BorderSide(color: c.glassBorder),
+    final borderColor = c.isLight ? const Color(0x1A000000) : c.glassBorder;
+    return DecoratedBox(
+      // `.form-input:focus { box-shadow: 0 0 0 3px primary@.06 }` — a
+      // hard-edged ring (no blur); light mode's `:focus` override lifts it to
+      // primary@.1 `!important` (styles-themes-responsive.css:1087-1093).
+      decoration: BoxDecoration(
+        borderRadius: NymRadius.rsm,
+        boxShadow: _focused
+            ? [
+                BoxShadow(
+                  color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                  spreadRadius: 3,
+                ),
+              ]
+            : null,
+      ),
+      child: TextField(
+        controller: widget.controller,
+        focusNode: _node,
+        onTap: widget.onTap,
+        onSubmitted: widget.onSubmitted,
+        onChanged: widget.onChanged,
+        maxLines: widget.maxLines,
+        maxLength: widget.maxLength,
+        // No counter — the PWA's `maxlength=` attribute renders none.
+        buildCounter: widget.maxLength == null
+            ? null
+            : (_, {required currentLength, required isFocused, maxLength}) =>
+                null,
+        // Inputs force neutral text: `color: #ffffff !important` dark /
+        // `#000000 !important` light, 15px (styles-themes-responsive.css:
+        // 570-592, styles-components.css:236).
+        style: TextStyle(
+          color: c.isLight ? Colors.black : Colors.white,
+          fontSize: 15,
         ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rsm,
-          borderSide: BorderSide(color: c.glassBorder),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: NymRadius.rsm,
-          borderSide: BorderSide(color: c.primaryA(0.4)),
+        cursorColor: c.isLight ? Colors.black : Colors.white,
+        decoration: InputDecoration(
+          isDense: true,
+          // `.settings-search .form-input { padding-left: 36px }` with the 16px
+          // icon inset at the left (styles-components.css:148-157).
+          prefixIcon: widget.prefix == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(left: 12, right: 8),
+                  child: widget.prefix,
+                ),
+          prefixIconConstraints:
+              const BoxConstraints(minWidth: 36, minHeight: 16),
+          hintText: widget.hint,
+          hintStyle: TextStyle(color: c.textDim, fontSize: 15),
+          // `.form-input { padding: 11px 14px }`.
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          filled: true,
+          // Dark: white@.05, focus lifts to .07; light: black@.04 `!important`
+          // (no focus lift).
+          fillColor: c.isLight
+              ? const Color(0x0A000000)
+              : Colors.white.withValues(alpha: _focused ? 0.07 : 0.05),
+          border: OutlineInputBorder(
+            borderRadius: NymRadius.rsm,
+            borderSide: BorderSide(color: borderColor),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rsm,
+            borderSide: BorderSide(color: borderColor),
+          ),
+          // `:focus` border is primary@.3 in both modes — light mode's own
+          // `:focus` rule re-asserts it `!important` and, being more specific,
+          // beats the base light `border-color: rgba(0,0,0,.1) !important`
+          // (styles-themes-responsive.css:1087-1093 over :564-569).
+          focusedBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rsm,
+            borderSide: BorderSide(color: c.primaryA(0.3)),
+          ),
         ),
       ),
     );
@@ -316,8 +462,11 @@ class SegmentGroup<T> extends StatelessWidget {
     final c = context.nym;
     return Container(
       padding: const EdgeInsets.all(3),
+      // `.color-mode-group { background: rgba(255,255,255,.04) }`; light mode
+      // → `rgba(0,0,0,.04)` (styles-themes-responsive.css:1292-1294). Neutral
+      // white/black — NOT the theme text color.
       decoration: BoxDecoration(
-        color: c.text.withValues(alpha: 0.04),
+        color: c.insetFill,
         borderRadius: NymRadius.rsm,
       ),
       child: Row(
@@ -357,6 +506,46 @@ class SegmentGroup<T> extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// `.unblock-btn` / `.remove-keyword-btn` (styles-components.css:532-549): the
+/// small danger pill on moderation-list rows. Fixed red tint in both modes
+/// (`rgba(255,68,68,.1)` fill, `.3` border), 20px pill radius, `3px 10px`
+/// padding, 10px `--danger` label. No uppercase transform — the PWA labels are
+/// 'Remove' / 'Unblock' / 'Unhide' as written.
+class DangerPillButton extends StatelessWidget {
+  const DangerPillButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final radius = BorderRadius.circular(20);
+    return InkWell(
+      onTap: onPressed,
+      borderRadius: radius,
+      // :hover/:active → bg rgba(255,68,68,.2): the .1 fill + this overlay.
+      highlightColor: const Color(0x1AFF4444),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+        decoration: BoxDecoration(
+          color: const Color(0x1AFF4444), // rgba(255,68,68,.1)
+          borderRadius: radius,
+          border: Border.all(color: const Color(0x4DFF4444)), // @.3
+        ),
+        child: Text(
+          label,
+          style: TextStyle(color: c.danger, fontSize: 10),
+        ),
       ),
     );
   }

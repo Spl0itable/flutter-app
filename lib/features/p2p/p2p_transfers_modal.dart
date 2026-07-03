@@ -84,9 +84,13 @@ class P2PTransfersModal extends ConsumerWidget {
             final empty = seeding.isEmpty && transfers.isEmpty;
             return Container(
               // .modal-content + .p2p-modal-content (max-width 500, width 90%,
-              // radius 24, glass border, shadow-lg + glow + 1px white ring).
+              // max-height 90vh, radius 24, glass border, shadow-lg + glow +
+              // 1px white ring) (styles-components.css:17-27).
               width: MediaQuery.of(context).size.width * 0.9,
-              constraints: const BoxConstraints(maxWidth: 500, maxHeight: 640),
+              constraints: BoxConstraints(
+                maxWidth: 500,
+                maxHeight: MediaQuery.of(context).size.height * 0.9,
+              ),
               decoration: BoxDecoration(
                 color: c.bgSecondary,
                 borderRadius: NymRadius.rxl,
@@ -142,46 +146,58 @@ class P2PTransfersModal extends ConsumerWidget {
                             ),
                           ),
                         ),
-                        // .modal-body > .p2p-transfers-list (max-height 400).
+                        // .modal-body > .p2p-transfers-list { max-height:
+                        // 400px; overflow-y: auto } (styles-features.css:
+                        // 1925-1928) — the scrolling list itself caps at 400,
+                        // independent of the modal's own 90vh limit.
                         Flexible(
-                          child: empty
-                              ? Padding(
-                                  // .p2p-empty-state: centered italic textDim,
-                                  // padding 30.
-                                  padding: const EdgeInsets.all(30),
-                                  child: Text(
-                                    'No active transfers',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: c.textDim,
-                                      fontStyle: FontStyle.italic,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxHeight: 400),
+                            child: empty
+                                ? Padding(
+                                    // .p2p-empty-state: centered italic
+                                    // textDim, padding 30.
+                                    padding: const EdgeInsets.all(30),
+                                    child: Text(
+                                      'No active transfers',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        color: c.textDim,
+                                        fontStyle: FontStyle.italic,
+                                      ),
+                                    ),
+                                  )
+                                : SingleChildScrollView(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.stretch,
+                                      children: [
+                                        for (final entry in seeding.entries)
+                                          _SeedingRow(
+                                            offer: entry.value,
+                                            onStop: () => service.stopSeeding(
+                                              entry.key,
+                                              geohash: _currentGeohash(ref),
+                                              channelName:
+                                                  _currentNamedChannel(ref),
+                                            ),
+                                          ),
+                                        for (final t in transfers)
+                                          _TransferRow(
+                                            // PWA keys each row's DOM node by
+                                            // `transfer-${id}` (p2p.js), so
+                                            // the fill's width transition
+                                            // stays with its transfer as rows
+                                            // come and go.
+                                            key: ValueKey(t.transferId),
+                                            transfer: t,
+                                            onCancel: () => service
+                                                .cancelTransfer(t.transferId),
+                                          ),
+                                      ],
                                     ),
                                   ),
-                                )
-                              : SingleChildScrollView(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.stretch,
-                                    children: [
-                                      for (final entry in seeding.entries)
-                                        _SeedingRow(
-                                          offer: entry.value,
-                                          onStop: () => service.stopSeeding(
-                                            entry.key,
-                                            geohash: _currentGeohash(ref),
-                                            channelName:
-                                                _currentNamedChannel(ref),
-                                          ),
-                                        ),
-                                      for (final t in transfers)
-                                        _TransferRow(
-                                          transfer: t,
-                                          onCancel: () => service
-                                              .cancelTransfer(t.transferId),
-                                        ),
-                                    ],
-                                  ),
-                                ),
+                          ),
                         ),
                         const SizedBox(height: 16),
                         // .modal-actions: centered Close .icon-btn.
@@ -307,7 +323,8 @@ class _SeedingRow extends StatelessWidget {
 }
 
 class _TransferRow extends StatelessWidget {
-  const _TransferRow({required this.transfer, required this.onCancel});
+  const _TransferRow(
+      {super.key, required this.transfer, required this.onCancel});
   final P2PTransfer transfer;
   final VoidCallback onCancel;
 
@@ -328,7 +345,8 @@ class _TransferRow extends StatelessWidget {
       children: [
         _TransferHeader(name: transfer.offer.name, size: transfer.offer.size),
         // .p2p-transfer-progress: 6px track white/0.05 radius 10; fill gradient
-        // primary→secondary radius 10. margin-bottom 8.
+        // primary→secondary radius 10, `transition: width 0.3s ease`
+        // (styles-features.css:1981-1987). margin-bottom 8.
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: ClipRRect(
@@ -338,7 +356,10 @@ class _TransferRow extends StatelessWidget {
               child: Stack(
                 children: [
                   Container(color: Colors.white.withValues(alpha: 0.05)),
-                  FractionallySizedBox(
+                  AnimatedFractionallySizedBox(
+                    duration: const Duration(milliseconds: 300),
+                    // CSS `ease` = cubic-bezier(0.25, 0.1, 0.25, 1).
+                    curve: Curves.ease,
                     widthFactor: pct,
                     child: Container(
                       decoration: BoxDecoration(

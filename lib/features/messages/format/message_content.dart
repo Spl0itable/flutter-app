@@ -2,6 +2,8 @@
 // mirroring the PWA's visual treatment (docs/specs/03 §9): markdown spans,
 // code/quote/heading blocks, channel/mention chips, emoji, and media galleries.
 
+import 'dart:async' show Timer;
+import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/gestures.dart';
@@ -28,8 +30,8 @@ import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
-import '../../emoji/emoji_data.dart' show kEmojiShortcodeMap;
 import '../inline_network_image.dart';
+import '../media_fallbacks.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
 import 'video_message.dart';
@@ -176,10 +178,11 @@ class MessageContent extends ConsumerWidget {
     }
 
     // Read-more height truncation (messages.js:1192-1265 + styles-chat.css:793-
-    // 822). Long bodies collapse to a 300px `.truncated-inner` with a "Read
+    // 822). Long bodies collapse to a 300px `.truncated-inner` (200px on the
+    // ≤768px breakpoint, styles-themes-responsive.css:42-46) with a "Read
     // more"/"Show less" toggle. The char threshold (400 mobile ≤768 / 600
     // desktop) only FLAGS a candidate; the collapse itself is height-based, so
-    // `_Collapsible` drops the toggle when the rendered body already fits 300px.
+    // `_Collapsible` drops the toggle when the rendered body already fits.
     // The PWA measures `replyText` = the content with `>`-prefixed quote lines
     // removed (blockquotes get their own separate truncation; primary path here
     // is the reply body).
@@ -193,13 +196,22 @@ class MessageContent extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // The CSS `margin: 10px 0` renders even when the block is the FIRST/
+        // LAST child of `.message-content` (no collapse through the padded
+        // bubble), so a leading/trailing media/code/quote/heading block keeps
+        // 10px of air against the content edges — e.g. an image-only message
+        // has 10px above and below the image inside the bubble.
+        if (blocks.isNotEmpty && _blockEdgeMargin(blocks.first) > 0)
+          SizedBox(height: _blockEdgeMargin(blocks.first)),
         for (var i = 0; i < blocks.length; i++) ...[
-          if (i > 0) const SizedBox(height: 4),
+          if (i > 0) SizedBox(height: _blockGap(blocks[i - 1], blocks[i])),
           _block(context, c, blocks[i], color, size,
               emojiOnly: emojiOnly,
               onChannelRef: onChannelRef,
               onMentionTap: onMentionTap),
         ],
+        if (blocks.isNotEmpty && _blockEdgeMargin(blocks.last) > 0)
+          SizedBox(height: _blockEdgeMargin(blocks.last)),
       ],
     );
 
@@ -313,6 +325,34 @@ class MessageContent extends ConsumerWidget {
     }
   }
 }
+
+/// The PWA vertical margin a block carries: media, code, quote and heading
+/// blocks all have `margin: 10px 0` (`.message-content img` styles-chat.css:
+/// 941-950, `.video-container` :980-985, `.message-gallery` :987-994, `pre`
+/// :1094-1099, `blockquote` :1270-1279, `h1,h2,h3` :1312-1317); plain text
+/// lines keep the 4px line gap.
+double _blockMargin(FormatBlock block) => switch (block) {
+      MediaBlock() || CodeBlock() || QuoteBlock() || HeadingBlock() => 10,
+      ParagraphBlock() => 4,
+    };
+
+/// Vertical gap between two adjacent blocks. CSS sibling margins collapse to
+/// the LARGER of the two, so any pair involving a media/code/quote block sits
+/// 10px apart while text-text pairs keep the 4px line gap.
+double _blockGap(FormatBlock a, FormatBlock b) {
+  final ma = _blockMargin(a);
+  final mb = _blockMargin(b);
+  return ma > mb ? ma : mb;
+}
+
+/// The margin a block renders against the START/END edge of the message body.
+/// Only blocks with a real CSS `margin: 10px 0` (media/code/quote/heading)
+/// carry it; a paragraph's 4px is a line gap between siblings, not a margin,
+/// so text sits flush at the edges exactly like the PWA.
+double _blockEdgeMargin(FormatBlock block) => switch (block) {
+      MediaBlock() || CodeBlock() || QuoteBlock() || HeadingBlock() => 10,
+      ParagraphBlock() => 0,
+    };
 
 /// One emoji "unit" (the PWA's `_EMOJI_UNIT`, `messages.js:8`): a flag pair, a
 /// keycap, or a presentation/pictographic glyph with optional VS / skin-tone /
@@ -455,18 +495,24 @@ class _RichInline extends StatelessWidget {
         //  border-radius:5px; font-family:mono; color: var(--secondary);
         //  font-size:0.9em }` (styles-chat.css:1084-1092) — a rounded inline
         //  pill, so a WidgetSpan carries the padding + radius the CSS needs.
+        //  Light mode flips the fill to `rgba(0,0,0,0.06)` (`body.light-mode
+        //  .message-content code`, styles-themes-responsive.css:632-634).
+        //  The family is `--font-mono` (styles-core.css:81) — the app-wide
+        //  [kMonoFont] stack, same as the CRT style and the fenced-code box.
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.06),
+              color: c.isLight
+                  ? Colors.black.withValues(alpha: 0.06)
+                  : Colors.white.withValues(alpha: 0.06),
               borderRadius: BorderRadius.circular(5),
             ),
             child: Text(
               code,
               style: base.merge(TextStyle(
-                fontFamily: 'monospace',
+                fontFamily: kMonoFont,
                 color: c.secondary,
                 fontSize: size * 0.9,
                 shadows: const [],
@@ -517,25 +563,36 @@ class _RichInline extends StatelessWidget {
         // (styles-chat.css:839-852). The HTML `width=30` attr is overridden by
         // the CSS, so inline is `1.75em` (≈26px at 15), not 22px.
         final side = emojiOnly ? size * 2.75 : size * 1.75;
+        // Many NIP-30 custom emoji are SVG (and some hosts serve formats the
+        // raster decoder can't handle); InlineNetworkImage renders SVG via
+        // flutter_svg and otherwise falls back to the `:shortcode:` text so a
+        // broken/undecodable emoji never throws. (BUG: custom emoji + decode.)
+        final image = InlineNetworkImage(
+          url: proxiedMedia(url, emoji: true),
+          width: side,
+          height: side,
+          fit: BoxFit.contain,
+          // Disk-cached (CachedNetworkImage): body emoji are sparse — only a
+          // few per visible message — so they don't storm the cache DB, and
+          // the disk cache lets them persist across restarts. (The high-volume
+          // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
+          retryOnError: true,
+          errorChild: Text(':$shortcode:', style: base),
+        );
+        // `.custom-emoji { vertical-align: -0.375em }` (styles-chat.css:843):
+        // baseline-aligned with the image bottom 0.375em below the alphabetic
+        // baseline. `.emoji-only .custom-emoji` overrides to `vertical-align:
+        // middle` (:848-852).
         return WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
+          alignment: emojiOnly
+              ? PlaceholderAlignment.middle
+              : PlaceholderAlignment.baseline,
+          baseline: emojiOnly ? null : TextBaseline.alphabetic,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 1),
-            // Many NIP-30 custom emoji are SVG (and some hosts serve formats the
-            // raster decoder can't handle); InlineNetworkImage renders SVG via
-            // flutter_svg and otherwise falls back to the `:shortcode:` text so a
-            // broken/undecodable emoji never throws. (BUG: custom emoji + decode.)
-            child: InlineNetworkImage(
-              url: proxiedMedia(url, emoji: true),
-              width: side,
-              height: side,
-              fit: BoxFit.contain,
-              // Disk-cached (CachedNetworkImage): body emoji are sparse — only a
-              // few per visible message — so they don't storm the cache DB, and
-              // the disk cache lets them persist across restarts. (The high-volume
-              // emoji PICKER grid uses memoryOnly to avoid the lock storm.)
-              errorChild: Text(':$shortcode:', style: base),
-            ),
+            child: emojiOnly
+                ? image
+                : EmojiBaselineDrop(drop: size * 0.375, child: image),
           ),
         );
       case ChannelLinkChip(:final ref, :final label):
@@ -600,23 +657,25 @@ class _MentionChip extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
+    // `.nm-mention { color: var(--secondary) }` (no-inline.css:198) — the chip
+    // inherits the body weight (NO bold), in both themes.
     final text = Text.rich(
       TextSpan(
         children: [
           TextSpan(
             text: node.base,
             style: TextStyle(
-              color: c.primary,
+              color: c.secondary,
               fontSize: size,
-              fontWeight: FontWeight.w600,
             ),
           ),
           if (node.suffix != null)
-            // `.nym-suffix`: opacity 0.7, 0.9em, weight 100 (inherits primary).
+            // `.nym-suffix`: opacity 0.7, 0.9em, weight 100 (styles-chat.css:
+            // 706-710; inherits the mention's secondary).
             TextSpan(
               text: '#${node.suffix}',
               style: TextStyle(
-                color: c.primaryA(0.7),
+                color: c.secondaryA(0.7),
                 fontSize: size * 0.9,
                 fontWeight: FontWeight.w100,
               ),
@@ -1117,10 +1176,14 @@ class _CodeBox extends StatelessWidget {
     // Tokenize for syntax coloring (NymHighlight). An unknown/absent language
     // yields a single `none` run, so the body is plain bright monospace exactly
     // as before — only recognized languages get the VS-Code token colors.
+    // `pre code { font-size: inherit }` (styles-chat.css:1107-1112): code
+    // glyphs render at the full base size, not 0.9em/size-1. The family is
+    // `--font-mono` (styles-chat.css:1104 + styles-core.css:81) — the same
+    // [kMonoFont] stack every other mono surface (CRT style) uses.
     final base = TextStyle(
       color: c.textBright,
-      fontSize: size - 1,
-      fontFamily: 'monospace',
+      fontSize: size,
+      fontFamily: kMonoFont,
       height: 1.4,
     );
     final tokens = _highlightCode(code, lang);
@@ -1140,62 +1203,100 @@ class _CodeBox extends StatelessWidget {
           ),
       ],
     );
-    // `pre` radius is `--radius-sm` (=12), wrapper `padding-top:22px`
-    // (styles-chat.css:1097, 1141-1143). The lang label + Copy pill are
-    // absolutely positioned (top-left / top-right), so we Stack them over the
-    // top-padded code body.
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: NymRadius.rsm,
-        border: Border.all(color: c.glassBorder),
-      ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 22, 10, 10),
+    // `.code-block-wrapper { position:relative; padding-top:22px }`
+    // (styles-chat.css:1141-1143) hosts the lang label / Copy pill in a 22px
+    // strip ABOVE the `pre` box; the `pre` itself carries the fill
+    // (white@0.04 dark / black@0.04 light, styles-chat.css:1094-1095 +
+    // styles-themes-responsive.css:636-638), the 1px glass border, radius
+    // `--radius-sm` (=12) and its own `padding: 12px` — so code text starts
+    // 22+12px from the wrapper top and is inset 12px on the other sides.
+    return Stack(
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 22),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: c.insetFill,
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: c.glassBorder),
+            ),
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Text.rich(codeSpan),
             ),
           ),
-          // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`.
-          if (lang != null && lang!.isNotEmpty)
-            Positioned(
-              top: 4,
-              left: 8,
-              child: Text(
-                lang!.toUpperCase(),
-                style: TextStyle(
-                  color: c.text.withValues(alpha: 0.55),
-                  fontSize: size * 0.7,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          // `.code-copy-btn`: top:6 right:6, primary@0.15 bg / primary@0.3
-          // border / radius-xs(8), "Copy" text 0.75em in `--primary`.
+        ),
+        // `.code-lang-label`: top:4 left:8, 0.7em, UPPERCASE, `text@0.55`,
+        // letter-spacing 0.05em (styles-chat.css:1145-1156).
+        if (lang != null && lang!.isNotEmpty)
           Positioned(
-            top: 6,
-            right: 6,
-            child: GestureDetector(
-              onTap: () => Clipboard.setData(ClipboardData(text: code)),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: c.primaryA(0.15),
-                  borderRadius: NymRadius.rxs,
-                  border: Border.all(color: c.primaryA(0.3)),
-                ),
-                child: Text(
-                  'Copy',
-                  style: TextStyle(color: c.primary, fontSize: size * 0.75),
-                ),
+            top: 4,
+            left: 8,
+            child: Text(
+              lang!.toUpperCase(),
+              style: TextStyle(
+                color: c.text.withValues(alpha: 0.55),
+                fontSize: size * 0.7,
+                letterSpacing: size * 0.7 * 0.05,
               ),
             ),
           ),
-        ],
+        // `.code-copy-btn`: top:6 right:6, primary@0.15 bg / primary@0.3
+        // border / radius-xs(8), "Copy" text 0.75em in `--primary`.
+        Positioned(
+          top: 6,
+          right: 6,
+          child: _CodeCopyButton(code: code, size: size),
+        ),
+      ],
+    );
+  }
+}
+
+/// The `.code-copy-btn` pill. Tapping writes [code] to the clipboard and flips
+/// the label to "Copied!" for 1500ms before reverting to "Copy"
+/// (`codeBlockCopy`, inline-bindings.js:456-466).
+class _CodeCopyButton extends StatefulWidget {
+  const _CodeCopyButton({required this.code, required this.size});
+  final String code;
+  final double size;
+
+  @override
+  State<_CodeCopyButton> createState() => _CodeCopyButtonState();
+}
+
+class _CodeCopyButtonState extends State<_CodeCopyButton> {
+  bool _copied = false;
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.code));
+    setState(() => _copied = true);
+    // The PWA stacks bare setTimeouts (no clearTimeout), so a re-tap's earlier
+    // timer still reverts the label at ITS 1500ms mark — mirror that by not
+    // cancelling; the `mounted` guard covers disposal.
+    Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: _copy,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: c.primaryA(0.15),
+          borderRadius: NymRadius.rxs,
+          border: Border.all(color: c.primaryA(0.3)),
+        ),
+        child: Text(
+          _copied ? 'Copied!' : 'Copy',
+          style: TextStyle(color: c.primary, fontSize: widget.size * 0.75),
+        ),
       ),
     );
   }
@@ -1472,20 +1573,20 @@ class _QuoteBox extends ConsumerWidget {
         topLevel && _quoteTextLength(block) > truncateThreshold(context)
             ? _Collapsible(child: inner)
             : inner;
-    // `blockquote`: border-left 3px primary@0.4, padding-left 12, bg
-    // secondary@0.1, radius `0 8 8 0` (styles-chat.css:1270-1283).
-    final box = Container(
-      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
-      decoration: BoxDecoration(
-        color: c.secondaryA(0.1),
-        border: Border(left: BorderSide(color: c.primaryA(0.4), width: 3)),
-        borderRadius: const BorderRadius.only(
-          topRight: Radius.circular(8),
-          bottomRight: Radius.circular(8),
-        ),
-      ),
-      child: clamped,
-    );
+    // `blockquote`: border-left 3px primary@0.4, padding-left 12 ONLY (no
+    // vertical/right padding), bg secondary@0.1, radius `0 8 8 0`, with
+    // `transition: background var(--transition)` (styles-chat.css:1270-1279).
+    BoxDecoration deco({bool hovered = false}) => BoxDecoration(
+          // `.message-content > blockquote:hover { background:
+          // secondary@0.18 }` (styles-chat.css:1281-1283) — the desktop hover
+          // brightening that signals the quote is clickable.
+          color: c.secondaryA(hovered ? 0.18 : 0.1),
+          border: Border(left: BorderSide(color: c.primaryA(0.4), width: 3)),
+          borderRadius: const BorderRadius.only(
+            topRight: Radius.circular(8),
+            bottomRight: Radius.circular(8),
+          ),
+        );
     // `.message-content > blockquote { cursor: pointer }` (styles-chat.css:1276):
     // ONLY the top-level quote is tappable; tapping it jumps the list to the
     // quoted source message and flashes it (PWA `_scrollToQuotedMessage`, bound
@@ -1493,11 +1594,25 @@ class _QuoteBox extends ConsumerWidget {
     // mentions / code carry their own recognizers and win the hit-test, so the
     // translucent wrapper only fires on the quote's own (inert) surface — the
     // same effect as the PWA's `closest('a, .nm-mention, code, …')` exclusion.
-    if (!topLevel) return box;
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onTap: () => _jumpToQuotedSource(ref),
-      child: box,
+    if (!topLevel) {
+      return Container(
+        padding: const EdgeInsets.only(left: 12),
+        decoration: deco(),
+        child: clamped,
+      );
+    }
+    return _HoverBuilder(
+      builder: (context, hovered) => GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _jumpToQuotedSource(ref),
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.only(left: 12),
+          decoration: deco(hovered: hovered),
+          child: clamped,
+        ),
+      ),
     );
   }
 
@@ -1600,27 +1715,34 @@ class _MediaGallery extends StatelessWidget {
     }
     // The grid is ALWAYS 2 columns, gap 4, max-width 420, radius sm
     // (`styles-chat.css:987-1023`). 3 items = a tall left hero + two stacked
-    // right; 2 / 4+ = a 2-column wrap. Tiles cap at 220px tall.
+    // right; 2 / 4+ = a 2-column wrap. Only the individual TILES cap at 220px
+    // tall — the grid itself has no overall height cap, so a 5-6-image message
+    // grows to fit every row (rows 3+ stay visible).
     const gap = 4.0;
     Widget tile(MediaItem m) => _MediaTile(
         item: m, maxSize: 220, blur: blur, inGallery: true, gallery: items);
     Widget body;
     if (items.length == 3) {
-      body = Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(child: tile(items[0])),
-          const SizedBox(width: gap),
-          Expanded(
-            child: Column(
-              children: [
-                Expanded(child: tile(items[1])),
-                const SizedBox(height: gap),
-                Expanded(child: tile(items[2])),
-              ],
+      // The hero spans both implicit rows (`gallery-3 > :first-child`), each
+      // row capped at the 220px tile height → a fixed 2×220 + gap footprint.
+      body = SizedBox(
+        height: 2 * 220 + gap,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: tile(items[0])),
+            const SizedBox(width: gap),
+            Expanded(
+              child: Column(
+                children: [
+                  Expanded(child: tile(items[1])),
+                  const SizedBox(height: gap),
+                  Expanded(child: tile(items[2])),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       );
     } else {
       body = GridView.count(
@@ -1633,13 +1755,13 @@ class _MediaGallery extends StatelessWidget {
       );
     }
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 420, maxHeight: 444),
+      constraints: const BoxConstraints(maxWidth: 420),
       child: body,
     );
   }
 }
 
-class _MediaTile extends StatelessWidget {
+class _MediaTile extends ConsumerWidget {
   const _MediaTile({
     required this.item,
     required this.maxSize,
@@ -1674,18 +1796,26 @@ class _MediaTile extends StatelessWidget {
   final bool inGallery;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     // Single image: radius `--radius-sm` (=12); gallery cell: square (radius 0,
     // the grid clips). (styles-chat.css:941-950, 1012-1023.)
     final radius =
         inGallery ? BorderRadius.zero : NymRadius.rsm;
 
+    // NIP-92 imeta Blossom mirrors recorded for this URL (`ingestImetaTags` /
+    // the upload path), retried when the primary source fails — the PWA's
+    // `data-media-fallbacks` attribute (message-format.js:146-151) consumed by
+    // `_attachMediaFallbacks` (messages.js:1154-1187). Keyed by the RAW url;
+    // each mirror is proxied at render time exactly like the primary.
+    final mirrors = ref.watch(mediaFallbacksProvider).fallbacksFor(item.url);
+
     if (item.isVideo) {
       // Inline playable video (`F16`): single → bordered max-300 radius-sm;
       // gallery cell → borderless, square corners, filling the tile.
       return VideoMessage(
         url: item.url,
+        fallbackUrls: mirrors,
         maxSize: maxSize,
         bordered: !inGallery,
         borderRadius: inGallery ? BorderRadius.zero : null,
@@ -1697,12 +1827,16 @@ class _MediaTile extends StatelessWidget {
     // broken-image placeholder instead of throwing. (BUG: image decode failures.)
     final image = InlineNetworkImage(
       url: proxiedMedia(item.url),
+      fallbackUrls: [for (final u in mirrors) proxiedMedia(u)],
       fit: BoxFit.cover,
       width: maxSize,
+      // `.msg-img:not(.img-loaded)`: a 300px-wide 4:3 slot with a white@0.03
+      // wash while the image decodes (styles-chat.css:952-958; no light-mode
+      // override).
       placeholder: Container(
         width: maxSize,
-        height: maxSize,
-        color: Colors.white.withValues(alpha: 0.05),
+        height: maxSize * 3 / 4,
+        color: Colors.white.withValues(alpha: 0.03),
       ),
       errorChild: Container(
         width: maxSize,
@@ -1724,28 +1858,104 @@ class _MediaTile extends StatelessWidget {
             onTap: () => _openFullscreen(context),
             child: image,
           );
-    final clipped = ClipRRect(
-      borderRadius: radius,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
-        child: tappableImage,
+    // `.message-content img:hover { transform: scale(1.02); box-shadow:
+    // var(--shadow-md); border-color: rgba(255,255,255,0.15) }` over
+    // `transition: all var(--transition)` (styles-chat.css:941-964) — mouse
+    // hover only ([MouseRegion] never fires on touch). `--shadow-md` is
+    // 0 4px 16px black@0.4 dark / black@0.1 light (styles-core.css:92 +
+    // styles-themes-responsive.css:536).
+    if (inGallery) {
+      // Gallery cell: no border; the scaled image is clipped by the cell
+      // (the PWA's `.message-gallery { overflow: hidden }`).
+      return _HoverBuilder(
+        builder: (context, hovered) => ClipRRect(
+          borderRadius: radius,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
+            child: AnimatedScale(
+              scale: hovered ? 1.02 : 1.0,
+              duration: NymMotion.transition,
+              curve: NymMotion.curve,
+              child: tappableImage,
+            ),
+          ),
+        ),
+      );
+    }
+    // A lone image carries a 1px glass border (`.message-content img`), which
+    // brightens to white@0.15 on hover alongside the lift + shadow.
+    return _HoverBuilder(
+      builder: (context, hovered) => AnimatedScale(
+        scale: hovered ? 1.02 : 1.0,
+        duration: NymMotion.transition,
+        curve: NymMotion.curve,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            border: Border.all(
+              color: hovered
+                  ? Colors.white.withValues(alpha: 0.15)
+                  : c.glassBorder,
+            ),
+            boxShadow: hovered
+                ? [
+                    BoxShadow(
+                      color: Colors.black
+                          .withValues(alpha: c.isLight ? 0.1 : 0.4),
+                      offset: const Offset(0, 4),
+                      blurRadius: 16,
+                    ),
+                  ]
+                : const [],
+          ),
+          child: ClipRRect(
+            borderRadius: radius,
+            child: ConstrainedBox(
+              constraints:
+                  BoxConstraints(maxWidth: maxSize, maxHeight: maxSize),
+              child: tappableImage,
+            ),
+          ),
+        ),
       ),
     );
-    // A lone image carries a 1px glass border (`.message-content img`); gallery
-    // cells have none.
-    if (inGallery) return clipped;
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        border: Border.all(color: c.glassBorder),
-      ),
-      child: clipped,
+  }
+}
+
+/// Rebuilds its subtree with the current mouse-hover state — the carrier for
+/// the PWA's desktop-only `:hover` treatments. [MouseRegion] enter/exit only
+/// fire for a hovering pointer (a mouse/trackpad), so touch platforms never
+/// see the hover state; the cursor is `click`, matching the PWA's
+/// `cursor: pointer` on these surfaces.
+class _HoverBuilder extends StatefulWidget {
+  const _HoverBuilder({required this.builder});
+  final Widget Function(BuildContext context, bool hovered) builder;
+
+  @override
+  State<_HoverBuilder> createState() => _HoverBuilderState();
+}
+
+class _HoverBuilderState extends State<_HoverBuilder> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: widget.builder(context, _hovered),
     );
   }
 }
 
 /// Fullscreen image viewer (`expandImage` + `_imageModalGallery`,
-/// messages.js:1432-1483): pinch-zoom via [InteractiveViewer], prev/next paging
+/// messages.js:1432-1483 + the touch-gesture module, app.js:2304-2480):
+/// pinch-zoom (1–5×) with clamped pan, one-finger swipe-to-dismiss with a live
+/// backdrop fade, >60px horizontal swipe gallery paging, 300ms double-tap
+/// 2.5× zoom toggle, prev/next paging
 /// across a message's images, tap the backdrop or the ✕ to close.
 class _FullscreenImageViewer extends StatefulWidget {
   const _FullscreenImageViewer(
@@ -1758,7 +1968,10 @@ class _FullscreenImageViewer extends StatefulWidget {
     return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder<void>(
         opaque: false,
-        barrierColor: Colors.black.withValues(alpha: 0.92),
+        // The `.image-modal { background: rgba(0,0,0,0.85) }` backdrop is
+        // painted INSIDE the page (not as a route barrier) because the swipe-
+        // to-dismiss gesture live-fades it (`modal.style.background =
+        // rgba(0,0,0, 0.4*(1-progress))`, app.js:2382-2383).
         pageBuilder: (_, __, ___) =>
             _FullscreenImageViewer(urls: urls, initialIndex: index),
       ),
@@ -1769,52 +1982,336 @@ class _FullscreenImageViewer extends StatefulWidget {
   State<_FullscreenImageViewer> createState() => _FullscreenImageViewerState();
 }
 
-class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
+class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
+    with SingleTickerProviderStateMixin {
+  static const double _minScale = 1; // MIN_SCALE (app.js:2305)
+  static const double _maxScale = 5; // MAX_SCALE
+
   late int _index = widget.initialIndex;
 
-  void _step(int delta) => setState(() =>
-      _index = (_index + delta + widget.urls.length) % widget.urls.length);
+  // The live `translate(tx, ty) scale(scale)` transform (app.js:2317-2320).
+  double _scale = 1, _tx = 0, _ty = 0;
+
+  // Gesture baselines captured at touch-down / pointer-count change.
+  double _startScale = 1, _startTx = 0, _startTy = 0;
+  Offset _startFocal = Offset.zero;
+
+  /// 'pinch' | 'pan' (one finger, zoomed) | 'swipe' (one finger, unzoomed) —
+  /// the PWA's `mode` (app.js:2341-2357). Null = no active gesture.
+  String? _mode;
+
+  /// The swipe-drag backdrop alpha override (`modal.style.background =
+  /// rgba(0,0,0, 0.4 * (1 - progress))`, app.js:2382-2383); null = the resting
+  /// `.image-modal` rgba(0,0,0,0.85).
+  double? _swipeBgAlpha;
+
+  /// Crossfade flag during gallery navigation (`opacity 0.12s linear`,
+  /// app.js:2411-2420): fade out, swap src after 120ms, fade back in.
+  bool _fadingOut = false;
+  Timer? _navTimer;
+
+  /// Measures the laid-out (unscaled) image box for `clampPan` (app.js:2331).
+  final GlobalKey _imgKey = GlobalKey();
+
+  /// Drives the animated transitions: the 0.25s ease `gesture-animating`
+  /// spring-back/settle (styles-components.css:599-601) and the 0.18s ease
+  /// transform reset while navigating the gallery.
+  late final AnimationController _anim = AnimationController(vsync: this);
+
+  @override
+  void dispose() {
+    _navTimer?.cancel();
+    _anim.dispose();
+    super.dispose();
+  }
+
+  /// Animates the transform to the given target — the CSS
+  /// `transition: transform [duration] ease` the PWA toggles via
+  /// `gesture-animating`.
+  void _animateTo(double scale, double tx, double ty, Duration duration) {
+    _anim.stop();
+    final s0 = _scale, x0 = _tx, y0 = _ty;
+    final curve = CurvedAnimation(parent: _anim, curve: Curves.ease);
+    void tick() {
+      if (!mounted) return;
+      setState(() {
+        final t = curve.value;
+        _scale = s0 + (scale - s0) * t;
+        _tx = x0 + (tx - x0) * t;
+        _ty = y0 + (ty - y0) * t;
+      });
+    }
+
+    curve.addListener(tick);
+    _anim.duration = duration;
+    _anim.forward(from: 0).whenCompleteOrCancel(() {
+      curve.removeListener(tick);
+      curve.dispose();
+    });
+  }
+
+  /// `reset(animate)` (app.js:2322-2328): zoom/pan back to identity and drop
+  /// the swipe backdrop override (instantly, like `modal.style.background=''`).
+  void _reset({required bool animate}) {
+    setState(() => _swipeBgAlpha = null);
+    if (animate) {
+      _animateTo(1, 0, 0, const Duration(milliseconds: 250));
+    } else {
+      _anim.stop();
+      setState(() {
+        _scale = 1;
+        _tx = 0;
+        _ty = 0;
+      });
+    }
+  }
+
+  /// `clampPan()` (app.js:2331-2336): keeps the zoomed image's pan within the
+  /// scaled overhang. Returns the clamped (tx, ty).
+  (double, double) _clampedPan() {
+    final box = _imgKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return (_tx, _ty);
+    final maxX = math.max(0.0, (box.size.width * _scale - box.size.width) / 2);
+    final maxY =
+        math.max(0.0, (box.size.height * _scale - box.size.height) / 2);
+    return (_tx.clamp(-maxX, maxX), _ty.clamp(-maxY, maxY));
+  }
+
+  void _onScaleStart(ScaleStartDetails d) {
+    _anim.stop();
+    _startScale = _scale;
+    _startTx = _tx;
+    _startTy = _ty;
+    _startFocal = d.focalPoint;
+    // 2 fingers → pinch; 1 finger → pan when zoomed, else swipe(-to-dismiss)
+    // (`onStart`, app.js:2339-2357).
+    _mode = d.pointerCount >= 2
+        ? 'pinch'
+        : (_scale > _minScale ? 'pan' : 'swipe');
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    // A finger added/lifted mid-gesture re-baselines like the PWA's fresh
+    // `touchstart` (its handler re-runs `onStart` on every new touch).
+    final wantPinch = d.pointerCount >= 2;
+    if (_mode == null || wantPinch != (_mode == 'pinch')) {
+      _startScale = _scale;
+      _startTx = _tx;
+      _startTy = _ty;
+      _startFocal = d.focalPoint;
+      _mode = wantPinch ? 'pinch' : (_scale > _minScale ? 'pan' : 'swipe');
+    }
+    final dFocal = d.focalPoint - _startFocal;
+    setState(() {
+      if (_mode == 'pinch') {
+        // scale = clamp(startScale × spanRatio); the midpoint drag pans
+        // (app.js:2361-2369).
+        _scale = (_startScale * d.scale).clamp(_minScale, _maxScale);
+        _tx = _startTx + dFocal.dx;
+        _ty = _startTy + dFocal.dy;
+      } else if (_mode == 'pan') {
+        _tx = _startTx + dFocal.dx;
+        _ty = _startTy + dFocal.dy;
+      } else {
+        // Swipe: the image follows the finger on BOTH axes and the backdrop
+        // fades `rgba(0,0,0, 0.4 * (1 - min(1, hypot/300)))` (app.js:2374-2383).
+        _tx = dFocal.dx;
+        _ty = dFocal.dy;
+        final progress =
+            math.min(1.0, Offset(_tx, _ty).distance / 300);
+        _swipeBgAlpha = 0.4 * (1 - progress);
+      }
+    });
+  }
+
+  void _onScaleEnd(ScaleEndDetails d) {
+    final mode = _mode;
+    if (d.pointerCount == 0) _mode = null;
+    if (mode == 'swipe') {
+      // `onEnd` (app.js:2426-2452): with a >1-image gallery a dominantly-
+      // horizontal release past 60px pages prev/next; otherwise a release
+      // whose travel exceeds 100px (vertical-only when a gallery exists)
+      // dismisses; anything else springs back over 0.25s ease.
+      final hasGallery = widget.urls.length > 1;
+      final horizontal = _tx.abs() > _ty.abs();
+      if (hasGallery && horizontal) {
+        if (_tx.abs() > 60) {
+          final delta = _tx < 0 ? 1 : -1;
+          if (_navigate(delta)) return;
+        }
+        _reset(animate: true);
+        return;
+      }
+      final closeDist =
+          hasGallery ? _ty.abs() : Offset(_tx, _ty).distance;
+      if (closeDist > 100) {
+        Navigator.of(context).maybePop();
+        return;
+      }
+      _reset(animate: true);
+    } else if (mode == 'pinch' || mode == 'pan') {
+      if (_scale <= _minScale) {
+        _reset(animate: true);
+      } else {
+        // Settle the pan inside the scaled bounds (`clampPan(); apply(true)`).
+        final (cx, cy) = _clampedPan();
+        _animateTo(_scale, cx, cy, const Duration(milliseconds: 250));
+      }
+    }
+  }
+
+  /// Double-tap toggles zoom 1 ↔ 2.5 (`onDoubleTap`, app.js:2455-2463; the
+  /// 300ms pairing window is the framework's double-tap timeout).
+  void _onDoubleTap() {
+    if (_scale > _minScale) {
+      _reset(animate: true);
+    } else {
+      _animateTo(2.5, _tx, _ty, const Duration(milliseconds: 250));
+    }
+  }
+
+  /// `navigateGallery(delta)` (app.js:2402-2423): CLAMPED at the gallery ends
+  /// (no wraparound — returns false past either end), resets zoom/pan, and
+  /// crossfades: opacity out over 0.12s (linear) with an 0.18s ease transform
+  /// reset, src swap at 120ms, then fade back in.
+  bool _navigate(int delta) {
+    final next = _index + delta;
+    if (next < 0 || next >= widget.urls.length) return false;
+    setState(() {
+      _fadingOut = true;
+      _swipeBgAlpha = null;
+    });
+    _animateTo(1, 0, 0, const Duration(milliseconds: 180));
+    _navTimer?.cancel();
+    _navTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      setState(() {
+        _index = next;
+        _fadingOut = false;
+      });
+    });
+    return true;
+  }
+
+  /// `downloadModalMedia` (app.js:2264-2302): the PWA blob-downloads the modal
+  /// image, falling back to `window.open(src, '_blank')`. Natively we hand the
+  /// image URL to the platform (browser/downloader) — the same
+  /// open-externally path the video fullscreen uses.
+  Future<void> _download() async {
+    final uri = Uri.tryParse(widget.urls[_index]);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final c = context.nym;
+    final screen = MediaQuery.of(context).size;
     final multi = widget.urls.length > 1;
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(
         children: [
-          // Tap the backdrop to dismiss.
+          // `.image-modal { background: rgba(0,0,0,0.85) }` (styles-components
+          // .css:570-577), live-faded by the swipe drag; tap dismisses
+          // (`data-action="closeImageModal"`).
           Positioned.fill(
             child: GestureDetector(
               onTap: () => Navigator.of(context).maybePop(),
               behavior: HitTestBehavior.opaque,
-              child: const SizedBox.expand(),
+              child: ColoredBox(
+                color: Colors.black.withValues(alpha: _swipeBgAlpha ?? 0.85),
+              ),
             ),
           ),
           Center(
-            child: InteractiveViewer(
-              minScale: 1,
-              maxScale: 5,
-              child: Image.network(
-                proxiedMedia(widget.urls[_index]),
-                fit: BoxFit.contain,
-                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image,
-                    color: Colors.white54, size: 48),
+            child: GestureDetector(
+              // A click on the UNZOOMED image bubbles to the modal and closes
+              // it; a zoomed/just-dragged image swallows the click (app.js:
+              // 2474-2479).
+              onTap: _scale > _minScale
+                  ? null
+                  : () => Navigator.of(context).maybePop(),
+              onDoubleTap: _onDoubleTap,
+              onScaleStart: _onScaleStart,
+              onScaleUpdate: _onScaleUpdate,
+              onScaleEnd: _onScaleEnd,
+              child: Transform.translate(
+                offset: Offset(_tx, _ty),
+                child: Transform.scale(
+                  scale: _scale,
+                  // `transform-origin: center center` (styles-components.css:594).
+                  alignment: Alignment.center,
+                  child: AnimatedOpacity(
+                    // The gallery crossfade (`opacity 0.12s linear`).
+                    opacity: _fadingOut ? 0 : 1,
+                    duration: const Duration(milliseconds: 120),
+                    curve: Curves.linear,
+                    // `.image-modal img`: max 90% × 90%, 1px glass border,
+                    // radius `--radius-md` (=16), `--shadow-lg` = 0 8px 32px
+                    // rgba(0,0,0,0.5) (styles-components.css:587-596). Light
+                    // mode softens it to 0 8px 40px rgba(0,0,0,0.2)
+                    // (`body.light-mode .image-modal img`,
+                    // styles-themes-responsive.css:677-679).
+                    child: Container(
+                      key: _imgKey,
+                      constraints: BoxConstraints(
+                        maxWidth: screen.width * 0.9,
+                        maxHeight: screen.height * 0.9,
+                      ),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: c.glassBorder),
+                        borderRadius: NymRadius.rmd,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black
+                                .withValues(alpha: c.isLight ? 0.2 : 0.5),
+                            offset: const Offset(0, 8),
+                            blurRadius: c.isLight ? 40 : 32,
+                          ),
+                        ],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Image.network(
+                        proxiedMedia(widget.urls[_index]),
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => const Icon(
+                            Icons.broken_image,
+                            color: Colors.white54,
+                            size: 48),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
           if (multi) ...[
-            Positioned(
-              left: 4,
-              top: 0,
-              bottom: 0,
-              child: Center(child: _btn(Icons.chevron_left, () => _step(-1))),
-            ),
-            Positioned(
-              right: 4,
-              top: 0,
-              bottom: 0,
-              child: Center(child: _btn(Icons.chevron_right, () => _step(1))),
-            ),
+            // `.image-modal-nav`: 44px glass circles at 20px insets, ‹ ›
+            // glyphs at 32px with a 4px bottom pad, vertically centered
+            // (styles-components.css:645-678). The prev arrow hides at index
+            // 0 and next at the last image — NO wraparound
+            // (`updateGalleryNavButtons`, app.js:2389-2399).
+            if (_index > 0)
+              Positioned(
+                left: 20,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: _chip('‹', 44, 32, () => _navigate(-1),
+                      padding: const EdgeInsets.only(bottom: 4)),
+                ),
+              ),
+            if (_index < widget.urls.length - 1)
+              Positioned(
+                right: 20,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: _chip('›', 44, 32, () => _navigate(1),
+                      padding: const EdgeInsets.only(bottom: 4)),
+                ),
+              ),
             Positioned(
               bottom: 28,
               left: 0,
@@ -1826,11 +2323,21 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
               ),
             ),
           ],
+          // `.image-modal-download`: a 40px glass circle at top:20 right:70
+          // with a ⤓ glyph at 22px (styles-components.css:627-644).
           Positioned(
-            top: 4,
-            right: 4,
+            top: 20,
+            right: 70,
+            child: SafeArea(child: _chip('⤓', 40, 22, _download)),
+          ),
+          // `.image-modal-close`: a 40px glass circle at top:20 right:20 with
+          // a × glyph at 24px (styles-components.css:602-620).
+          Positioned(
+            top: 20,
+            right: 20,
             child: SafeArea(
-              child: _btn(Icons.close, () => Navigator.of(context).maybePop()),
+              child:
+                  _chip('×', 40, 24, () => Navigator.of(context).maybePop()),
             ),
           ),
         ],
@@ -1838,12 +2345,30 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer> {
     );
   }
 
-  Widget _btn(IconData icon, VoidCallback onTap) => Material(
-        color: Colors.black54,
-        shape: const CircleBorder(),
-        child:
-            IconButton(icon: Icon(icon, color: Colors.white), onPressed: onTap),
-      );
+  /// A `.image-modal-close`/`-download`/`-nav` glass circle: rgba(20,20,35,0.8)
+  /// fill, 1px glass border, `--text` glyph, centered.
+  Widget _chip(String glyph, double side, double fontSize, VoidCallback onTap,
+      {EdgeInsets padding = EdgeInsets.zero}) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: side,
+        height: side,
+        padding: padding,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: const Color(0xCC141423),
+          shape: BoxShape.circle,
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: Text(
+          glyph,
+          style: TextStyle(color: c.text, fontSize: fontSize, height: 1),
+        ),
+      ),
+    );
+  }
 }
 
 /// Wraps an image in a gaussian blur revealed on tap (`.blurred`,
@@ -1870,10 +2395,12 @@ class _BlurRevealState extends State<_BlurReveal> {
         child: widget.child,
       );
     }
+    // `img.blurred { filter: blur(20px) }` (styles-components.css:1628-1631);
+    // the hover blur(10px) lightening is desktop-hover-only and omitted here.
     return GestureDetector(
       onTap: () => setState(() => _revealed = true),
       child: ImageFiltered(
-        imageFilter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        imageFilter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: widget.child,
       ),
     );
@@ -1881,13 +2408,22 @@ class _BlurRevealState extends State<_BlurReveal> {
 }
 
 /// Renders a short string inline while resolving NIP-30 custom emoji: any
-/// `:shortcode:` known to [liveCustomEmojiProvider] (and bare http(s) custom-
-/// emoji URLs) becomes an inline image; everything else is plain styled text.
+/// `:shortcode:` known to [liveCustomEmojiProvider] becomes an inline image;
+/// everything else is plain styled text.
 ///
 /// This is the lightweight counterpart to [MessageContent] for surfaces that
 /// show a reaction emoji or a short notification line — reaction badges, the
 /// reactors sheet, the notifications panel — where a full formatted block is too
 /// heavy and where, until now, `:shortcode:` reactions showed as literal text.
+///
+/// It mirrors the PWA's two short-text helpers (emoji.js):
+///   - `renderCustomEmojiInEscapedText` (:560-568) — the default: every KNOWN
+///     custom `:code:` in the string becomes an image; built-in unicode
+///     shortcodes (e.g. `:tada:`) are NOT substituted (only message bodies do
+///     that, message-format.js:251-257) and unknown codes stay literal.
+///   - `renderReactionEmoji` (:342-351) — [wholeStringOnly]: ONLY a text that
+///     is exactly `:code:` for a known custom code becomes an image; a token
+///     embedded in longer content stays literal.
 ///
 /// Text runs keep the caller's [style] verbatim (no colour-emoji fallback is
 /// forced onto them, which would wreck Latin metrics/glyphs the same way the old
@@ -1898,6 +2434,10 @@ class InlineEmojiText extends ConsumerWidget {
     required this.text,
     required this.style,
     this.emojiSize,
+    this.wholeStringOnly = false,
+    this.emojiMargin = const EdgeInsets.symmetric(horizontal: 1),
+    this.emojiAlignment,
+    this.emojiBaselineDropEm,
     this.maxLines,
     this.overflow,
     this.textAlign,
@@ -1906,9 +2446,39 @@ class InlineEmojiText extends ConsumerWidget {
   final String text;
   final TextStyle style;
 
-  /// Side length for an inline custom-emoji image. Defaults to ~1.2× the font
-  /// size so the glyph sits a touch above the cap height like the PWA's emoji.
+  /// Exact side length for an inline custom-emoji image. Defaults to 1.75× the
+  /// font size — the PWA's base `.custom-emoji { width/height: 1.75em }`
+  /// (styles-chat.css:839-846). Surfaces with their own CSS size (reaction
+  /// badges 1.45em, quick-react 30px, burst 45px, …) pass it explicitly.
   final double? emojiSize;
+
+  /// `renderReactionEmoji` semantics (emoji.js:342-351): only an exact
+  /// `^:code:$` text resolves to an image; embedded tokens stay literal.
+  final bool wholeStringOnly;
+
+  /// Margin around the emoji image. The base `.custom-emoji` rule is
+  /// `margin: 0 1px`; reaction surfaces (`.custom-emoji-reaction`,
+  /// `.quick-react-emoji .custom-emoji`) override it to 0.
+  final EdgeInsets emojiMargin;
+
+  /// Override for surfaces whose CSS is NOT the inline baseline-shift: pass
+  /// [PlaceholderAlignment.middle] where the PWA says `vertical-align: middle`
+  /// or centers the image as a flex item (`.reaction-badge`/
+  /// `.reactors-modal-emoji` are `display:(inline-)flex; align-items:center`,
+  /// `.quick-react-emoji .custom-emoji` is `vertical-align: middle`), or
+  /// [PlaceholderAlignment.top] for the burst's `vertical-align: top`
+  /// (styles-features.css:369-374). When null the image is baseline-aligned
+  /// with its bottom [emojiBaselineDropEm] ems below the text baseline — the
+  /// PWA's `vertical-align: -Nem`.
+  final PlaceholderAlignment? emojiAlignment;
+
+  /// Ems (of [style]'s font size, the img's inherited `em`) the image bottom
+  /// sits below the alphabetic baseline. Defaults per the PWA class each mode
+  /// maps to: `.custom-emoji { vertical-align: -0.375em }` for the default
+  /// mode (styles-chat.css:843), `.custom-emoji-reaction { vertical-align:
+  /// -0.25em }` for [wholeStringOnly] (:857). Ignored when [emojiAlignment]
+  /// is set.
+  final double? emojiBaselineDropEm;
 
   final int? maxLines;
   final TextOverflow? overflow;
@@ -1917,60 +2487,85 @@ class InlineEmojiText extends ConsumerWidget {
   /// `:shortcode:` token (NIP-30 codes are `[a-zA-Z0-9_]+`, emoji.js).
   static final RegExp _rxToken = RegExp(r':([a-zA-Z0-9_]+):');
 
+  /// Whole-string `:shortcode:` (emoji.js `renderReactionEmoji` `^:code:$`).
+  static final RegExp _rxWholeToken = RegExp(r'^:([a-zA-Z0-9_]+):$');
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final codeToUrl = ref.watch(liveCustomEmojiProvider).codeToUrl;
+    final side = emojiSize ?? (style.fontSize ?? 14) * 1.75;
+
+    Widget plainText() => Text(text,
+        style: style,
+        maxLines: maxLines,
+        overflow: overflow,
+        textAlign: textAlign);
+
+    // `vertical-align: -Nem` per the mode's PWA class (see
+    // [emojiBaselineDropEm]) unless the surface overrides [emojiAlignment].
+    final dropPx = (style.fontSize ?? 14) *
+        (emojiBaselineDropEm ?? (wholeStringOnly ? 0.25 : 0.375));
+
+    InlineSpan emojiSpan(String code, String url) {
+      final image = InlineNetworkImage(
+        url: proxiedMedia(url, emoji: true),
+        width: side,
+        height: side,
+        fit: BoxFit.contain,
+        // Disk-cached (sparse: a reaction badge / a notification line
+        // shows one emoji). Only the picker grid uses memoryOnly.
+        retryOnError: true,
+        errorChild: Text(':$code:', style: style),
+      );
+      final align = emojiAlignment;
+      return WidgetSpan(
+        alignment: align ?? PlaceholderAlignment.baseline,
+        baseline: align == null ? TextBaseline.alphabetic : null,
+        child: Padding(
+          padding: emojiMargin,
+          child: align == null
+              ? EmojiBaselineDrop(drop: dropPx, child: image)
+              : image,
+        ),
+      );
+    }
+
+    if (wholeStringOnly) {
+      // `renderReactionEmoji`: an image ONLY when the whole text is a known
+      // custom `:code:`; anything else (unicode, unknown code, embedded token)
+      // is the literal escaped text.
+      final code = _rxWholeToken.firstMatch(text)?.group(1);
+      final url = code == null ? null : codeToUrl[code];
+      if (url == null) return plainText();
+      return Text.rich(
+        emojiSpan(code!, url),
+        maxLines: maxLines,
+        overflow: overflow,
+        textAlign: textAlign,
+      );
+    }
 
     // Fast path: no `:shortcode:` token at all → a single styled Text (keeps
     // these surfaces find-by-text friendly and avoids a needless RichText).
-    if (!_rxToken.hasMatch(text)) {
-      return Text(text,
-          style: style,
-          maxLines: maxLines,
-          overflow: overflow,
-          textAlign: textAlign);
-    }
+    if (!_rxToken.hasMatch(text)) return plainText();
 
-    final side = (emojiSize ?? (style.fontSize ?? 14)) * 1.2;
     final spans = <InlineSpan>[];
     var last = 0;
     for (final m in _rxToken.allMatches(text)) {
       final code = m.group(1)!;
-      // PWA resolution order (message-format.js:251-257): the built-in unicode
-      // `emojiMap` (lowercased key) is tried FIRST and substitutes the literal
-      // shortcode with its glyph; only then the NIP-30 custom-emoji image
-      // (looked up with the EXACT case). `kEmojiShortcodeMap` is the full PWA
-      // map (emoji_data.dart) — so common `:shortcodes:` (e.g. `:tada:`,
-      // `:rocket:`) render as the unicode emoji here too, not literal text.
-      final builtin = kEmojiShortcodeMap[code.toLowerCase()];
-      final url = builtin == null ? codeToUrl[code] : null;
-      if (builtin == null && url == null) {
+      // `renderCustomEmojiInEscapedText` (emoji.js:560-568) replaces ONLY
+      // known custom codes; built-in unicode shortcodes are never substituted
+      // on these surfaces (`registerCustomEmoji` refuses codes shadowing the
+      // built-in `emojiMap`, emoji.js:121, so `customEmojis` never has them)
+      // and unknown codes stay literal text.
+      final url = codeToUrl[code];
+      if (url == null) {
         continue; // unknown code → leave the literal `:code:` in trailing text
       }
       if (m.start > last) {
         spans.add(TextSpan(text: text.substring(last, m.start), style: style));
       }
-      if (builtin != null) {
-        // Built-in unicode glyph: plain text run (no colour-emoji fallback is
-        // forced — it renders via the platform emoji font like the PWA's glyph).
-        spans.add(TextSpan(text: builtin, style: style));
-      } else {
-        spans.add(WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 1),
-            child: InlineNetworkImage(
-              url: proxiedMedia(url!, emoji: true),
-              width: side,
-              height: side,
-              fit: BoxFit.contain,
-              // Disk-cached (sparse: a reaction badge / a notification line
-              // shows one emoji). Only the picker grid uses memoryOnly.
-              errorChild: Text(':$code:', style: style),
-            ),
-          ),
-        ));
-      }
+      spans.add(emojiSpan(code, url));
       last = m.end;
     }
     if (last < text.length) {
@@ -1985,31 +2580,35 @@ class InlineEmojiText extends ConsumerWidget {
   }
 }
 
-/// The maximum collapsed height of a `.truncated-inner` block
-/// (`styles-chat.css:795 max-height:300px`).
-const double _kTruncateHeight = 300;
+/// The maximum collapsed height of a `.truncated-inner` block: 300px
+/// (`styles-chat.css:795`), reduced to 200px on the ≤768px breakpoint
+/// (`@media (max-width:768px) .truncated-inner { max-height: 200px }`,
+/// styles-themes-responsive.css:42-46).
+double _truncateHeight(BuildContext context) =>
+    MediaQuery.of(context).size.width <= 768 ? 200 : 300;
 
 /// Collapsible body wrapper for the read-more truncation (messages.js:1192-1265,
-/// `.truncated-inner` + `.read-more-btn`). Clamps [child] to [_kTruncateHeight]
+/// `.truncated-inner` + `.read-more-btn`). Clamps [child] to [_truncateHeight]
 /// with overflow hidden and a "Read more"/"Show less" toggle.
 ///
 /// The char-count threshold (checked by the caller) only flags this body as a
 /// candidate; the collapse itself is height-based, so the toggle is dropped once
-/// the body is measured to already fit 300px (PWA: `scrollHeight <= clientHeight
-/// + 2` → remove the button + expand).
-class _Collapsible extends StatefulWidget {
+/// the body is measured to already fit the collapsed height (PWA: `scrollHeight
+/// <= clientHeight + 2` → remove the button + expand).
+class _Collapsible extends ConsumerStatefulWidget {
   const _Collapsible({required this.child});
   final Widget child;
 
   @override
-  State<_Collapsible> createState() => _CollapsibleState();
+  ConsumerState<_Collapsible> createState() => _CollapsibleState();
 }
 
-class _CollapsibleState extends State<_Collapsible> {
+class _CollapsibleState extends ConsumerState<_Collapsible> {
   bool _expanded = false;
 
   /// The body's natural (unclamped) height, learned after the first layout.
-  /// Null until measured; `<= 300 + 2` means it fits and needs no toggle.
+  /// Null until measured; `<= collapsed height + 2` means it fits and needs no
+  /// toggle.
   double? _fullHeight;
 
   void _onMeasured(double height) {
@@ -2023,8 +2622,13 @@ class _CollapsibleState extends State<_Collapsible> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    // Content already fits 300px → no clamp, no button (PWA drops the toggle).
-    final fits = _fullHeight != null && _fullHeight! <= _kTruncateHeight + 2;
+    // `body.chat-bubbles` restyles the toggle (divider + tighter padding).
+    final bubbles = ref.watch(settingsProvider).useBubbles;
+    // 300px desktop / 200px on the ≤768px breakpoint (see [_truncateHeight]).
+    final truncateHeight = _truncateHeight(context);
+    // Content already fits the collapsed height → no clamp, no button (PWA
+    // drops the toggle).
+    final fits = _fullHeight != null && _fullHeight! <= truncateHeight + 2;
     final collapsed = !fits && !_expanded;
 
     return Column(
@@ -2033,22 +2637,41 @@ class _CollapsibleState extends State<_Collapsible> {
       children: [
         ClipRect(
           child: _MeasuredMaxHeight(
-            maxHeight: collapsed ? _kTruncateHeight : double.infinity,
+            maxHeight: collapsed ? truncateHeight : double.infinity,
             onMeasured: _onMeasured,
             child: widget.child,
           ),
         ),
-        // `.read-more-btn { display:block; width:100%; color:--primary; font-
-        // size:12px; padding:4px 0 }`. Shown only while the body overflows 300px.
+        // `.read-more-btn`: a full-width <button> (label centered), `--primary`
+        // 12px, `padding:4px 0; margin-top:2px` (styles-chat.css:804-816).
+        // `body.chat-bubbles` adds explicit centering, `padding:6px 0 4px`,
+        // `margin-top:0` and a 1px top divider — white@0.08 dark / black@0.06
+        // light (styles-chat.css:817-822 + styles-themes-responsive.css:48-50).
+        // Shown only while the body overflows the collapsed height.
         if (!fits)
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => setState(() => _expanded = !_expanded),
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 4),
+              margin: bubbles ? null : const EdgeInsets.only(top: 2),
+              padding: bubbles
+                  ? const EdgeInsets.only(top: 6, bottom: 4)
+                  : const EdgeInsets.symmetric(vertical: 4),
+              decoration: bubbles
+                  ? BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                          color: c.isLight
+                              ? Colors.black.withValues(alpha: 0.06)
+                              : Colors.white.withValues(alpha: 0.08),
+                        ),
+                      ),
+                    )
+                  : null,
               child: Text(
                 _expanded ? 'Show less' : 'Read more',
+                textAlign: TextAlign.center,
                 style: TextStyle(color: c.primary, fontSize: 12),
               ),
             ),

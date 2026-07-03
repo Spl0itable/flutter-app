@@ -94,14 +94,17 @@ class _MessagesListState extends ConsumerState<MessagesList> {
 
   /// Reports the currently-visible render-index range so the scroll-to-bottom
   /// FAB can mirror the PWA's `distanceFromBottom > 150` gate (`app.js:7120`).
-  /// In the `reverse:true` list, index 0 is the newest message at the bottom;
-  /// the FAB shows once the bottom-most visible unit is a couple of rows up.
+  /// In the `reverse:true` list, index 0 is the newest message at the bottom.
   final ItemPositionsListener _positionsListener =
       ItemPositionsListener.create();
 
   /// Whether the jump-to-latest FAB is currently shown (the user has scrolled
   /// up away from the newest message).
   bool _showScrollButton = false;
+
+  /// The messages viewport height in px, captured at build — converts the
+  /// normalized [ItemPosition] edges into the PWA's pixel scroll distance.
+  double _viewportHeight = 0;
 
   @override
   void initState() {
@@ -115,20 +118,32 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     super.dispose();
   }
 
-  /// Recomputes [_showScrollButton] from the visible item positions. Analogue
-  /// of the PWA's `distanceFromBottom > 150` (`app.js:7120-7124`): in the
-  /// reversed list the bottom edge is index 0, so we show the FAB once the
-  /// smallest visible index is at least 2 render units off the bottom.
+  /// Recomputes [_showScrollButton] from the visible item positions — the
+  /// PWA's fixed-pixel `distanceFromBottom > 150` gate (`app.js:7120-7124`).
+  /// In the `reverse:true` list, scroll offset 0 rests index 0's leading
+  /// (bottom) edge 16px inside the viewport (the list's bottom padding), so
+  /// the pixel distance scrolled away from the bottom is
+  /// `16 − itemLeadingEdge × viewportHeight`. When index 0 isn't laid out at
+  /// all the user is far beyond 150px, so the FAB always shows.
   void _onPositionsChanged() {
     final positions = _positionsListener.itemPositions.value;
     if (positions.isEmpty) return;
-    // The visually-bottom-most item is the one with the smallest index whose
-    // trailing edge is still within the viewport.
-    final minIndex = positions
-        .where((p) => p.itemTrailingEdge > 0)
-        .map((p) => p.index)
-        .fold<int>(1 << 30, (a, b) => a < b ? a : b);
-    final shouldShow = minIndex >= 2;
+    ItemPosition? newest;
+    for (final p in positions) {
+      if (p.index == 0) {
+        newest = p;
+        break;
+      }
+    }
+    final bool shouldShow;
+    if (newest == null) {
+      shouldShow = true;
+    } else if (_viewportHeight <= 0) {
+      shouldShow = false;
+    } else {
+      final distanceFromBottom = 16 - newest.itemLeadingEdge * _viewportHeight;
+      shouldShow = distanceFromBottom > 150;
+    }
     if (shouldShow != _showScrollButton) {
       setState(() => _showScrollButton = shouldShow);
     }
@@ -154,6 +169,9 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     final messages = ref.watch(messagesForCurrentViewProvider);
     final reactions = ref.watch(reactionsProvider);
     final polls = ref.watch(pollsForCurrentViewProvider);
+    // The history-edge notice is channel-only (the PWA's PM back-pager never
+    // prepends one).
+    final isChannel = app.view.kind == ViewKind.channel;
 
     // `.messages-container`: bg rgba(0,0,0,0.15) dark; light-mode flips it to
     // rgba(255,255,255,0.3) (a light wash over the page), so it must be
@@ -260,7 +278,12 @@ class _MessagesListState extends ConsumerState<MessagesList> {
             // A Stack so the scroll-to-bottom FAB (`.scroll-to-bottom-btn`) can
             // float over the conversation, mirroring the PWA's always-present
             // single-view jump-to-latest control (`styles-chat.css:9-43`).
-            child: Stack(
+            // The LayoutBuilder captures the viewport height that
+            // [_onPositionsChanged] needs to turn the normalized item edges
+            // into the PWA's 150px distance-from-bottom gate.
+            child: LayoutBuilder(builder: (context, constraints) {
+              _viewportHeight = constraints.maxHeight;
+              return Stack(
               children: [
                 Positioned.fill(
                   child: ScrollablePositionedList.builder(
@@ -268,17 +291,45 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     itemPositionsListener: _positionsListener,
                     reverse: true,
                     padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-                    itemCount: units.length,
+                    // Channel views carry one extra unit ABOVE the oldest
+                    // message: the `.channel-history-limit` pill ("You've
+                    // reached the edge of this channel's history."), which the
+                    // PWA prepends once back-paging reaches the start of stored
+                    // history (`loadOlderChannelMessages`, messages.js:
+                    // 3175-3180). Here the whole stored history is rendered, so
+                    // the lazily-built top item IS that boundary — it only
+                    // appears once the user scrolls back to it. PM/group views
+                    // have no such notice (`loadOlderPMMessages` never adds
+                    // one).
+                    itemCount: units.length + (isChannel ? 1 : 0),
                     itemBuilder: (context, revIndex) {
-                      final unit = units[units.length - 1 - revIndex];
-                      if (unit is _PollUnit) {
-                        return PollCard(poll: unit.poll, settings: settings);
+                      if (revIndex == units.length) {
+                        return _ChannelHistoryEdgeNotice(
+                            textSize: settings.textSize.toDouble());
                       }
-                      return MessageGroup(
-                        entries: (unit as _GroupUnit).entries,
-                        settings: settings,
-                        onReactionPicker: (msg) =>
-                            showReactionPicker(context, ref, msg),
+                      final forward = units.length - 1 - revIndex;
+                      final unit = units[forward];
+                      final Widget child;
+                      if (unit is _PollUnit) {
+                        child = PollCard(poll: unit.poll, settings: settings);
+                      } else {
+                        child = MessageGroup(
+                          entries: (unit as _GroupUnit).entries,
+                          settings: settings,
+                          onReactionPicker: (msg) =>
+                              showReactionPicker(context, ref, msg),
+                        );
+                      }
+                      // `.messages-list { gap: 3px }` (styles-chat.css:1-7):
+                      // a 3px flex gap between EVERY adjacent pair of list
+                      // children (rows, group wrappers, pills, polls), on top
+                      // of each row's own padding/margins. Driven from the top
+                      // edge; the list's very first child (the oldest unit, or
+                      // the history notice above it) opens no gap.
+                      return Padding(
+                        padding: EdgeInsets.only(
+                            top: (forward > 0 || isChannel) ? 3 : 0),
+                        child: child,
                       );
                     },
                   ),
@@ -298,7 +349,8 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     child: _ScrollToBottomButton(onTap: _scrollToBottom),
                   ),
               ],
-            ),
+              );
+            }),
           ),
           const TypingIndicatorRow(),
         ],
@@ -419,6 +471,55 @@ class _EmptyOrLoadingState extends State<_EmptyOrLoading> {
   }
 }
 
+/// The `.system-message.channel-history-limit` pill (`styles-chat.css:
+/// 1349-1355` on the `.system-message` base at `:1334-1348`): a centered
+/// fit-content pill marking the start of stored channel history — "You've
+/// reached the edge of this channel's history." Softer chrome than a normal
+/// system pill (border white@0.05, bg white@0.02 — same literals in both
+/// themes; no light override exists), padding 12px 20px, radius 20, margin
+/// 10px auto, italic `--text-dim` at `textSize − 3`, weight 450.
+class _ChannelHistoryEdgeNotice extends StatelessWidget {
+  const _ChannelHistoryEdgeNotice({required this.textSize});
+
+  /// The user text-size setting (`--user-text-size`); the pill renders 3px
+  /// smaller (`font-size: calc(var(--user-text-size) - 3px)`).
+  final double textSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Padding(
+      // `.system-message { margin: 10px auto }`.
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Center(
+        child: Container(
+          // `.channel-history-limit { padding: 12px 20px }` (overrides the
+          // base pill's 8px 16px).
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.02),
+            border:
+                Border.all(color: Colors.white.withValues(alpha: 0.05)),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: Text(
+            "You've reached the edge of this channel's history.",
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: textSize - 3,
+              fontStyle: FontStyle.italic,
+              // `.system-message { font-weight: 450 }` (w500 nearest).
+              fontWeight: FontWeight.w500,
+              height: 1.3,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A merged conversation entry, used only to interleave messages + polls in
 /// chronological order before folding into render units.
 sealed class _ListEntry {
@@ -458,8 +559,9 @@ class _GroupUnit extends _RenderUnit {
 /// analogue of the columns deck's `_ScrollBottomButton`, but 40px (vs 36) and —
 /// unlike the columns copy — it carries the light-mode style
 /// (`styles-themes-responsive.css:607-615`): rest fill white@0.85 / border
-/// primary@0.2 / shadow `0 2px 12px black@0.15`. Hover stays primary@0.15 fill /
-/// primary@0.30 border in both modes.
+/// primary@0.2 / shadow `0 2px 12px black@0.15`. Dark hover: primary@0.15 fill,
+/// primary@0.30 border, `0 0 15px primary@0.15` glow; light hover only lifts
+/// the fill to primary@0.10 (the light rest rule outranks the dark `:hover`).
 class _ScrollToBottomButton extends StatefulWidget {
   const _ScrollToBottomButton({required this.onTap});
   final VoidCallback onTap;
@@ -475,26 +577,35 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final light = c.isLight;
-    // Rest fill/border flip in light mode (the columns copy omits this); hover
-    // is primary-tinted in both modes.
+    // Rest fill/border flip in light mode (the columns copy omits this).
+    // Light-mode CASCADE: `body.light-mode .scroll-to-bottom-btn` (0,2,1)
+    // outranks the dark `.scroll-to-bottom-btn:hover` (0,2,0), so on light
+    // hover ONLY the background changes — to primary@0.10 via the (0,3,1)
+    // `body.light-mode .scroll-to-bottom-btn:hover` — while the border stays
+    // primary@0.2 and the shadow stays `0 2px 12px black@0.15`
+    // (styles-themes-responsive.css:607-615). Dark hover takes the full
+    // `:hover` set: primary@0.15 fill, primary@0.3 border, and the shadow
+    // swaps to a `0 0 15px primary@0.15` glow (styles-chat.css:34-39).
     final fill = _hover
-        ? c.primaryA(0.15)
+        ? (light ? c.primaryA(0.10) : c.primaryA(0.15))
         : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
-    final border = _hover
-        ? c.primaryA(0.30)
-        : (light ? c.primaryA(0.20) : c.glassBorder);
-    // shadow-md (dark) vs light `0 2px 12px black@0.15`.
+    final border = light
+        ? c.primaryA(0.20)
+        : (_hover ? c.primaryA(0.30) : c.glassBorder);
+    // shadow-md (dark rest) → hover glow (dark); light `0 2px 12px black@0.15`.
     final shadow = light
         ? const BoxShadow(
             color: Color(0x26000000), // black @ 0.15
             offset: Offset(0, 2),
             blurRadius: 12,
           )
-        : const BoxShadow(
-            color: Color(0x66000000), // black @ 0.4
-            offset: Offset(0, 4),
-            blurRadius: 16,
-          );
+        : _hover
+            ? BoxShadow(color: c.primaryA(0.15), blurRadius: 15)
+            : const BoxShadow(
+                color: Color(0x66000000), // black @ 0.4
+                offset: Offset(0, 4),
+                blurRadius: 16,
+              );
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),

@@ -12,6 +12,7 @@ import '../../models/user.dart';
 import '../../services/platform/deep_links.dart' show parseGroupInvite;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
 
@@ -59,9 +60,20 @@ class NewPmModal extends ConsumerStatefulWidget {
   const NewPmModal({super.key});
 
   static Future<void> open(BuildContext context) {
+    // `.modal` barrier: glass `rgba(0,0,0,0.7)` (styles-chat.css:1974);
+    // `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1636).
+    final solidUi =
+        ProviderScope.containerOf(context).read(settingsProvider).solidUi;
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
+      barrierColor: !solidUi
+          ? Colors.black.withValues(alpha: 0.7)
+          : isLight
+              ? const Color(0x73000000) // black @ 0.45
+              : const Color(0xBF000000), // black @ 0.75
       builder: (_) => const NewPmModal(),
     );
   }

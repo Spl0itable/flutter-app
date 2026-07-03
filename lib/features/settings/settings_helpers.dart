@@ -138,6 +138,24 @@ List<LandingChannelOption> buildLandingChannelOptions(
   return out;
 }
 
+/// The five valid read-receipt/typing-indicator scopes (settings.js:3
+/// `INDICATOR_SCOPES`).
+const List<String> kIndicatorScopes = [
+  'disabled', 'pms', 'groups', 'pms-groups', 'everywhere',
+];
+
+/// Coerces a stored indicator-scope value to a valid scope, mirroring
+/// `_normalizeIndicatorScope` (settings.js:27-32): the legacy boolean strings
+/// `'true'` → `'everywhere'` and `'false'` → `'disabled'`; any other value not
+/// in [kIndicatorScopes] falls back to [fallback].
+String normalizeIndicatorScope(String? value,
+    {String fallback = 'pms-groups'}) {
+  if (value == 'true') return 'everywhere';
+  if (value == 'false') return 'disabled';
+  if (value != null && kIndicatorScopes.contains(value)) return value;
+  return fallback;
+}
+
 /// Validates a settings-transfer recipient pubkey, mirroring shop.js:1767:
 /// must be exactly 64 hex chars, and not the user's own pubkey. Returns the
 /// matching PWA error string, or null when valid.
@@ -147,22 +165,25 @@ String? validateTransferPubkey(String input, {required String selfPubkey}) {
     return 'Invalid pubkey. Must be 64 hex characters.';
   }
   if (selfPubkey.isNotEmpty && pk == selfPubkey.toLowerCase()) {
-    return "You can't transfer settings to yourself.";
+    return 'Cannot transfer settings to yourself.';
   }
   return null;
 }
 
 /// The on-device cache-size readout shown in Data & Backup (app.js:3681
-/// `refreshAppCacheSize`). Native ports compute the breakdown from the live
-/// in-memory store (channels / PM+group threads / profiles / reaction records)
-/// with a byte estimate of that content; the PWA additionally consults
-/// `navigator.storage.estimate()`, which has no native analogue here.
+/// `refreshAppCacheSize`). Native ports compute the item breakdown from the
+/// live in-memory store (channels / PM+group threads / profiles / reaction
+/// records) with a byte estimate of that content. [realBytes], when > 0, is
+/// preferred over the content estimate — the PWA prefers the real
+/// `navigator.storage.estimate()` usage over its per-record estimate
+/// (app.js:3699 `estimateUsage > 0 ? estimateUsage : counts.totalBytes`); the
+/// native analogue is the on-disk `CacheStore.totalBytes()` reading.
 ///
 /// Returns the same human strings:
 ///  * `"{size} cached on device — N channels, N PM/group threads, N profiles,
-///    N reaction records"`
+///    N reaction records"` (size auto-scaled B/KB/MB/GB)
 ///  * `"No cached data on device yet"` when nothing is cached.
-String cacheReadoutFor(AppState s) {
+String cacheReadoutFor(AppState s, {int realBytes = 0}) {
   var channels = 0;
   var pms = 0;
   var bytes = 0;
@@ -183,19 +204,22 @@ String cacheReadoutFor(AppState s) {
   final reactions = s.reactions.length;
   bytes += reactions * 48;
 
+  final sizeBytes = realBytes > 0 ? realBytes : bytes;
   final totalItems = channels + pms + profiles + reactions;
-  if (totalItems == 0) return 'No cached data on device yet';
+  // The PWA's empty state requires BOTH zero items and zero bytes
+  // (app.js:3701); a non-zero estimate still renders the sized breakdown.
+  if (totalItems == 0 && sizeBytes <= 0) return 'No cached data on device yet';
 
   String plural(int n, String unit) => '$n $unit${n == 1 ? '' : 's'}';
   final breakdown =
       '${plural(channels, 'channel')}, ${plural(pms, 'PM/group thread')}, '
       '${plural(profiles, 'profile')}, ${plural(reactions, 'reaction record')}';
-  return '${formatCacheBytes(bytes)} cached on device — $breakdown';
+  return '${formatCacheBytes(sizeBytes)} cached on device — $breakdown';
 }
 
-/// Formats a byte count as a fixed-unit "MB" string for the Data & Backup
-/// cache readout (F7 asks for the size in MB specifically). Sub-megabyte totals
-/// keep one decimal (e.g. `0.4 MB`); larger totals round to whole MB.
+/// Formats a byte count as a fixed-unit "MB" string. Retained for tests; the
+/// live Data & Backup readout uses the PWA's auto-scaled [formatCacheBytes]
+/// via [cacheReadoutFor] (app.js:3631 `formatCacheBytes`).
 String formatCacheMb(int bytes) {
   if (bytes <= 0) return '0 MB';
   final mb = bytes / (1024 * 1024);
@@ -204,8 +228,7 @@ String formatCacheMb(int bytes) {
 }
 
 /// Formats a byte count into a short auto-scaled human string (app.js:3631
-/// `formatCacheBytes`). Retained for the breakdown helper / tests; the live
-/// readout uses [formatCacheMb].
+/// `formatCacheBytes`): B/KB/MB/GB, one decimal below 10 (except bytes).
 String formatCacheBytes(int bytes) {
   if (bytes <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];

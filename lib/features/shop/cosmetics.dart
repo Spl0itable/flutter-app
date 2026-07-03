@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,7 +28,7 @@ import 'shop_widgets.dart';
 class UserCosmetics {
   const UserCosmetics({
     this.styleId,
-    this.flairId,
+    this.flairIds = const [],
     this.supporter = false,
     this.cosmetics = const [],
     this.genesisEdition,
@@ -36,8 +37,16 @@ class UserCosmetics {
   /// Active message-style item id (e.g. `style-satoshi`), or null.
   final String? styleId;
 
-  /// Active nickname-flair item id (e.g. `flair-crown`), or null.
-  final String? flairId;
+  /// Active nickname-flair item ids (e.g. `flair-crown`), in record order. The
+  /// PWA renders a badge for EVERY id in a user's flair array (`getFlairForUser`
+  /// maps each id, shop.js:1149-1154; `_applyFlairBadgesToMessage` forEach,
+  /// :520-527) — the SELF activation UI merely caps the local set to one
+  /// (shop.js:401), so multi-flair records only arrive for other users.
+  final List<String> flairIds;
+
+  /// The last active flair id, or null — for the single-badge surfaces that
+  /// only show one (autocomplete rows, poll cards).
+  String? get flairId => flairIds.isNotEmpty ? flairIds.last : null;
 
   /// True when the user owns + has the supporter badge active.
   final bool supporter;
@@ -51,7 +60,7 @@ class UserCosmetics {
   final int? genesisEdition;
 
   bool get isEmpty =>
-      styleId == null && flairId == null && !supporter && cosmetics.isEmpty;
+      styleId == null && flairIds.isEmpty && !supporter && cosmetics.isEmpty;
   bool get isNotEmpty => !isEmpty;
 
   /// True when the redacted privacy cosmetic is active (blanks content + author
@@ -83,7 +92,8 @@ UserCosmetics resolveCosmetics(WidgetRef ref, String pubkey) {
 UserCosmetics _selfCosmetics(ActiveItems active) {
   return UserCosmetics(
     styleId: active.style,
-    flairId: active.flair.isNotEmpty ? active.flair.last : null,
+    // The PWA caps the SELF flair set to the last activated id (shop.js:401).
+    flairIds: active.flair.isNotEmpty ? [active.flair.last] : const [],
     supporter: active.supporter,
     cosmetics: active.cosmetics,
     genesisEdition: active.editions['flair-genesis'],
@@ -98,9 +108,10 @@ UserCosmetics userCosmeticsFromUser(User? user) {
     styleId: (user.shopStyle != null && user.shopStyle!.isNotEmpty)
         ? user.shopStyle
         : null,
-    flairId: (user.shopFlair != null && user.shopFlair!.isNotEmpty)
-        ? user.shopFlair
-        : null,
+    // Presence broadcasts carry a single flair field.
+    flairIds: (user.shopFlair != null && user.shopFlair!.isNotEmpty)
+        ? [user.shopFlair!]
+        : const [],
     supporter: user.isSupporter,
     cosmetics: user.shopCosmetics,
     genesisEdition: user.shopEdition,
@@ -109,11 +120,12 @@ UserCosmetics userCosmeticsFromUser(User? user) {
 
 /// Builds [UserCosmetics] from a D1 `shop-status` active record — the
 /// authoritative source for other users' cosmetics (shop.js:459-467). Keeps the
-/// last flair like the PWA and surfaces the Genesis edition from `active.editions`.
+/// FULL flair array (the PWA renders a badge per id, shop.js:520-527/1149-1154)
+/// and surfaces the Genesis edition from `active.editions`.
 UserCosmetics userCosmeticsFromStatus(ShopStatusActive a) {
   return UserCosmetics(
     styleId: (a.style != null && a.style!.isNotEmpty) ? a.style : null,
-    flairId: a.flair.isNotEmpty ? a.flair.last : null,
+    flairIds: a.flair,
     supporter: a.supporter,
     cosmetics: a.cosmetics,
     genesisEdition: a.editions['flair-genesis'],
@@ -173,20 +185,31 @@ class CosmeticNymBadges extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final flairId = cosmetics.flairId;
+    // One badge per ACTIVE flair id, in record order, skipping ids the catalog
+    // doesn't know (`_applyFlairBadgesToMessage` forEach + its
+    // `getShopItemById(id)` guard, shop.js:520-527).
+    final flairIds = [
+      for (final id in cosmetics.flairIds)
+        if (id.isNotEmpty && ShopCatalog.byId(id) != null) id,
+    ];
     final supporter = cosmetics.supporter;
-    if ((flairId == null || flairId.isEmpty) && !supporter) {
+    if (flairIds.isEmpty && !supporter) {
       return const SizedBox.shrink();
     }
-    // Stamp the Genesis edition number when the active flair is genesis and an
-    // explicit edition wasn't passed (`_flairIconHtml(id, editions[id])`).
-    final ed = edition ??
-        (flairId == 'flair-genesis' ? cosmetics.genesisEdition : null);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (flairId != null && flairId.isNotEmpty)
-          FlairBadge(flairId: flairId, edition: ed, size: flairSize),
+        for (final id in flairIds)
+          FlairBadge(
+            flairId: id,
+            // Stamp the Genesis edition number on the genesis badge when an
+            // explicit edition wasn't passed (`_flairIconHtml(id, editions[id])`
+            // — only genesis renders its number).
+            edition: id == 'flair-genesis'
+                ? (edition ?? cosmetics.genesisEdition)
+                : null,
+            size: flairSize,
+          ),
         if (supporter) SupporterBadge(height: supporterHeight),
       ],
     );
@@ -196,7 +219,7 @@ class CosmeticNymBadges extends StatelessWidget {
 /// True when [cosmetics] should bold the whole author nym — the Genesis holder
 /// treatment (`.has-genesis-flair { font-weight: 700 }`, the suffix stays 400).
 bool hasGenesisFlair(UserCosmetics cosmetics) =>
-    cosmetics.flairId == 'flair-genesis';
+    cosmetics.flairIds.contains('flair-genesis');
 
 /// A faithful Flutter translation of a `.message.style-X` rule from
 /// `css/styles-features.css`. Captures the parts we can render natively:
@@ -221,6 +244,10 @@ class MessageStyleDecoration {
     this.gradient,
     this.gradientGlow,
     this.contentBackground,
+    this.bubbleContentBackground,
+    this.bubbleOnlyContentBackground = false,
+    this.contentPadding,
+    this.transparentBubble = false,
     this.backgroundGradient,
     this.bubbleTextColor,
     this.childColor,
@@ -247,6 +274,33 @@ class MessageStyleDecoration {
   final Shadow? gradientGlow;
 
   final Color? contentBackground;
+
+  /// The bubble-layout `.message-content { background }` when it differs from
+  /// the IRC [contentBackground] (`body.chat-bubbles .message.style-X
+  /// .message-content { background: … !important }`): light-mode satoshi paints
+  /// `rgba(247,147,26,.12)` in bubbles but the IRC `rgba(196,122,21,.1)` tint.
+  /// Null = [contentBackground] in both layouts.
+  final Color? bubbleContentBackground;
+
+  /// True when [contentBackground] is a BUBBLE-layout-only wash: supporter's
+  /// gold `.message-content` fill is `body.chat-bubbles`-gated
+  /// (styles-features.css:3692-3694), so the IRC layout paints NO content plate
+  /// for it (supporter's IRC treatment is the row [backgroundGradient] + left
+  /// bar alone) — [contentBackgroundFor] `(bubble: false)` returns null.
+  final bool bubbleOnlyContentBackground;
+
+  /// The `.message-content` padding a style adds over the layout default — only
+  /// satoshi (`.message.style-satoshi .message-content { padding: 10px 15px }`,
+  /// styles-features.css:548-549). Applied by the IRC content plate; the bubble
+  /// keeps its own layout padding.
+  final EdgeInsets? contentPadding;
+
+  /// True when the bubble layout REPLACES the default translucent bubble fill
+  /// with a fully transparent one — aurora (`body.chat-bubbles .message.
+  /// style-aurora .message-content` clips its gradient to the text over a
+  /// `linear-gradient(transparent, transparent)` border-box layer `!important`,
+  /// styles-features.css:3675-3686), so the bubble shape disappears.
+  final bool transparentBubble;
 
   /// A 135deg background gradient painted on the IRC row (`body:not(.chat-bubbles)
   /// .message.X { background: linear-gradient(135deg,…) }`) — supporter's gold
@@ -296,6 +350,18 @@ class MessageStyleDecoration {
   /// This is the `.message-content` CONTAINER colour — what bare body text uses.
   Color textColorFor({required bool bubble}) =>
       bubble ? (bubbleTextColor ?? textColor) : textColor;
+
+  /// The `.message-content` background for the layout: the bubble override /
+  /// transparent-bubble replacement in bubble mode, else [contentBackground].
+  /// A NON-null return replaces the layout's default translucent bubble fill
+  /// (aurora returns fully transparent); null = keep the default fill.
+  Color? contentBackgroundFor({required bool bubble}) {
+    if (bubble) {
+      if (transparentBubble) return const Color(0x00000000);
+      return bubbleContentBackground ?? contentBackground;
+    }
+    return bubbleOnlyContentBackground ? null : contentBackground;
+  }
 
   /// The colour for an INNER `> *` element (link/mention/emoji) and for the shop
   /// DEMO sample (which the PWA wraps in a `<span>`, so it is a child). Falls back
@@ -404,6 +470,7 @@ class CosmeticAura {
     this.insetWidth = 1,
     this.glowColor,
     this.glowBlur = 0,
+    this.bubbleGlowColor,
     this.bubbleGlowBlur,
     this.borderAccent,
     this.gradient,
@@ -436,6 +503,13 @@ class CosmeticAura {
   /// `box-shadow: 0 0 {glowBlur}px {glowColor}` (IRC).
   final Color? glowColor;
   final double glowBlur;
+
+  /// The bubble-layout outer-glow COLOUR when it differs from the IRC
+  /// [glowColor] — light gold strokes `rgba(180,140,0,.15)` on the bubble
+  /// (`body.light-mode.chat-bubbles … .message-content`,
+  /// styles-themes-responsive.css:929-932) vs the IRC `.12`. Null = use
+  /// [glowColor] in both layouts.
+  final Color? bubbleGlowColor;
 
   /// The bubble-layout outer-glow blur when it differs from the IRC [glowBlur]
   /// (gold: bubble 12px vs IRC 18px). Null = use [glowBlur] in both layouts.
@@ -494,6 +568,10 @@ class CosmeticAura {
   Color? insetColorFor({required bool bubble}) =>
       bubble ? (bubbleInsetColor ?? insetColor) : insetColor;
 
+  /// The outer-glow colour for [bubble] layout (the bubble override when set).
+  Color? glowColorFor({required bool bubble}) =>
+      bubble ? (bubbleGlowColor ?? glowColor) : glowColor;
+
   /// The outer-glow blur for [bubble] layout (the bubble override when set).
   double glowBlurFor({required bool bubble}) =>
       bubble ? (bubbleGlowBlur ?? glowBlur) : glowBlur;
@@ -550,12 +628,23 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // Only aurora keeps a multi-stop gradient in light mode; every other gradient
     // style falls back to a solid [_styleLightColor].
     gradient: isLight ? _styleLightGradient[styleId] : v.gradient,
-    // The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`),
-    // kept in both modes; light only swaps the gradient stops.
-    gradientGlow: (v.gradient != null) ? _styleGradientGlow[styleId] : null,
+    // The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`)
+    // — dark mode only: the light rule swaps the gradient stops AND resets
+    // `text-shadow: none` (styles-themes-responsive.css:884-897).
+    gradientGlow:
+        (!isLight && v.gradient != null) ? _styleGradientGlow[styleId] : null,
     contentBackground:
         (isLight ? _styleLightContentBackground[styleId] : null) ??
             _styleContentBackground[styleId],
+    // Bubble-layout background override — light satoshi's rgba(247,147,26,.12)
+    // (styles-themes-responsive.css:1417) vs its IRC rgba(196,122,21,.1) tint.
+    bubbleContentBackground:
+        isLight ? _styleLightBubbleContentBackground[styleId] : null,
+    // satoshi's own `.message-content` padding (`padding: 10px 15px`, :548).
+    contentPadding: _styleContentPadding[styleId],
+    // Aurora replaces the bubble fill with a transparent border-box layer in
+    // BOTH modes (styles-features.css:3675-3686 + themes:843's light gradient).
+    transparentBubble: styleId == 'style-aurora',
     // Bubble-only colour overrides (fire/ice). Light mode uses the single light
     // colour for both layouts (the bubble override is a dark-mode-only rule).
     bubbleTextColor: hasLightText ? null : _styleBubbleTextColor[styleId],
@@ -635,7 +724,8 @@ const Map<String, List<Shadow>> _styleGlowShadows = {
 };
 
 /// The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`,
-/// styles-features.css:644), kept behind the gradient-clipped text in both modes.
+/// styles-features.css:644), kept behind the gradient-clipped text — DARK mode
+/// only (light resets `text-shadow: none`, styles-themes-responsive.css:889).
 const Map<String, Shadow> _styleGradientGlow = {
   'style-aurora': Shadow(color: Color(0x4D5B8CFF), blurRadius: 10),
 };
@@ -651,6 +741,13 @@ const Map<String, Color> _styleBubbleTextColor = {
 /// Styles that bold their glyphs (`font-weight: bold` on the inner spans).
 /// satoshi (`styles-features.css:572`).
 const Set<String> _styleBold = {'style-satoshi'};
+
+/// Per-style `.message-content` padding — satoshi's plate carries its own
+/// `padding: 10px 15px` (styles-features.css:548-549, kept by the light
+/// override); eclipse/crt paint their plates with no extra padding.
+const Map<String, EdgeInsets> _styleContentPadding = {
+  'style-satoshi': EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+};
 
 /// Dark-mode `.message-content` CONTAINER body-text colour for styles whose bare
 /// body differs from their inner `> *` child colour. Only satoshi: the container
@@ -703,10 +800,21 @@ const Map<String, List<Color>> _styleLightGradient = {
   ],
 };
 
-/// Light-mode content-background overrides (satoshi tints lighter:
-/// `rgba(196,122,21,0.1)`).
+/// Light-mode IRC content-background overrides (satoshi tints
+/// `rgba(196,122,21,0.1)`, styles-themes-responsive.css:899-901).
 const Map<String, Color> _styleLightContentBackground = {
   'style-satoshi': Color(0x1AC47A15),
+};
+
+/// Light-mode BUBBLE content-background overrides (`body.light-mode.chat-bubbles
+/// .message.style-satoshi .message-content { background: rgba(247,147,26,.12)
+/// !important }`, styles-themes-responsive.css:1417-1419; fire/ice share a
+/// dedicated `rgba(0,0,0,.08)` fill instead of the generic black@.10 bubble,
+/// :1412-1414).
+const Map<String, Color> _styleLightBubbleContentBackground = {
+  'style-satoshi': Color(0x1FF7931A),
+  'style-fire': Color(0x14000000), // rgba(0,0,0,0.08)
+  'style-ice': Color(0x14000000), // rgba(0,0,0,0.08)
 };
 
 /// Explicit glyph shadows for styles whose CSS `text-shadow` is not a single
@@ -1030,6 +1138,9 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
   glow: Color(0x40FFD700), // rgba(255,215,0,.25) — single-layer fallback
   // body.chat-bubbles .message.supporter-style .message-content { bg rgba(255,215,0,.12) }
   contentBackground: Color(0x1FFFD700), // rgba(255,215,0,.12) bubble wash
+  // The gold wash is `body.chat-bubbles`-gated (:3692) — IRC paints only the
+  // row gradient + bar, never a content plate.
+  bubbleOnlyContentBackground: true,
   // body:not(.chat-bubbles) .message.supporter-style { bg gradient .08→.03 } (:1085)
   backgroundGradient: [Color(0x14FFD700), Color(0x08FFD700)],
   borderAccent: Color(0xFFFFD700),
@@ -1042,12 +1153,107 @@ const MessageStyleDecoration supporterStyleDecoration = MessageStyleDecoration(
 const MessageStyleDecoration supporterStyleDecorationLight =
     MessageStyleDecoration(
   textColor: Color(0xFF8A6D00),
-  contentBackground: Color(0x14B48C00), // rgba(180,140,0,~.08) bubble wash
+  // body.light-mode.chat-bubbles .message.supporter-style .message-content
+  // { background: rgba(180,150,0,0.08) !important } (themes:1421) — note the
+  // 150 green channel (NOT the 140 of the wash/border rules).
+  contentBackground: Color(0x14B49600), // rgba(180,150,0,.08) bubble wash
+  // Bubble-only, like the dark wash — IRC light paints just the row gradient.
+  bubbleOnlyContentBackground: true,
   // body.light-mode:not(.chat-bubbles) .message.supporter-style { bg gradient
   // rgba(180,140,0,.06→.02) } (:935).
   backgroundGradient: [Color(0x0FB48C00), Color(0x05B48C00)],
   borderAccent: Color(0xFFB8960A),
 );
+
+/// Message styles whose DARK body-text colour rule is declared AFTER the
+/// supporter gold rule (`.message.supporter-style .message-content
+/// { color:#ffd700 !important }`, styles-features.css:1089) at equal
+/// specificity — so they keep their own colour + text-shadow when both classes
+/// are present: eclipse (:1249) and crt (:1281).
+const Set<String> _darkStyleColorBeatsSupporter = {
+  'style-eclipse',
+  'style-crt',
+};
+
+/// Message styles whose LIGHT body-text colour rule is declared AFTER the light
+/// supporter rule (`body.light-mode .message.supporter-style .message-content
+/// { color:#8a6d00 !important }`, styles-themes-responsive.css:939) at equal
+/// specificity — ocean/sakura/galaxy/toxic/blood/royal/circuit/gold (:987-1002)
+/// and vapor (:1009) keep their own light colour; every other style (and
+/// eclipse/crt, whose 3-class dark rules lose to the 4-class light supporter
+/// rule) goes supporter gold-brown.
+const Set<String> _lightStyleColorBeatsSupporter = {
+  'style-ocean',
+  'style-sakura',
+  'style-galaxy',
+  'style-toxic',
+  'style-blood',
+  'style-royal',
+  'style-circuit',
+  'style-gold',
+  'style-vapor',
+};
+
+/// Composes the supporter-badge gold treatment ONTO an active message style —
+/// the PWA adds BOTH classes to the message (`_applyShopClassesToMessage`,
+/// shop.js:485-495), so the two cascade together rather than one replacing the
+/// other:
+///
+/// * Row (IRC): supporter's gold 135deg wash + 3px gold left bar
+///   (`body:not(.chat-bubbles) .message.supporter-style`) — no style paints
+///   those, so they always compose in.
+/// * Bubble fill: supporter's gold wash (`body.chat-bubbles .message.
+///   supporter-style .message-content { background … !important }`,
+///   styles-features.css:3692) is declared after every style's bubble
+///   background at equal-or-winning specificity/importance, so it replaces the
+///   style's bubble fill.
+/// * Body text: supporter's `color:#ffd700 !important` + gold text-shadow
+///   (:1089-1092) beat the style colour rules declared before them (source
+///   order at equal specificity); the styles in
+///   [_darkStyleColorBeatsSupporter] / [_lightStyleColorBeatsSupporter] are
+///   declared later and keep their own text. The style's content plates
+///   (satoshi/eclipse/crt), watermark, monospace/bold and the bubble-only
+///   fire/ice colours (`body.chat-bubbles …`, 4 classes, :3664-3672) survive.
+///
+/// aurora is exempt: its text is gradient-clipped with
+/// `-webkit-text-fill-color: transparent`, so the gold `color` never shows.
+MessageStyleDecoration composeSupporterStyle(
+  MessageStyleDecoration styled,
+  String styleId, {
+  required bool isLight,
+}) {
+  if (styleId == 'style-aurora') return styled;
+  final supporter =
+      isLight ? supporterStyleDecorationLight : supporterStyleDecoration;
+  final goldText = isLight
+      ? !_lightStyleColorBeatsSupporter.contains(styleId)
+      : !_darkStyleColorBeatsSupporter.contains(styleId);
+  return MessageStyleDecoration(
+    textColor: goldText ? supporter.textColor : styled.textColor,
+    glow: goldText ? supporter.glow : styled.glow,
+    // Supporter's `text-shadow: 0 0 8px gold@.25` (:1090) replaces the style's
+    // stack (glitch's chromatic split included) whenever the gold colour wins;
+    // light supporter resets `text-shadow: none` (themes:940).
+    glowShadows: goldText ? supporter.glowShadows : styled.glowShadows,
+    glyphShadows: goldText ? null : styled.glyphShadows,
+    gradient: styled.gradient,
+    gradientGlow: styled.gradientGlow,
+    contentBackground: styled.contentBackground,
+    bubbleOnlyContentBackground: styled.bubbleOnlyContentBackground,
+    // Supporter's bubble wash wins over every style's bubble fill (dark
+    // rgba(255,215,0,.12) at :3692; light rgba(180,150,0,.08) at themes:1421).
+    bubbleContentBackground: supporter.contentBackgroundFor(bubble: true),
+    contentPadding: styled.contentPadding,
+    transparentBubble: styled.transparentBubble,
+    backgroundGradient: supporter.backgroundGradient,
+    bubbleTextColor: styled.bubbleTextColor,
+    childColor: styled.childColor,
+    borderAccent: supporter.borderAccent,
+    monospace: styled.monospace,
+    bold: styled.bold,
+    watermark: styled.watermark,
+  );
+}
 
 // =============================================================================
 // Special cosmetics (auras / watermarks / prism / hologram). `.message.cosmetic-X`
@@ -1057,20 +1263,25 @@ const MessageStyleDecoration supporterStyleDecorationLight =
 /// Resolves the active special-cosmetic auras for [cosmetics] (in declared
 /// order, excluding the redacted privacy item which is handled separately).
 ///
-/// [isLight] selects the `body.light-mode .message.cosmetic-X` override: the
-/// bright dark rings/borders are too strong on a light surface, so the PWA (gold)
-/// — and, where the PWA has no explicit light rule, a derived readable tone —
-/// swaps to a darker, softer aura. Mirrors how the styles thread `isLight`.
+/// [isLight] selects the `body.light-mode .message.cosmetic-X` override — the
+/// PWA ships one ONLY for gold; the other auras keep their dark values in light
+/// mode (see [cosmeticAuraFor]).
 List<CosmeticAura> resolveCosmeticAuras(UserCosmetics cosmetics,
     {bool isLight = false}) {
-  final table = isLight ? _cosmeticAurasLight : _cosmeticAuras;
   final out = <CosmeticAura>[];
   for (final id in cosmetics.cosmetics) {
-    final aura = table[id] ?? _cosmeticAuras[id];
+    final aura = cosmeticAuraFor(id, isLight: isLight);
     if (aura != null) out.add(aura);
   }
   return out;
 }
+
+/// The aura for a single cosmetic [id], mode-aware. Only GOLD has a light-mode
+/// override in the PWA; every other aura keeps its dark values in light mode
+/// (styles-themes-responsive.css:923-931 is the sole `body.light-mode`
+/// cosmetic-aura rule). Used by both the chat bubble and the shop card preview.
+CosmeticAura? cosmeticAuraFor(String id, {bool isLight = false}) =>
+    (isLight ? _cosmeticAurasLight[id] : null) ?? _cosmeticAuras[id];
 
 const String _frostSnowflakeSvg =
     "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
@@ -1176,13 +1387,12 @@ final Map<String, CosmeticAura> _cosmeticAuras = {
   ),
 };
 
-/// Light-mode aura overrides. The PWA only ships an explicit light rule for GOLD
-/// (`body.light-mode … .cosmetic-aura-gold`, styles-themes-responsive.css:923-931);
-/// for the other auras (neon/rainbow/phoenix/cosmic/frost/hologram) there is no
-/// light override, so a bright dark ring would bleed onto the light surface —
-/// here we DERIVE a readable light tone (lower ring/glow alpha, the same hue) so
-/// the aura still reads without overpowering the bubble. Auras absent from this
-/// map fall back to the dark entry (see [resolveCosmeticAuras]).
+/// Light-mode aura overrides. The PWA ships an explicit light rule ONLY for
+/// GOLD (`body.light-mode … .cosmetic-aura-gold`, styles-themes-responsive.css:
+/// 923-931). Every other aura (neon/rainbow/phoenix/cosmic/frost/hologram) has
+/// NO light override in the CSS and keeps its dark values in light mode —
+/// ground-truth parity forbids inventing muted variants for them. Auras absent
+/// from this map fall back to the dark entry (see [cosmeticAuraFor]).
 final Map<String, CosmeticAura> _cosmeticAurasLight = {
   // gold — explicit PWA light values. IRC: inset .3, glow 12px .12, border
   // #b8960a, bg .06→.02. Bubble: inset .5, glow 10px .15, fill .18→.06.
@@ -1194,94 +1404,16 @@ final Map<String, CosmeticAura> _cosmeticAurasLight = {
     insetRing: true,
     glowColor: Color(0x1FB48C00), // rgba(180,140,0,.12)
     glowBlur: 12,
+    // Bubble glow: 0 0 10px rgba(180,140,0,.15) (themes:931) — .15, not the
+    // IRC .12.
+    bubbleGlowColor: Color(0x26B48C00), // rgba(180,140,0,.15)
     bubbleGlowBlur: 10,
     borderAccent: Color(0xFFB8960A),
     gradient: [Color(0x0FB48C00), Color(0x05B48C00)], // .06→.02
     bubbleGradient: [Color(0x2EB48C00), Color(0x0FB48C00)], // .18→.06
     bubblePaintsGradient: true,
   ),
-  // neon — derived: softer cyan ring (.35) + dimmer glow, darker border so it
-  // reads on white. Bubble box-shadow-only (no fill), like dark.
-  'cosmetic-aura-neon': const CosmeticAura(
-    id: 'cosmetic-aura-neon',
-    insetColor: Color(0x59008CA8), // muted cyan ring ~.35
-    insetRing: true,
-    glowColor: Color(0x33008CA8),
-    glowBlur: 16,
-    borderAccent: Color(0xFF0095B3),
-    gradient: [Color(0x14008CA8), Color(0x08008CA8)],
-  ),
-  // rainbow — prism ring reads fine on light; just soften the purple glow.
-  'cosmetic-aura-rainbow': const CosmeticAura(
-    id: 'cosmetic-aura-rainbow',
-    glowColor: Color(0x335A2FB0), // softer purple
-    glowBlur: 14,
-    prismRing: true,
-  ),
-  // frost — derived: a darker icy ring/border + a lighter wash so frosted edges
-  // and the bg read on a light surface.
-  'cosmetic-frost': CosmeticAura(
-    id: 'cosmetic-frost',
-    insetColor: const Color(0x665B9FC8), // muted blue ring
-    insetRing: true,
-    glowColor: const Color(0x335B9FC8),
-    glowBlur: 10,
-    background: const Color(0x1F7FB8D8), // lighter icy wash
-    watermark: StyleWatermark.svg(_frostSnowflakeSvgLight, const Size(18, 18)),
-    edgeWatermark: true,
-  ),
-  // phoenix — derived: darker orange ring/border, dimmer glow.
-  'cosmetic-aura-phoenix': const CosmeticAura(
-    id: 'cosmetic-aura-phoenix',
-    insetColor: Color(0x80C25000), // muted orange ~.5
-    insetRing: true,
-    glowColor: Color(0x40C24700),
-    glowBlur: 22,
-    borderAccent: Color(0xFFC24700),
-    gradient: [Color(0x12C25000), Color(0x08B33000)],
-  ),
-  // cosmic — derived: darker purple ring/border, dimmer glow; keep the starfield.
-  'cosmetic-aura-cosmic': CosmeticAura(
-    id: 'cosmetic-aura-cosmic',
-    insetColor: const Color(0x805A3FB0), // muted purple ~.5
-    insetRing: true,
-    glowColor: const Color(0x405A3FB0),
-    glowBlur: 22,
-    borderAccent: const Color(0xFF5A3FB0),
-    gradient: const [Color(0x1F46308C), Color(0x0F2A2350)],
-    watermark: StyleWatermark.svg(_cosmicStarfieldSvgLight, const Size(60, 60)),
-  ),
-  // hologram — derived: a darker inset so the white-sheen iridescence stays
-  // visible over a light bubble; the sheen/gradient itself is unchanged.
-  'cosmetic-bubble-hologram': const CosmeticAura(
-    id: 'cosmetic-bubble-hologram',
-    insetColor: Color(0x66607090), // muted slate ring (was white .5)
-    insetRing: true,
-    glowColor: Color(0x668097C8),
-    glowBlur: 18,
-    hologram: true,
-  ),
 };
-
-/// Light-mode variants of the tiled aura SVGs (darker fills so the texture
-/// reads on a light surface — the PWA has no light rule for these auras, so the
-/// tone is derived).
-const String _frostSnowflakeSvgLight =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='18' height='18'>"
-    "<g fill='none' stroke='#3f7fa8' stroke-opacity='0.5' stroke-width='1' "
-    "stroke-linecap='round'>"
-    "<path d='M9 2.5v13M2.5 9h13M4.4 4.4l9.2 9.2M13.6 4.4 4.4 13.6'/>"
-    "<path d='M9 4.5 7.5 6M9 4.5 10.5 6M9 13.5 7.5 12M9 13.5 10.5 12M4.5 9 6 "
-    "7.5M4.5 9 6 10.5M13.5 9 12 7.5M13.5 9 12 10.5'/></g></svg>";
-
-const String _cosmicStarfieldSvgLight =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'>"
-    "<g fill='#5a3fb0'><circle cx='10' cy='12' r='1' fill-opacity='0.45'/>"
-    "<circle cx='44' cy='8' r='0.8' fill-opacity='0.4'/>"
-    "<circle cx='52' cy='34' r='1.2' fill-opacity='0.5'/>"
-    "<circle cx='22' cy='44' r='0.9' fill-opacity='0.4'/>"
-    "<circle cx='33' cy='22' r='0.7' fill-opacity='0.35'/>"
-    "<circle cx='15' cy='50' r='0.6' fill-opacity='0.3'/></g></svg>";
 
 // =============================================================================
 // Rendering widgets for the watermark / aura textures.
@@ -1419,8 +1551,8 @@ class _GlyphTilePainter extends CustomPainter {
 }
 
 /// Repeats a small inline SVG [tile] across the available box. Uses
-/// [SvgPicture.string] inside an `OverflowBox`-free wrap-grid so it tiles
-/// cheaply without rasterisation plumbing.
+/// [SvgPicture.string] cells absolutely positioned in a Stack so it tiles
+/// cheaply without rasterisation plumbing (and without RenderFlex overflow).
 class _TiledSvg extends StatelessWidget {
   const _TiledSvg({required this.svg, required this.tile});
   final String svg;
@@ -1432,27 +1564,30 @@ class _TiledSvg extends StatelessWidget {
       builder: (context, constraints) {
         final w = constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
         final h = constraints.maxHeight.isFinite ? constraints.maxHeight : 120.0;
-        final cols = (w / tile.width).ceil() + 1;
-        final rows = (h / tile.height).ceil() + 1;
-        // A fresh SvgPicture per cell (a widget can't appear twice in the tree).
-        SizedBox cell() => SizedBox(
-              width: tile.width,
-              height: tile.height,
-              child: SvgPicture.string(
-                svg,
-                width: tile.width,
-                height: tile.height,
-                fit: BoxFit.fill,
-              ),
-            );
-        return Column(
-          mainAxisSize: MainAxisSize.min,
+        final cols = (w / tile.width).ceil();
+        final rows = (h / tile.height).ceil();
+        // Positioned tiles from the top-left (CSS `background-repeat` origin
+        // 0 0); the partial last row/column is clipped by the wrapping ClipRect.
+        // A Stack never reports RenderFlex overflow, unlike a Row/Column grid.
+        return Stack(
+          clipBehavior: Clip.none,
           children: [
             for (var r = 0; r < rows; r++)
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [for (var col = 0; col < cols; col++) cell()],
-              ),
+              for (var col = 0; col < cols; col++)
+                Positioned(
+                  left: col * tile.width,
+                  top: r * tile.height,
+                  width: tile.width,
+                  height: tile.height,
+                  // A fresh SvgPicture per cell (a widget can't appear twice
+                  // in the tree).
+                  child: SvgPicture.string(
+                    svg,
+                    width: tile.width,
+                    height: tile.height,
+                    fit: BoxFit.fill,
+                  ),
+                ),
           ],
         );
       },
@@ -1477,8 +1612,19 @@ class _EdgeTiledSvg extends StatelessWidget {
         final h = constraints.maxHeight.isFinite ? constraints.maxHeight : 120.0;
         final cols = (w / tile.width).ceil() + 1;
         final rows = (h / tile.height).ceil() + 1;
+        // Inner vertical strips skip the top/bottom row so the corners aren't
+        // double-stacked (the horizontal strips already cover them).
+        final innerRows = rows - 2 > 0 ? rows - 2 : 0;
+        // `center top/bottom` → the horizontal strips centre on the box;
+        // `left/right center` → the vertical strips centre vertically. Cells are
+        // absolutely positioned (a Stack never reports RenderFlex overflow —
+        // the overhang is clipped by the wrapping ClipRect).
+        final x0 = (w - cols * tile.width) / 2;
+        final y0 = (h - innerRows * tile.height) / 2;
         // A fresh SvgPicture per cell (a widget can't appear twice in the tree).
-        Widget cell() => SizedBox(
+        Widget cellAt(double left, double top) => Positioned(
+              left: left,
+              top: top,
               width: tile.width,
               height: tile.height,
               child: SvgPicture.string(
@@ -1488,22 +1634,17 @@ class _EdgeTiledSvg extends StatelessWidget {
                 fit: BoxFit.fill,
               ),
             );
-        Widget hStrip() => Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [for (var col = 0; col < cols; col++) cell()],
-            );
-        // Inner vertical strips skip the top/bottom row so the corners aren't
-        // double-stacked (the horizontal strips already cover them).
-        Widget vStrip() => Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [for (var r = 0; r < rows - 2; r++) cell()],
-            );
         return Stack(
+          clipBehavior: Clip.none,
           children: [
-            Align(alignment: Alignment.topCenter, child: hStrip()),
-            Align(alignment: Alignment.bottomCenter, child: hStrip()),
-            Align(alignment: Alignment.centerLeft, child: vStrip()),
-            Align(alignment: Alignment.centerRight, child: vStrip()),
+            for (var col = 0; col < cols; col++)
+              cellAt(x0 + col * tile.width, 0),
+            for (var col = 0; col < cols; col++)
+              cellAt(x0 + col * tile.width, h - tile.height),
+            for (var r = 0; r < innerRows; r++)
+              cellAt(0, y0 + r * tile.height),
+            for (var r = 0; r < innerRows; r++)
+              cellAt(w - tile.width, y0 + r * tile.height),
           ],
         );
       },
@@ -1519,27 +1660,16 @@ class _EdgeTiledSvg extends StatelessWidget {
 /// inner ring (stroked fully inside the bubble edge) plus a soft inward feather,
 /// instead of the outset glow `BoxShadow` can only approximate.
 ///
-/// CROSS-FILE NOTE (needs a one-line `message_row.dart` edit — outside this
-/// slice's owned files): `message_row.dart._decorateBubble` now routes
-/// `auras.where((a) => a.hasOverlay)` through this painter (its `overlays`
-/// filter, ~line 590), and [CosmeticAura.hasOverlay] includes `insetRing`. So
-/// every inset-ring aura (gold/neon/phoenix/cosmic/frost + hologram) DOES reach
-/// this painter and gets its fully-inset ring drawn here. BUT `_decorateBubble`
-/// ALSO still sets `border: Border.all(inset.insetColor, inset.insetWidth)`
-/// (~line 605) whenever the last aura carries an `insetColor` — i.e. the same
-/// four pure-ring auras now get BOTH a centred `Border.all` AND this painter's
-/// inset ring → two overlapping rings of the same hue (a visible double ring).
-/// FIX (in `message_row.dart`, not here): suppress that `Border.all` for auras
-/// routed through the painter, e.g. guard it with `inset != null &&
-/// inset.insetColor != null && !inset.hasOverlay`. Every aura with an
-/// `insetColor` today is an `insetRing`/`hasOverlay` aura, so this leaves only
-/// the painter's single inset ring. Nothing else needs to change — the painter
-/// already strokes the ring for all `insetRing` auras.
+/// `message_row.dart._decorateBubble` routes `auras.where((a) => a.hasOverlay)`
+/// through this painter and suppresses its own `Border.all` fallback for those
+/// auras (`!lastAura.hasOverlay` guard), so every inset-ring aura draws exactly
+/// ONE ring — the fully-inset stroke painted here.
 class CosmeticOverlayPainter extends CustomPainter {
   CosmeticOverlayPainter({
     required this.aura,
     required this.radius,
     this.bubble = true,
+    this.styleActive = false,
   });
 
   final CosmeticAura aura;
@@ -1548,6 +1678,13 @@ class CosmeticOverlayPainter extends CustomPainter {
   /// Whether this overlay is painted in bubble layout (selects [CosmeticAura.
   /// bubbleInsetColor]). The prism ring / hologram sheen are layout-agnostic.
   final bool bubble;
+
+  /// True when the message has an active `style-…` message style. The PWA
+  /// gates the hologram iridescent fill + sheen on `.message:not([class*=
+  /// "style-"]).cosmetic-bubble-hologram` (styles-features.css:1203-1211), so a
+  /// styled message keeps only the box-shadow ring. Callers (message_row /
+  /// previews) pass the active-style flag; the shop demo has no style.
+  final bool styleActive;
 
   static const List<Color> _prism = [
     Color(0xFFFF2D2D),
@@ -1565,16 +1702,26 @@ class CosmeticOverlayPainter extends CustomPainter {
     final rect = Offset.zero & size;
     final rrect = radius.toRRect(rect);
     if (aura.prismRing) {
-      // 3px conic-gradient ring masked to the border.
-      final shader = const SweepGradient(colors: _prism).createShader(rect);
+      // 3px conic-gradient ring masked to the border. CSS `conic-gradient(from
+      // 0deg …)` starts at 12 o'clock; SweepGradient starts at the +x axis
+      // (3 o'clock), so rotate back a quarter turn to put red at the top.
+      final shader = const SweepGradient(
+        colors: _prism,
+        transform: GradientRotation(-math.pi / 2),
+      ).createShader(rect);
       final ring = Paint()
         ..shader = shader
         ..style = PaintingStyle.stroke
         ..strokeWidth = 3;
       canvas.drawRRect(rrect.deflate(1.5), ring);
     }
-    if (aura.hologram) {
-      // 135deg multi-colour gradient + a 115deg white sheen (screen blend).
+    // Hologram fill + sheen are background-image layers the PWA drops when a
+    // message style is active (`:not([class*="style-"])`); the ring stays.
+    if (aura.hologram && !styleActive) {
+      // 135deg multi-colour gradient + a 115deg white sheen. CSS
+      // `background-blend-mode: screen, normal` (styles-features.css:1209):
+      // only the white sheen screen-blends — the colour gradient composites
+      // normally over the bubble fill.
       final base = Paint()
         ..shader = const LinearGradient(
           begin: Alignment.topLeft,
@@ -1586,8 +1733,7 @@ class CosmeticOverlayPainter extends CustomPainter {
             Color(0x66FFE100),
             Color(0x66FF00C8),
           ],
-        ).createShader(rect)
-        ..blendMode = BlendMode.screen;
+        ).createShader(rect);
       canvas.drawRRect(rrect, base);
       final sheen = Paint()
         ..shader = const LinearGradient(
@@ -1643,6 +1789,7 @@ class CosmeticOverlayPainter extends CustomPainter {
       old.aura.id != aura.id ||
       old.radius != radius ||
       old.bubble != bubble ||
+      old.styleActive != styleActive ||
       old.aura.insetColor != aura.insetColor ||
       old.aura.bubbleInsetColor != aura.bubbleInsetColor ||
       old.aura.insetWidth != aura.insetWidth ||

@@ -16,6 +16,7 @@ import '../features/emoji/custom_emoji.dart'
         kCustomEmojiPacksKey,
         loadCustomEmojiState;
 import '../features/emoji/emoji_data.dart';
+import '../features/emoji/emoji_prefetch.dart' show scheduleCustomEmojiPrefetch;
 import '../features/groups/group_logic.dart';
 import '../features/messages/spam_filter.dart';
 import '../features/messages/trust_graph.dart';
@@ -943,6 +944,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// (e.g. before the controller boots, or in pure UI/state tests).
   void Function(ChatView view)? onViewOpened;
 
+  /// Fired after a PM/group message is inserted via [ingestPMMessage] /
+  /// [ingestGroupMessage], with the conversation storage key. The controller
+  /// wires this to its dirty-key cache flush so inbound (and engine-injected,
+  /// e.g. Nymbot) messages persist like the PWA's per-insert
+  /// `persistPMMessages` (pms.js:1307). Best-effort; may be null in pure state
+  /// tests.
+  void Function(String storageKey)? onPmMessageIngested;
+
   /// Fired whenever the closed-PM set ([_closedPMs] / [_closedPMTimes]) mutates
   /// (close, re-open, or a strictly-newer inbound that re-opens a thread). The
   /// controller wires this to KV persistence (`nym_closed_pms` /
@@ -989,6 +998,120 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// conversation storage key the badge is bucketed under.
   bool _isUnreadByWatermark(String key, Message m) =>
       m.createdAt > (_channelLastRead[key] ?? 0);
+
+  /// Columns-mode read gate (PWA `_cvMarkColumnRead`, columns.js:26-42).
+  /// Registered by the columns deck while it is mounted; null in single view.
+  /// Given a conversation storage key, returns true ONLY when that
+  /// conversation's column is the focused one, pinned to the newest message
+  /// (at-bottom), and the app is visible (document not hidden) — the only case
+  /// the PWA clears/keeps-clear its unread badge. A focused-but-scrolled-up
+  /// column keeps accruing unread until it scrolls back to the bottom.
+  bool Function(String storageKey)? columnsReadGate;
+
+  /// True when a NEW message for [storageKey] should be treated as SEEN (no
+  /// unread bump, watermark advanced): single view → it is the active
+  /// conversation; columns view → the deck's [columnsReadGate] says the
+  /// column is focused + at-bottom + visible (messages.js:546 /
+  /// pms.js:1378 / groups.js:1333 all route through `_cvMarkColumnRead`).
+  bool _isConversationSeen(String storageKey) {
+    final gate = columnsReadGate;
+    if (gate != null) return gate(storageKey);
+    return storageKey == state.view.storageKey;
+  }
+
+  /// Public form of the seen check for the controller's read-receipt gate
+  /// (messages.js:546 sends `sendChannelReadReceipt` only when
+  /// `_cvMarkColumnRead` says the message was seen).
+  bool isConversationSeen(String storageKey) => _isConversationSeen(storageKey);
+
+  /// Clears [key]'s unread badge and stamps its read watermark to
+  /// max(now, newest message) — the PWA's `clearUnreadCount`
+  /// (channels.js:1892-1911). Public so the columns deck can clear a focused
+  /// column's badge when it scrolls back to the bottom (`_cvAttachColumnScroll`
+  /// at-bottom transition, columns.js:636) or the app becomes visible again
+  /// (`_cvMarkVisibleColumnsRead`, relays.js:532/584).
+  void clearUnread(String key) {
+    if (key.isEmpty) return;
+    var lastTs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final msgs = state.messages[key];
+    if (msgs != null) {
+      for (final m in msgs) {
+        if (m.createdAt > lastTs) lastTs = m.createdAt;
+      }
+    }
+    // Badges are bucketed under both the storage key and the bare id (peer
+    // pubkey / group id / channel name) depending on the ingest path — clear
+    // both, like [switchView] does.
+    String? alt;
+    if (key.startsWith('pm-')) {
+      alt = key.substring(3);
+    } else if (key.startsWith('group-')) {
+      alt = key.substring(6);
+    } else if (key.startsWith('#')) {
+      alt = key.substring(1);
+    }
+    var removed = state.unreadCounts.remove(key) != null;
+    if (alt != null && state.unreadCounts.remove(alt) != null) removed = true;
+    markChannelRead(key, lastTs);
+    if (alt != null) markChannelRead(alt, lastTs);
+    if (removed) state = state.copyWith();
+  }
+
+  /// Clears the unread badge of every column the [columnsReadGate] passes —
+  /// the PWA's `_cvMarkVisibleColumnsRead` (columns.js:44-47), fired when the
+  /// app returns to the foreground (relays.js:532/584 on `visibilitychange`).
+  /// Messages that arrived while the app was hidden accrued unread even for
+  /// the focused column (the gate returns false while hidden); becoming
+  /// visible again clears the focused + at-bottom column's count. No-op in
+  /// single view (no gate registered) — there the active conversation never
+  /// accrues unread in the first place.
+  void markVisibleColumnsRead() {
+    final gate = columnsReadGate;
+    if (gate == null) return;
+    // Iterate a snapshot: `clearUnread` mutates `unreadCounts`. Keys may be
+    // stored under the storage key OR the bare id depending on the ingest
+    // path, so the deck-registered gate must accept either form — and
+    // `clearUnread` derives its dual buckets from the STORAGE key, so a bare
+    // id is resolved to storage form first (otherwise only the bare bucket
+    // would clear, leaving the storage-key badge + watermark stale).
+    for (final key in state.unreadCounts.keys.toList()) {
+      if (gate(key)) clearUnread(_unreadStorageKey(key));
+    }
+  }
+
+  /// Resolves a raw unread-counts key — either a storage key or a bare id
+  /// (peer pubkey / group id / channel name), the same dual-key model the
+  /// columns deck's `_descMatchesKey` gate accepts — to the storage-style key
+  /// [clearUnread] derives both of its buckets from. Bare ids are classified
+  /// against the live stores (PM ingest buckets under the bare peer pubkey,
+  /// app_state PM path); anything unrecognized falls back to the channel form,
+  /// whose bare alt is the original key again.
+  String _unreadStorageKey(String key) {
+    if (key.startsWith('#') ||
+        key.startsWith('pm-') ||
+        key.startsWith('group-')) {
+      return key;
+    }
+    if (state.messages.containsKey('pm-$key') || state.users.containsKey(key)) {
+      return 'pm-$key';
+    }
+    if (state.messages.containsKey('group-$key') ||
+        state.groups.any((g) => g.id == key)) {
+      return 'group-$key';
+    }
+    return '#$key';
+  }
+
+  /// Clears the session's processed-event dedup sets — the in-memory
+  /// `processedPMEventIds` / `deletedEventIds` analogues the PWA wipes inside
+  /// `clearLocalStorageCache` (app.js:4021-4022) — so relay backlog / archive
+  /// restore can repopulate the just-cleared cache instead of being dropped
+  /// as already-seen duplicates. Called by [NostrController.clearCache] after
+  /// the store wipe.
+  void clearSessionDedup() {
+    _seenIds.clear();
+    _seenNymMessageIds.clear();
+  }
 
   int _localSeq = 1000000;
   int _ingestSeq = 1;
@@ -1355,16 +1478,23 @@ class AppStateNotifier extends StateNotifier<AppState> {
       ));
     }
 
-    // Bump unread when the message isn't for the active view and counts toward
-    // the badge — the PWA's `_recomputeUnreadCount` predicate (own / blocked /
-    // WoT-gated excluded, but keyword + heuristic-spam STILL counted; see
-    // [AppState.countsTowardUnread], channels.js `_recomputeUnreadCount`).
+    // Bump unread when the message isn't SEEN (single view: active view;
+    // columns view: focused + at-bottom + visible column, messages.js:546) and
+    // counts toward the badge — the PWA's `_recomputeUnreadCount` predicate
+    // (own / blocked / WoT-gated excluded, but keyword + heuristic-spam STILL
+    // counted; see [AppState.countsTowardUnread]).
     // `_isUnreadByWatermark` gates on `created_at > lastRead`, so a D1 backfill
     // of older history never re-inflates the badge for an already-read channel.
-    if (key != state.view.storageKey &&
+    final seen = _isConversationSeen(key);
+    if (!seen &&
         state.countsTowardUnread(m) &&
         _isUnreadByWatermark(key, m)) {
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
+    } else if (seen && columnsReadGate != null) {
+      // A seen column keeps its badge clear and its watermark pinned to the
+      // newest message (`_cvMarkColumnRead` → `_markChannelRead`).
+      state.unreadCounts.remove(key);
+      markChannelRead(key, m.createdAt);
     }
 
     // Replay any channel read receipts (kind 24421) that arrived before this
@@ -1701,15 +1831,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
       u.lastSeen = m.timestamp;
     }
 
-    if (key != state.view.storageKey &&
+    // Seen = active PM (single view) or focused + at-bottom + visible column
+    // (columns view, pms.js:1378 `_cvMarkColumnRead`).
+    final seenPm = _isConversationSeen(key);
+    if (!seenPm &&
         state.countsTowardUnread(m) &&
         _isUnreadByWatermark(peer, m)) {
       state.unreadCounts[peer] = (state.unreadCounts[peer] ?? 0) + 1;
+    } else if (seenPm && columnsReadGate != null) {
+      state.unreadCounts.remove(peer);
+      state.unreadCounts.remove(key);
+      markChannelRead(peer, m.createdAt);
+      markChannelRead(key, m.createdAt);
     }
     // Apply a buffered out-of-order edit whose original is this PM (matches on
     // id or the shared nymMessageId).
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
+    onPmMessageIngested?.call(key);
   }
 
   /// Inserts a decrypted group message [m] into the `group-<id>` store.
@@ -1739,7 +1878,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       u.lastSeen = m.timestamp;
     }
-    if (key != state.view.storageKey &&
+    // Seen = active group (single view) or focused + at-bottom + visible column
+    // (columns view, groups.js:1333 `_cvMarkColumnRead`).
+    final seenGroup = _isConversationSeen(key);
+    if (!seenGroup &&
         state.countsTowardUnread(m) &&
         _isUnreadByWatermark(key, m)) {
       // Key the unread count by the group's storage key (== `key`), NOT the bare
@@ -1748,10 +1890,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // `_recomputeUnreadCount` (keyword/heuristic-spam still count; see
       // [AppState.countsTowardUnread]) + the `created_at > lastRead` watermark.
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
+    } else if (seenGroup && columnsReadGate != null) {
+      state.unreadCounts.remove(key);
+      markChannelRead(key, m.createdAt);
     }
     // Apply a buffered out-of-order edit whose original is this group message.
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
+    onPmMessageIngested?.call(key);
   }
 
   /// Registers/updates a [Group] in the store (on create or on receiving a
@@ -1911,8 +2057,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// gift-wrapped friend-presence rumor).
   /// Applies a parsed nym-presence event to the user's store entry. Mirrors
   /// users.js `handlePresenceEvent`: updates status/away/nym, and — when the
-  /// presence carries an `avatar-update` / `shop-update` — the avatar
-  /// (`profile.picture`) and the broadcast shop cosmetics.
+  /// presence carries an `avatar-update` — the avatar (`profile.picture`).
+  /// A `shop-update` tag is handled by the controller (D1 shop-status cache
+  /// invalidation), never here.
   ///
   /// `hidden` status updates `lastSeen`/away tracking but leaves the
   /// activity-derived [User.status] alone (the PWA tracks visibility separately,
@@ -1927,12 +2074,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
     bool stampLastSeen = true,
     String? avatarUrl,
     bool hasAvatarTag = false,
-    bool shopUpdate = false,
-    String? shopStyle,
-    String? shopFlair,
-    bool isSupporter = false,
-    List<String>? shopCosmetics,
-    int? shopEdition,
   }) {
     final u = state.users.putIfAbsent(
       pubkey,
@@ -1963,18 +2104,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
 
-    // Shop cosmetics: a `shop-update` event refreshes the broadcast flair so it
-    // renders for everyone (users.js shop-update branch → re-fetch; native reads
-    // the inlined tags). Absent inlined tags, the cosmetics are cleared.
-    if (shopUpdate) {
-      u.shopStyle = (shopStyle != null && shopStyle.isNotEmpty) ? shopStyle : null;
-      u.shopFlair = (shopFlair != null && shopFlair.isNotEmpty) ? shopFlair : null;
-      u.isSupporter = isSupporter;
-      // Special cosmetics + Genesis edition broadcast by other users
-      // (`active.cosmetics`/`active.editions`, shop.js:459-478).
-      u.shopCosmetics = shopCosmetics ?? const <String>[];
-      u.shopEdition = shopEdition;
-    }
+    // Shop cosmetics deliberately NOT handled here: a presence `shop-update`
+    // tag is a pure cache-bust flag (users.js:1221-1223) — the controller
+    // reacts by invalidating the D1-backed `shop-status` cache
+    // (OtherUsersShopController.invalidate), which is the authoritative
+    // per-user cosmetics source. Presence never carries item data.
 
     state = state.copyWith();
   }
@@ -1983,11 +2117,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// the close time so a strictly-newer inbound message can re-open it (pms.js
   /// `closedPMTimes`). [nowSec] is injectable for tests.
   void closePM(String peerPubkey, {int? nowSec}) {
+    final ts = nowSec ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
     _closedPMs.add(peerPubkey);
-    _closedPMTimes[peerPubkey] =
-        nowSec ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    _closedPMTimes[peerPubkey] = ts;
     state.pmConversations.removeWhere((c) => c.pubkey == peerPubkey);
     state.messages.remove(PmLogic.pmStorageKey(peerPubkey));
+    // `deletePM` side effects (pms.js:2996-2999): stamp the conversation's
+    // read watermark to the close time and drop its unread badge, so a later
+    // re-open / backlog replay never resurrects a stale count. Applied here so
+    // EVERY caller gets them, not just the sidebar context menu.
+    markChannelRead(peerPubkey, ts);
+    markChannelRead(PmLogic.pmStorageKey(peerPubkey), ts);
+    state.unreadCounts.remove(peerPubkey);
+    state.unreadCounts.remove(PmLogic.pmStorageKey(peerPubkey));
     onClosedPmsChanged?.call();
     state = state.copyWith();
   }
@@ -2023,15 +2165,39 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// controller's KV persistence (paired with [closedPMs]).
   Map<String, int> get closedPmTimes => Map.unmodifiable(_closedPMTimes);
 
-  void switchView(ChatView view) {
+  /// One-shot "always spawn a new column" hint set by [switchView]'s
+  /// `forceNewColumn:` (the globe's `openColumnForGeohash` passes
+  /// `{forceNew: true}`, geohash-globe.js:1200 → columns.js:282). Consumed by
+  /// the columns deck's view sink so a globe open never repurposes the primary
+  /// column; sidebar taps leave it false.
+  bool _forceNewColumnHint = false;
+
+  /// Reads-and-clears the one-shot force-new-column hint (columns deck only).
+  bool consumeForceNewColumnHint() {
+    final v = _forceNewColumnHint;
+    _forceNewColumnHint = false;
+    return v;
+  }
+
+  void switchView(ChatView view, {bool forceNewColumn = false}) {
+    _forceNewColumnHint = forceNewColumn;
     // Clear unread for the target on entry (mirrors marking-as-read), and stamp
     // the read watermark to NOW so a later D1 backfill of this conversation's
     // older history doesn't re-inflate the badge (PWA `_markChannelRead`).
-    state.unreadCounts.remove(view.id);
-    state.unreadCounts.remove(view.storageKey);
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    markChannelRead(view.id, nowSec);
-    markChannelRead(view.storageKey, nowSec);
+    //
+    // In columns view the clear is GATED (PWA `_cvMarkColumnRead`,
+    // columns.js:26-42 via `_cvFocusColumn`:565): only when the target's column
+    // is focused, pinned to the newest message, and the app is visible — a
+    // focused-but-scrolled-up column keeps its unread badge until it scrolls
+    // back to the bottom ([clearUnread] handles that transition).
+    final gate = columnsReadGate;
+    if (gate == null || gate(view.storageKey)) {
+      state.unreadCounts.remove(view.id);
+      state.unreadCounts.remove(view.storageKey);
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      markChannelRead(view.id, nowSec);
+      markChannelRead(view.storageKey, nowSec);
+    }
     state = state.copyWith(view: view);
     // Best-effort D1 history backfill on open (channel-get / group archive).
     // Wrapped so a backfill failure can't break the view switch.
@@ -2323,7 +2489,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (k == kDefaultChannel) return false;
     state.blockedChannels.add(k);
     state.channels.removeWhere((c) => c.key == k);
-    state.pinnedChannels.remove(k);
+    // NOTE: the PWA's `blockChannel` (channels.js:862-888) never touches
+    // `pinnedChannels` — a favorited channel keeps its favorite through a
+    // block/unblock round-trip.
     if (state.view.kind == ViewKind.channel && state.view.id.toLowerCase() == k) {
       switchView(const ChatView.channel(kDefaultChannel));
     } else {
@@ -2843,13 +3011,15 @@ final usersProvider = Provider<Map<String, User>>((ref) {
   return out;
 });
 
-/// Ordered messages for the active view (oldest first). Messages from blocked
-/// users, keyword matches (content OR author nym), and heuristic spam are
-/// dropped — mirrors the PWA's `.message.blocked` hiding (messages.js §11) plus
-/// the `spamHit` term of the non-own hide branch (messages.js:648).
-final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
-  final s = ref.watch(appStateProvider);
-  final list = s.messages[s.view.storageKey] ?? const <Message>[];
+/// The filtered, ordered messages for one conversation [storageKey] (oldest
+/// first). Messages from blocked users, keyword matches (content OR author
+/// nym), and heuristic spam are dropped — mirrors the PWA's
+/// `getFilteredMessages`/`getFilteredPMMessages` (messages.js:2934-2949), the
+/// single pipeline `renderMessagesWithVirtualScroll` renders through, which
+/// makes it shared by the single view AND every columns-deck column
+/// (columns.js:510).
+List<Message> visibleMessagesFor(AppState s, String storageKey) {
+  final list = s.messages[storageKey] ?? const <Message>[];
   // Fast-path only when nothing can filter: no blocks AND the content spam
   // filter is off. With the filter on (its default) every non-own message is
   // tested, so the empty-block-sets shortcut must NOT skip it.
@@ -2861,6 +3031,15 @@ final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
       : [...list];
   visible.sort(compareMessages);
   return visible;
+}
+
+/// Ordered messages for the active view (oldest first), via
+/// [visibleMessagesFor] — mirrors the PWA's `.message.blocked` hiding
+/// (messages.js §11) plus the `spamHit` term of the non-own hide branch
+/// (messages.js:648).
+final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
+  final s = ref.watch(appStateProvider);
+  return visibleMessagesFor(s, s.view.storageKey);
 });
 
 /// Transient "scroll-flash" signal: the id of the message currently flashing its
@@ -2963,8 +3142,11 @@ final blockedKeywordsProvider = Provider<Set<String>>((ref) {
 /// service / UI). Null when unavailable or permission denied.
 final userLocationProvider = StateProvider<UserLocation?>((ref) => null);
 
-/// Registered channels sorted by the PWA's priority (nymchat → active → pinned →
-/// proximity → activity/unread), with hidden/blocked channels filtered out.
+/// Registered channels in the exact sidebar order: visibility per the PWA's
+/// `applyHiddenChannels` (channels.js:820-833 — `#nymchat` and the ACTIVE row
+/// are NEVER hidden, neither via the hidden set nor via hide-non-pinned), then
+/// `sortChannelsByActivity`, then the CSS `order` bands (styles-shell.css:
+/// 344-390): nymchat (-4) > active (-3) > pinned (-2) > has-unread (-1) > rest.
 final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
   final s = ref.watch(appStateProvider);
   final sortByProximity = ref.watch(
@@ -2974,18 +3156,20 @@ final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
   final hideNonPinned =
       ref.watch(settingsProvider.select((settings) => settings.hideNonPinned));
   final location = ref.watch(userLocationProvider);
+  final activeKey =
+      s.view.kind == ViewKind.channel ? s.view.id.toLowerCase() : '';
   final visible = s.channels
-      .where((c) => !s.hiddenChannels.contains(c.key))
       .where((c) => !s.blockedChannels.contains(c.key))
-      .where((c) => !(hideNonPinned &&
-          c.key != kDefaultChannel &&
-          !s.pinnedChannels.contains(c.key)))
+      .where((c) =>
+          c.key == kDefaultChannel ||
+          c.key == activeKey ||
+          (!s.hiddenChannels.contains(c.key) &&
+              !(hideNonPinned && !s.pinnedChannels.contains(c.key))))
       .toList();
-  return ChannelManager.sortChannels(
+  final sorted = ChannelManager.sortChannels(
     visible,
     ChannelSortContext(
-      activeKey:
-          s.view.kind == ViewKind.channel ? s.view.id.toLowerCase() : '',
+      activeKey: activeKey,
       pinned: s.pinnedChannels,
       lastActivity: s.channelLastActivity,
       unreadCounts: s.unreadCounts,
@@ -2993,6 +3177,20 @@ final sortedChannelsProvider = Provider<List<ChannelEntry>>((ref) {
       userLocation: location,
     ),
   );
+  // CSS `order` band partition — stable within each band, exactly like flex
+  // `order` ties breaking on DOM order.
+  int orderBand(ChannelEntry ch) {
+    if (ch.key == kDefaultChannel) return -4;
+    if (ch.key == activeKey) return -3;
+    if (s.pinnedChannels.contains(ch.key)) return -2;
+    if ((s.unreadCounts[ch.storageKey] ?? 0) > 0) return -1;
+    return 0;
+  }
+
+  return [
+    for (var band = -4; band <= 0; band++)
+      ...sorted.where((ch) => orderBand(ch) == band),
+  ];
 });
 
 // =============================================================================
@@ -3611,9 +3809,24 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
       }
       if (mounted && (_codeToUrl.isNotEmpty || _packsByKey.isNotEmpty)) {
         _publish();
+        // Warm the images the user is likely to see first (the PWA's cache
+        // load routes through `_storeEmojiPack`, which schedules
+        // `_prefetchCustomEmojiImages`).
+        _schedulePrefetch();
       }
     } catch (_) {
       // Cache is best-effort; an unavailable store just yields live-only emoji.
+    }
+  }
+
+  /// Schedules the debounced custom-emoji image prefetch (emoji.js
+  /// `_prefetchCustomEmojiImages`: 3s + idle, skipped in low-data mode, 60-URL
+  /// budget — all implemented in `emoji_prefetch.dart`). Best-effort.
+  void _schedulePrefetch() {
+    try {
+      scheduleCustomEmojiPrefetch(_ref.container);
+    } catch (_) {
+      // Prefetch is a warm-up only; never let it break registration.
     }
   }
 
@@ -3637,6 +3850,9 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
     }
     _publish();
     _persist();
+    // The PWA's `registerCustomEmoji` schedules the image warm-up
+    // (emoji.js:128 `_prefetchCustomEmojiImages`).
+    _schedulePrefetch();
     return true;
   }
 
@@ -3652,6 +3868,9 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
     if (changed) {
       _publish();
       _persist();
+      // The PWA's `ingestEmojiTags` routes through `registerCustomEmoji`,
+      // which schedules the warm-up (emoji.js:128).
+      _schedulePrefetch();
     }
   }
 
@@ -3680,6 +3899,8 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
     }
     _publish();
     _persist();
+    // `_storeEmojiPack` schedules the image warm-up (emoji.js:243).
+    _schedulePrefetch();
   }
 
   /// Records the user's kind-10030 emoji-pack subscription list (emoji.js
@@ -3730,6 +3951,9 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
 
   /// Clears all live + persisted custom emoji (sign-out).
   void clearAll() {
+    // Cancel a pending debounced write so it can't re-persist what we wipe.
+    _persistTimer?.cancel();
+    _persistTimer = null;
     _codeToUrl.clear();
     _packsByKey.clear();
     _userPackRefs.clear();
@@ -3753,10 +3977,39 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
     );
   }
 
+  /// Pending debounced-persist timer (the PWA's `_emojiCacheSaveTimer` /
+  /// `_emojiMapSaveTimer`).
+  Timer? _persistTimer;
+
+  /// Schedules a debounced persist (emoji.js `_saveCustomEmojiCache` /
+  /// `_saveCustomEmojiMap`: a 2s timer + idle callback), so a burst of pack
+  /// events / the D1 emoji-get replay re-encodes the full ≤5000-entry map +
+  /// ≤200-pack JSON ONCE instead of per registration. (SharedPreferences has
+  /// no localStorage quota, so the PWA's QuotaExceeded trim fallback has no
+  /// native counterpart.)
+  void _persist() {
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(seconds: 2), () {
+      _persistTimer = null;
+      _persistNow();
+    });
+  }
+
+  @override
+  void dispose() {
+    // Flush a pending debounced write so a teardown never loses registrations.
+    if (_persistTimer != null) {
+      _persistTimer!.cancel();
+      _persistTimer = null;
+      _persistNow();
+    }
+    super.dispose();
+  }
+
   /// Persists both caches in the PWA's localStorage shape (`_saveCustomEmojiMap`
   /// + `_saveCustomEmojiCache`): the loose map as `[[shortcode,url],…]` (≤5000)
   /// and packs as objects sorted newest-first (≤200). Best-effort.
-  void _persist() {
+  void _persistNow() {
     final prefs = _prefs;
     if (prefs == null) return;
     try {

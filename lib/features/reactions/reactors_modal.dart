@@ -90,9 +90,25 @@ class ReactorsModal extends ConsumerWidget {
           color: c.bgSecondary,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rmd,
-          boxShadow: const [
-            BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
-          ],
+          // dark (styles-chat.css:495): shadow-lg + shadow-glow + a 1px
+          // white@0.05 ring; light (styles-themes-responsive.css:1196-1199):
+          // `0 8px 32px rgba(0,0,0,0.12)` only.
+          boxShadow: c.isLight
+              ? const [
+                  BoxShadow(
+                      color: Color(0x1F000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                ]
+              : [
+                  const BoxShadow(
+                      color: Color(0x80000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                  BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                  const BoxShadow(
+                      color: Color(0x0DFFFFFF), spreadRadius: 1),
+                ],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -115,12 +131,21 @@ class ReactorsModal extends ConsumerWidget {
                     )
                   : Row(
                       children: [
-                        // A `:shortcode:` reaction renders as its custom-emoji
-                        // image at the 40px header size; unicode stays text.
+                        // `renderReactionEmoji` (emoji.js:342-351): only an
+                        // exact `:shortcode:` reaction renders as its custom-
+                        // emoji image, at `.custom-emoji-reaction` 1.45em of
+                        // the 40px `.reactors-modal-emoji` font (= 58px,
+                        // margin 0); unicode stays text.
                         InlineEmojiText(
                           text: emoji,
                           style: const TextStyle(fontSize: 40, height: 1),
-                          emojiSize: 40,
+                          wholeStringOnly: true,
+                          emojiSize: 40 * 1.45,
+                          emojiMargin: EdgeInsets.zero,
+                          // `.reactors-modal-emoji` is `inline-flex;
+                          // align-items: center` (styles-chat.css:540-545), so
+                          // the img is flex-centered — `vertical-align` inert.
+                          emojiAlignment: PlaceholderAlignment.middle,
                         ),
                         const SizedBox(width: 6),
                         Text(

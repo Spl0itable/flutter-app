@@ -268,7 +268,7 @@ class _PollCreateModalState extends ConsumerState<PollCreateModal> {
         ),
         // Matches the PWA's "✕" dismissal convention (styled text, not an icon).
         child: Text('✕',
-            style: TextStyle(color: c.textDim, fontSize: 14, height: 1)),
+            style: TextStyle(color: c.textDim, fontSize: 12, height: 1)),
       ),
     );
   }

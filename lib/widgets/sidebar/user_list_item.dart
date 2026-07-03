@@ -25,7 +25,7 @@ import '../context_menu/profile_badges.dart';
 /// header) — see [showUserContextMenu]. This mirrors the PWA, where a
 /// nyms-list click/contextmenu calls `showContextMenu(..., profileOnly=true)`
 /// (users.js:1513).
-class UserListItem extends ConsumerWidget {
+class UserListItem extends ConsumerStatefulWidget {
   const UserListItem({
     super.key,
     required this.user,
@@ -38,12 +38,27 @@ class UserListItem extends ConsumerWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<UserListItem> createState() => _UserListItemState();
+}
+
+class _UserListItemState extends ConsumerState<UserListItem> {
+  // `@media (hover:hover) .user-item:hover` (styles-shell.css:571-575,
+  // 584-590) — MouseRegion only reacts to mouse pointers, matching the media
+  // query's hover-capable gate.
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
-    final status = user.effectiveStatus();
+    final user = widget.user;
+    final textSize = widget.textSize;
     final controller = ref.read(nostrControllerProvider);
     final isDev = controller.isVerifiedDeveloper(user.pubkey);
     final isBot = controller.isVerifiedBot(user.pubkey);
+    // Verified bots always show the green online dot (`getEffectiveUserStatus`
+    // returns 'online' for `verifiedBotPubkeys`, users.js:1112, feeding
+    // `.user-status-dot status-${effectiveStatus}`, users.js:1540).
+    final status = user.effectiveStatus(isVerifiedBot: isBot);
     final isFriend = ref.watch(appStateProvider).isFriend(user.pubkey);
 
     // `_fillUserLabel`: the base nym is hard-truncated to 20 chars + '...'
@@ -51,76 +66,92 @@ class UserListItem extends ConsumerWidget {
     final base = stripPubkeySuffix(user.nym);
     final displayNym = base.length > 20 ? '${base.substring(0, 20)}...' : base;
     final suffix = getPubkeySuffix(user.pubkey);
+    // `:hover` brightens the nym span from `--text-dim` to `--text`.
+    final nymColor = _hover ? c.text : c.textDim;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       child: Material(
         color: Colors.transparent,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) =>
-              showUserContextMenu(context, ref, user, d.globalPosition),
-          onSecondaryTapDown: (d) =>
-              showUserContextMenu(context, ref, user, d.globalPosition),
-          child: InkWell(
-          onTap: onTap,
-          borderRadius: NymRadius.rxs,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: const BoxDecoration(borderRadius: NymRadius.rxs),
-            child: Row(
-              children: [
-                // `.user-avatar-wrap` (20×20, position:relative) with the
-                // `.user-status-dot` overlaid bottom-right (-1px), 8px + a 2px
-                // #0a0a0f ring (content-box → 12px outer).
-                _AvatarWithStatus(
-                  seed: user.pubkey,
-                  imageUrl: user.profile?.picture,
-                  status: status,
+        child: MouseRegion(
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPressStart: (d) =>
+                showUserContextMenu(context, ref, user, d.globalPosition),
+            onSecondaryTapDown: (d) =>
+                showUserContextMenu(context, ref, user, d.globalPosition),
+            child: InkWell(
+              onTap: widget.onTap,
+              borderRadius: NymRadius.rxs,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  // `:hover` fill white@0.04 (light: black@0.04,
+                  // styles-themes-responsive.css:1251-1255), radius-xs.
+                  color: _hover
+                      ? (c.isLight
+                          ? Colors.black.withValues(alpha: 0.04)
+                          : Colors.white.withValues(alpha: 0.04))
+                      : null,
+                  borderRadius: NymRadius.rxs,
                 ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(text: displayNym),
+                child: Row(
+                  children: [
+                    // `.user-avatar-wrap` (20×20, position:relative) with the
+                    // `.user-status-dot` overlaid bottom-right (-1px), 8px + a 2px
+                    // #0a0a0f ring (content-box → 12px outer).
+                    _AvatarWithStatus(
+                      seed: user.pubkey,
+                      imageUrl: user.profile?.picture,
+                      status: status,
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text.rich(
                         TextSpan(
-                          // `.nym-suffix`: opacity .7, 0.9em, weight 100.
-                          text: '#$suffix',
-                          style: TextStyle(
-                            color: c.textDim.withValues(alpha: 0.7),
-                            fontSize: (textSize - 3) * 0.9,
-                            fontWeight: FontWeight.w100,
-                          ),
+                          children: [
+                            TextSpan(text: displayNym),
+                            TextSpan(
+                              // `.nym-suffix`: opacity .7, 0.9em, weight 100.
+                              text: '#$suffix',
+                              style: TextStyle(
+                                color: nymColor.withValues(alpha: 0.7),
+                                fontSize: (textSize - 3) * 0.9,
+                                fontWeight: FontWeight.w100,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: nymColor,
+                          fontSize: textSize - 3,
+                        ),
+                      ),
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: c.textDim,
-                      fontSize: textSize - 3,
+                    CosmeticNymBadges(
+                      cosmetics: userCosmeticsFromUser(user),
+                      flairSize: 13,
+                      supporterHeight: 13,
                     ),
-                  ),
+                    // Verified developer / bot ✓ then friend badge
+                    // (`_fillUserLabel`: `verified-badge` margin-left 4, friend after).
+                    if (isDev || isBot) ...[
+                      const SizedBox(width: 4),
+                      const VerifiedBadge(size: 13),
+                    ],
+                    if (isFriend) ...[
+                      const SizedBox(width: 2),
+                      const FriendBadge(size: 13),
+                    ],
+                  ],
                 ),
-                CosmeticNymBadges(
-                  cosmetics: userCosmeticsFromUser(user),
-                  flairSize: 13,
-                  supporterHeight: 13,
-                ),
-                // Verified developer / bot ✓ then friend badge
-                // (`_fillUserLabel`: `verified-badge` margin-left 4, friend after).
-                if (isDev || isBot) ...[
-                  const SizedBox(width: 4),
-                  const VerifiedBadge(size: 13),
-                ],
-                if (isFriend) ...[
-                  const SizedBox(width: 2),
-                  const FriendBadge(size: 13),
-                ],
-              ],
+              ),
             ),
-          ),
           ),
         ),
       ),
@@ -181,15 +212,25 @@ class _AvatarWithStatus extends StatelessWidget {
           Positioned(
             right: -1,
             bottom: -1,
+            // CSS `box-sizing:content-box` puts the 2px ring OUTSIDE the 8px
+            // dot → 12px border box positioned at bottom/right -1px. The ring
+            // color is hardcoded `#0a0a0f` (NOT `--bg`), with a light-mode
+            // override to `#f5f5f2` (styles-themes-responsive.css:1309-1311).
             child: Container(
-              width: 8,
-              height: 8,
+              width: 12,
+              height: 12,
+              padding: const EdgeInsets.all(2),
               decoration: BoxDecoration(
-                color: statusColor(status),
+                color: c.isLight
+                    ? const Color(0xFFF5F5F2)
+                    : const Color(0xFF0A0A0F),
                 shape: BoxShape.circle,
-                // `.user-status-dot` ring = `--bg` (#0a0a0f dark; light-mode
-                // override `#f5f5f2`). Use the theme bg so it's correct in both.
-                border: Border.all(color: c.bg, width: 2),
+              ),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: statusColor(status),
+                  shape: BoxShape.circle,
+                ),
               ),
             ),
           ),

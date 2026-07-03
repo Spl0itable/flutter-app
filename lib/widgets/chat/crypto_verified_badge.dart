@@ -40,16 +40,20 @@ class CryptoVerifiedBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => showVerificationPopup(context, state),
-      child: Padding(
-        // `.crypto-verified-badge { margin-left: 4px }`.
-        padding: const EdgeInsets.only(left: 4),
-        child: SizedBox(
-          width: size,
-          height: size,
-          child: CustomPaint(painter: _LockPainter(state, _color)),
+    return Padding(
+      // `.crypto-verified-badge { margin-left: 4px }` — a margin sits OUTSIDE
+      // the element's box, so the popup anchors on the lock itself (the inner
+      // Builder context), not the padded footprint.
+      padding: const EdgeInsets.only(left: 4),
+      child: Builder(
+        builder: (anchorContext) => GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => showVerificationPopup(anchorContext, state),
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: CustomPaint(painter: _LockPainter(state, _color)),
+          ),
         ),
       ),
     );
@@ -132,10 +136,14 @@ class _LockPainter extends CustomPainter {
 }
 
 /// Opens the verification-info popup (`showVerificationPopup`,
-/// `messages.js:3405-3424`): a small `.verification-popup` card with a
-/// state-coloured title and an explanatory body.
+/// `messages.js:3405-3424`): a `.reactors-modal`-chromed `.verification-popup`
+/// card (styles-chat.css:505-529) ANCHORED to the tapped lock — the same
+/// placement engine as the timestamp popup, with NO dimming scrim. Vertical:
+/// 6px above the anchor when there's head-room (`rect.top > approxHeight(170)
+/// + 20`), else 6px below. Horizontal: `left = max(8, min(rect.left,
+/// innerWidth - width - 8))`. Dismissed on the next outside tap / drag
+/// (mirrors the PWA's document-click + scroll close).
 void showVerificationPopup(BuildContext context, CryptoVerifyState state) {
-  final c = context.nym;
   final (title, titleColor, body) = switch (state) {
     CryptoVerifyState.verified => (
         'Cryptographically verified',
@@ -164,48 +172,118 @@ void showVerificationPopup(BuildContext context, CryptoVerifyState state) {
       ),
   };
 
-  showDialog<void>(
-    context: context,
-    barrierColor: Colors.black54,
-    builder: (ctx) => Dialog(
-      backgroundColor: c.bgSecondary,
-      shape: RoundedRectangleBorder(
-        borderRadius: NymRadius.rmd,
-        side: BorderSide(color: c.glassBorder),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 280),
-        child: Padding(
-          // `.verification-popup { padding: 12px 14px; gap: 6px }`.
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: TextStyle(
-                  color: titleColor,
-                  fontWeight: FontWeight.w700,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Opacity(
-                opacity: 0.85,
-                child: Text(
-                  body,
-                  style: TextStyle(
-                    color: c.text,
-                    fontSize: 12,
-                    height: 1.45,
-                  ),
-                ),
-              ),
-            ],
+  // Anchor on the tapped lock's global bounds (the PWA's
+  // `anchorEl.getBoundingClientRect()`).
+  final box = context.findRenderObject() as RenderBox?;
+  if (box == null || !box.hasSize) return;
+  final rect = box.localToGlobal(Offset.zero) & box.size;
+  final overlay = Overlay.of(context, rootOverlay: true);
+  final screen = MediaQuery.of(context).size;
+
+  // `const approxHeight = 170` — prefer above when there's head-room.
+  final above = rect.top > 170 + 20;
+  // `left = Math.max(8, Math.min(rect.left, innerWidth - width - 8))` with the
+  // popup's `.verification-popup` max-width of 280 (shrunk on tiny screens so
+  // the 8px viewport gutters hold).
+  final double width = screen.width - 16 < 280 ? screen.width - 16 : 280;
+  double left = rect.left;
+  if (left > screen.width - width - 8) left = screen.width - width - 8;
+  if (left < 8) left = 8;
+
+  OverlayEntry? entry;
+  void close() {
+    if (entry?.mounted ?? false) entry!.remove();
+    entry = null;
+  }
+
+  entry = OverlayEntry(
+    builder: (ctx) {
+      final c = ctx.nym;
+      return Stack(
+        children: [
+          // No dimming scrim — just an outside-tap / scroll-start dismiss
+          // barrier (PWA closes on document click + scroll).
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: close,
+              onPanStart: (_) => close(),
+            ),
           ),
-        ),
-      ),
-    ),
+          Positioned(
+            left: left,
+            top: above ? null : rect.bottom + 6,
+            bottom: above ? screen.height - rect.top + 6 : null,
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                // `.reactors-modal { min-width: 160 }` +
+                // `.verification-popup { max-width: 280 }`.
+                constraints: BoxConstraints(minWidth: 160, maxWidth: width),
+                // `.verification-popup { padding: 12px 14px }`.
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                decoration: BoxDecoration(
+                  color: c.bgSecondary,
+                  borderRadius: NymRadius.rmd,
+                  border: Border.all(
+                    color: c.isLight
+                        ? Colors.black.withValues(alpha: 0.08)
+                        : c.glassBorder,
+                  ),
+                  // dark: shadow-lg + shadow-glow + a 1px white@0.05 ring;
+                  // light: `0 8px 32px rgba(0,0,0,0.12)`.
+                  boxShadow: c.isLight
+                      ? const [
+                          BoxShadow(
+                              color: Color(0x1F000000),
+                              offset: Offset(0, 8),
+                              blurRadius: 32),
+                        ]
+                      : [
+                          const BoxShadow(
+                              color: Color(0x80000000),
+                              offset: Offset(0, 8),
+                              blurRadius: 32),
+                          BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                          const BoxShadow(
+                              color: Color(0x0DFFFFFF), spreadRadius: 1),
+                        ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // `.verification-popup-title`: 13px w700, state colour.
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: titleColor,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 13,
+                      ),
+                    ),
+                    // `.verification-popup { gap: 6px }`.
+                    const SizedBox(height: 6),
+                    // `.verification-popup-body`: 12px/1.45 @ opacity 0.85.
+                    Opacity(
+                      opacity: 0.85,
+                      child: Text(
+                        body,
+                        style: TextStyle(
+                          color: c.text,
+                          fontSize: 12,
+                          height: 1.45,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    },
   );
+  overlay.insert(entry!);
 }

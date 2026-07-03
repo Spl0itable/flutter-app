@@ -6,20 +6,12 @@ import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_context_menu.dart';
 import '../../features/settings/settings_helpers.dart';
 import '../../models/channel.dart';
+import 'sidebar_row_gestures.dart';
 
 /// The grey "pinned/favorited" tint the PWA paints on a `.channel-item.pinned`
 /// row when it is not the active channel (`rgba(150,150,160,…)`,
 /// styles-shell.css:348-366).
 const Color _pinnedGrey = Color(0xFF9696A0); // rgb(150,150,160)
-
-/// Global-coordinate centre of [c]'s render box — the anchor for a long-press
-/// context menu (`InkWell.onLongPress` carries no pointer position, unlike a
-/// secondary-tap).
-Offset _rowCenter(BuildContext c) {
-  final box = c.findRenderObject() as RenderBox?;
-  if (box == null || !box.hasSize) return Offset.zero;
-  return box.localToGlobal(box.size.center(Offset.zero));
-}
 
 /// A single channel row in the sidebar PUBLIC CHANNELS list.
 ///
@@ -30,8 +22,10 @@ Offset _rowCenter(BuildContext c) {
 /// grey accent bar instead. Unread count renders as a pill badge — the PWA's
 /// ONLY channel badge.
 ///
-/// A long-press (mobile) or secondary-tap / right-click (desktop) opens the
-/// `.channel-context-menu` (Favorite/Hide/Block) — see [showChannelContextMenu].
+/// A 500ms press-and-hold (mouse primary button or touch — the PWA binds no
+/// `contextmenu` handler on the sidebar) opens the `.quick-context-menu`
+/// (Favorite/Hide/Block) at the press point — see [SidebarRowGestures] /
+/// [maybeShowChannelContextMenu].
 class ChannelListItem extends ConsumerWidget {
   const ChannelListItem({
     super.key,
@@ -67,9 +61,13 @@ class ChannelListItem extends ConsumerWidget {
     // primary accent bar. The pinned (grey) treatment has no light override.
     final Color activeFill =
         c.isLight ? Colors.black.withValues(alpha: 0.06) : c.primaryA(0.10);
-    final Color fill = active
-        ? activeFill
-        : (showPinned ? _pinnedGrey.withValues(alpha: 0.10) : Colors.transparent);
+    // `@media (hover:hover)` row hover (styles-shell.css:368-374): explicit
+    // white@0.06 fill (light: black@0.04, styles-themes-responsive.css:1132)
+    // that loses to `.active` but WINS over `.pinned` (the hover rule follows
+    // `.pinned` in the stylesheet), plus a padding-left 12→14 content shift.
+    final Color hoverFill = c.isLight
+        ? Colors.black.withValues(alpha: 0.04)
+        : Colors.white.withValues(alpha: 0.06);
     final Color borderColor = active
         ? c.primaryA(0.20)
         : (showPinned ? _pinnedGrey.withValues(alpha: 0.20) : Colors.transparent);
@@ -95,92 +93,97 @@ class ChannelListItem extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      child: Material(
-        color: Colors.transparent,
-        // Tap, long-press and secondary-tap share ONE InkWell recognizer set so
-        // the long-press reliably wins the gesture arena inside the scrollable
-        // sidebar. The previous GestureDetector-wrapped-around-InkWell split let
-        // the InkWell's tap claim the pointer and the parent long-press never
-        // resolved — so channel rows opened no context menu on long-press.
-        // InkWell.onLongPress also fires Feedback.forLongPress (the PWA's
-        // `nymHapticTap`) for free.
-        child: Builder(
-          builder: (rowContext) => InkWell(
-            onTap: onTap,
-            onLongPress: () => showChannelContextMenu(
-                rowContext, ref, entry, _rowCenter(rowContext)),
-            onSecondaryTapDown: (d) =>
-                showChannelContextMenu(rowContext, ref, entry, d.globalPosition),
-            borderRadius: NymRadius.rxs,
-            child: Stack(
-              children: [
-                Container(
-                  constraints: const BoxConstraints(minHeight: 36),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                  decoration: BoxDecoration(
-                    color: fill,
-                    borderRadius: NymRadius.rxs,
-                    border: Border.all(color: borderColor, width: 1),
-                    // `.channel-item.active`: box-shadow 0 0 12px primary@5%
-                    // (grey@5% when pinned-not-active).
-                    boxShadow: glow,
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        // `.channel-name` inherits `--text` weight normal even
-                        // when active (active changes bg/border/bar only).
-                        child: location.isEmpty
-                            ? nameText
-                            : Tooltip(message: location, child: nameText),
-                      ),
-                      // PWA `.channel-badges` only ever contains the unread
-                      // pill. `.std-badge` / `.geohash-badge` are DEAD CSS —
-                      // never emitted by channels.js/pms.js/groups.js. Geohash
-                      // vs standard channels are distinguished by the name only.
-                      if (unread > 0) ...[
-                        const SizedBox(width: 8),
-                        _UnreadPill(count: unread),
-                      ],
-                    ],
-                  ),
+      // The PWA's 500ms press-and-hold (mouse button 0 / touch, 10px move
+      // cancel) opens the quick menu at the press point and swallows the
+      // following tap; right-click deliberately does nothing
+      // (sidebar-sections.js:239-303). Hover paints the explicit overlay +
+      // 2px indent below.
+      child: SidebarRowGestures(
+        onTap: onTap,
+        onShowMenu: (pos) =>
+            maybeShowChannelContextMenu(context, ref, entry, pos),
+        builder: (context, hovered) {
+          // Fill priority mirrors the cascade: `.active` > `:hover` >
+          // `.pinned` > transparent.
+          final Color fill = active
+              ? activeFill
+              : hovered
+                  ? hoverFill
+                  : (showPinned
+                      ? _pinnedGrey.withValues(alpha: 0.10)
+                      : Colors.transparent);
+          return Stack(
+            children: [
+              Container(
+                constraints: const BoxConstraints(minHeight: 36),
+                // `:hover { padding-left: 14px }` (rest 12px).
+                padding: EdgeInsets.fromLTRB(hovered ? 14 : 12, 9, 12, 9),
+                decoration: BoxDecoration(
+                  color: fill,
+                  borderRadius: NymRadius.rxs,
+                  border: Border.all(color: borderColor, width: 1),
+                  // `.channel-item.active`: box-shadow 0 0 12px primary@5%
+                  // (grey@5% when pinned-not-active).
+                  boxShadow: glow,
                 ),
-                if (active || showPinned)
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    child: Center(
-                      child: FractionallySizedBox(
-                        heightFactor: 0.6,
-                        child: Container(
-                          width: 3,
-                          decoration: BoxDecoration(
-                            color: active ? c.primary : _pinnedGrey,
-                            borderRadius: const BorderRadius.only(
-                              topRight: Radius.circular(3),
-                              bottomRight: Radius.circular(3),
-                            ),
-                            // `::before` accent bar glow 0 0 8px primary@40%
-                            // (no glow on the grey pinned bar).
-                            boxShadow: active
-                                ? [
-                                    BoxShadow(
-                                      color: c.primaryA(0.4),
-                                      blurRadius: 8,
-                                    ),
-                                  ]
-                                : null,
+                child: Row(
+                  children: [
+                    Expanded(
+                      // `.channel-name` inherits `--text` weight normal even
+                      // when active (active changes bg/border/bar only).
+                      child: location.isEmpty
+                          ? nameText
+                          : Tooltip(message: location, child: nameText),
+                    ),
+                    // PWA `.channel-badges` only ever contains the unread
+                    // pill. `.std-badge` / `.geohash-badge` are DEAD CSS —
+                    // never emitted by channels.js/pms.js/groups.js. Geohash
+                    // vs standard channels are distinguished by the name only.
+                    // `.channel-badges { margin-left: 5px }` sets the gap.
+                    if (unread > 0) ...[
+                      const SizedBox(width: 5),
+                      _UnreadPill(count: unread),
+                    ],
+                  ],
+                ),
+              ),
+              if (active || showPinned)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: FractionallySizedBox(
+                      heightFactor: 0.6,
+                      child: Container(
+                        width: 3,
+                        decoration: BoxDecoration(
+                          // Active bar is `--primary`; the pinned-not-active bar
+                          // is `var(--text-dim)` (styles-shell.css:355-366).
+                          color: active ? c.primary : c.textDim,
+                          borderRadius: const BorderRadius.only(
+                            topRight: Radius.circular(3),
+                            bottomRight: Radius.circular(3),
                           ),
+                          // `::before` accent bar glow: 0 0 8px primary@40%
+                          // when active; 0 0 8px rgba(150,150,160,0.3) on the
+                          // grey pinned bar.
+                          boxShadow: [
+                            BoxShadow(
+                              color: active
+                                  ? c.primaryA(0.4)
+                                  : _pinnedGrey.withValues(alpha: 0.3),
+                              blurRadius: 8,
+                            ),
+                          ],
                         ),
                       ),
                     ),
                   ),
-              ],
-            ),
-          ),
-        ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }

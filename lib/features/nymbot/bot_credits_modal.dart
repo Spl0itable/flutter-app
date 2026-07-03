@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../features/identity/modal_chrome.dart';
+import '../../state/nostr_controller.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
 
@@ -209,22 +210,34 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
                 Text(_error!, style: TextStyle(color: c.danger, fontSize: 12)),
               ],
               const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed:
-                      (_loading || _amountSats == null) ? null : _generate,
-                  style: FilledButton.styleFrom(backgroundColor: c.lightning),
-                  icon: _loading
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.bolt),
-                  label: Text(_loading
-                      ? 'Generating invoice…'
-                      : (widget.isGift ? 'Generate gift invoice' : 'Pay with Lightning')),
-                ),
+              // `.send-btn` chrome (styles-chat.css:1920-1943): translucent
+              // primary/0.1 pill, primary/0.3 border, h42, 12px UPPERCASE
+              // ls1.5 w600 primary label, disabled opacity 0.35. While
+              // generating, the PWA pairs the 15px `.loader` with
+              // "Generating invoice..." (zaps.js:588-590).
+              ModalChrome.sendButton(
+                c,
+                widget.isGift ? 'Generate gift invoice' : 'Pay with Lightning',
+                (_loading || _amountSats == null) ? null : _generate,
+                fullWidth: true,
+                child: _loading
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _loader(c),
+                          const SizedBox(width: 8),
+                          Text(
+                            'GENERATING INVOICE…',
+                            style: TextStyle(
+                              color: c.primary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 1.5,
+                            ),
+                          ),
+                        ],
+                      )
+                    : null,
               ),
                 ] else
                   _InvoiceView(invoice: _invoice!, colors: c, onBack: () {
@@ -451,6 +464,19 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
         ? 'Nymbot ${isPro ? 'Pro ' : ''}credits gift for @$giftNym — $creditWord'
         : 'Nymbot ${isPro ? 'Pro ' : ''}credits — $creditWord';
 
+    // Signed NIP-57 zap request riding the create-invoice body so the worker's
+    // `canNip57` receipt-verify fallback stays available (zaps.js:601-604) —
+    // best-effort, exactly like the PWA's try/catch (a signer failure omits it).
+    Map<String, dynamic>? zapRequest;
+    try {
+      final zr = await ref.read(nostrControllerProvider).buildZapRequest(
+            recipientPubkey: NostrController.nymbotPubkey,
+            amountSats: sats,
+            comment: comment,
+          );
+      zapRequest = zr?.toJson();
+    } catch (_) {}
+
     BotInvoice? inv;
     String? err;
     try {
@@ -459,6 +485,7 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
             _tier,
             recipientPubkey: widget.giftRecipientPubkey,
             comment: comment,
+            zapRequest: zapRequest,
           );
       // A null result means the chat isn't bound to an identity yet — the worker
       // can't issue an invoice without a pubkey (PWA gates on `this.pubkey`).
@@ -529,7 +556,14 @@ class _InvoiceViewState extends ConsumerState<_InvoiceView> {
 
   Future<void> _check({bool manual = false}) async {
     if (_paid) return;
-    if (manual) setState(() => _checking = true);
+    // PWA manualCheckPayment: `.zap-status.checking` + loader +
+    // "Checking payment..." while the server round-trip runs (zaps.js:707-712).
+    if (manual) {
+      setState(() {
+        _checking = true;
+        _status = 'Checking payment…';
+      });
+    }
     _checks++;
     final paid = await ref
         .read(botChatControllerProvider.notifier)
@@ -540,7 +574,9 @@ class _InvoiceViewState extends ConsumerState<_InvoiceView> {
       setState(() {
         _paid = true;
         _checking = false;
-        _status = 'Payment received — credits added!';
+        // handleZapPaymentSuccess shows the same success line for credit
+        // purchases as for zaps (zaps.js:1130-1134).
+        _status = 'Zap sent successfully!';
       });
       return;
     }
@@ -550,7 +586,12 @@ class _InvoiceViewState extends ConsumerState<_InvoiceView> {
     setState(() {
       _checking = false;
       if (manual) {
-        _status = 'Not paid yet — complete the payment, then tap again.';
+        _status =
+            'Not paid yet — complete the payment in your wallet, then tap again.';
+      } else if (_checks >= _maxChecks) {
+        // PWA gives up after 180 polls with a distinct hint (zaps.js:686-693).
+        _status =
+            'Payment not detected yet — if you paid, tap "I\'ve paid" or run ?balance shortly.';
       }
     });
   }
@@ -568,24 +609,52 @@ class _InvoiceViewState extends ConsumerState<_InvoiceView> {
   Widget build(BuildContext context) {
     final c = widget.colors;
     if (_paid) {
-      // `.zap-status.paid` success state.
+      // `.zap-status.paid` (styles-chat.css:288-292): primary border + text
+      // over the white/0.03 status fill, with the `zapSuccess` 0.5s scale pop.
+      // Content mirrors handleZapPaymentSuccess (zaps.js:1130-1134): ⚡ 24px
+      // (mb 10), the status line, `${amount} sats` 20px (mt 10).
+      final card = Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        margin: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.03),
+          border: Border.all(color: c.primary),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          children: [
+            const Text('⚡', style: TextStyle(fontSize: 24)),
+            const SizedBox(height: 10),
+            Text(_status,
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.primary)),
+            if (widget.invoice.amountSats > 0) ...[
+              const SizedBox(height: 10),
+              Text('${widget.invoice.amountSats} sats',
+                  style: TextStyle(color: c.primary, fontSize: 20)),
+            ],
+          ],
+        ),
+      );
       return Column(
         children: [
-          Icon(Icons.check_circle, size: 40, color: c.lightning),
-          const SizedBox(height: 12),
-          Text(_status,
-              style: TextStyle(
-                  color: c.lightning,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600)),
+          // `@keyframes zapSuccess`: scale 1 → 1.05 → 1 over 0.5s.
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 500),
+            builder: (_, t, child) {
+              final pop = 1 + 0.05 * (1 - (2 * t - 1).abs());
+              return Transform.scale(scale: pop, child: child);
+            },
+            child: card,
+          ),
           const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: c.lightning),
-              onPressed: () => Navigator.of(context).maybePop(),
-              child: const Text('Done'),
-            ),
+          ModalChrome.sendButton(
+            c,
+            'Done',
+            () => Navigator.of(context).maybePop(),
+            fullWidth: true,
           ),
         ],
       );
@@ -614,56 +683,112 @@ class _InvoiceViewState extends ConsumerState<_InvoiceView> {
               color: c.textDim, fontSize: 11, fontFamily: 'monospace'),
         ),
         const SizedBox(height: 10),
+        // `.zap-invoice-actions` (styles-chat.css:268-272): two `.icon-btn
+        // nm-flex1` pills — "Copy Invoice" / "Open Wallet" — stretched
+        // equally with a 10px gap (index.html:2075-2079).
         Row(
           children: [
             Expanded(
-              child: OutlinedButton.icon(
-                onPressed: () =>
+              child: _iconBtn(
+                c,
+                'Copy Invoice',
+                () =>
                     Clipboard.setData(ClipboardData(text: widget.invoice.pr)),
-                icon: const Icon(Icons.copy, size: 16),
-                label: const Text('Copy'),
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(backgroundColor: c.lightning),
-                onPressed: _openWallet,
-                icon: const Icon(Icons.account_balance_wallet, size: 16),
-                label: const Text('Open wallet'),
-              ),
-            ),
+            const SizedBox(width: 10),
+            Expanded(child: _iconBtn(c, 'Open Wallet', _openWallet)),
           ],
         ),
-        const SizedBox(height: 10),
+        // `.zap-status` (styles-chat.css:274-286): centered box, white/0.03
+        // fill, glass border, padding 12, margin 10 0; `.checking` swaps the
+        // border + text to `--warning` and shows the 15px `.loader`
+        // (manualCheckPayment, zaps.js:707-712).
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          margin: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: _checking ? c.warning : c.glassBorder),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (_checking) ...[
+                _loader(c),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Text(_status,
+                    textAlign: TextAlign.center,
+                    style:
+                        TextStyle(color: _checking ? c.warning : c.text)),
+              ),
+            ],
+          ),
+        ),
+        // `.modal-actions` (index.html:2083-2086): an `.icon-btn` beside the
+        // `.send-btn` "I've paid" (an immediate re-check, PWA
+        // `manualCheckPayment`), centered with a 10px gap.
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (_checking) ...[
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2, color: c.textDim),
-              ),
-              const SizedBox(width: 8),
-            ],
-            Flexible(
-              child: Text(_status,
-                  style: TextStyle(color: c.textDim, fontSize: 11)),
+            ModalChrome.iconButton(c, 'Change amount', widget.onBack),
+            const SizedBox(width: 10),
+            ModalChrome.sendButton(
+              c,
+              "I've paid",
+              _checking ? null : () => _check(manual: true),
             ),
           ],
-        ),
-        const SizedBox(height: 4),
-        // "I've paid" — an immediate re-check (PWA `manualCheckPayment`).
-        TextButton(
-          onPressed: _checking ? null : () => _check(manual: true),
-          child: Text("I've paid", style: TextStyle(color: c.lightning)),
-        ),
-        TextButton(
-          onPressed: widget.onBack,
-          child: Text('Change amount', style: TextStyle(color: c.textDim)),
         ),
       ],
     );
   }
+
+  /// An `.icon-btn.nm-flex1` — the bordered translucent uppercase pill
+  /// (styles-shell.css:912-926) stretched by its parent [Expanded]: white/0.05
+  /// fill + glass border + `--text` label in dark; black/0.03 fill + black/0.1
+  /// border + `--primary` label in light (styles-themes-responsive.css:595-599).
+  Widget _iconBtn(NymColors c, String label, VoidCallback? onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: c.subtleFill,
+          border: Border.all(
+              color: c.isLight ? const Color(0x1A000000) : c.glassBorder),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label.toUpperCase(),
+          style: TextStyle(
+            color: c.isLight ? c.primary : c.text,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.8,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The 15px `.loader` spinner (styles-components.css:2173-2182): a 2px
+/// `--text-dim` ring with a `--primary` sweep, spinning at 1s linear.
+Widget _loader(NymColors c) {
+  return SizedBox(
+    width: 15,
+    height: 15,
+    child: CircularProgressIndicator(
+      strokeWidth: 2,
+      color: c.primary,
+      backgroundColor: c.textDim,
+    ),
+  );
 }

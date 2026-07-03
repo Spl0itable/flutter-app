@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../features/autocomplete/pending_edit.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_language_prompt.dart';
@@ -19,6 +20,7 @@ import '../../models/user.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
 import 'context_menu_actions.dart';
@@ -697,7 +699,8 @@ class ContextMenuPanel extends ConsumerWidget {
         if (context.mounted) await NickEditModal.open(context);
         break;
       case CtxAction.edit:
-        // Own message: prompt for the new content, then editMessage.
+        // Own message: seed the composer with the original content
+        // (startEditMessage) so the next send publishes the edit.
         await _edit(context, ref, t);
         break;
       case CtxAction.delete:
@@ -742,20 +745,22 @@ class ContextMenuPanel extends ConsumerWidget {
     return view.kind == ViewKind.group ? view.id : '';
   }
 
-  /// Edit own message — prompt for new content (seeded with the original) then
-  /// call editMessage. Mirrors startEditMessage populating the input.
+  /// Edit own message — seed the composer with the original content and enter
+  /// pending-edit mode: the amber "Editing message" chip shows above the input
+  /// and the NEXT send publishes the edit. Mirrors `ctxEditMessage` →
+  /// `startEditMessage` (ui-context.js:261-266, messages.js:1861-1919), which
+  /// populates `#messageInput` rather than opening a prompt. `startEditMessage`
+  /// bails without messageId/content or on someone else's message.
   Future<void> _edit(BuildContext context, WidgetRef ref, CtxTarget t) async {
     final messageId = t.messageId;
-    if (messageId == null) {
-      onClose();
-      return;
+    final content = t.content ?? '';
+    if (messageId != null && content.isNotEmpty && t.isSelf) {
+      ref.read(pendingEditProvider.notifier).request(
+            messageId: messageId,
+            content: content,
+          );
     }
-    final newText = await _promptEdit(context, t.content ?? '');
     onClose();
-    if (newText == null) return;
-    final trimmed = newText.trim();
-    if (trimmed.isEmpty || trimmed == (t.content ?? '')) return;
-    await ref.read(nostrControllerProvider).editMessage(messageId, trimmed);
   }
 
   /// Delete — own messages send a kind-5 deletion (confirm); a mod/owner
@@ -787,8 +792,10 @@ class ContextMenuPanel extends ConsumerWidget {
     }
   }
 
-  /// Shows a confirm dialog (showAppConfirm equivalent); on confirm, closes the
-  /// panel and runs [action].
+  /// Shows the `.app-dialog` confirm (the PWA routes all context-menu
+  /// confirmations through `showAppConfirm` with `{danger, okLabel}`,
+  /// inline-bindings.js:479-520); on confirm, closes the panel and runs
+  /// [action].
   Future<void> _confirmThen(
     BuildContext context,
     String message, {
@@ -796,60 +803,14 @@ class ContextMenuPanel extends ConsumerWidget {
     required bool danger,
     required FutureOr<void> Function() action,
   }) async {
-    final c = context.nym;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: c.bgTertiary,
-        content: Text(message, style: TextStyle(color: c.text, fontSize: 14)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('Cancel', style: TextStyle(color: c.textDim)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(okLabel,
-                style: TextStyle(color: danger ? c.danger : c.text)),
-          ),
-        ],
-      ),
+    final ok = await showAppConfirm(
+      context,
+      message,
+      okLabel: okLabel,
+      danger: danger,
     );
     onClose();
-    if (ok == true) await action();
-  }
-
-  /// Prompts for edited message text, returning the new value or null on cancel.
-  Future<String?> _promptEdit(BuildContext context, String original) async {
-    final c = context.nym;
-    final controller = TextEditingController(text: original);
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: c.bgTertiary,
-        title: Text('Edit Message', style: TextStyle(color: c.text, fontSize: 16)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLines: null,
-          style: TextStyle(color: c.text),
-          decoration: InputDecoration(
-            hintText: 'Edit your message…',
-            hintStyle: TextStyle(color: c.textDim),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text('Cancel', style: TextStyle(color: c.textDim)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(controller.text),
-            child: Text('Save', style: TextStyle(color: c.text)),
-          ),
-        ],
-      ),
-    );
+    if (ok) await action();
   }
 
   Future<void> _translate(BuildContext context, WidgetRef ref) async {

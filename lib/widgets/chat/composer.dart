@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,6 +25,7 @@ import '../../features/emoji/custom_emoji.dart';
 import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
+import '../../features/groups/group_logic.dart';
 import '../../features/messages/format/message_content.dart'
     show InlineEmojiText, proxiedMedia;
 import '../../features/messages/inline_network_image.dart';
@@ -33,9 +35,52 @@ import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
 import '../../features/zaps/zap_modal.dart';
+import '../../models/group.dart' show GroupControlType;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../context_menu/interaction_hooks.dart';
+import 'message_row.dart'
+    show GroupInfoMember, encodeGroupInfoSystemMessage;
+
+/// Session-wide per-conversation unsent drafts — the PWA's app-level
+/// `_inputDrafts` map + `_getInputContextKey` (channels.js:1075-1105). The PWA
+/// has ONE persistent `#messageInput` shared by every conversation (including
+/// the bot PM), so its draft map survives every switch; natively the store
+/// must live OUTSIDE the composer widget state, because opening the Nymbot
+/// chat swaps the canonical [Composer] out entirely (chat_pane returns
+/// `BotChatScreen`) and its bot composer shares this same store.
+class ComposerDrafts {
+  ComposerDrafts._();
+
+  static final Map<String, String> _drafts = {};
+
+  /// `_getInputContextKey` (channels.js:1075-1079): `'g:'+group` / `'p:'+pm` /
+  /// `'c:'+(geohash||channel)` — the [ChatView] id carries exactly those.
+  static String keyFor(ChatView view) {
+    switch (view.kind) {
+      case ViewKind.group:
+        return 'g:${view.id}';
+      case ViewKind.pm:
+        return 'p:${view.id}';
+      case ViewKind.channel:
+        return 'c:${view.id}';
+    }
+  }
+
+  /// `_saveCurrentDraft` semantics (channels.js:1082-1089): stash [value]
+  /// under [key]; a blank/whitespace draft DELETES the stored entry.
+  static void save(String key, String value) {
+    if (value.trim().isNotEmpty) {
+      _drafts[key] = value;
+    } else {
+      _drafts.remove(key);
+    }
+  }
+
+  /// The saved draft for [key], or '' when none (`_restoreDraftForContext`).
+  static String restore(String key) => _drafts[key] ?? '';
+}
 
 /// The message composer (`.input-container` + `.message-input` + `.input-buttons`,
 /// docs/specs/02 §5.5). A multi-line input with a toolbar of image/file/emoji/GIF
@@ -81,6 +126,56 @@ class _ComposerState extends ConsumerState<Composer> {
   ({String author, String text})? _pendingQuote;
   PendingEdit? _pendingEdit;
 
+  // --- Per-conversation unsent drafts ---------------------------------------
+  // [ComposerDrafts] + `_activeDraftKey` (channels.js:1075-1105): every
+  // conversation switch — a sidebar/channel switch OR a columns-deck focus
+  // change (`_cvFocusColumn`, columns.js:549-564) — stashes the current input
+  // under the OUTGOING conversation's key, clears the quote chip, cancels a
+  // pending edit, then restores the INCOMING conversation's saved draft. The
+  // map itself is session-level ([ComposerDrafts]) so drafts survive this
+  // composer unmounting (the bot chat swap).
+  String? _activeDraftKey;
+
+  /// `_saveCurrentDraft` (channels.js:1082-1089): stash the input under the
+  /// active key — a blank/whitespace draft DELETES the stored entry. Stored in
+  /// EXPANDED form (`:code:` text, via [EmojiSentinelController.expand]) so a
+  /// draft never carries sentinel chars whose allocations are dropped when the
+  /// input empties (02-F-02-E); [_restoreDraftForContext]'s `_onInputChanged`
+  /// re-collapses them on restore.
+  void _saveCurrentDraft() {
+    final key = _activeDraftKey;
+    if (key == null) return;
+    ComposerDrafts.save(key, _controller.expand(_controller.text));
+  }
+
+  /// `_restoreDraftForContext` (channels.js:1092-1105): point the active key at
+  /// [view] and load its saved draft (empty when none). No-ops when the input
+  /// already holds that exact text.
+  void _restoreDraftForContext(ChatView view) {
+    final key = ComposerDrafts.keyFor(view);
+    _activeDraftKey = key;
+    final draft = ComposerDrafts.restore(key);
+    if (_controller.text == draft) return;
+    _controller.text = draft;
+    _controller.selection =
+        TextSelection.collapsed(offset: _controller.text.length);
+    // `autoResizeTextarea` + `handleInputChange` — recompute the popout /
+    // autocomplete state for the restored text.
+    _onInputChanged();
+  }
+
+  /// Runs the PWA's conversation-switch composer sequence (columns.js:549-564,
+  /// mirrored by switchChannel/openPM/openGroup): save the outgoing draft,
+  /// clear any quote chip, cancel a pending edit (which empties the input),
+  /// then restore the incoming conversation's draft.
+  void _onViewSwitched(ChatView view) {
+    if (!mounted) return;
+    _saveCurrentDraft();
+    _clearQuote();
+    if (_pendingEdit != null) _cancelEdit();
+    _restoreDraftForContext(view);
+  }
+
   // --- In-composer translate (F7) ------------------------------------------
   // A 26×26 translate button overlaid bottom-right of the input opens a 230px
   // language dropdown; choosing a language translates the typed draft in place
@@ -112,6 +207,14 @@ class _ComposerState extends ConsumerState<Composer> {
   /// styles-chat.css:1737-1748). It follows the same `_acAnchor` leader as the
   /// autocomplete (a single leader supports multiple followers).
   final _popoutPortal = OverlayPortalController();
+
+  /// Hosts the floating quote/edit preview chip. The PWA's `.quote-preview` /
+  /// `.edit-preview` are `position:absolute; bottom:100%` (styles-chat.css:
+  /// 1412-1425 / 1496-1511): the chip OVERLAYS the message area above the
+  /// input without growing the composer bar. Shown permanently (from
+  /// [initState]); the overlay builder renders nothing while no chip is
+  /// pending.
+  final _chipPortal = OverlayPortalController();
 
   /// Measures the message-input box so the autocomplete dropdown spans the
   /// INPUT width (`.autocomplete-dropdown{left:0;right:0}` = `.input-wrapper`),
@@ -162,6 +265,11 @@ class _ComposerState extends ConsumerState<Composer> {
 
   @override
   void dispose() {
+    // Stash the active conversation's unsent input before this composer
+    // unmounts (opening the Nymbot chat swaps the whole pane for
+    // `BotChatScreen`) — the PWA's single persistent input never unmounts, so
+    // its `_inputDrafts` survives implicitly; ours must save here.
+    _saveCurrentDraft();
     _focus.removeListener(_onFocusChanged);
     _controller.dispose();
     _focus.dispose();
@@ -250,6 +358,10 @@ class _ComposerState extends ConsumerState<Composer> {
   @override
   void initState() {
     super.initState();
+    // Seed the draft key with the conversation already in view so the FIRST
+    // switch away saves its unsent input (the PWA sets `_activeDraftKey` in
+    // `_restoreDraftForContext`, which the boot path runs too).
+    _activeDraftKey = ComposerDrafts.keyFor(ref.read(currentViewProvider));
     // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
     // rebuild on focus change to swap those in/out.
     _focus.addListener(_onFocusChanged);
@@ -262,6 +374,13 @@ class _ComposerState extends ConsumerState<Composer> {
             onSystemMessage: _onSystemMessage,
             hooks: _buildCommandHooks(),
           );
+      // Mount the chip portal once; [_chipOverlay] renders nothing until a
+      // quote/edit is actually pending.
+      _chipPortal.show();
+      // A REMOUNT (e.g. returning from the bot chat, which swaps this composer
+      // out) must restore the incoming conversation's stashed draft — the
+      // PWA's persistent input still holds it; ours starts empty.
+      _restoreDraftForContext(ref.read(currentViewProvider));
     });
   }
 
@@ -321,6 +440,9 @@ class _ComposerState extends ConsumerState<Composer> {
           _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
       ban: (pubkey) =>
           _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
+      // `/unban @nym` → lift a group ban, owner-only (`cmdUnbanFromGroup` →
+      // `unbanFromGroup`, groups.js:1926-1968).
+      unban: _unbanFromCurrentGroup,
       addMod: (pubkey) =>
           _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
       removeMod: (pubkey) =>
@@ -352,29 +474,90 @@ class _ComposerState extends ConsumerState<Composer> {
         ref.read(nostrControllerProvider).addGroupMembers(view.id, [target.pubkey]));
   }
 
-  /// Emits a `/groupinfo` summary (owner, mods, member count) as a system line.
+  /// `/unban @nym` — a port of the PWA's owner-only `unbanFromGroup`
+  /// (groups.js:1926-1968): gate on ownership ("Only the group owner can unban
+  /// users."), require the target to actually be banned ("That user is not
+  /// banned."), then drop the pubkey from `group.banned` and append the
+  /// `{type:'unban'}` mod-log entry via the shared control-apply, confirming
+  /// with the PWA's system line. The gift-wrapped `group-unban` rumor that
+  /// notifies the unbanned user (tags `p`/`g`/`subject`/`type`/`unban`/`x`)
+  /// needs an outbound publish path on [NostrController] (`unbanFromGroup`),
+  /// which doesn't exist yet — see the handoff note.
+  void _unbanFromCurrentGroup(String pubkey) {
+    final view = ref.read(currentViewProvider);
+    if (view.kind != ViewKind.group) return;
+    final appState = ref.read(appStateProvider.notifier);
+    final app = ref.read(appStateProvider);
+    final group = appState.groupById(view.id);
+    if (group == null) return;
+    if (!GroupLogic.isOwner(group, app.selfPubkey)) {
+      _onSystemMessage('Only the group owner can unban users.');
+      return;
+    }
+    if (!group.banned.contains(pubkey)) {
+      _onSystemMessage('That user is not banned.');
+      return;
+    }
+    appState.applyGroupControl(
+      groupId: view.id,
+      type: GroupControlType.unban,
+      tags: [
+        ['unban', pubkey],
+      ],
+      senderPubkey: app.selfPubkey,
+      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      eventId: GroupLogic.generateGroupId(),
+    );
+    // Resolve the target's profile if unknown (the PWA's fetchProfileDirect).
+    ref.read(nostrControllerProvider).ensureProfiles([pubkey]);
+    final nym = ref.read(usersProvider)[pubkey]?.nym ??
+        'anon#${pubkey.substring(pubkey.length - 4)}';
+    _onSystemMessage('@$nym was unbanned. They can be re-invited.');
+  }
+
+  /// `/groupinfo` — the PWA's `cmdGroupInfo` (groups.js:3487-3525): sort the
+  /// members owner-first, then mods, then everyone else (each block
+  /// alphabetized by nym), label `owner`/`mod`/`you`, and emit the structured
+  /// `.group-info` block as a system row — rendered by `MessageRow` with the
+  /// 22px avatar member rows — prefetching unknown profiles like the PWA's
+  /// `ensureListProfiles`.
   void _showGroupInfo() {
     final view = ref.read(currentViewProvider);
     if (view.kind != ViewKind.group) return;
     final group = ref.read(appStateProvider.notifier).groupById(view.id);
     if (group == null) return;
+    final app = ref.read(appStateProvider);
     final users = ref.read(usersProvider);
-    String nymOf(String pk) {
-      final u = users[pk];
-      return u != null
-          ? stripPubkeySuffix(u.nym)
-          : 'nym#${pk.substring(pk.length - 4)}';
-    }
-
-    final owner =
-        group.createdBy != null ? nymOf(group.createdBy!) : 'unknown';
-    final lines = <String>[
-      'Group: ${group.name.isEmpty ? '(unnamed)' : group.name}',
-      'Owner: $owner',
-      if (group.mods.isNotEmpty) 'Mods: ${group.mods.map(nymOf).join(', ')}',
-      'Members: ${group.members.length}',
+    final ownerPk = group.createdBy;
+    final mods = group.mods;
+    String nymOf(String pk) => users[pk]?.nym ?? '';
+    int rank(String pk) => pk == ownerPk ? 0 : (mods.contains(pk) ? 1 : 2);
+    final sorted = [...group.members]..sort((a, b) {
+        final ra = rank(a), rb = rank(b);
+        if (ra != rb) return ra - rb;
+        return nymOf(a).toLowerCase().compareTo(nymOf(b).toLowerCase());
+      });
+    final members = <GroupInfoMember>[
+      for (final pk in sorted)
+        (
+          pubkey: pk,
+          labels: [
+            if (pk == ownerPk)
+              'owner'
+            else if (mods.contains(pk))
+              'mod',
+            if (pk == app.selfPubkey) 'you',
+          ],
+        ),
     ];
-    _onSystemMessage(lines.join('\n'));
+    ref.read(nostrControllerProvider).ensureProfiles(sorted);
+    // Straight to the in-list system pill — no SnackBar echo of the payload.
+    ref.read(appStateProvider.notifier).addSystemMessage(
+        encodeGroupInfoSystemMessage((
+      name: group.name,
+      count: group.members.length,
+      members: members,
+    )));
   }
 
   void _onFocusChanged() {
@@ -503,11 +686,11 @@ class _ComposerState extends ConsumerState<Composer> {
     _selectedIndex = 0;
 
     // `.composer-popout`: float the input into an elevated box once the draft
-    // exceeds ~1.5 lines (ui-context.js:1738). Approximate "extent" by newline
-    // count + a rough wrap estimate so we don't need a layout pass. The box
-    // lives in an OverlayPortal so it overlays the messages (B4) rather than
-    // growing the bottom bar — toggle the portal with the flag.
-    _popout = _estimatedLineCount() > 1;
+    // exceeds ~1.5 lines (ui-context.js:1738), MEASURED at the field's real
+    // width + font size (see [_draftWantsPopout]). The box lives in an
+    // OverlayPortal so it overlays the messages (B4) rather than growing the
+    // bottom bar — toggle the portal with the flag.
+    _popout = _draftWantsPopout();
     _syncPopoutPortal();
 
     if (trigger.kind == TriggerKind.command) {
@@ -556,16 +739,45 @@ class _ComposerState extends ConsumerState<Composer> {
     }
   }
 
-  /// Cheap line-count estimate for the popout threshold: explicit newlines plus
-  /// a per-line wrap estimate (~36 chars/line is a conservative composer width).
-  int _estimatedLineCount() {
-    final text = _controller.text;
-    if (text.isEmpty) return 0;
-    var lines = 0;
-    for (final line in text.split('\n')) {
-      lines += 1 + (line.length ~/ 36);
+  /// `.message-input` font: `var(--user-text-size)` (the Settings text-size
+  /// slider, styles-chat.css:1670), pinned to 16px at the ≤768 phone
+  /// breakpoint (`font-size: 16px !important`, styles-themes-responsive.css:
+  /// 270-275 — the iOS anti-zoom override).
+  double _inputFontSize() {
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return 16;
     }
-    return lines;
+    return ref.read(settingsProvider).textSize.toDouble();
+  }
+
+  /// Whether the draft wraps past ~1.5 visual lines at the input's REAL width
+  /// — the PWA's popout rule (`autoResizeTextarea`, ui-context.js:1725-1743:
+  /// `expand = (scrollHeight - padV) > lineHeight * 1.5`). Lays the draft out
+  /// with a [TextPainter] at the field's content width (the field minus its
+  /// 16px paddings / the 38px translate-button inset) and compares the laid-out
+  /// height against 1.5 of the SAME painter's line height, so the threshold
+  /// tracks any field width and any user text size instead of a hard-coded
+  /// chars-per-line guess.
+  bool _draftWantsPopout() {
+    final text = _controller.text;
+    if (text.isEmpty) return false;
+    final box = _inputKey.currentContext?.findRenderObject() as RenderBox?;
+    // Not laid out yet (first frame): keep the current state.
+    if (box == null || !box.hasSize || box.size.width <= 0) return _popout;
+    final fontSize = _inputFontSize();
+    // `.message-input { padding: 10px 16px }` + 1px borders; with text the
+    // right inset is the 38px translate-button reserve (see [_textField]).
+    final hasText = text.trim().isNotEmpty;
+    final contentWidth =
+        box.size.width - 16 - (hasText ? 38 : 16) - 2;
+    if (contentWidth <= 0) return _popout;
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: TextStyle(fontSize: fontSize)),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: contentWidth);
+    final expand = painter.height > painter.preferredLineHeight * 1.5;
+    painter.dispose();
+    return expand;
   }
 
   /// Whether the active view is the private chat with the verified Nymbot
@@ -1138,8 +1350,19 @@ class _ComposerState extends ConsumerState<Composer> {
       _applyEdit(edit);
       ref.read(pendingEditProvider.notifier).consume();
     });
+    // Conversation switches — sidebar selections AND columns-deck focus changes
+    // (the deck re-points the current view, `_cvFocusColumn`) — run the PWA's
+    // composer sequence: save the outgoing conversation's draft, clear any
+    // quote-reply chip, cancel a pending edit, restore the incoming draft
+    // (columns.js:549-564, channels.js:1216/1267-1268/1373).
+    ref.listen(currentViewProvider, (prev, next) {
+      if (prev == next) return;
+      _onViewSwitched(next);
+    });
 
-    final input = _inputWithChips(context, sendEnabled);
+    // The quote/edit chip no longer sits in-flow — it floats above the input
+    // via [_chipOverlay] (`bottom:100%`), so the input IS the composer body.
+    final input = _input(context, sendEnabled);
     // `.input-container` is `padding: 12px 16px` (desktop/tablet); the phone
     // breakpoint (≤768) collapses it to a flat `padding: 10px`
     // (styles-themes-responsive.css:221/304). `compact` spans the whole ≤1024
@@ -1186,10 +1409,14 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// The input column with the quote/edit preview chip stacked above it
-  /// (`.quote-preview` / `.edit-preview`, `bottom:100%`). The chip slides in
-  /// (0.2s, dy 8→0) and the column height animates so the input shifts down.
-  Widget _inputWithChips(BuildContext context, bool inputEnabled) {
+  /// The floating quote/edit preview chip (`.quote-preview` / `.edit-preview`:
+  /// `position:absolute; bottom:100%` with `margin-bottom:8px`, styles-chat.css
+  /// :1412-1425 / 1496-1511): anchored ABOVE the input, overlaying the message
+  /// area — the composer bar does NOT grow — and sliding in per
+  /// `quoteSlideIn` (0.2s ease-out, opacity 0→1 / translateY 8px→0). With the
+  /// popout active the chip lifts past the floating field's overhang, matching
+  /// the autocomplete's `--ac-offset` stack (dropdown above chip above field).
+  Widget _chipOverlay(BuildContext context) {
     final chip = _pendingEdit != null
         ? _EditPreviewChip(
             text: _quotePreviewText(_pendingEdit!.content),
@@ -1202,26 +1429,37 @@ class _ComposerState extends ConsumerState<Composer> {
                 onClose: _clearQuote,
               )
             : null);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        AnimatedSize(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          alignment: Alignment.bottomLeft,
-          child: chip == null
-              ? const SizedBox(height: 0)
-              : Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  // Keyed so the autocomplete dropdown can clear the chip height
-                  // (`--ac-offset`, 04-F2). Measures the chip alone (the +8 gap
-                  // is added in the offset, matching the PWA's `previewH + 8`).
-                  child: KeyedSubtree(key: _chipKey, child: chip),
-                ),
+    if (chip == null) return const SizedBox.shrink();
+    final overhang = _popout
+        ? math.max(0.0, _boxHeight(_popoutFieldKey) - _composerRowBase)
+        : 0.0;
+    return CompositedTransformFollower(
+      link: _acAnchor,
+      targetAnchor: Alignment.topLeft,
+      followerAnchor: Alignment.bottomLeft,
+      // `margin-bottom: 8px` between the chip and the field (+ the popout
+      // overhang when the field floats).
+      offset: Offset(0, -(overhang + 8)),
+      showWhenUnlinked: false,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(
+            width: _anchorWidth(context),
+            // Re-mounts (and so replays the slide-in) when the chip KIND
+            // changes — the PWA recreates the element on each
+            // setQuoteReply/startEditMessage.
+            child: _ChipSlideIn(
+              key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
+              // Keyed so the autocomplete dropdown can clear the chip height
+              // (`--ac-offset`, 04-F2). Measures the chip alone (the +8 gap
+              // is added in the offset, matching the PWA's `previewH + 8`).
+              child: KeyedSubtree(key: _chipKey, child: chip),
+            ),
+          ),
         ),
-        _input(context, inputEnabled),
-      ],
+      ),
     );
   }
 
@@ -1238,15 +1476,24 @@ class _ComposerState extends ConsumerState<Composer> {
         ? 'Uploading $_uploadIndex of $_uploadTotal...'
         : 'Uploading $kind...';
     final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
+    // In solid-ui the panel is repainted with --glass-bg (#14141e dark /
+    // opaque #ffffff light — styles-themes-responsive.css:1593-1627, sourced
+    // AFTER the light white@0.92 rule so it wins in both themes).
+    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
     return Container(
-      // `.upload-progress`: bg var(--bg-tertiary) (rgba(20,20,35,0.9) dark /
-      // #1c1c2c solid-ui); `body.light-mode .upload-progress` → white@0.92
-      // (styles-themes-responsive.css:1179). border 1px glass, radius-sm top
-      // corners, padding 12, margin-bottom 8.
+      // `.upload-progress`: bg literal rgba(20,20,35,0.9) dark
+      // (styles-components.css:1142-1153); `body.light-mode .upload-progress`
+      // → white@0.92 (styles-themes-responsive.css:1179). border 1px glass
+      // (light: black@0.08 = glassBorder), radius-sm top corners, padding 12,
+      // margin-bottom 8.
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: c.isLight ? Colors.white.withValues(alpha: 0.92) : c.bgTertiary,
+        color: solidUi
+            ? c.glassBg
+            : (c.isLight
+                ? Colors.white.withValues(alpha: 0.92)
+                : const Color(0xE6141423)),
         border: Border.all(color: c.glassBorder),
         borderRadius:
             const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
@@ -1336,14 +1583,22 @@ class _ComposerState extends ConsumerState<Composer> {
       child: OverlayPortal(
         controller: _popoutPortal,
         overlayChildBuilder: (ctx) => _popoutOverlay(ctx, focus),
+        // The chip portal nests between the popout field (behind) and the
+        // autocomplete (topmost), so the dropdown paints over the chip and the
+        // chip over the floating field — the PWA's `--ac-offset` stack.
         child: OverlayPortal(
-          controller: _acPortal,
-          overlayChildBuilder: _overlayChild,
-          // In-flow we reserve only the base row height while the field floats;
-          // flat (non-popout) the field stays in place.
-          child: _popout
-              ? const SizedBox(height: _composerRowBase, width: double.infinity)
-              : focus,
+          controller: _chipPortal,
+          overlayChildBuilder: _chipOverlay,
+          child: OverlayPortal(
+            controller: _acPortal,
+            overlayChildBuilder: _overlayChild,
+            // In-flow we reserve only the base row height while the field
+            // floats; flat (non-popout) the field stays in place.
+            child: _popout
+                ? const SizedBox(
+                    height: _composerRowBase, width: double.infinity)
+                : focus,
+          ),
         ),
       ),
     );
@@ -1468,6 +1723,18 @@ class _ComposerState extends ConsumerState<Composer> {
     final c = context.nym;
     final hasText = _controller.text.trim().isNotEmpty;
     final focused = _focus.hasFocus;
+    // `.message-input { font-size: var(--user-text-size) }` — the input font
+    // tracks the Settings text-size slider (styles-chat.css:1670); the ≤768
+    // phone breakpoint pins it to 16px (`font-size: 16px !important`,
+    // styles-themes-responsive.css:270-275). Watch so a slider change
+    // re-renders the field live.
+    ref.watch(settingsProvider.select((s) => s.textSize));
+    final fontSize = _inputFontSize();
+    // Flat-field growth cap: `.message-input { max-height: 160px }` with its
+    // 10px vertical paddings → ~140px of text, at the PWA's effective
+    // `fontSize * 1.4` line height (`autoResizeTextarea`'s fallback). The
+    // popout keeps its own `min(40vh, 360)` cap below.
+    final flatMaxLines = math.max(1, 140 ~/ (fontSize * 1.4));
     // `.composer-popout .message-input`: elevated rounded box vs the flat field.
     // `.message-input` flat fill is white@0.05 → white@0.07 on focus (dark); in
     // light mode `body.light-mode div.message-input` flips to black@0.04 →
@@ -1508,7 +1775,7 @@ class _ComposerState extends ConsumerState<Composer> {
       // on the SAME [inputEnabled] (= the SEND `sendEnabled`) so the field is
       // typable iff SEND is — never inert while SEND is live, nor vice-versa.
       enabled: inputEnabled,
-      maxLines: _popout ? 12 : 5,
+      maxLines: _popout ? 12 : flatMaxLines,
       minLines: 1,
       textInputAction: TextInputAction.newline,
       onChanged: (_) {
@@ -1524,7 +1791,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // — `color:#ffffff !important` / `body.light-mode … color:#000000`
         // (styles-themes-responsive.css:578-593), NOT the accent `--text`.
         color: c.isLight ? Colors.black : Colors.white,
-        fontSize: widget.compact ? 16 : 15,
+        fontSize: fontSize,
       ),
       cursorColor: c.isLight ? Colors.black : Colors.white,
       decoration: InputDecoration(
@@ -1536,7 +1803,7 @@ class _ComposerState extends ConsumerState<Composer> {
             // black@0.4 (`body.light-mode …`, styles-themes-responsive.css:58).
             color: (c.isLight ? Colors.black : Colors.white)
                 .withValues(alpha: 0.4),
-            fontSize: widget.compact ? 16 : 15),
+            fontSize: fontSize),
         filled: true,
         fillColor: fill,
         // The translate button only exists when there's text (A9), so only then
@@ -1551,7 +1818,7 @@ class _ComposerState extends ConsumerState<Composer> {
       ),
     );
 
-    final stack = Stack(
+    Widget stack = Stack(
       children: [
         field,
         // `#translateInputBtn` starts `.nm-hidden` and `display:flex` ONLY when
@@ -1565,6 +1832,16 @@ class _ComposerState extends ConsumerState<Composer> {
           ),
       ],
     );
+    // `div.message-input.input-disabled { opacity: 0.55; cursor: not-allowed }`
+    // (styles-chat.css:1692-1695), toggled by the contenteditable `disabled`
+    // setter (ui-context.js:1953) — pre-connect the whole field dims and the
+    // pointer reads not-allowed.
+    if (!inputEnabled) {
+      stack = MouseRegion(
+        cursor: SystemMouseCursors.forbidden,
+        child: Opacity(opacity: 0.55, child: stack),
+      );
+    }
 
     if (!_popout) {
       // `.message-input:focus`: a 3px primary@0.06 focus ring (spread, no blur)
@@ -1911,6 +2188,9 @@ class _ComposerState extends ConsumerState<Composer> {
         overlayChildBuilder: (context) => _popover(
           link: _gifAnchor,
           onDismiss: _gifPortal.hide,
+          // `.gif-picker` ≤768: `width: 90%; max-width: 350px`
+          // (styles-themes-responsive.css:89-97, ui-context.js:2017-2031).
+          phoneWidthFactor: 0.9,
           child: GifPicker(
             favoritesStore: FavoriteGifsStore(_prefs!),
             onSelect: _onGifSelected,
@@ -1930,16 +2210,22 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Positions a picker above its anchor button (bottom-anchored, like the
   /// PWA's `bottom: 100%` inline popup) with a barrier to dismiss on tap-out.
+  ///
+  /// [phoneWidthFactor] pins the picker to that fraction of the viewport width
+  /// on phones — the GIF picker's ≤768 rule is `width: 90%; max-width: 350px`
+  /// (styles-themes-responsive.css:89-97) where the emoji picker only caps
+  /// (`max-width: 90%`, :407-419).
   Widget _popover({
     required LayerLink link,
     required VoidCallback onDismiss,
     required Widget child,
+    double? phoneWidthFactor,
   }) {
     final media = MediaQuery.of(context);
     // `.emoji-picker`/`.gif-picker` @media (max-width:768): `position: fixed;
-    // left: 50%; transform: translateX(-50%); bottom: 60px; max-width: 90%` —
-    // centered above the input bar on phones (vs anchored above the button on
-    // desktop, base `bottom: 100%`).
+    // left: 50%; transform: translateX(-50%); bottom: 60px` — centered above
+    // the input bar on phones (vs anchored above the button on desktop, base
+    // `bottom: 100%`).
     final isPhone = media.size.width <= NymDimens.mobileBreakpoint;
     final picker = Material(type: MaterialType.transparency, child: child);
     return Stack(
@@ -1952,16 +2238,28 @@ class _ComposerState extends ConsumerState<Composer> {
         ),
         if (isPhone)
           Positioned(
-            left: 8,
-            right: 8,
+            left: 0,
+            right: 0,
             // 60px above the bar, lifted above the keyboard when it's open.
             bottom: 60 + media.viewInsets.bottom,
             child: Align(
               alignment: Alignment.bottomCenter,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: picker,
-              ),
+              child: phoneWidthFactor != null
+                  // `width: 90%` of the viewport; the picker's own max-width
+                  // (350 for the GIF picker) still caps it, so this renders
+                  // exactly `min(90vw, 350)` like the PWA.
+                  ? ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width * phoneWidthFactor),
+                      child: picker,
+                    )
+                  : ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width - 16 < 360
+                              ? media.size.width - 16
+                              : 360),
+                      child: picker,
+                    ),
             ),
           )
         else
@@ -2027,24 +2325,34 @@ class _IconBtnState extends State<_IconBtn> {
     // overriding only height/padding/radius (styles-chat.css:1946-1953) — so it
     // carries the SAME fill/border/hover the header pills do (B1/B2). Mirrors
     // `_iconBtnStyle` (chat_pane.dart:1172):
-    //  - Dark base : fill white@0.05, border `--glass-border`, glyph `--text`.
-    //  - Dark hover: fill primary@0.12, border primary@0.3, glyph `--primary`.
-    //  - Light base: fill black@0.03, border black@0.1, glyph `--primary`.
-    //  - Light hover: fill black@0.06, border `--primary`, glyph `--primary`.
+    //  - Dark base : fill white@0.05, border `--glass-border`.
+    //  - Dark hover: fill primary@0.12, border primary@0.3.
+    //  - Light base: fill black@0.03, border black@0.1.
+    //  - Light hover: fill black@0.06, border `--primary`.
+    // Glyph colors split by markup:
+    //  - SVG strokes: the explicit `.icon-btn.input-btn svg { stroke:
+    //    var(--text) }` resolves directly, so the light-mode `color:
+    //    var(--primary)` on `.icon-btn` does NOT recolor them — `--text` at
+    //    rest in BOTH themes, `--primary` only on hover
+    //    (styles-chat.css:1955-1961).
+    //  - The GIF `<text fill="currentColor">` follows `color:` — `--text`/
+    //    hover-primary in dark, always `--primary` in light
+    //    (styles-themes-responsive.css:595-605).
     final Color fill;
     final Color borderColor;
-    final Color glyphColor;
+    final Color labelColor;
     if (c.isLight) {
       fill = hovered
           ? Colors.black.withValues(alpha: 0.06)
           : Colors.black.withValues(alpha: 0.03);
       borderColor = hovered ? c.primary : Colors.black.withValues(alpha: 0.1);
-      glyphColor = c.primary;
+      labelColor = c.primary;
     } else {
       fill = hovered ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05);
       borderColor = hovered ? c.primaryA(0.30) : c.glassBorder;
-      glyphColor = hovered ? c.primary : c.text;
+      labelColor = hovered ? c.primary : c.text;
     }
+    final glyphColor = hovered ? c.primary : c.text;
     // `.icon-btn.input-btn`: 42 tall, 0 12 padding, radius sm. Hover adds the
     // `0 0 15px primary@0.1` glow (`.icon-btn:hover box-shadow`).
     final btn = Tooltip(
@@ -2083,7 +2391,7 @@ class _IconBtnState extends State<_IconBtn> {
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 0.5,
-                          color: glyphColor,
+                          color: labelColor,
                         ),
                       )
                     : NymSvgIcon(
@@ -2168,6 +2476,9 @@ class _SendButtonState extends State<_SendButton> {
       _anonFired = true;
       _suppressClickUntil =
           DateTime.now().add(const Duration(milliseconds: 800));
+      // `nymHapticTap` = the same 30ms vibrate every long-press site uses
+      // (ui-context.js:1217, inline-bindings.js:106-115) — a solid motor
+      // pulse, so mediumImpact rather than the faint lightImpact.
       HapticFeedback.mediumImpact();
       setState(() => _preGlow = true);
       widget.onAnon!.call();
@@ -2187,6 +2498,20 @@ class _SendButtonState extends State<_SendButton> {
     _holdTimer = null;
     _preGlowTimer?.cancel();
     if (!_anonFired && mounted && _preGlow) setState(() => _preGlow = false);
+  }
+
+  /// `mouseleave` → cancel (ui-context.js:1261): dragging a pressed MOUSE
+  /// pointer off the button abandons the 2s hold. Mouse only — the PWA binds
+  /// no `touchmove` cancel, so a touch that wanders keeps the timer running.
+  /// Tracked from the captured pointer stream (a MouseRegion exit is not
+  /// guaranteed mid-drag), against the button's own bounds.
+  void _maybeCancelOnExit(PointerMoveEvent e) {
+    if (e.kind != PointerDeviceKind.mouse || _holdTimer == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    if (!(Offset.zero & box.size).contains(box.globalToLocal(e.position))) {
+      _cancelHold();
+    }
   }
 
   void _handleTap() {
@@ -2219,6 +2544,7 @@ class _SendButtonState extends State<_SendButton> {
         onExit: (_) => setState(() => _hover = false),
         child: Listener(
           onPointerDown: (_) => _startHold(),
+          onPointerMove: _maybeCancelOnExit,
           onPointerUp: (_) => _cancelHold(),
           onPointerCancel: (_) => _cancelHold(),
           child: AnimatedContainer(
@@ -2317,6 +2643,50 @@ class _PreviewChip extends StatelessWidget {
   }
 }
 
+/// `@keyframes quoteSlideIn` (styles-chat.css:1428-1439): opacity 0→1 +
+/// translateY 8px→0 over 0.2s ease-out, replayed whenever the chip (re)mounts
+/// — the PWA recreates the preview element on every setQuoteReply /
+/// startEditMessage, so each new chip animates in.
+class _ChipSlideIn extends StatefulWidget {
+  const _ChipSlideIn({super.key, required this.child});
+  final Widget child;
+
+  @override
+  State<_ChipSlideIn> createState() => _ChipSlideInState();
+}
+
+class _ChipSlideInState extends State<_ChipSlideIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 200),
+  )..forward();
+  late final CurvedAnimation _t =
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+
+  @override
+  void dispose() {
+    _t.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _t,
+      child: AnimatedBuilder(
+        animation: _t,
+        builder: (context, child) => Transform.translate(
+          offset: Offset(0, 8 * (1 - _t.value)),
+          child: child,
+        ),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 /// `.quote-preview`: author (primary 12/w600 with a muted `#suffix`) over the
 /// truncated quoted text (dim 12, ellipsis).
 class _QuotePreviewChip extends StatelessWidget {
@@ -2370,13 +2740,14 @@ class _QuotePreviewChip extends StatelessWidget {
           // The quoted line renders custom emoji as images, matching the PWA's
           // `renderCustomEmojiInEscapedText` in setQuoteReply (messages.js:1847,
           // "keep shortcodes so they render as images"). `InlineEmojiText` falls
-          // back to a plain Text for unicode-only text (F-02-B).
+          // back to a plain Text for unicode-only text (F-02-B). Image size is
+          // the base `.custom-emoji` 1.75em of the 12px `.quote-preview-text`
+          // (= 21px) — the InlineEmojiText default.
           InlineEmojiText(
             text: text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: c.textDim, fontSize: 12),
-            emojiSize: 14,
           ),
         ],
       ),
@@ -2860,8 +3231,9 @@ class EmojiSentinelController extends TextEditingController {
           context: context, style: style, withComposing: withComposing);
     }
     final baseStyle = style ?? const TextStyle();
-    // ~1.3× the font size, square — matches the spec for the typed-emoji glyph.
-    final side = (baseStyle.fontSize ?? 14) * 1.3;
+    // 1.4× the font size, square — `div.message-input .custom-emoji
+    // { width/height: 1.4em }` (styles-chat.css:1703-1708).
+    final side = (baseStyle.fontSize ?? 14) * 1.4;
     final children = <InlineSpan>[];
     final buf = StringBuffer();
 
@@ -2883,18 +3255,26 @@ class EmojiSentinelController extends TextEditingController {
         continue;
       }
       flushText();
+      // `div.message-input .custom-emoji { vertical-align: -0.3em }`
+      // (styles-chat.css:1703-1708): baseline-aligned with the image bottom
+      // 0.3em below the alphabetic baseline.
       children.add(WidgetSpan(
-        alignment: PlaceholderAlignment.middle,
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 1),
-          child: InlineNetworkImage(
-            url: proxiedMedia(url, emoji: true),
-            width: side,
-            height: side,
-            fit: BoxFit.contain,
-            // Same disk-cache + SVG handling + literal-fallback as the rendered
-            // message emoji (message_content.dart `CustomEmojiNode`).
-            errorChild: Text(':$code:', style: baseStyle),
+          child: EmojiBaselineDrop(
+            drop: (baseStyle.fontSize ?? 14) * 0.3,
+            child: InlineNetworkImage(
+              url: proxiedMedia(url, emoji: true),
+              width: side,
+              height: side,
+              fit: BoxFit.contain,
+              // Same disk-cache + SVG handling + retry + literal-fallback as the
+              // rendered message emoji (message_content.dart `CustomEmojiNode`).
+              retryOnError: true,
+              errorChild: Text(':$code:', style: baseStyle),
+            ),
           ),
         ),
       ));

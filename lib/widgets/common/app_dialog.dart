@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/settings_provider.dart';
 
 /// Shared confirm / alert / prompt dialog — the native port of the PWA's
 /// `dialog.js` (`showAppConfirm` / `showAppAlert` / `showAppPrompt`), styled to
@@ -18,6 +20,19 @@ import '../../core/theme/nym_metrics.dart';
 ///
 /// Other modal slices can reuse these helpers for a consistent danger-confirm /
 /// prompt-with-char-count / checkbox-confirm surface.
+
+/// `.modal` overlay: glass default `rgba(0,0,0,0.7)` (styles-chat.css:1974);
+/// `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
+/// `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+/// (styles-themes-responsive.css:1630-1636).
+Color _barrierColor(BuildContext context) {
+  final solidUi =
+      ProviderScope.containerOf(context).read(settingsProvider).solidUi;
+  if (!solidUi) return Colors.black.withValues(alpha: 0.7);
+  return context.nym.isLight
+      ? const Color(0x73000000) // black @ 0.45
+      : const Color(0xBF000000); // black @ 0.75
+}
 
 /// Shows a confirmation dialog. Resolves `true` on OK, `false` on Cancel/Esc.
 ///
@@ -35,7 +50,7 @@ Future<bool> showAppConfirm(
 }) async {
   final res = await showDialog<AppDialogResult>(
     context: context,
-    barrierColor: const Color(0xB3000000), // rgba(0,0,0,0.7) overlay
+    barrierColor: _barrierColor(context),
     builder: (_) => _AppDialog(
       message: message,
       title: title ?? 'Confirm',
@@ -60,7 +75,7 @@ Future<AppConfirmResult> showAppConfirmWithCheckbox(
 }) async {
   final res = await showDialog<AppDialogResult>(
     context: context,
-    barrierColor: const Color(0xB3000000),
+    barrierColor: _barrierColor(context),
     builder: (_) => _AppDialog(
       message: message,
       title: title ?? 'Confirm',
@@ -85,7 +100,7 @@ Future<void> showAppAlert(
 }) {
   return showDialog<void>(
     context: context,
-    barrierColor: const Color(0xB3000000),
+    barrierColor: _barrierColor(context),
     builder: (_) => _AppDialog(
       message: message,
       title: title ?? 'Notice',
@@ -112,7 +127,7 @@ Future<String?> showAppPrompt(
 }) async {
   final res = await showDialog<AppDialogResult>(
     context: context,
-    barrierColor: const Color(0xB3000000),
+    barrierColor: _barrierColor(context),
     builder: (_) => _AppDialog(
       message: message,
       title: title ?? 'Confirm',
@@ -188,6 +203,12 @@ class _AppDialogState extends State<_AppDialog> {
     super.initState();
     // Repaint the `.form-input:focus` glow/fill when focus changes.
     _inputFocus.addListener(() => setState(() {}));
+    // The PWA selects the whole default value on open so typing replaces it
+    // (`field.focus(); field.select()` — dialog.js:127).
+    if (widget.isPrompt) {
+      _input.selection =
+          TextSelection(baseOffset: 0, extentOffset: _input.text.length);
+    }
   }
 
   @override
@@ -240,22 +261,32 @@ class _AppDialogState extends State<_AppDialog> {
                     borderRadius: NymRadius.rxl,
                     border: Border.all(color: c.glassBorder),
                     // `.modal-content` shadow stack: shadow-lg + shadow-glow +
-                    // a 1px white/0.05 ring.
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.5),
-                        blurRadius: 32,
-                        offset: const Offset(0, 8),
-                      ),
-                      BoxShadow(
-                        color: c.primaryA(0.1),
-                        blurRadius: 20,
-                      ),
-                      BoxShadow(
-                        color: Colors.white.withValues(alpha: 0.05),
-                        spreadRadius: 1,
-                      ),
-                    ],
+                    // a 1px white/0.05 ring. Light mode replaces it with a
+                    // single soft `0 8px 40px rgba(0,0,0,0.12)` — no glow, no
+                    // ring (styles-themes-responsive.css:1050-1052).
+                    boxShadow: c.isLight
+                        ? const [
+                            BoxShadow(
+                              color: Color(0x1F000000), // black @ 0.12
+                              blurRadius: 40,
+                              offset: Offset(0, 8),
+                            ),
+                          ]
+                        : [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.5),
+                              blurRadius: 32,
+                              offset: const Offset(0, 8),
+                            ),
+                            BoxShadow(
+                              color: c.primaryA(0.1),
+                              blurRadius: 20,
+                            ),
+                            BoxShadow(
+                              color: Colors.white.withValues(alpha: 0.05),
+                              spreadRadius: 1,
+                            ),
+                          ],
                   ),
                   clipBehavior: Clip.antiAlias,
                   child: Column(
@@ -376,18 +407,30 @@ class _AppDialogState extends State<_AppDialog> {
     } else {
       counterColor = c.textDim.withValues(alpha: 0.6);
     }
+    // Light mode forces `input { background: rgba(0,0,0,0.04); border-color:
+    // rgba(0,0,0,0.1); color: #000000 } !important` (no focus fill lift),
+    // while dark's global `input { color: #ffffff !important }` beats
+    // `.form-input`'s `--text-bright`
+    // (styles-themes-responsive.css:561-592, styles-components.css:229-255).
+    final baseBorder = c.isLight ? const Color(0x1A000000) : c.glassBorder;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // `.app-dialog-input` / `.app-dialog-textarea` — 12px top margin, with
-        // the `.form-input:focus` glow ring (`0 0 0 3px primary/0.06`).
+        // the `.form-input:focus` glow ring (`0 0 0 3px primary/0.06`; light
+        // mode `primary/0.1` — styles-themes-responsive.css:1087-1092).
         Padding(
           padding: const EdgeInsets.only(top: 12),
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: NymRadius.rsm,
               boxShadow: focused
-                  ? [BoxShadow(color: c.primaryA(0.06), spreadRadius: 3)]
+                  ? [
+                      BoxShadow(
+                        color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                        spreadRadius: 3,
+                      ),
+                    ]
                   : null,
             ),
             child: ConstrainedBox(
@@ -410,7 +453,12 @@ class _AppDialogState extends State<_AppDialog> {
                         required isFocused,
                         maxLength}) =>
                     null,
-                style: TextStyle(color: c.textBright, fontSize: 15),
+                style: TextStyle(
+                  color: c.isLight
+                      ? const Color(0xFF000000)
+                      : const Color(0xFFFFFFFF),
+                  fontSize: 15,
+                ),
                 decoration: InputDecoration(
                   isDense: true,
                   hintText:
@@ -419,16 +467,18 @@ class _AppDialogState extends State<_AppDialog> {
                   contentPadding:
                       const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
                   filled: true,
-                  // focus → fill lifts white/0.05 → white/0.07.
-                  fillColor:
-                      Colors.white.withValues(alpha: focused ? 0.07 : 0.05),
+                  // Dark: focus lifts the fill white/0.05 → white/0.07; light:
+                  // black/0.04 `!important`, so the focus bump never applies.
+                  fillColor: c.isLight
+                      ? const Color(0x0A000000)
+                      : Colors.white.withValues(alpha: focused ? 0.07 : 0.05),
                   border: OutlineInputBorder(
                     borderRadius: NymRadius.rsm,
-                    borderSide: BorderSide(color: c.glassBorder),
+                    borderSide: BorderSide(color: baseBorder),
                   ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: NymRadius.rsm,
-                    borderSide: BorderSide(color: c.glassBorder),
+                    borderSide: BorderSide(color: baseBorder),
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: NymRadius.rsm,

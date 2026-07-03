@@ -64,12 +64,20 @@ class SettingsController extends StateNotifier<Settings> {
     _syncedChanged();
   }
 
-  /// Reset the saved column-view layout to defaults (PWA `cvResetColumns`):
-  /// removes the persisted `nym_columns_layout` so the next column-view load
-  /// re-seeds the default columns. The runtime re-render is handled by the
-  /// columns feature when column view is active.
+  /// Reset the saved column-view layout to defaults (PWA `cvResetColumns`,
+  /// columns.js:363-381): removes the persisted `nym_columns_layout` and bumps
+  /// [Settings.columnsResetTick] so a mounted columns deck can observe the
+  /// reset, tear down its live columns, and re-seed the defaults immediately —
+  /// the PWA does this live (clears storage, re-seeds, re-focuses, re-syncs)
+  /// rather than waiting for the next mount.
   void resetColumns() {
     _kv.remove(StorageKeys.columnsLayout);
+    state = state.copyWith(columnsResetTick: state.columnsResetTick + 1);
+    // SYNCED: the PWA pushes the cleared/re-seeded layout to the other devices
+    // in BOTH branches — `nostrSettingsSave()` directly when columns are
+    // inactive (columns.js:368) and via `_cvSeedDefaults` → `_cvSaveLayout` →
+    // `nostrSettingsSave` when they are live (columns.js:374 → :994).
+    _syncedChanged();
   }
 
   void setTextSize(int size) {
@@ -131,14 +139,30 @@ class SettingsController extends StateNotifier<Settings> {
 
   // --- Privacy & Security ---------------------------------------------------
 
+  /// Hook fired after [setKeypairMode] persists the new mode, so the
+  /// [NostrController] (which owns the [IdentityService]/secure store) can
+  /// apply the PWA's save side effects (app.js:3873-3890): switching to
+  /// random/hardcore removes the saved `nym_session_nsec`; switching to
+  /// persistent saves the CURRENT session keypair's nsec when none is stored,
+  /// so the in-use identity survives reload. Registered by the controller at
+  /// boot; skipped for durable (nsec/extension/NIP-46) logins there, mirroring
+  /// the PWA's `!isNostrLoggedIn()` gate.
+  Future<void> Function(String mode)? onKeypairModeChanged;
+
   /// Keypair-per-session mode: 'persistent' | 'random' | 'hardcore'.
-  /// Mirrors the PWA which writes both the legacy boolean flag and the mode.
+  /// Mirrors the PWA which writes both the legacy boolean flag and the mode
+  /// (app.js:3875-3882: random/hardcore set the legacy flag, persistent
+  /// removes it), then fires [onKeypairModeChanged] for the session-nsec
+  /// side effects.
   void setKeypairMode(String mode) {
     _kv.setString(StorageKeys.keypairMode, mode);
-    _kv.setBool(
-      StorageKeys.randomKeypairPerSession,
-      mode == 'random' || mode == 'hardcore',
-    );
+    if (mode == 'random' || mode == 'hardcore') {
+      _kv.setBool(StorageKeys.randomKeypairPerSession, true);
+    } else {
+      _kv.remove(StorageKeys.randomKeypairPerSession);
+    }
+    final cb = onKeypairModeChanged;
+    if (cb != null) cb(mode);
   }
 
   String get keypairMode => _kv.getString(StorageKeys.keypairMode) ?? 'persistent';
@@ -232,7 +256,22 @@ class SettingsController extends StateNotifier<Settings> {
     }
   }
 
-  String get blurImages => _kv.getString(StorageKeys.imageBlur) ?? 'true';
+  /// The active identity's pubkey, set by the [NostrController] at boot and on
+  /// every identity change, so [blurImages] can resolve the per-pubkey blur
+  /// key the way the PWA's `loadImageBlurSettings` does.
+  String? activePubkey;
+
+  /// PWA `loadImageBlurSettings` (settings.js:1139-1156): the per-pubkey
+  /// `nym_image_blur_<pubkey>` key wins, then the global `nym_image_blur`,
+  /// defaulting to blur ('true').
+  String get blurImages {
+    final pk = activePubkey;
+    if (pk != null && pk.isNotEmpty) {
+      final perKey = _kv.getString(StorageKeys.imageBlurFor(pk));
+      if (perKey != null) return perKey;
+    }
+    return _kv.getString(StorageKeys.imageBlur) ?? 'true';
+  }
 
   // --- Messaging & Display --------------------------------------------------
 
@@ -335,9 +374,16 @@ class SettingsController extends StateNotifier<Settings> {
 
   // --- Data & Backup --------------------------------------------------------
 
+  /// Hook fired after [setLowDataMode] persists the new value, so the
+  /// [NostrController] can mirror it onto the live relay layer
+  /// ([NostrService.setLowDataMode] — the PWA's `applyLowDataMode` call on
+  /// every settings save, app.js:3989). Registered by the controller at boot.
+  void Function(bool enabled)? onLowDataModeChanged;
+
   void setLowDataMode(bool v) {
     _kv.setBool(StorageKeys.lowDataMode, v);
     state = state.copyWith(lowDataMode: v);
+    onLowDataModeChanged?.call(v);
     _syncedChanged();
   }
 

@@ -13,6 +13,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../models/user.dart';
 import 'action_rate_limit.dart';
 import 'command_registry.dart';
+import 'help_output.dart';
 
 /// The effects a command can request. The controller supplies these; the
 /// handler never reaches into app_state directly (it is not an owner of it).
@@ -37,6 +38,10 @@ abstract class CommandEngine {
 
   // Direct engine actions (each maps to an existing controller method).
   void join(String channel);
+
+  /// `/clear` — `cmdClear` (commands.js:689-692): empties the rendered
+  /// conversation (`messagesContainer.innerHTML = ''`), THEN shows the
+  /// 'Chat cleared' system line.
   void clear();
   void leave();
   void quit();
@@ -58,6 +63,7 @@ class CommandHooks {
     this.openPm,
     this.openZap,
     this.invite,
+    this.openShare,
     this.createGroup,
     this.addMember,
     this.groupInfo,
@@ -82,6 +88,12 @@ class CommandHooks {
   /// `/invite <arg>` → channel-invite / startGroupFromPM / addMemberToGroup.
   /// TODO(verify): group/PM invite flow spans pms/groups agents.
   final void Function(String arg)? invite;
+
+  /// `/share` → `shareChannel()` (channels.js:411-427): opens the Share
+  /// Channel modal (`#shareModal`) with `origin+pathname#<channel||'nymchat'>`
+  /// in the readonly input, auto-selected. The modal is [ShareChannelModal]
+  /// (features/channels/channel_share.dart), owned by the channels UI.
+  final void Function()? openShare;
 
   /// `/group <@u1 @u2 [name]>` → resolve members + createGroup.
   final void Function(List<String> memberPubkeys, String name)? createGroup;
@@ -205,9 +217,12 @@ class CommandDispatcher {
   void _dispatch(CommandSpec spec, String args) {
     switch (spec.id) {
       case 'help':
-        // Help renders the categorized palette (handled by the UI palette);
-        // the system-message form is informational here.
-        engine.systemMessage('Available commands');
+        // `showHelp()` (commands.js:522-546): the full categorized listing —
+        // title, per-category headers, "/name, /alias — desc" rows, and the
+        // five footer lines — posted as a system message. The styled
+        // `.help-output` rendering is [HelpOutputBlock] (help_output.dart);
+        // this emits the identical content through the plain-text sink.
+        engine.systemMessage(buildHelpMessageText());
       case 'join':
         if (args.isEmpty) {
           engine.systemMessage(
@@ -273,7 +288,15 @@ class CommandDispatcher {
         // (headless/tests) this degrades to nothing, matching the prior no-op.
         hooks.openPoll?.call();
       case 'share':
-        engine.share();
+        // `cmdShare` → `shareChannel()` (channels.js:411-427) opens the Share
+        // Channel modal — works even in PM mode (URL falls back to the current
+        // channel or 'nymchat'). Prefer the modal hook; engine.share() is the
+        // headless fallback.
+        if (hooks.openShare != null) {
+          hooks.openShare!();
+        } else {
+          engine.share();
+        }
       case 'block':
         engine.block(args);
       case 'unblock':

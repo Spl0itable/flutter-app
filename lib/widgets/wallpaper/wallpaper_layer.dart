@@ -26,7 +26,8 @@ class WallpaperPattern {
     required this.fill,
     this.tile = Size.zero,
     this.baseAlpha = 0,
-  });
+    double? lightAlpha,
+  }) : lightAlpha = lightAlpha ?? baseAlpha;
 
   /// The canonical type string (one of the 9 PWA `data-wallpaper` values).
   final String type;
@@ -38,6 +39,15 @@ class WallpaperPattern {
   /// The dominant tint alpha (the SVG-mask `background-color` alpha, or the
   /// primary gradient-stop alpha). Used by previews and the painter.
   final double baseAlpha;
+
+  /// Light-mode tint alpha. `body.light-mode` boosts the masked patterns'
+  /// `background-color` alpha to 0.45 and the dots gradient alpha to 0.4
+  /// (`styles-themes-responsive.css:1368-1378`); geometric keeps its dark
+  /// values, so it defaults to [baseAlpha].
+  final double lightAlpha;
+
+  /// The tint alpha to paint for the given theme brightness.
+  double alphaFor({required bool isLight}) => isLight ? lightAlpha : baseAlpha;
 
   bool get paints => fill != WallpaperFill.none;
 
@@ -59,6 +69,7 @@ class WallpaperPattern {
           fill: WallpaperFill.svgMask,
           tile: Size(80, 80),
           baseAlpha: 0.10,
+          lightAlpha: 0.45,
         );
       case 'dots':
         return const WallpaperPattern(
@@ -66,6 +77,7 @@ class WallpaperPattern {
           fill: WallpaperFill.gradient,
           tile: Size(24, 24),
           baseAlpha: 0.10,
+          lightAlpha: 0.4,
         );
       case 'waves':
         return const WallpaperPattern(
@@ -73,6 +85,7 @@ class WallpaperPattern {
           fill: WallpaperFill.svgMask,
           tile: Size(120, 24),
           baseAlpha: 0.08,
+          lightAlpha: 0.45,
         );
       case 'topography':
         return const WallpaperPattern(
@@ -80,6 +93,7 @@ class WallpaperPattern {
           fill: WallpaperFill.svgMask,
           tile: Size(120, 120),
           baseAlpha: 0.08,
+          lightAlpha: 0.45,
         );
       case 'hexagons':
         return const WallpaperPattern(
@@ -87,6 +101,7 @@ class WallpaperPattern {
           fill: WallpaperFill.svgMask,
           tile: Size(56, 100),
           baseAlpha: 0.08,
+          lightAlpha: 0.45,
         );
       case 'diamonds':
         return const WallpaperPattern(
@@ -94,6 +109,7 @@ class WallpaperPattern {
           fill: WallpaperFill.svgMask,
           tile: Size(48, 48),
           baseAlpha: 0.08,
+          lightAlpha: 0.45,
         );
       case 'custom':
         return const WallpaperPattern(type: 'custom', fill: WallpaperFill.custom);
@@ -166,7 +182,11 @@ class WallpaperLayer extends ConsumerWidget {
     return IgnorePointer(
       child: CustomPaint(
         size: Size.infinite,
-        painter: _WallpaperPainter(pattern: pattern, primary: c.primary),
+        painter: _WallpaperPainter(
+          pattern: pattern,
+          primary: c.primary,
+          isLight: c.isLight,
+        ),
       ),
     );
   }
@@ -176,10 +196,19 @@ class WallpaperLayer extends ConsumerWidget {
 /// pattern's tint alpha (CSS `rgba(--wp-r,--wp-g,--wp-b, a)`); geometry mirrors
 /// the SVG data-URIs / CSS gradients one-for-one.
 class _WallpaperPainter extends CustomPainter {
-  _WallpaperPainter({required this.pattern, required this.primary});
+  _WallpaperPainter({
+    required this.pattern,
+    required this.primary,
+    required this.isLight,
+  });
 
   final WallpaperPattern pattern;
   final Color primary;
+  final bool isLight;
+
+  /// The theme-resolved dominant tint alpha: light mode boosts the masked
+  /// patterns to 0.45 and dots to 0.4 (`styles-themes-responsive.css:1368-1378`).
+  double get _alpha => pattern.alphaFor(isLight: isLight);
 
   Color _tint(double a) => primary.withValues(alpha: a);
 
@@ -219,7 +248,7 @@ class _WallpaperPainter extends CustomPainter {
 
   // dots: radial 1px tinted dot per 24×24 tile.
   void _paintDots(Canvas canvas, Size size) {
-    final p = Paint()..color = _tint(pattern.baseAlpha);
+    final p = Paint()..color = _tint(_alpha);
     const step = 24.0;
     for (double y = 0; y < size.height; y += step) {
       for (double x = 0; x < size.width; x += step) {
@@ -299,7 +328,7 @@ class _WallpaperPainter extends CustomPainter {
 
   // circuit (80×80): inset square, 4 corner dots, 4 center stubs, center ring.
   void _circuitTile(Canvas canvas, Size t) {
-    final a = pattern.baseAlpha;
+    final a = _alpha;
     _strokeShape(canvas, Path()..addRect(const Rect.fromLTWH(10, 10, 60, 60)), a, 0.5);
     final dot = Paint()..color = _tint(a);
     for (final c in const [Offset(10, 10), Offset(70, 10), Offset(10, 70), Offset(70, 70)]) {
@@ -320,12 +349,12 @@ class _WallpaperPainter extends CustomPainter {
       ..moveTo(0, 12)
       ..quadraticBezierTo(30, 0, 60, 12)
       ..quadraticBezierTo(90, 24, 120, 12);
-    _strokeShape(canvas, p, pattern.baseAlpha, 0.8);
+    _strokeShape(canvas, p, _alpha, 0.8);
   }
 
   // topography (120×120): 4 nested contour lines with descending opacity.
   void _topographyTile(Canvas canvas, Size t) {
-    final a = pattern.baseAlpha;
+    final a = _alpha;
     Path line(List<double> v) => Path()
       ..moveTo(v[0], v[1])
       ..quadraticBezierTo(v[2], v[3], v[4], v[5])
@@ -338,7 +367,7 @@ class _WallpaperPainter extends CustomPainter {
 
   // hexagons (56×100): two interlocking honeycomb polylines.
   void _hexagonsTile(Canvas canvas, Size t) {
-    final a = pattern.baseAlpha;
+    final a = _alpha;
     Path poly(List<Offset> pts) {
       final p = Path()..moveTo(pts.first.dx, pts.first.dy);
       for (final pt in pts.skip(1)) {
@@ -369,7 +398,7 @@ class _WallpaperPainter extends CustomPainter {
 
   // diamonds (48×48): outer + concentric inner diamond.
   void _diamondsTile(Canvas canvas, Size t) {
-    final a = pattern.baseAlpha;
+    final a = _alpha;
     Path diamond(double cx, double cy, double r) => Path()
       ..moveTo(cx, cy - r)
       ..lineTo(cx + r, cy)
@@ -382,5 +411,7 @@ class _WallpaperPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_WallpaperPainter old) =>
-      old.pattern.type != pattern.type || old.primary != primary;
+      old.pattern.type != pattern.type ||
+      old.primary != primary ||
+      old.isLight != isLight;
 }

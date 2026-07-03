@@ -169,47 +169,58 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
         // `.form-label`.
         ModalChrome.formLabel(c, 'Method'),
         const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          // `value` over `initialValue`: the latter doesn't exist on the
-          // build toolchain's Flutter; `value` works on both (deprecated-only
-          // on newer SDKs).
-          // ignore: deprecated_member_use
-          value: _method,
-          dropdownColor: c.bgTertiary,
-          style: TextStyle(color: c.text, fontSize: 14),
-          decoration: _decoration(c, ''),
-          items: [
-            const DropdownMenuItem(value: 'password', child: Text('Password')),
-            const DropdownMenuItem(value: 'pin', child: Text('PIN')),
-            if (_bioAvailable)
+        ModalChrome.focusRing(
+          c,
+          child: DropdownButtonFormField<String>(
+            // `value` over `initialValue`: the latter doesn't exist on the
+            // build toolchain's Flutter; `value` works on both (deprecated-only
+            // on newer SDKs).
+            // ignore: deprecated_member_use
+            value: _method,
+            dropdownColor: c.bgTertiary,
+            style: TextStyle(color: c.text, fontSize: 14),
+            decoration: _decoration(c, ''),
+            items: [
               const DropdownMenuItem(
-                  value: 'biometric',
-                  child: Text('Biometric (Face/Touch ID)')),
-          ],
-          onChanged: (v) => setState(() => _method = v ?? 'password'),
+                  value: 'password', child: Text('Password')),
+              const DropdownMenuItem(value: 'pin', child: Text('PIN')),
+              if (_bioAvailable)
+                const DropdownMenuItem(
+                    value: 'biometric',
+                    child: Text('Biometric (Face/Touch ID)')),
+            ],
+            onChanged: (v) => setState(() => _method = v ?? 'password'),
+          ),
         ),
         if (!isBio) ...[
           const SizedBox(height: 12),
-          TextField(
-            controller: _pw,
-            obscureText: true,
-            keyboardType: isPin ? TextInputType.number : TextInputType.text,
-            // PIN: hard-strip non-digits on every keystroke (key-vault.js:558).
-            inputFormatters:
-                isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
-            style: TextStyle(color: c.textBright, fontSize: 15),
-            decoration:
-                _decoration(c, isPin ? 'Choose a PIN code' : 'Choose a password'),
+          ModalChrome.focusRing(
+            c,
+            child: TextField(
+              controller: _pw,
+              obscureText: true,
+              keyboardType: isPin ? TextInputType.number : TextInputType.text,
+              // PIN: hard-strip non-digits on every keystroke
+              // (key-vault.js:558).
+              inputFormatters:
+                  isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+              style: TextStyle(color: c.textBright, fontSize: 15),
+              decoration: _decoration(
+                  c, isPin ? 'Choose a PIN code' : 'Choose a password'),
+            ),
           ),
           const SizedBox(height: 10),
-          TextField(
-            controller: _pw2,
-            obscureText: true,
-            keyboardType: isPin ? TextInputType.number : TextInputType.text,
-            inputFormatters:
-                isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
-            style: TextStyle(color: c.textBright, fontSize: 15),
-            decoration: _decoration(c, 'Confirm'),
+          ModalChrome.focusRing(
+            c,
+            child: TextField(
+              controller: _pw2,
+              obscureText: true,
+              keyboardType: isPin ? TextInputType.number : TextInputType.text,
+              inputFormatters:
+                  isPin ? [FilteringTextInputFormatter.digitsOnly] : null,
+              style: TextStyle(color: c.textBright, fontSize: 15),
+              decoration: _decoration(c, 'Confirm'),
+            ),
           ),
         ] else
           Padding(

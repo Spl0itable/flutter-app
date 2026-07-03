@@ -218,16 +218,20 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
                       ),
                       const SizedBox(height: 16),
                       if (!isBio)
-                        TextField(
-                          controller: _pw,
-                          autofocus: true,
-                          obscureText: true,
-                          enabled: !_busy,
-                          keyboardType: TextInputType.visiblePassword,
-                          onSubmitted: (_) => _unlock(),
-                          decoration: ModalChrome.inputDecoration(
-                              c, 'Password or PIN'),
-                          style: TextStyle(color: c.textBright, fontSize: 15),
+                        ModalChrome.focusRing(
+                          c,
+                          child: TextField(
+                            controller: _pw,
+                            autofocus: true,
+                            obscureText: true,
+                            enabled: !_busy,
+                            keyboardType: TextInputType.visiblePassword,
+                            onSubmitted: (_) => _unlock(),
+                            decoration: ModalChrome.inputDecoration(
+                                c, 'Password or PIN'),
+                            style:
+                                TextStyle(color: c.textBright, fontSize: 15),
+                          ),
                         ),
                       if (_error != null) ...[
                         const SizedBox(height: 12),

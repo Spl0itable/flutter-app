@@ -1,26 +1,35 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/nymbot/nymbot_providers.dart'
+    show BotChatController, botChatControllerProvider, mergeBotThreadWithInfo;
 import '../../features/pms/pm_logic.dart';
 import '../../features/reactions/reaction_picker.dart';
+import '../../features/shop/cosmetics.dart';
 import '../../models/channel.dart';
 import '../../models/group.dart';
-import '../../models/message.dart';
 import '../../models/pm_conversation.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../chat/message_row.dart';
 import '../chat/message_skeleton.dart';
 import '../chat/typing_indicator.dart';
 import '../common/app_dialog.dart';
 import '../common/nym_avatar.dart';
+import '../context_menu/profile_badges.dart';
 import '../nym_icons.dart';
 
 /// Fixed dimensions from `css/styles-columns.css`.
@@ -133,15 +142,19 @@ class _ColumnDesc {
   int get hashCode => Object.hash(kind, key);
 }
 
+/// A row in the add-column picker (`_cvAvailableConversations` entry).
+typedef _PickerEntry = ({_ColumnDesc desc, String label, Widget icon});
+
 /// The deck / multi-column view (`#columnsStrip .cv-strip`), shown when
 /// `settings.chatViewMode == 'columns'`.
 ///
 /// Desktop (width > 768): a horizontally-scrollable strip of 360px-wide columns
 /// — channel, PM, or group (gap F1) — each draggable by its header to reorder
-/// (`_cvAttachDnd`/`cv-drag-ghost`, gap F4) and clickable to focus
-/// (`.cv-column.focused` primary border + glow), with a centered pager
-/// (`.cv-pager`/`.cv-pdot`) above the strip. Ends in a 220px dashed
-/// "+ Add column".
+/// (`_cvAttachDnd`/`cv-drag-ghost`, with the PWA's 5px start threshold and live
+/// midpoint reflow) and clickable to focus (`.cv-column.focused` primary border
+/// + glow), with a centered pager (`.cv-pager`/`.cv-pdot`) above the strip.
+/// Ends in a 220px dashed "+ Add column" which opens an in-strip column-shaped
+/// picker panel (`.cv-picker`).
 ///
 /// Mobile (width <= 768): a full-width [PageView] snap carousel (one column per
 /// screen, `scroll-snap-type:x mandatory` / `flex:0 0 100%`), each header
@@ -154,8 +167,9 @@ class _ColumnDesc {
 /// none is saved, `#nymchat` + the most-recent PM + the most-recent group
 /// (`_cvSeedDefaults`); the order/layout is persisted on every mutation
 /// (`_cvSaveLayout`). When `settings.columnsWallpaper` is on, the per-column
-/// backgrounds go transparent so the wallpaper drawn by the shell behind the
-/// deck shows through (`.columns-wallpaper`).
+/// body/scroller backgrounds go transparent so the wallpaper drawn by the shell
+/// behind the deck shows through (`.columns-wallpaper` — the glass header bar
+/// and the column border/shadow are kept, styles-columns.css:72-78).
 class ColumnsDeck extends ConsumerStatefulWidget {
   const ColumnsDeck({super.key});
 
@@ -183,14 +197,169 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// Mobile carousel page controller (`_cvScrollToIndex` on `innerWidth<=768`).
   final PageController _pageController = PageController();
 
+  /// Desktop strip scroll controller (`_cvScrollToIndex`/`_cvScrollToEnd`).
+  final ScrollController _stripScroll = ScrollController();
+
+  /// The scrollable strip's element, for drag geometry (`_cvStrip` rects).
+  final GlobalKey _stripKey = GlobalKey();
+
   /// The focused / visible column index. On mobile this is the PageView page;
   /// on desktop it tracks the last-focused column for the pager highlight.
   int _focused = 0;
 
+  /// `_cvPrimaryId`: the key of the primary channel column — the FIRST channel
+  /// column at enable (columns.js:75-76). Nulled when that column is removed
+  /// (columns.js:261) and never reassigned; only while it's alive (and still a
+  /// channel) do sidebar channel taps repurpose it in place (columns.js:282-287).
+  /// Repurposing keeps the same column, so the tracked key follows it.
+  String? _primaryKey;
+
+  /// Whether the in-strip add-column picker panel is open (`.cv-picker`,
+  /// `_cvOpenAddColumn`). Desktop only; the add button hides while it's open.
+  bool _pickerOpen = false;
+
+  // --- Desktop column drag state (`_cvStartColumnDrag`, columns.js:673-728) ---
+
+  /// Current index of the column being dragged (live-reflowed), else null.
+  int? _dragIndex;
+
+  /// True once the pointer moved past the 5px start threshold (columns.js:682).
+  bool _dragActive = false;
+  Offset _dragStart = Offset.zero;
+
+  /// Pointer offset inside the column at grab time; the y component is clamped
+  /// to 40 like the PWA (`grabY = Math.min(startY - rect.top, 40)`).
+  Offset _grabOffset = Offset.zero;
+
+  /// The dragged column's exact on-screen size (the ghost matches it 1:1).
+  Size _dragSize = Size.zero;
+  BuildContext? _dragBoundary;
+  ui.Image? _dragImage;
+  OverlayEntry? _dragGhostEntry;
+  Offset _ghostPos = Offset.zero;
+
+  /// Per-column `col._atBottom` flags keyed by storage key, reported by each
+  /// mounted [_DeckColumn] (`_cvAttachColumnScroll`, columns.js:633-636).
+  /// Absent means at-bottom — columns start pinned to the newest message
+  /// (`col._atBottom = true`, columns.js:433).
+  final Map<String, bool> _atBottomByKey = <String, bool>{};
+
+  /// The [AppStateNotifier] the deck registered its [columnsReadGate] on, kept
+  /// so [dispose] can unregister without touching `ref` after teardown.
+  AppStateNotifier? _gateHost;
+
+  @override
+  void initState() {
+    super.initState();
+    // Register the columns-mode read gate for the deck's lifetime (the PWA's
+    // `_cvMarkColumnRead`, columns.js:26-42): while it is set, the unread bump
+    // (app_state ingest), the `switchView` clear, channel read receipts
+    // (`isConversationSeen`) and `markVisibleColumnsRead` (fired on resume,
+    // relays.js:532/584) all defer to focused + at-bottom + visible.
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.columnsReadGate = _columnsReadGate;
+    _gateHost = notifier;
+  }
+
   @override
   void dispose() {
+    // Unregister the read gate (single view has none — the active conversation
+    // is simply the seen one). Guarded so a hypothetical second deck's gate is
+    // never clobbered.
+    final host = _gateHost;
+    if (host != null && host.columnsReadGate == _columnsReadGate) {
+      host.columnsReadGate = null;
+    }
+    _gateHost = null;
+    _removeGhost();
     _pageController.dispose();
+    _stripScroll.dispose();
     super.dispose();
+  }
+
+  // --- Columns read gate (`_cvMarkColumnRead`, columns.js:26-47) --------------
+
+  /// `_cvMarkColumnRead`'s pass condition (columns.js:26-42): [key] belongs to
+  /// the FOCUSED column, that column is pinned to the bottom
+  /// (`col._atBottom !== false`), and the app is visible (`!document.hidden`).
+  /// Unread keys arrive as either the storage key or the bare id (peer pubkey /
+  /// group id / channel name) depending on the ingest path, so both forms match.
+  bool _columnsReadGate(String key) {
+    if (key.isEmpty || _columns.isEmpty) return false;
+    if (_focused < 0 || _focused >= _columns.length) return false;
+    final desc = _columns[_focused];
+    if (!_descMatchesKey(desc, key)) return false;
+    // `document.hidden`: a backgrounded app never marks columns read; unread
+    // accrued while hidden is cleared on resume via `markVisibleColumnsRead`.
+    // `inactive` (visible but unfocused) still counts as visible — on the web
+    // an unfocused-but-visible tab has `document.hidden === false`.
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle == AppLifecycleState.hidden ||
+        lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.detached) {
+      return false;
+    }
+    return _atBottomByKey[desc.storageKey] ?? true;
+  }
+
+  /// Whether an unread-counts [key] refers to [desc]'s conversation — accepts
+  /// the storage key (`#chan` / `pm-<pk>` / `group-<id>`), the descriptor key,
+  /// and (for channels) the bare lowercase name/geohash badge bucket.
+  bool _descMatchesKey(_ColumnDesc desc, String key) {
+    if (key == desc.storageKey || key == desc.key) return true;
+    if (desc.kind == _ColumnKind.channel) {
+      final k = key.toLowerCase();
+      return k == desc.key || k == '#${desc.key}';
+    }
+    return false;
+  }
+
+  /// `_cvAttachColumnScroll`'s at-bottom bookkeeping (columns.js:633-636):
+  /// track the per-column flag and, on the scrolled-up → at-bottom transition,
+  /// mark the column read — only the focused + visible column's badge actually
+  /// clears (`_cvMarkColumnRead` re-checks the gate).
+  void _onColumnAtBottom(_ColumnDesc desc, bool atBottom) {
+    final was = _atBottomByKey[desc.storageKey] ?? true;
+    _atBottomByKey[desc.storageKey] = atBottom;
+    if (atBottom && !was) _markColumnRead(desc);
+  }
+
+  /// `_cvMarkColumnRead` (columns.js:26-42): when the gate passes, clear the
+  /// column's unread badge AND stamp its read watermark ([clearUnread] folds
+  /// the PWA's `clearUnreadCount` + `_markChannelRead` branches together).
+  void _markColumnRead(_ColumnDesc desc) {
+    if (!_columnsReadGate(desc.storageKey)) return;
+    ref.read(appStateProvider.notifier).clearUnread(desc.storageKey);
+  }
+
+  /// Binds [_onColumnAtBottom] to [desc] at BUILD time, so a scroll event that
+  /// races a live reorder can't report under a stale index's column.
+  ValueChanged<bool> _atBottomHandlerFor(_ColumnDesc desc) =>
+      (atBottom) => _onColumnAtBottom(desc, atBottom);
+
+  /// `cvResetColumns` while columns are LIVE (columns.js:363-381): tear down
+  /// the in-memory columns and let the next build re-seed the defaults
+  /// (`_cvSeedDefaults` — storage was already cleared by
+  /// [SettingsController.resetColumns] before the tick bump), re-derive the
+  /// primary column, re-focus the first column and snap the strip/carousel to
+  /// it. Without this a mounted deck would keep its stale `_columns` and the
+  /// next `_saveLayout` would re-persist them, permanently undoing the reset.
+  void _onColumnsReset() {
+    if (!mounted) return;
+    setState(() {
+      _columns.clear();
+      _seeded = false; // build → `_seedIfNeeded` → seed defaults + save
+      _pickerOpen = false;
+      _focused = 0;
+    });
+    _primaryKey = null; // re-derived by the re-seed (columns.js:376-377)
+    _syncedInitialView = false; // re-fire `_cvFocusColumn(first.id)` (:378-379)
+    _atBottomByKey.clear();
+    // Snap the carousel/strip back to the first (focused) column once the
+    // re-seeded columns have built.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _columns.isNotEmpty) _scrollToIndex(0);
+    });
   }
 
   // --- Persistence (`_cvSaveLayout` / `_cvLoadLayout`) -----------------------
@@ -240,32 +409,72 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       _columns.addAll(pmOnly
           ? saved.where((d) => d.kind != _ColumnKind.channel)
           : saved);
-      if (_columns.isNotEmpty) return;
     }
 
-    // `_cvSeedDefaults`: #nymchat (unless PM-only) + most-recent PM + group.
-    if (!pmOnly) {
-      final nymchat = channels.firstWhere(
-        (ch) => ch.key == kDefaultChannel,
-        orElse: () => channels.isNotEmpty
-            ? channels.first
-            : ChannelEntry(channel: kDefaultChannel),
-      );
-      _columns.add(_ColumnDesc.channel(nymchat.channel, nymchat.geohash));
+    if (_columns.isEmpty) {
+      // `_cvSeedDefaults`: #nymchat (unless PM-only) + most-recent PM + group.
+      if (!pmOnly) {
+        final nymchat = channels.firstWhere(
+          (ch) => ch.key == kDefaultChannel,
+          orElse: () => channels.isNotEmpty
+              ? channels.first
+              : ChannelEntry(channel: kDefaultChannel),
+        );
+        _columns.add(_ColumnDesc.channel(nymchat.channel, nymchat.geohash));
+      }
+      if (pms.isNotEmpty) {
+        // pmListProvider is already most-recent-first.
+        _columns.add(_ColumnDesc.pm(pms.first.pubkey, nym: pms.first.nym));
+      }
+      if (groups.isNotEmpty) {
+        final g = [...groups]
+          ..sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+        _columns.add(_ColumnDesc.group(g.first.id));
+      }
+      // Mirror `_cvSeedDefaults`, which persists the freshly seeded layout.
+      // Deferred to post-frame since seeding runs inside the first build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _saveLayout();
+      });
     }
-    if (pms.isNotEmpty) {
-      // pmListProvider is already most-recent-first.
-      _columns.add(_ColumnDesc.pm(pms.first.pubkey, nym: pms.first.nym));
+
+    // `_cvEnable` (columns.js:75-76): the primary column is the first channel
+    // column present at enable time.
+    for (final d in _columns) {
+      if (d.kind == _ColumnKind.channel) {
+        _primaryKey = d.key;
+        break;
+      }
     }
-    if (groups.isNotEmpty) {
-      final g = [...groups]
-        ..sort((a, b) => b.lastMessageTime - a.lastMessageTime);
-      _columns.add(_ColumnDesc.group(g.first.id));
+    // `cvAddColumn` → `_cvSubscribeChannel` for every seeded channel column
+    // (columns.js:188/200 seed with `cvAddColumn`, which subscribes at :224).
+    for (final d in _columns) {
+      _subscribeChannel(d);
     }
-    // Mirror `_cvSeedDefaults`, which persists the freshly seeded layout.
-    // Deferred to post-frame since seeding runs inside the first build.
+  }
+
+  /// `_cvSubscribeChannel` (columns.js:520-540), fired for every channel column
+  /// the deck seeds/adds/repurposes. Routes through the controller's
+  /// `subscribeChannelColumn`, which bundles the PWA's side effects WITHOUT
+  /// switching the shared view: register + persist the channel (`addChannel` +
+  /// `userJoinedChannels`, columns.js:523-526), the D1 archive restore
+  /// (`channelRestoreFromD1`, columns.js:527), geo-relay connect for a geohash
+  /// channel (`connectToGeoRelays`, columns.js:529 — the native relay pool owns
+  /// reconnection, so `startGeoRelayKeepAlive`/`ensureDefaultRelaysConnected`
+  /// need no counterpart, and the always-on shared channel subscription does
+  /// `loadChannelFromRelays`'s job), and the channel typing sub when this
+  /// column IS the active conversation (`_ensureChannelTypingSub`,
+  /// columns.js:536-538 — the native sub is single/latest-wins, so a
+  /// background column must not steal the focused column's feed; focus-driven
+  /// switches re-point it via [_syncFocusedView] → `switchChannel`). Runs
+  /// post-frame because seeding happens during build.
+  void _subscribeChannel(_ColumnDesc desc) {
+    if (desc.kind != _ColumnKind.channel) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _saveLayout();
+      if (!mounted) return;
+      ref
+          .read(nostrControllerProvider)
+          .subscribeChannelColumn(desc.channel, geohash: desc.geohash);
     });
   }
 
@@ -300,46 +509,74 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     _doRemoveColumn(desc);
   }
 
-  /// The actual removal (`cvRemoveColumn`, columns.js:253-268).
+  /// The actual removal (`cvRemoveColumn`, columns.js:253-268). Focus is
+  /// identity-based: it only moves (to `min(idx, len-1)`) when the REMOVED
+  /// column was the focused one; removing any other column leaves the focused
+  /// column — and the shared header/composer — untouched.
   void _doRemoveColumn(_ColumnDesc desc) {
     final idx = _columns.indexOf(desc);
     if (idx < 0) return;
+    final wasFocused = idx == _focused;
+    final focusedDesc = (_focused >= 0 && _focused < _columns.length)
+        ? _columns[_focused]
+        : null;
     setState(() {
       _columns.removeAt(idx);
-      // `cvRemoveColumn`: keep the focus on a still-present neighbour.
-      if (_focused >= _columns.length) {
-        _focused = _columns.isEmpty ? 0 : _columns.length - 1;
+      if (_columns.isEmpty) {
+        _focused = 0;
+      } else if (wasFocused) {
+        _focused = math.min(idx, _columns.length - 1);
+      } else if (focusedDesc != null) {
+        final f = _columns.indexOf(focusedDesc);
+        if (f >= 0) _focused = f;
+      }
+    });
+    // `cvRemoveColumn`: `if (this._cvPrimaryId === id) this._cvPrimaryId = null`.
+    if (desc.key == _primaryKey) _primaryKey = null;
+    // No column shows this conversation anymore — drop its at-bottom flag so a
+    // later re-add starts pinned (`col._atBottom = true`, columns.js:433).
+    if (!_columns.any((d) => d.storageKey == desc.storageKey)) {
+      _atBottomByKey.remove(desc.storageKey);
+    }
+    _saveLayout();
+    _syncPageController();
+    // Re-point the shared header/composer only when the focused column itself
+    // was removed (`_cvFocusColumn(next.id)` runs only in that branch).
+    if (wasFocused) _syncFocusedView();
+  }
+
+  /// Commit a tabs-sheet row reorder ([from] → [to], final-index terms), keeping
+  /// focus pinned to the same column by identity — the PWA drag `end()`
+  /// (columns.js:928-937) re-sorts `_cvColumns` + saves without ever touching
+  /// `_cvFocusedId`.
+  void _commitTabsReorder(int from, int to) {
+    if (from < 0 || from >= _columns.length) return;
+    if (to < 0 || to >= _columns.length || from == to) return;
+    final focusedDesc =
+        (_focused >= 0 && _focused < _columns.length) ? _columns[_focused] : null;
+    setState(() {
+      final moved = _columns.removeAt(from);
+      _columns.insert(to, moved);
+      if (focusedDesc != null) {
+        final f = _columns.indexOf(focusedDesc);
+        if (f >= 0) _focused = f;
       }
     });
     _saveLayout();
-    _syncPageController();
-    // Re-point the shared header/composer at the surviving focused column.
-    _syncFocusedView();
-  }
-
-  /// Reorder a column from [oldIndex] to [newIndex] (desktop drag / tabs-sheet
-  /// drag / `_cvMoveColumn`), then persist (`_cvSaveLayout`).
-  void _reorderColumn(int oldIndex, int newIndex) {
-    if (oldIndex < 0 || oldIndex >= _columns.length) return;
-    if (newIndex < 0 || newIndex > _columns.length) return;
-    setState(() {
-      final moved = _columns.removeAt(oldIndex);
-      if (newIndex > oldIndex) newIndex -= 1;
-      newIndex = newIndex.clamp(0, _columns.length);
-      _columns.insert(newIndex, moved);
-      _focused = newIndex;
-    });
-    _saveLayout();
-    _scrollToIndex(_focused);
   }
 
   /// Desktop "click a column to focus it" (`columns.js:175-179` →
-  /// `_cvOpenConversation`/`_cvFocusColumn`): clicking a non-focused column
-  /// marks it focused so its header shows the primary border + `--shadow-glow`,
-  /// and re-points the shared chat header + composer at it.
+  /// `_cvOpenConversation`/`_cvFocusColumn` + `_cvScrollToCol`): clicking a
+  /// non-focused column marks it focused so its header shows the primary border
+  /// + `--shadow-glow`, re-points the shared chat header + composer at it, and
+  /// reveals it — the strip scrolls a partly off-screen column fully into view
+  /// (`_cvScrollToIndex`, columns.js:969-977). Clicks on the already-focused
+  /// column do nothing (the strip delegate gates on `colId !== _cvFocusedId`).
   void _focusColumn(int index) {
     if (index < 0 || index >= _columns.length) return;
-    if (_focused != index) setState(() => _focused = index);
+    if (_focused == index) return;
+    setState(() => _focused = index);
+    _revealColumn(index);
     _syncFocusedView();
   }
 
@@ -363,15 +600,32 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   void _syncFocusedView() {
     if (_columns.isEmpty) return;
     final idx = _focused.clamp(0, _columns.length - 1);
-    final view = _viewForDesc(_columns[idx]);
+    final desc = _columns[idx];
+    final view = _viewForDesc(desc);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final notifier = ref.read(appStateProvider.notifier);
-      if (ref.read(appStateProvider).view == view) return;
+      if (ref.read(appStateProvider).view == view) {
+        // `_cvFocusColumn` still marks the (re)focused column read
+        // (columns.js:565) even when the shared view already points at it;
+        // the gated `switchView` clear below covers the switching path.
+        _markColumnRead(desc);
+        return;
+      }
       // Flag the deck-driven switch so the `ref.listen(view)` nav-sink
       // (`_onExternalView`) doesn't treat it as outside navigation and recurse.
       _syncingFromDeck = true;
-      notifier.switchView(view);
+      if (desc.kind == _ColumnKind.channel) {
+        // Channel focus routes through the controller's `switchChannel` (not
+        // bare `switchView`) so the focused geohash channel's geo relays
+        // (`connectGeoRelaysForGeohash`) and typing sub follow focus — the
+        // controller keeps ONE active channel typing sub, unlike the PWA's
+        // accumulating per-channel `_ensureChannelTypingSub`.
+        ref
+            .read(nostrControllerProvider)
+            .switchChannel(desc.channel, geohash: desc.geohash);
+      } else {
+        ref.read(appStateProvider.notifier).switchView(view);
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _syncingFromDeck = false;
       });
@@ -410,17 +664,23 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// leaving the header/composer pointed at a conversation with no visible
   /// column:
   ///   1. an existing column for [v] → focus + scroll it into view;
-  ///   2. a channel [v] with a primary channel column present → repurpose that
-  ///      column in place (`_cvNavigateColumn`);
+  ///   2. a channel [v] while the tracked PRIMARY column is alive and still a
+  ///      channel → repurpose that column in place (`_cvNavigateColumn`);
   ///   3. otherwise → append a new column, focus + scroll to it (`cvAddColumn`).
   void _onExternalView(ChatView v) {
     // Ignore our own `_syncFocusedView`-driven switches, and anything before the
     // deck has seeded its initial columns.
     if (_syncingFromDeck || !_seeded) return;
+    // `opts.forceNew` (columns.js:282): the globe's geohash opens pass
+    // `{forceNew: true}` (geohash-globe.js:1200) so they NEVER repurpose the
+    // primary column — an existing column still wins, but otherwise a NEW
+    // column is added. One-shot hint set by `switchView(forceNewColumn:)`.
+    final forceNew =
+        ref.read(appStateProvider.notifier).consumeForceNewColumnHint();
     final desc = _descForView(v);
 
     // (1) Existing column → focus + scroll (handles the back/forward + re-tap
-    // cases). `_scrollToIndex` records focus, animates the mobile carousel and
+    // cases). `_scrollToIndex` records focus, moves the carousel/strip and
     // re-points the shared view (a no-op here since it already equals [v]).
     final existing = _columns.indexWhere((d) => d == desc);
     if (existing >= 0) {
@@ -428,16 +688,23 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       return;
     }
 
-    // (2) Channel view + a primary channel column exists → navigate it in place
-    // rather than spawning a duplicate channel column (`_cvNavigateColumn`).
-    if (v.kind == ViewKind.channel) {
-      final primary =
-          _columns.indexWhere((d) => d.kind == _ColumnKind.channel);
+    // (2) Channel view + the tracked primary column is alive and still a
+    // channel → navigate it in place (`_cvNavigateColumn`). Once the primary is
+    // closed (`_cvPrimaryId = null`), channels ADD new columns instead. Skipped
+    // entirely when the open carried `forceNew` (globe geohash opens).
+    if (!forceNew && v.kind == ViewKind.channel && _primaryKey != null) {
+      final primary = _columns.indexWhere(
+          (d) => d.key == _primaryKey && d.kind == _ColumnKind.channel);
       if (primary >= 0) {
         setState(() {
           _columns[primary] = desc;
           _focused = primary;
         });
+        // The repurposed column stays the primary under its new key.
+        _primaryKey = desc.key;
+        // `_cvNavigateColumn` → `_cvSubscribeChannel` (geo relays + typing sub
+        // + D1 restore; the view already points here, so no re-switch needed).
+        _subscribeChannel(desc);
         _saveLayout();
         _scrollToIndex(primary);
         return;
@@ -449,6 +716,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       _columns.add(desc);
       _focused = _columns.length - 1;
     });
+    // `cvAddColumn` → `_cvSubscribeChannel` (relay-side work included).
+    _subscribeChannel(desc);
     _saveLayout();
     _scrollToIndex(_columns.length - 1);
   }
@@ -461,19 +730,62 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     _scrollToIndex(to);
   }
 
-  /// `_cvScrollToIndex`: on mobile snap the carousel by page width; on desktop
-  /// this just records the focused column for the pager highlight.
+  /// `_cvScrollToIndex` + focus: on mobile snap the carousel INSTANTLY (the PWA
+  /// assigns `scrollLeft` directly, columns.js:965-967 — no smooth behavior);
+  /// on desktop smooth-scroll the strip only if the target column is partly
+  /// off-screen (columns.js:969-977).
   void _scrollToIndex(int idx) {
     if (idx < 0 || idx >= _columns.length) return;
-    if (_isMobile && _pageController.hasClients) {
-      _pageController.animateToPage(
-        idx,
-        duration: NymMotion.transition,
-        curve: NymMotion.curve,
-      );
+    if (_isMobile) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pageController.hasClients && _columns.isNotEmpty) {
+          _pageController.jumpToPage(idx.clamp(0, _columns.length - 1));
+        }
+      });
+    } else {
+      _revealColumn(idx);
     }
     if (_focused != idx) setState(() => _focused = idx);
     _syncFocusedView();
+  }
+
+  /// Desktop `_cvScrollToIndex` (columns.js:969-977): smooth-scroll the strip so
+  /// column [idx] is fully visible with the strip's 12px edge padding — but
+  /// never nudge a column that's already fully in view. Post-frame so a column
+  /// added this build participates in the extent.
+  void _revealColumn(int idx) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_stripScroll.hasClients) return;
+      if (idx < 0 || idx >= _columns.length) return;
+      final pos = _stripScroll.position;
+      final left = _CvDimens.padding + idx * (_CvDimens.column + _CvDimens.gap);
+      final right = left + _CvDimens.column;
+      double? target;
+      if (left < pos.pixels) {
+        target = left - 12; // `cr.left - sr.left - 12`
+      } else if (right > pos.pixels + pos.viewportDimension) {
+        target = right - pos.viewportDimension + 12; // `cr.right - sr.right + 12`
+      }
+      if (target == null) return;
+      _stripScroll.animateTo(
+        target.clamp(pos.minScrollExtent, pos.maxScrollExtent),
+        duration: NymMotion.transition,
+        curve: NymMotion.curve,
+      );
+    });
+  }
+
+  /// `_cvScrollToEnd` (columns.js:979-981): smooth-scroll the strip to its end
+  /// (used when the add-column picker opens).
+  void _scrollStripToEnd() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_stripScroll.hasClients) return;
+      _stripScroll.animateTo(
+        _stripScroll.position.maxScrollExtent,
+        duration: NymMotion.transition,
+        curve: NymMotion.curve,
+      );
+    });
   }
 
   /// Keep the PageView page valid after a removal/reorder changes the count.
@@ -482,7 +794,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final page = _pageController.page?.round() ?? 0;
     if (page != _focused && _focused < _columns.length) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _pageController.hasClients) {
+        if (mounted && _pageController.hasClients && _columns.isNotEmpty) {
           _pageController.jumpToPage(_focused.clamp(0, _columns.length - 1));
         }
       });
@@ -494,179 +806,379 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     return w <= _CvDimens.mobileBreakpoint;
   }
 
-  Future<void> _openAddColumn(
+  // --- Desktop column drag (`_cvStartColumnDrag`, columns.js:673-728) --------
+
+  /// Header mouse-down (`_cvAttachDnd`): arm a potential drag. The drag itself
+  /// starts only after 5px of pointer travel, so a plain click just focuses.
+  void _onColumnHeaderDown(
+      int index, PointerDownEvent e, BuildContext boundaryContext) {
+    if (_isMobile) return;
+    if (e.buttons != kPrimaryButton) return; // `e.button !== 0`
+    final box = boundaryContext.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached) return;
+    final topLeft = box.localToGlobal(Offset.zero);
+    _dragIndex = index;
+    _dragActive = false;
+    _dragStart = e.position;
+    _grabOffset = Offset(
+      e.position.dx - topLeft.dx,
+      math.min(e.position.dy - topLeft.dy, 40.0),
+    );
+    _dragSize = box.size;
+    _dragBoundary = boundaryContext;
+  }
+
+  void _onColumnHeaderMove(PointerMoveEvent e) {
+    final idx = _dragIndex;
+    if (idx == null || _isMobile) return;
+    if (!_dragActive) {
+      // 5px start threshold (columns.js:682).
+      final d = e.position - _dragStart;
+      if (d.dx.abs() < 5 && d.dy.abs() < 5) return;
+      _dragActive = true;
+      _ghostPos = e.position - _grabOffset;
+      _insertGhost();
+      _captureDragImage();
+      setState(() {}); // dim the source (`.cv-column.cv-dragging`, 0.4)
+    }
+    _ghostPos = e.position - _grabOffset;
+    _dragGhostEntry?.markNeedsBuild();
+    _updateDragTarget(e.position.dx);
+  }
+
+  /// Mouse-up / cancel: drop the ghost; when a drag actually ran, persist the
+  /// (already live-reflowed) order. Focus is never changed by a reorder.
+  void _onColumnHeaderUp() {
+    if (_dragIndex == null) return;
+    final wasActive = _dragActive;
+    _removeGhost();
+    _dragIndex = null;
+    _dragActive = false;
+    _dragBoundary = null;
+    if (wasActive && mounted) {
+      setState(() {}); // un-dim the source
+      _saveLayout();
+    }
+  }
+
+  /// Live reflow (columns.js:706-713): as the ghost crosses a neighbour's
+  /// midpoint the strip reorders immediately — the dimmed source column moves to
+  /// the insertion point, exactly like the PWA's `insertBefore` loop.
+  void _updateDragTarget(double pointerX) {
+    final from = _dragIndex;
+    if (from == null || from >= _columns.length) return;
+    if (!_stripScroll.hasClients) return;
+    final stripBox = _stripKey.currentContext?.findRenderObject() as RenderBox?;
+    if (stripBox == null) return;
+    final originX =
+        stripBox.localToGlobal(Offset.zero).dx - _stripScroll.offset;
+    const span = _CvDimens.column + _CvDimens.gap;
+    // Find the first non-dragged column whose midpoint is right of the pointer;
+    // the dragged column inserts before it (else it goes to the end).
+    var insertAt = _columns.length - 1;
+    var pos = 0;
+    var found = false;
+    for (var i = 0; i < _columns.length; i++) {
+      if (i == from) continue;
+      final mid = originX + _CvDimens.padding + i * span + _CvDimens.column / 2;
+      if (pointerX < mid) {
+        insertAt = pos;
+        found = true;
+        break;
+      }
+      pos++;
+    }
+    if (!found) insertAt = _columns.length - 1;
+    if (insertAt == from) return;
+    final focusedDesc =
+        (_focused >= 0 && _focused < _columns.length) ? _columns[_focused] : null;
+    setState(() {
+      final moved = _columns.removeAt(from);
+      _columns.insert(insertAt, moved);
+      _dragIndex = insertAt;
+      // Reorders never move focus (`_cvMoveColumn`/drag `end()` don't touch
+      // `_cvFocusedId`); re-derive the focused index by identity.
+      if (focusedDesc != null) {
+        final f = _columns.indexOf(focusedDesc);
+        if (f >= 0) _focused = f;
+      }
+    });
+  }
+
+  /// Snapshot the dragged column's pixels so the ghost is an exact clone of what
+  /// the user sees (the PWA clones the DOM node trimmed to visible messages).
+  /// Until the async capture lands, the ghost shows a live widget clone.
+  void _captureDragImage() {
+    final ctx = _dragBoundary;
+    if (ctx == null || !ctx.mounted) return;
+    final ro = ctx.findRenderObject();
+    if (ro is! RenderRepaintBoundary) return;
+    final ratio = MediaQuery.of(context).devicePixelRatio;
+    ro.toImage(pixelRatio: ratio).then((img) {
+      if (_dragActive && _dragGhostEntry != null) {
+        _dragImage = img;
+        _dragGhostEntry?.markNeedsBuild();
+      } else {
+        img.dispose();
+      }
+    }).catchError((_) {});
+  }
+
+  /// The floating drag clone (`.cv-drag-ghost`: fixed, exact column size,
+  /// opacity 0.92, `--shadow-lg`, pointer-events none).
+  void _insertGhost() {
+    if (_dragGhostEntry != null) return;
+    final overlay = Overlay.of(context, rootOverlay: true);
+    final entry = OverlayEntry(builder: (ctx) {
+      final light = ctx.nym.isLight;
+      return Positioned(
+        left: _ghostPos.dx,
+        top: _ghostPos.dy,
+        width: _dragSize.width,
+        height: _dragSize.height,
+        child: IgnorePointer(
+          child: Opacity(
+            opacity: 0.92,
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: NymRadius.rmd,
+                // `--shadow-lg`: 0 8px 32px black@0.5 (dark) / @0.12 (light,
+                // styles-themes-responsive.css:537).
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: light ? 0.12 : 0.5),
+                    offset: const Offset(0, 8),
+                    blurRadius: 32,
+                  ),
+                ],
+              ),
+              child: _dragImage != null
+                  ? ClipRRect(
+                      borderRadius: NymRadius.rmd,
+                      child: RawImage(image: _dragImage, fit: BoxFit.fill),
+                    )
+                  : Material(
+                      type: MaterialType.transparency,
+                      child: _buildGhostClone(),
+                    ),
+            ),
+          ),
+        ),
+      );
+    });
+    overlay.insert(entry);
+    _dragGhostEntry = entry;
+  }
+
+  Widget _buildGhostClone() {
+    final idx = _dragIndex;
+    if (idx == null || idx < 0 || idx >= _columns.length || !mounted) {
+      return const SizedBox.shrink();
+    }
+    final desc = _columns[idx];
+    final style = TextStyle(
+      color: context.nym.secondary,
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+    );
+    return _DeckColumn(
+      desc: desc,
+      titleWidget: _columnTitleWidget(context, desc, style),
+      icon: _columnIcon(context, desc),
+      focused: idx == _focused,
+      transparent: false,
+      mobile: false,
+      index: idx,
+      total: _columns.length,
+      onClose: () {},
+    );
+  }
+
+  void _removeGhost() {
+    _dragGhostEntry?.remove();
+    _dragGhostEntry = null;
+    _dragImage?.dispose();
+    _dragImage = null;
+  }
+
+  // --- Add-column picker (`_cvOpenAddColumn` / `_cvAvailableConversations`) ---
+
+  /// `_cvAvailableConversations` (columns.js:774-803): channels (unless
+  /// PM-only), then PMs, then groups — minus already-open columns. Row icons
+  /// follow the picker markup: `#`, a 20px avatar, or the `◧` group fallback
+  /// character (columns.js:798).
+  List<_PickerEntry> _availableRows(
+    BuildContext context,
     List<ChannelEntry> channels,
     List<PMConversation> pms,
     List<Group> groups,
     bool pmOnly,
-  ) async {
-    // `_cvAvailableConversations`: channels (unless PM-only) + PMs + groups not
-    // already open. Each carries its title (the PWA's `label`) so the live
-    // search can filter by it (`_cvOpenAddColumn`, columns.js:750-753).
+  ) {
     final open = _columns.toSet();
-    final available = <_ColumnDesc>[
-      if (!pmOnly)
-        for (final ch in channels) _ColumnDesc.channel(ch.channel, ch.geohash),
-      for (final pm in pms) _ColumnDesc.pm(pm.pubkey, nym: pm.nym),
-      for (final g in groups) _ColumnDesc.group(g.id),
-    ]
-        .where((d) => !open.contains(d))
-        .map((d) => (desc: d, label: _columnTitle(context, d)))
-        .toList();
+    final out = <_PickerEntry>[];
+    if (!pmOnly) {
+      for (final ch in channels) {
+        final d = _ColumnDesc.channel(ch.channel, ch.geohash);
+        if (open.contains(d)) continue;
+        out.add((
+          desc: d,
+          label: '#${ch.geohash.isNotEmpty ? ch.geohash : ch.channel}',
+          icon: _pickerRowIcon(context, d),
+        ));
+      }
+    }
+    for (final pm in pms) {
+      final d = _ColumnDesc.pm(pm.pubkey, nym: pm.nym);
+      if (open.contains(d)) continue;
+      out.add((
+        desc: d,
+        label: pm.nym.isNotEmpty ? pm.nym : 'Direct message',
+        icon: _pickerRowIcon(context, d),
+      ));
+    }
+    for (final g in groups) {
+      final d = _ColumnDesc.group(g.id);
+      if (open.contains(d)) continue;
+      out.add((
+        desc: d,
+        label: g.name.isNotEmpty ? g.name : 'Group chat',
+        icon: _pickerRowIcon(context, d),
+      ));
+    }
+    return out;
+  }
 
-    final picked = await showModalBottomSheet<_ColumnDesc>(
-      context: context,
-      backgroundColor: context.nym.bgSecondary,
-      isScrollControlled: true,
-      builder: (ctx) {
-        final c = ctx.nym;
-        if (available.isEmpty) {
-          return Padding(
-            padding: const EdgeInsets.all(24),
-            child: Text('No conversations',
-                style: TextStyle(color: c.textDim, fontSize: 14)),
+  /// Picker-row icons (`.cv-picker-row-icon`, 13px row font): `#` for channels,
+  /// a 20px round avatar for PMs / avatar groups, the literal `◧` otherwise.
+  Widget _pickerRowIcon(BuildContext context, _ColumnDesc d) {
+    final c = context.nym;
+    final app = ref.read(appStateProvider);
+    switch (d.kind) {
+      case _ColumnKind.channel:
+        return Text('#',
+            style: TextStyle(color: c.textDim, fontSize: 13, height: 1));
+      case _ColumnKind.pm:
+        return NymAvatar(
+          seed: d.pubkey,
+          size: 20,
+          imageUrl: app.users[d.pubkey]?.profile?.picture,
+        );
+      case _ColumnKind.group:
+        final g = app.groups.where((g) => g.id == d.groupId).toList();
+        final avatar = g.isNotEmpty ? g.first.avatar : null;
+        if (avatar != null && avatar.isNotEmpty) {
+          return NymAvatar(
+            seed: _columnTitle(context, d),
+            size: 20,
+            imageUrl: avatar,
           );
         }
-        // `.cv-picker-search` live filter over the available conversations.
-        var term = '';
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            final f = term.trim().toLowerCase();
-            final shown = f.isEmpty
-                ? available
-                : available
-                    .where((r) => r.label.toLowerCase().contains(f))
-                    .toList();
-            return SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // `.cv-column-header` → `.cv-col-title`.
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text('Add a column',
-                          style: TextStyle(
-                              color: c.textBright,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700)),
-                    ),
-                  ),
-                  // `.cv-picker-search` → `.cv-picker-input` (form-input).
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                    child: TextField(
-                      autofocus: true,
-                      style: TextStyle(color: c.textBright, fontSize: 14),
-                      cursorColor: c.isLight ? Colors.black : Colors.white,
-                      onChanged: (v) => setSheetState(() => term = v),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText: 'Search conversations…',
-                        hintStyle: TextStyle(color: c.textDim, fontSize: 14),
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
-                        filled: true,
-                        fillColor: c.insetFill,
-                        border: OutlineInputBorder(
-                          borderRadius: NymRadius.rxs,
-                          borderSide: BorderSide(color: c.glassBorder),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: NymRadius.rxs,
-                          borderSide: BorderSide(color: c.glassBorder),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: NymRadius.rxs,
-                          borderSide: BorderSide(color: c.primaryA(0.30)),
-                        ),
-                      ),
-                    ),
-                  ),
-                  // `.cv-picker-list` (filtered rows) / `.cv-picker-empty`.
-                  Flexible(
-                    child: shown.isEmpty
-                        ? Padding(
-                            padding: const EdgeInsets.all(24),
-                            child: Text('No conversations',
-                                style:
-                                    TextStyle(color: c.textDim, fontSize: 14)),
-                          )
-                        : ListView(
-                            shrinkWrap: true,
-                            children: [
-                              for (final r in shown)
-                                ListTile(
-                                  leading: _columnIcon(ctx, r.desc, size: 24),
-                                  title: Text(r.label,
-                                      style: TextStyle(color: c.text)),
-                                  onTap: () =>
-                                      Navigator.of(ctx).pop(r.desc),
-                                ),
-                            ],
-                          ),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
-    if (picked != null && mounted) {
-      setState(() {
-        _columns.add(picked);
-        _focused = _columns.length - 1;
-      });
-      _saveLayout();
-      // `_cvOpenAddColumn` scrolls the new column into view on add.
-      _scrollToIndex(_columns.length - 1);
+        // `_cvAvailableConversations` group fallback is the '◧' character.
+        return Text('◧',
+            style: TextStyle(color: c.textDim, fontSize: 13, height: 1));
     }
+  }
+
+  /// `_cvOpenAddColumn` (columns.js:731-772): the picker is a column-shaped
+  /// `.cv-picker` panel inserted into the strip before the (hidden) add button.
+  /// Desktop: the strip smooth-scrolls to the end so the panel is in view.
+  /// Mobile: every `.cv-column` — the picker included — is a full snap page
+  /// (`flex:0 0 100%`, styles-columns.css:508-517), so the picker occupies the
+  /// carousel's trailing page and the strip scrolls to it (`_cvScrollToEnd`).
+  void _openAddColumn() {
+    if (_pickerOpen) return; // `if (strip.querySelector('.cv-picker')) return`
+    setState(() => _pickerOpen = true);
+    if (_isMobile) {
+      // `_cvScrollToEnd()`: the picker page replaces the (hidden) add-column
+      // page at the end of the carousel.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_pageController.hasClients) return;
+        _pageController.animateToPage(
+          _columns.length,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+        );
+      });
+    } else {
+      _scrollStripToEnd();
+    }
+  }
+
+  /// A picker row was chosen: `cvAddColumn(desc, { focus:true })` + close +
+  /// `_cvScrollToIndex(len-1)` (columns.js:760-764).
+  void _addPickedColumn(_ColumnDesc desc) {
+    final existing = _columns.indexOf(desc);
+    setState(() {
+      _pickerOpen = false;
+      if (existing >= 0) {
+        _focused = existing;
+      } else {
+        _columns.add(desc);
+        _focused = _columns.length - 1;
+      }
+    });
+    if (existing < 0) {
+      // `cvAddColumn` → `_cvSubscribeChannel` (geo relays, D1 restore); the
+      // picked column gets focus via `_scrollToIndex` → `_syncFocusedView`,
+      // which re-points the typing sub through `switchChannel`.
+      _subscribeChannel(desc);
+      _saveLayout();
+    }
+    _scrollToIndex(_focused);
   }
 
   /// The "Columns" bottom-sheet tab switcher (`_cvOpenTabsView` /
   /// `_cvBuildTabsView`): a list of `.cv-tab` rows with drag-to-reorder, a
   /// per-row close, the active column highlighted, and a "+ Add column" footer
-  /// (gap F5). Metrics from `styles-columns.css:684-772`.
-  Future<void> _openTabsView(
-    List<ChannelEntry> channels,
-    List<PMConversation> pms,
-    List<Group> groups,
-    bool pmOnly,
-  ) async {
-    final result = await showModalBottomSheet<_TabsResult>(
+  /// (gap F5). Reorders and removals commit IMMEDIATELY (the PWA saves on every
+  /// drag `end()` and keeps the sheet open across removals), so dismissing the
+  /// sheet never discards anything. Metrics from `styles-columns.css:623-772`.
+  Future<void> _openTabsView() async {
+    // The PWA overlay is a plain `display: none` → `display: flex` toggle
+    // (`.cv-tabs-overlay.open`, styles-columns.css:623-635) with no
+    // transition/animation, so the sheet POPS in/out instantly on both
+    // breakpoints — a general dialog with a zero-length transition, not a
+    // slide-up modal bottom sheet.
+    final result = await showGeneralDialog<_TabsResult>(
       context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Columns',
       // `.cv-tabs-overlay` background rgba(0,0,0,0.5).
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => _TabsSheet(
-        columns: List<_ColumnDesc>.from(_columns),
-        focused: _focused,
-        titleOf: (d) => _columnTitle(ctx, d),
-        iconOf: (d) => _columnIcon(ctx, d, size: 24),
+      transitionDuration: Duration.zero,
+      pageBuilder: (ctx, _, __) => Material(
+        type: MaterialType.transparency,
+        child: _TabsSheet(
+          columns: List<_ColumnDesc>.from(_columns),
+          activeDesc: (_focused >= 0 && _focused < _columns.length)
+              ? _columns[_focused]
+              : null,
+          titleOf: (d) => _columnTitleWidget(
+            ctx,
+            d,
+            TextStyle(
+              color: ctx.nym.secondary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          iconOf: (d) => _columnIcon(ctx, d, size: 24),
+          onReorder: _commitTabsReorder,
+          onRemove: (d) async {
+            await _removeColumn(d);
+            return !_columns.contains(d);
+          },
+        ),
       ),
     );
     if (result == null || !mounted) return;
     switch (result.action) {
       case _TabsAction.select:
-        _scrollToIndex(result.index!);
-      case _TabsAction.remove:
-        _removeColumn(_columns[result.index!]);
-      case _TabsAction.reorder:
-        // The sheet returns the fully reordered list.
-        setState(() {
-          _columns
-            ..clear()
-            ..addAll(result.reordered!);
-          _focused = _focused.clamp(0, _columns.length - 1);
-        });
-        _saveLayout();
-        _scrollToIndex(_focused);
+        // `_cvSwitchToColumn(row.dataset.colId)`: focus + reveal by identity.
+        final i = _columns.indexOf(result.desc!);
+        if (i >= 0) _scrollToIndex(i);
       case _TabsAction.add:
-        await _openAddColumn(channels, pms, groups, pmOnly);
+        _openAddColumn();
     }
   }
 
@@ -692,6 +1204,73 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
             ? g.first.name
             : 'Group chat';
     }
+  }
+
+  /// The rich column title (`_cvColTitleHtml`, columns.js:492-505): for PM
+  /// columns the title carries the dimmed `#suffix` (`.nym-suffix`: 0.9em, w100,
+  /// opacity 0.7), the user's flair/supporter badge, the verified-developer/bot
+  /// ✓ badge, and the friend badge. Channels/groups render the bare title. Used
+  /// by the column header (columns.js:394), and the tabs-sheet rows (:903-904).
+  Widget _columnTitleWidget(
+      BuildContext context, _ColumnDesc d, TextStyle style) {
+    final title = _columnTitle(context, d);
+    if (d.kind != _ColumnKind.pm || d.pubkey.isEmpty) {
+      return Text(title,
+          maxLines: 1, overflow: TextOverflow.ellipsis, style: style);
+    }
+    final base = stripPubkeySuffix(title);
+    final suffix = getPubkeySuffix(d.pubkey);
+    final controller = ref.read(nostrControllerProvider);
+    final isDev = controller.isVerifiedDeveloper(d.pubkey);
+    final isBot = !isDev && controller.isVerifiedBot(d.pubkey);
+    final isFriend = ref.read(appStateProvider).friends.contains(d.pubkey);
+    final cosmetics = ref.read(userCosmeticsProvider(d.pubkey));
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text.rich(
+            TextSpan(
+              style: style,
+              children: [
+                TextSpan(text: base),
+                if (suffix.isNotEmpty)
+                  TextSpan(
+                    text: '#$suffix',
+                    // `.nym-suffix`: opacity 0.7, 0.9em, weight 100.
+                    style: style.copyWith(
+                      color: style.color?.withValues(alpha: 0.7),
+                      fontSize: (style.fontSize ?? 14) * 0.9,
+                      fontWeight: FontWeight.w100,
+                    ),
+                  ),
+              ],
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        // `getFlairForUser` markup (flair + supporter, both 20px like the PWA).
+        CosmeticNymBadges(
+          cosmetics: cosmetics,
+          flairSize: 20,
+          supporterHeight: 20,
+        ),
+        // `.verified-badge` (20×20 circle, ✓) for the developer/bot pubkeys.
+        if (isDev || isBot) ...[
+          const SizedBox(width: 4),
+          VerifiedBadge(
+            size: 20,
+            tooltip: isDev ? 'Nymchat Developer' : 'Nymchat Bot',
+          ),
+        ],
+        // `getFriendBadgeHtml`.
+        if (isFriend) ...[
+          const SizedBox(width: 4),
+          const FriendBadge(size: 20),
+        ],
+      ],
+    );
   }
 
   /// Resolves a column's header icon (`_cvColIcon`): a `#` text glyph for
@@ -758,6 +1337,17 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       (prev, next) => _onExternalView(next),
     );
 
+    // "Reset columns to defaults" pressed while the deck is mounted — the PWA
+    // resets LIVE (`cvResetColumns` tears down + re-seeds + re-focuses,
+    // columns.js:363-381); the tick is bumped by `SettingsController.
+    // resetColumns` after clearing the persisted layout.
+    ref.listen<int>(
+      settingsProvider.select((s) => s.columnsResetTick),
+      (prev, next) {
+        if (prev != next) _onColumnsReset();
+      },
+    );
+
     if (_focused >= _columns.length) {
       _focused = _columns.isEmpty ? 0 : _columns.length - 1;
     }
@@ -788,6 +1378,11 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     bool pmOnly,
     bool transparentColumns,
   ) {
+    final titleStyle = TextStyle(
+      color: c.secondary,
+      fontSize: 14,
+      fontWeight: FontWeight.w600,
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -796,38 +1391,84 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           _Pager(
             count: _columns.length,
             active: _focused,
-            onTap: () => _openTabsView(channels, pms, groups, pmOnly),
+            onTap: _openTabsView,
           ),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.all(_CvDimens.padding),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (var i = 0; i < _columns.length; i++) ...[
-                    _DesktopColumnSlot(
-                      key: ValueKey('cvcol_${_columns[i].key}'),
-                      index: i,
-                      total: _columns.length,
-                      desc: _columns[i],
-                      title: _columnTitle(context, _columns[i]),
-                      icon: _columnIcon(context, _columns[i]),
-                      focused: i == _focused,
-                      transparent: transparentColumns,
-                      onClose: () => _removeColumn(_columns[i]),
-                      onFocus: () => _focusColumn(i),
-                      onReorder: _reorderColumn,
-                    ),
-                    const SizedBox(width: _CvDimens.gap),
-                  ],
-                  _AddColumnButton(
-                    c: c,
-                    width: _CvDimens.addColumn,
-                    onTap: () => _openAddColumn(channels, pms, groups, pmOnly),
+            padding: const EdgeInsets.symmetric(vertical: _CvDimens.padding),
+            // `.cv-strip::-webkit-scrollbar`: 6px, transparent track, radius 10.
+            // Thumb rgba(255,255,255,0.12) → 0.2 on hover (styles-columns.css:
+            // 110-117) — but `body.light-mode ::-webkit-scrollbar-thumb`
+            // (styles-themes-responsive.css:1095-1106) is MORE SPECIFIC
+            // (0-1-2 vs 0-1-1), so in light mode the strip thumb is
+            // rgba(0,0,0,0.12) → 0.2 on hover.
+            child: ScrollbarTheme(
+              data: ScrollbarThemeData(
+                thickness: const WidgetStatePropertyAll(6),
+                radius: const Radius.circular(10),
+                trackColor: const WidgetStatePropertyAll(Colors.transparent),
+                trackBorderColor:
+                    const WidgetStatePropertyAll(Colors.transparent),
+                thumbColor: WidgetStateProperty.resolveWith(
+                  (states) => (c.isLight ? Colors.black : Colors.white)
+                      .withValues(
+                          alpha: states.contains(WidgetState.hovered)
+                              ? 0.2
+                              : 0.12),
+                ),
+              ),
+              child: Scrollbar(
+                controller: _stripScroll,
+                thumbVisibility: true,
+                child: SingleChildScrollView(
+                  key: _stripKey,
+                  controller: _stripScroll,
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: _CvDimens.padding),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (var i = 0; i < _columns.length; i++) ...[
+                        _DesktopColumnSlot(
+                          key: ValueKey('cvcol_${_columns[i].key}'),
+                          index: i,
+                          total: _columns.length,
+                          desc: _columns[i],
+                          titleWidget: _columnTitleWidget(
+                              context, _columns[i], titleStyle),
+                          icon: _columnIcon(context, _columns[i]),
+                          focused: i == _focused,
+                          transparent: transparentColumns,
+                          dimmed: _dragActive && _dragIndex == i,
+                          onClose: () => _removeColumn(_columns[i]),
+                          onFocus: () => _focusColumn(i),
+                          onDragDown: (e, boundaryCtx) =>
+                              _onColumnHeaderDown(i, e, boundaryCtx),
+                          onDragMove: _onColumnHeaderMove,
+                          onDragEnd: _onColumnHeaderUp,
+                          onAtBottomChanged: _atBottomHandlerFor(_columns[i]),
+                        ),
+                        const SizedBox(width: _CvDimens.gap),
+                      ],
+                      // `.cv-picker` replaces the (hidden) add button while
+                      // open (`_cvOpenAddColumn` sets `display:none` on it).
+                      if (_pickerOpen)
+                        _PickerColumn(
+                          rows: _availableRows(
+                              context, channels, pms, groups, pmOnly),
+                          onPick: _addPickedColumn,
+                          onClose: () => setState(() => _pickerOpen = false),
+                        )
+                      else
+                        _AddColumnButton(
+                          c: c,
+                          width: _CvDimens.addColumn,
+                          onTap: _openAddColumn,
+                        ),
+                    ],
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -856,8 +1497,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       // column-to-column touch paging — columns are switched only via the
       // arrows/dots. Disabling touch paging here frees the horizontal-drag
       // budget for each message row's swipe-to-act (G3). Arrow/dot navigation
-      // still works because it drives `animateToPage`/`jumpToPage`
-      // programmatically, which ignores scroll physics.
+      // still works because it drives `jumpToPage` programmatically, which
+      // ignores scroll physics.
       physics: const NeverScrollableScrollPhysics(),
       itemCount: pageCount,
       onPageChanged: (i) {
@@ -869,14 +1510,25 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       },
       itemBuilder: (context, i) {
         if (i >= _columns.length) {
-          // Full-width dashed add-column page (`.cv-add-column flex:0 0 100%`).
-          return Padding(
-            padding: const EdgeInsets.all(_CvDimens.padding),
-            child: _AddColumnButton(
-              c: c,
-              width: double.infinity,
-              onTap: () => _openAddColumn(channels, pms, groups, pmOnly),
-            ),
+          // `_cvOpenAddColumn` inserts the `.cv-picker` — itself a `.cv-column`
+          // — before the (display:none) add button, so on mobile the picker IS
+          // the trailing full snap page (`flex:0 0 100%`, with the column
+          // border/radius/shadow dropped — styles-columns.css:508-517).
+          if (_pickerOpen) {
+            return _PickerColumn(
+              mobile: true,
+              rows: _availableRows(context, channels, pms, groups, pmOnly),
+              onPick: _addPickedColumn,
+              onClose: () => setState(() => _pickerOpen = false),
+            );
+          }
+          // Full-bleed dashed add-column page: the mobile strip has NO padding
+          // (`.cv-strip { padding:0; gap:0 }`, styles-columns.css:501-506) and
+          // the tile spans the whole screen (`.cv-add-column flex:0 0 100%`).
+          return _AddColumnButton(
+            c: c,
+            width: double.infinity,
+            onTap: _openAddColumn,
           );
         }
         final desc = _columns[i];
@@ -888,59 +1540,81 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           onClose: () => _removeColumn(desc),
           onPrev: () => _stepFocused(-1),
           onNext: () => _stepFocused(1),
-          onOpenTabs: () => _openTabsView(channels, pms, groups, pmOnly),
+          onOpenTabs: _openTabsView,
+          onAtBottomChanged: _atBottomHandlerFor(desc),
         );
       },
     );
   }
 }
 
-/// A desktop column wrapped as a horizontal drag-source + drag-target so columns
-/// can be reordered by dragging the 6-dot grip (`_cvAttachDnd`, gap F4). The
-/// drag feedback is a translucent clone (`.cv-drag-ghost`, opacity 0.92) and the
-/// source dims to opacity 0.4 (`.cv-column.cv-dragging`).
+/// A desktop column slot: hosts the column, the "any click focuses" listener
+/// (`columns.js:175-179` — delegated on the strip, so clicks on message rows
+/// focus too; a [Listener] bypasses the gesture arena the rows' own recognizers
+/// would otherwise win), the `cv-dragging` dim, and the [RepaintBoundary] the
+/// custom header drag snapshots for its pixel-exact ghost.
 class _DesktopColumnSlot extends StatefulWidget {
   const _DesktopColumnSlot({
     super.key,
     required this.index,
     required this.total,
     required this.desc,
-    required this.title,
+    required this.titleWidget,
     required this.icon,
     required this.focused,
     required this.transparent,
+    required this.dimmed,
     required this.onClose,
     required this.onFocus,
-    required this.onReorder,
+    required this.onDragDown,
+    required this.onDragMove,
+    required this.onDragEnd,
+    this.onAtBottomChanged,
   });
 
   final int index;
   final int total;
   final _ColumnDesc desc;
-  final String title;
+  final Widget titleWidget;
   final Widget icon;
   final bool focused;
   final bool transparent;
+
+  /// `.cv-column.cv-dragging { opacity: 0.4 }` while this column is dragged.
+  final bool dimmed;
   final VoidCallback onClose;
   final VoidCallback onFocus;
-  final void Function(int from, int to) onReorder;
+
+  /// Header pointer plumbing for the deck-level drag (`_cvStartColumnDrag`).
+  final void Function(PointerDownEvent event, BuildContext boundaryContext)
+      onDragDown;
+  final void Function(PointerMoveEvent event) onDragMove;
+  final VoidCallback onDragEnd;
+
+  /// At-bottom transitions, forwarded to the deck's read-gate bookkeeping.
+  final ValueChanged<bool>? onAtBottomChanged;
 
   @override
   State<_DesktopColumnSlot> createState() => _DesktopColumnSlotState();
 }
 
 class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
-  bool _dragging = false;
-  bool _dragOver = false;
+  /// Marks the snapshot boundary for the drag ghost (and the drag geometry —
+  /// grab offset + exact column size).
+  final GlobalKey _boundaryKey = GlobalKey();
 
-  /// Builds a `_DeckColumn` for this slot. When [draggable] is true the column
-  /// header is the drag source (`_cvAttachDnd` attaches `mousedown` to the whole
-  /// header, excluding close/move/dots); the floating drag clone passes false so
-  /// it isn't itself draggable.
-  Widget _buildColumn({required bool draggable}) {
-    return _DeckColumn(
+  /// True while the current pointer-down started on the close button. The PWA
+  /// close click `e.stopPropagation()`s before the strip's click-to-focus
+  /// delegate runs (columns.js:168-171), so closing an UNFOCUSED column never
+  /// focuses it first (which would re-point the shared header/composer and
+  /// clear its unread).
+  bool _closePressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final column = _DeckColumn(
       desc: widget.desc,
-      title: widget.title,
+      titleWidget: widget.titleWidget,
       icon: widget.icon,
       focused: widget.focused,
       transparent: widget.transparent,
@@ -948,99 +1622,36 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
       index: widget.index,
       total: widget.total,
       onClose: widget.onClose,
-      // The whole header (grip + icon + title) starts the drag — matches the
-      // PWA `cursor:grab` header (live column on the strip only).
-      headerDragBuilder: draggable
-          ? (header) => Draggable<int>(
-                data: widget.index,
-                axis: Axis.horizontal,
-                dragAnchorStrategy: childDragAnchorStrategy,
-                onDragStarted: () => setState(() => _dragging = true),
-                onDragEnd: (_) => setState(() => _dragging = false),
-                onDraggableCanceled: (_, __) =>
-                    setState(() => _dragging = false),
-                feedback: _DragGhost(
-                  width: _CvDimens.column,
-                  child: _buildColumn(draggable: false),
-                ),
-                childWhenDragging: header,
-                child: header,
-              )
-          : null,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Clicking anywhere on the column focuses it (`columns.js:175-179`); the
-    // header drag-source sits above this so a grab doesn't read as a click.
-    final column = GestureDetector(
-      onTap: widget.onFocus,
-      behavior: HitTestBehavior.deferToChild,
-      child: _buildColumn(draggable: true),
+      // The close button's pointer-down lands here (deepest Listener) BEFORE
+      // the slot's focus Listener below, flagging the event as "consumed".
+      onCloseDown: () => _closePressed = true,
+      onHeaderDown: (e) {
+        final ctx = _boundaryKey.currentContext;
+        if (ctx != null) widget.onDragDown(e, ctx);
+      },
+      onHeaderMove: widget.onDragMove,
+      onHeaderUp: widget.onDragEnd,
+      onAtBottomChanged: widget.onAtBottomChanged,
     );
 
-    // The whole column is a drop target; dropping inserts the dragged column at
-    // this slot. The dim (0.4) + floating ghost (0.92) match the PWA, and the
-    // end-state order is identical. The one remaining delta vs the PWA's
-    // `_cvStartColumnDrag` (columns.js:706-713) is that the neighbours don't
-    // reflow *live* as the ghost passes their midpoints — Flutter commits the
-    // reorder on drop and just marks the hovered drop-slot with a primary edge
-    // (08-M3, med). True live reflow would require lifting drag state into the
-    // parent deck and reordering a working copy on midpoint crossings (the
-    // `Draggable.data` here is the captured old index, so reordering mid-drag
-    // desyncs the keyed slots); deferred as a behavioural-feel-only divergence.
-    return DragTarget<int>(
-      onWillAcceptWithDetails: (details) {
-        if (details.data == widget.index) return false;
-        setState(() => _dragOver = true);
-        return true;
+    // Any click inside the column focuses it (`columns.js:175-179`) — EXCEPT
+    // one on the close button, whose handler stops propagation in the PWA.
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (_) {
+        if (_closePressed) {
+          _closePressed = false;
+          return;
+        }
+        widget.onFocus();
       },
-      onLeave: (_) => setState(() => _dragOver = false),
-      onAcceptWithDetails: (details) {
-        setState(() => _dragOver = false);
-        widget.onReorder(details.data, widget.index);
-      },
-      builder: (context, candidate, rejected) {
-        return AnimatedOpacity(
-          duration: NymMotion.slide,
-          opacity: _dragging ? 0.4 : 1.0,
-          child: DecoratedBox(
-            // A subtle primary edge marks the live drop slot.
-            decoration: BoxDecoration(
-              borderRadius: NymRadius.rmd,
-              border: _dragOver
-                  ? Border.all(color: context.nym.primary, width: 2)
-                  : null,
-            ),
-            child: column,
-          ),
-        );
-      },
-    );
-  }
-}
-
-/// The translucent drag clone shown under the pointer (`.cv-drag-ghost`:
-/// fixed, shadow-lg, opacity 0.92).
-class _DragGhost extends StatelessWidget {
-  const _DragGhost({required this.width, required this.child});
-  final double width;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Opacity(
-      opacity: 0.92,
-      child: Material(
-        type: MaterialType.transparency,
-        child: SizedBox(
-          width: width,
-          // Constrain height so the floating clone matches the column footprint
-          // without unbounded layout.
-          height: MediaQuery.of(context).size.height * 0.7,
-          child: child,
-        ),
+      child: AnimatedOpacity(
+        // `.cv-column { transition: ... opacity var(--transition) }` — the
+        // cv-dragging dim fades over 250ms cubic-bezier(0.4,0,0.2,1).
+        duration: NymMotion.transition,
+        curve: NymMotion.curve,
+        opacity: widget.dimmed ? 0.4 : 1.0,
+        child: RepaintBoundary(key: _boundaryKey, child: column),
       ),
     );
   }
@@ -1058,6 +1669,7 @@ class _MobileColumn extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     required this.onOpenTabs,
+    this.onAtBottomChanged,
   });
 
   final int index;
@@ -1069,12 +1681,15 @@ class _MobileColumn extends StatelessWidget {
   final VoidCallback onNext;
   final VoidCallback onOpenTabs;
 
+  /// At-bottom transitions, forwarded to the deck's read-gate bookkeeping.
+  final ValueChanged<bool>? onAtBottomChanged;
+
   @override
   Widget build(BuildContext context) {
     return _DeckColumn(
       desc: desc,
       // Title/icon are hidden on mobile; the dots take the title's slot.
-      title: '',
+      titleWidget: const SizedBox.shrink(),
       icon: const SizedBox.shrink(),
       // Mobile columns reset `.cv-column.focused` border/shadow to none.
       focused: false,
@@ -1086,6 +1701,7 @@ class _MobileColumn extends StatelessWidget {
       onPrev: onPrev,
       onNext: onNext,
       onOpenTabs: onOpenTabs,
+      onAtBottomChanged: onAtBottomChanged,
     );
   }
 }
@@ -1095,7 +1711,7 @@ class _MobileColumn extends StatelessWidget {
 class _DeckColumn extends ConsumerStatefulWidget {
   const _DeckColumn({
     required this.desc,
-    required this.title,
+    required this.titleWidget,
     required this.icon,
     required this.focused,
     required this.transparent,
@@ -1103,14 +1719,18 @@ class _DeckColumn extends ConsumerStatefulWidget {
     required this.index,
     required this.total,
     required this.onClose,
+    this.onCloseDown,
     this.onPrev,
     this.onNext,
     this.onOpenTabs,
-    this.headerDragBuilder,
+    this.onHeaderDown,
+    this.onHeaderMove,
+    this.onHeaderUp,
+    this.onAtBottomChanged,
   });
 
   final _ColumnDesc desc;
-  final String title;
+  final Widget titleWidget;
   final Widget icon;
 
   /// Desktop only: the focused column shows a primary border + `--shadow-glow`
@@ -1122,6 +1742,11 @@ class _DeckColumn extends ConsumerStatefulWidget {
   final int total;
   final VoidCallback onClose;
 
+  /// Desktop: pointer-down on the close button, fired before the slot's
+  /// click-to-focus Listener sees the event (the PWA close handler
+  /// `stopPropagation()`s, columns.js:168-171).
+  final VoidCallback? onCloseDown;
+
   /// Mobile prev/next carousel step (`_cvStepFocused`).
   final VoidCallback? onPrev;
   final VoidCallback? onNext;
@@ -1129,9 +1754,17 @@ class _DeckColumn extends ConsumerStatefulWidget {
   /// Mobile: tapping the dot indicator opens the "Columns" tabs sheet.
   final VoidCallback? onOpenTabs;
 
-  /// Desktop: wraps the whole header (the drag region) in a [Draggable] so the
-  /// column can be dragged anywhere on its header to reorder (`_cvAttachDnd`).
-  final Widget Function(Widget header)? headerDragBuilder;
+  /// Desktop: raw pointer plumbing over the header drag region so the deck can
+  /// run the PWA's custom column drag (`_cvAttachDnd` mousedown on the header,
+  /// excluding the close button — which sits outside this region).
+  final void Function(PointerDownEvent event)? onHeaderDown;
+  final void Function(PointerMoveEvent event)? onHeaderMove;
+  final VoidCallback? onHeaderUp;
+
+  /// Reports `col._atBottom` transitions up to the deck
+  /// (`_cvAttachColumnScroll`, columns.js:633-636) so the columns read gate
+  /// and the at-bottom mark-read can see this column's scroll state.
+  final ValueChanged<bool>? onAtBottomChanged;
 
   @override
   ConsumerState<_DeckColumn> createState() => _DeckColumnState();
@@ -1142,10 +1775,32 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   bool _atBottom = true;
   bool _showScrollButton = false;
 
+  /// Message count last seen by [build] — detects appended messages, standing
+  /// in for `_cvAttachAutoScroll`'s childList MutationObserver.
+  int _lastMessageCount = 0;
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DeckColumn old) {
+    super.didUpdateWidget(old);
+    if (old.desc.storageKey != widget.desc.storageKey) {
+      // Repurposed column (`_cvNavigateColumn` → `_cvRenderColumn`): the PWA
+      // re-renders the new conversation pinned to the newest message
+      // (`scrollerEl.scrollTop = 0; col._atBottom = true`, columns.js:511-512).
+      _lastMessageCount = 0;
+      _atBottom = true;
+      _showScrollButton = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_scroll.hasClients && _scroll.offset != 0) _scroll.jumpTo(0);
+        widget.onAtBottomChanged?.call(true);
+      });
+    }
   }
 
   @override
@@ -1164,6 +1819,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final distanceFromBottom = _scroll.offset;
     final atBottom = distanceFromBottom < 120;
     final showButton = distanceFromBottom > 150;
+    if (atBottom != _atBottom) widget.onAtBottomChanged?.call(atBottom);
     if (atBottom != _atBottom || showButton != _showScrollButton) {
       setState(() {
         _atBottom = atBottom;
@@ -1189,15 +1845,55 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final settings = ref.watch(settingsProvider);
     final app = ref.watch(appStateProvider);
     final reactions = ref.watch(reactionsProvider);
-    final messages = [...(app.messages[widget.desc.storageKey] ?? const <Message>[])];
-    messages.sort(compareMessages);
+    // Columns render the same FILTERED view as the single chat: the PWA's
+    // columns draw via `renderMessagesWithVirtualScroll` → `getFilteredMessages`
+    // / `getFilteredPMMessages` (columns.js:510 → messages.js:2934-2949), so
+    // blocked users, blocked-keyword hits and heuristic spam are dropped here
+    // exactly like `messagesForCurrentViewProvider` does for the single view.
+    var messages = visibleMessagesFor(app, widget.desc.storageKey);
+    // The Nymbot PM column additionally merges the bot engine's LOCAL-ONLY
+    // info bubbles (welcome intro, `?help` guide, command outputs — PWA
+    // `_displayBotInfoMessage`) exactly like the single-view `BotChatScreen`:
+    // they never enter the shared store, so the store-only filter above would
+    // silently drop them. The "thinking" strip needs no merge — it rides the
+    // shared typing indicator ([TypingIndicatorRow] below).
+    if (widget.desc.storageKey == BotChatController.conversationKey) {
+      messages = mergeBotThreadWithInfo(
+          messages, ref.watch(botChatControllerProvider).infoMessages);
+    }
+
+    // `_cvAttachAutoScroll` (columns.js:442-456): when new messages arrive
+    // while the user is at the bottom (<120px, `_atBottom`), pin the column
+    // back to the newest message (`scrollerEl.scrollTop = 0` in a rAF) —
+    // UNLESS `settings.autoscroll === false`, in which case the observer bails
+    // and the user's small scroll drift is preserved. (At offset exactly 0 the
+    // reversed list tracks the newest edge inherently, like the PWA's
+    // column-reverse scroller does at scrollTop 0 in both modes.)
+    if (messages.length != _lastMessageCount) {
+      final added = messages.length > _lastMessageCount;
+      _lastMessageCount = messages.length;
+      if (added && settings.autoscroll && _atBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _scroll.hasClients && _atBottom && _scroll.offset != 0) {
+            _scroll.jumpTo(0);
+          }
+        });
+      }
+    }
 
     // `.cv-column.focused` (desktop): primary border + `--shadow-glow`
     // (`0 0 20px primary@0.1`). Mobile resets focused styling to none.
     final showFocus = widget.focused && !mobile;
 
-    final body = Container(
+    // `.cv-column` chrome. AnimatedContainer because the CSS cross-fades
+    // border-color/box-shadow over `var(--transition)` (0.25s cubic-bezier)
+    // when focus moves between columns (styles-columns.css:133).
+    final body = AnimatedContainer(
+      duration: NymMotion.transition,
+      curve: NymMotion.curve,
       decoration: BoxDecoration(
+        // `.columns-wallpaper` clears ONLY the column/scroller backgrounds
+        // (styles-columns.css:72-78) — border + shadow + glass header remain.
         color: transparent ? Colors.transparent : c.bgSecondary,
         // Mobile columns drop the border/radius/shadow (`flex:0 0 100%`,
         // `border:none; border-radius:0; box-shadow:none`).
@@ -1206,15 +1902,16 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
             ? null
             : Border.all(color: showFocus ? c.primary : c.glassBorder),
         // .cv-column box-shadow: focused → --shadow-glow (0 0 20px primary@0.1,
-        // desktop only); else --shadow-md (0 4px 16px black@0.4), dropped on
-        // mobile / under the columns wallpaper.
+        // desktop only); else --shadow-md (0 4px 16px black@0.4 dark / @0.1
+        // light, styles-themes-responsive.css:536), dropped on mobile only.
         boxShadow: showFocus
             ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 20)]
-            : (transparent || mobile)
+            : mobile
                 ? null
                 : [
                     BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.4),
+                      color: Colors.black
+                          .withValues(alpha: c.isLight ? 0.1 : 0.4),
                       offset: const Offset(0, 4),
                       blurRadius: 16,
                     ),
@@ -1276,6 +1973,12 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
                                 return MessageGroup(
                                   entries: entries,
                                   settings: settings,
+                                  // `body.columns-mode` message-layout variants
+                                  // (styles-columns.css:27-82): IRC rows stack
+                                  // vertically, hover buttons stack, media caps
+                                  // at 100%, and desktop self bubble groups
+                                  // drop the 14px right padding.
+                                  columnsMode: true,
                                   onReactionPicker: (msg) =>
                                       showReactionPicker(context, ref, msg),
                                 );
@@ -1349,6 +2052,9 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
           ),
         ),
       ));
+      // `.cv-column-header { gap: 8px }` separates every visible control:
+      // dots | prev | next | close (styles-columns.css:184-194).
+      children.add(const SizedBox(width: 8));
       // `.cv-col-move` prev arrow (columns.js:397 — feather chevron-left).
       children.add(_HeaderIconButton(
         svg: NymIcons.chevronLeft,
@@ -1356,6 +2062,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
         enabled: widget.index > 0,
         onTap: widget.onPrev,
       ));
+      children.add(const SizedBox(width: 8));
       // `.cv-col-move` next arrow (columns.js:398 — feather chevron-right).
       children.add(_HeaderIconButton(
         svg: NymIcons.chevronRight,
@@ -1377,21 +2084,21 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     children.add(const SizedBox(width: 8));
     children.add(widget.icon);
     children.add(const SizedBox(width: 8));
-    children.add(Expanded(
-      child: Text(
-        widget.title,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: c.secondary,
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    ));
+    children.add(Expanded(child: widget.titleWidget));
 
     Widget dragRegion = Row(children: children);
-    if (widget.headerDragBuilder != null) {
-      dragRegion = widget.headerDragBuilder!(dragRegion);
+    if (widget.onHeaderDown != null) {
+      // Raw pointer listener (no gesture arena) so the deck can run the PWA's
+      // 5px-threshold custom drag; move/up events keep routing here after the
+      // down hit-tested this region.
+      dragRegion = Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: widget.onHeaderDown,
+        onPointerMove: widget.onHeaderMove,
+        onPointerUp: (_) => widget.onHeaderUp?.call(),
+        onPointerCancel: (_) => widget.onHeaderUp?.call(),
+        child: dragRegion,
+      );
     }
     // `.cv-column-header { cursor: grab }` over the draggable region.
     dragRegion = MouseRegion(
@@ -1411,26 +2118,33 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     );
   }
 
-  /// The `.cv-col-close` button (text-dim → danger on hover).
+  /// The `.cv-col-close` button — the X glyph itself recolors text-dim → danger
+  /// on hover over `var(--transition)` (styles-columns.css:268-270); no hover
+  /// circle/fill in the PWA.
   Widget _buildCloseButton(NymColors c) {
-    return IconButton(
+    Widget btn = _HoverCloseButton(
       tooltip: 'Remove column',
-      // `.cv-col-close` (columns.js:399) — the two-line feather X SVG.
-      icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
-      hoverColor: c.danger.withValues(alpha: 0.12),
-      onPressed: widget.onClose,
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(),
+      size: 16,
+      hoverColor: c.danger,
+      onTap: widget.onClose,
     );
+    final down = widget.onCloseDown;
+    if (down != null) {
+      // Deeper Listeners see the pointer first, so this fires before the
+      // desktop slot's click-to-focus Listener (`stopPropagation()` analogue).
+      btn = Listener(onPointerDown: (_) => down(), child: btn);
+    }
+    return btn;
   }
 
   /// The `.cv-column-header` chrome (padding 10/12, glass bg, bottom border).
+  /// Kept glass under the columns wallpaper — only `.cv-column`/`.cv-scroller`
+  /// go transparent (styles-columns.css:72-78); the header keeps var(--glass-bg).
   Widget _headerContainer(NymColors c, Widget child) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: widget.transparent ? Colors.transparent : c.glassBg,
+        color: c.glassBg,
         border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: child,
@@ -1648,8 +2362,10 @@ class _HeaderDots extends StatelessWidget {
 }
 
 /// A small header control button used for the mobile `.cv-col-move` prev/next
-/// carousel arrows (`_cvStepFocused`). text-dim → text-bright on hover, dimmed
-/// when disabled. (Desktop move arrows don't exist — reorder is drag-only.)
+/// carousel arrows (`_cvStepFocused`). text-dim → text-bright on hover; the PWA
+/// never dims the arrows at the ends (`_cvStepFocused` silently no-ops,
+/// columns.js:321-327, and `.cv-col-move` keeps `--text-dim`). (Desktop move
+/// arrows don't exist — reorder is drag-only.)
 class _HeaderIconButton extends StatefulWidget {
   const _HeaderIconButton({
     required this.svg,
@@ -1660,6 +2376,9 @@ class _HeaderIconButton extends StatefulWidget {
 
   final String svg;
   final String tooltip;
+
+  /// Gates the tap only (a tap past the first/last column is a silent no-op);
+  /// the visual state never changes.
   final bool enabled;
   final VoidCallback? onTap;
 
@@ -1673,17 +2392,13 @@ class _HeaderIconButtonState extends State<_HeaderIconButton> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final color = !widget.enabled
-        ? c.textDim.withValues(alpha: 0.3)
-        : (_hover ? c.textBright : c.textDim);
+    final color = _hover ? c.textBright : c.textDim;
     return Tooltip(
       message: widget.tooltip,
       child: MouseRegion(
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
-        cursor: widget.enabled
-            ? SystemMouseCursors.click
-            : SystemMouseCursors.basic,
+        cursor: SystemMouseCursors.click,
         child: GestureDetector(
           onTap: widget.enabled ? widget.onTap : null,
           behavior: HitTestBehavior.opaque,
@@ -1731,17 +2446,25 @@ class _PagerState extends State<_Pager> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                // `.cv-pdot`: text-dim @ 0.4, active primary @ 1 — but
+                // `.cv-pager:hover .cv-pdot { opacity: 0.7 }` outweighs
+                // `.cv-pdot.active` (specificity 0,3,0 vs 0,2,0), so on hover
+                // EVERY dot — the active one included — dims to 0.7. Both the
+                // opacity and background cross-fade over 0.15s (ease).
                 for (var i = 0; i < widget.count; i++)
-                  Container(
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    curve: Curves.ease,
                     width: 7,
                     height: 7,
                     margin: const EdgeInsets.symmetric(horizontal: 2),
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: i == widget.active
-                          ? c.primary
-                          : c.textDim.withValues(
-                              alpha: _hover ? 0.7 : 0.4),
+                      color: (i == widget.active ? c.primary : c.textDim)
+                          .withValues(
+                              alpha: _hover
+                                  ? 0.7
+                                  : (i == widget.active ? 1.0 : 0.4)),
                     ),
                   ),
               ],
@@ -1753,27 +2476,342 @@ class _PagerState extends State<_Pager> {
   }
 }
 
-/// Result of the "Columns" tabs bottom-sheet.
-enum _TabsAction { select, remove, reorder, add }
+/// A close/X glyph button whose ICON recolors on hover (no hover fill), with
+/// the CSS `transition: color var(--transition)` (250ms) — `.cv-col-close` /
+/// `.cv-tab-close` hover → `--danger`, `.cv-tabs-close` hover → text-bright.
+class _HoverCloseButton extends StatefulWidget {
+  const _HoverCloseButton({
+    required this.onTap,
+    required this.hoverColor,
+    this.size = 16,
+    this.padding = const EdgeInsets.all(2),
+    this.tooltip,
+  });
+
+  final VoidCallback onTap;
+  final Color hoverColor;
+  final double size;
+  final EdgeInsets padding;
+  final String? tooltip;
+
+  @override
+  State<_HoverCloseButton> createState() => _HoverCloseButtonState();
+}
+
+class _HoverCloseButtonState extends State<_HoverCloseButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final target = _hover ? widget.hoverColor : c.textDim;
+    Widget button = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Padding(
+          padding: widget.padding,
+          child: TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: target),
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            builder: (context, color, _) => NymSvgIcon(
+              NymIcons.close,
+              size: widget.size,
+              color: color ?? target,
+            ),
+          ),
+        ),
+      ),
+    );
+    final t = widget.tooltip;
+    if (t != null && t.isNotEmpty) {
+      button = Tooltip(message: t, child: button);
+    }
+    return button;
+  }
+}
+
+// --- Add-column picker (`.cv-picker`) ----------------------------------------
+
+/// The in-strip add-column panel (`_cvOpenAddColumn`, columns.js:731-772
+/// + styles-columns.css:322-390): a column-shaped `.cv-column.cv-picker` frame
+/// inserted before the (hidden) add button, with an "Add a column" header
+/// (`.cv-col-title`: 14/600/--secondary) + cancel X, a search input, and the
+/// filtered conversation rows. With [mobile] the panel is a full carousel page
+/// and the mobile `.cv-column` rules drop the border/radius/shadow
+/// (styles-columns.css:508-517).
+class _PickerColumn extends StatelessWidget {
+  const _PickerColumn({
+    required this.rows,
+    required this.onPick,
+    required this.onClose,
+    this.mobile = false,
+  });
+
+  final List<_PickerEntry> rows;
+  final ValueChanged<_ColumnDesc> onPick;
+  final VoidCallback onClose;
+  final bool mobile;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      width: mobile ? null : _CvDimens.column,
+      clipBehavior: Clip.antiAlias,
+      // `.cv-column` chrome (the picker reuses the column frame); mobile keeps
+      // only the bg-secondary fill.
+      decoration: mobile
+          ? BoxDecoration(color: c.bgSecondary)
+          : BoxDecoration(
+              color: c.bgSecondary,
+              borderRadius: NymRadius.rmd,
+              border: Border.all(color: c.glassBorder),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: c.isLight ? 0.1 : 0.4),
+                  offset: const Offset(0, 4),
+                  blurRadius: 16,
+                ),
+              ],
+            ),
+      child: Column(
+        children: [
+          // `.cv-column-header` with only the title + `.cv-picker-close`.
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: c.glassBg,
+              border: Border(bottom: BorderSide(color: c.glassBorder)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Add a column',
+                    style: TextStyle(
+                      color: c.secondary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                _HoverCloseButton(
+                  tooltip: 'Cancel',
+                  size: 16,
+                  hoverColor: c.danger,
+                  onTap: onClose,
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _PickerBody(rows: rows, onPick: onPick),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The picker's search field + filtered rows (`.cv-picker-search` /
+/// `.cv-picker-list`, the latter `flex:1`), shared by the desktop in-strip
+/// panel and the mobile full-page picker. The input grabs focus 30ms after
+/// opening (`setTimeout(() => input.focus(), 30)`).
+class _PickerBody extends StatefulWidget {
+  const _PickerBody({
+    required this.rows,
+    required this.onPick,
+  });
+
+  final List<_PickerEntry> rows;
+  final ValueChanged<_ColumnDesc> onPick;
+
+  @override
+  State<_PickerBody> createState() => _PickerBodyState();
+}
+
+class _PickerBodyState extends State<_PickerBody> {
+  final TextEditingController _ctrl = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
+  Timer? _focusTimer;
+  String _term = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _focusTimer = Timer(const Duration(milliseconds: 30), () {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusTimer?.cancel();
+    _ctrl.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final f = _term.trim().toLowerCase();
+    final shown = f.isEmpty
+        ? widget.rows
+        : widget.rows
+            .where((r) => r.label.toLowerCase().contains(f))
+            .toList();
+
+    // `.cv-picker-search` (padding 10, bottom border) → `.cv-picker-input`.
+    final search = Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: TextField(
+        controller: _ctrl,
+        focusNode: _focusNode,
+        style: TextStyle(color: c.textBright, fontSize: 14),
+        cursorColor: c.isLight ? Colors.black : Colors.white,
+        onChanged: (v) => setState(() => _term = v),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search conversations…',
+          hintStyle: TextStyle(color: c.textDim, fontSize: 14),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          filled: true,
+          fillColor: c.insetFill,
+          border: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.glassBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.glassBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: NymRadius.rxs,
+            borderSide: BorderSide(color: c.primaryA(0.30)),
+          ),
+        ),
+      ),
+    );
+
+    // `.cv-picker-empty`: padding 16, centered, text-dim, 12px.
+    final Widget list = shown.isEmpty
+        ? Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'No conversations',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: c.textDim, fontSize: 12),
+              ),
+            ),
+          )
+        : ListView(
+            // `.cv-picker-list { padding: 6px }`.
+            padding: const EdgeInsets.all(6),
+            children: [
+              for (final r in shown)
+                _PickerRow(
+                  icon: r.icon,
+                  label: r.label,
+                  onTap: () => widget.onPick(r.desc),
+                ),
+            ],
+          );
+
+    return Column(children: [search, Expanded(child: list)]);
+  }
+}
+
+/// A `.cv-picker-row`: padding 8/10, gap 10, 13px text, radius-xs, hover
+/// rgba(255,255,255,0.05) (styles-columns.css:343-361).
+class _PickerRow extends StatefulWidget {
+  const _PickerRow({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final Widget icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  State<_PickerRow> createState() => _PickerRowState();
+}
+
+class _PickerRowState extends State<_PickerRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: NymRadius.rxs,
+            color: _hover
+                ? Colors.white.withValues(alpha: 0.05)
+                : Colors.transparent,
+          ),
+          child: Row(
+            children: [
+              // `.cv-picker-row-icon` (20px imgs, text-dim glyphs).
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: Center(child: widget.icon),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  widget.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: c.text, fontSize: 13),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// --- "Columns" tabs sheet (`.cv-tabs-overlay` / `.cv-tabs-sheet`) ------------
+
+/// What the tabs sheet was dismissed with; reorders/removals are committed live
+/// through callbacks (the PWA saves on every drag `end()` and keeps the sheet
+/// open across removals), so only select/add need to round-trip.
+enum _TabsAction { select, add }
 
 class _TabsResult {
-  const _TabsResult.select(this.index)
-      : action = _TabsAction.select,
-        reordered = null;
-  const _TabsResult.remove(this.index)
-      : action = _TabsAction.remove,
-        reordered = null;
-  const _TabsResult.reorder(this.reordered)
-      : action = _TabsAction.reorder,
-        index = null;
+  const _TabsResult.select(this.desc) : action = _TabsAction.select;
   const _TabsResult.add()
       : action = _TabsAction.add,
-        index = null,
-        reordered = null;
+        desc = null;
 
   final _TabsAction action;
-  final int? index;
-  final List<_ColumnDesc>? reordered;
+  final _ColumnDesc? desc;
 }
 
 /// The "Columns" bottom-sheet (`.cv-tabs-overlay`/`.cv-tabs-sheet`): a
@@ -1783,15 +2821,25 @@ class _TabsResult {
 class _TabsSheet extends StatefulWidget {
   const _TabsSheet({
     required this.columns,
-    required this.focused,
+    required this.activeDesc,
     required this.titleOf,
     required this.iconOf,
+    required this.onReorder,
+    required this.onRemove,
   });
 
   final List<_ColumnDesc> columns;
-  final int focused;
-  final String Function(_ColumnDesc) titleOf;
+  final _ColumnDesc? activeDesc;
+  final Widget Function(_ColumnDesc) titleOf;
   final Widget Function(_ColumnDesc) iconOf;
+
+  /// Commits a reorder immediately ([from] → final index [to]), like the PWA
+  /// drag `end()` (columns.js:928-937).
+  final void Function(int from, int to) onReorder;
+
+  /// Requests a (confirmed) removal; resolves true when the column is gone.
+  /// The sheet stays open and just drops the row (columns.js:862-866).
+  final Future<bool> Function(_ColumnDesc) onRemove;
 
   @override
   State<_TabsSheet> createState() => _TabsSheetState();
@@ -1799,18 +2847,11 @@ class _TabsSheet extends StatefulWidget {
 
 class _TabsSheetState extends State<_TabsSheet> {
   late List<_ColumnDesc> _local;
-  bool _reordered = false;
-  late int _activeKeyIndex;
-  _ColumnDesc? _activeDesc;
 
   @override
   void initState() {
     super.initState();
     _local = List<_ColumnDesc>.from(widget.columns);
-    _activeKeyIndex = widget.focused;
-    _activeDesc = (widget.focused >= 0 && widget.focused < _local.length)
-        ? _local[widget.focused]
-        : null;
   }
 
   @override
@@ -1838,9 +2879,12 @@ class _TabsSheetState extends State<_TabsSheet> {
                   : const BorderRadius.vertical(
                       top: Radius.circular(NymRadius.lg),
                     ),
+              // `--shadow-lg`: 0 8px 32px black@0.5 (dark) / @0.12 (light,
+              // styles-themes-responsive.css:537).
               boxShadow: [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.5),
+                  color: Colors.black
+                      .withValues(alpha: c.isLight ? 0.12 : 0.5),
                   blurRadius: 32,
                   offset: const Offset(0, 8),
                 ),
@@ -1850,7 +2894,8 @@ class _TabsSheetState extends State<_TabsSheet> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // `.cv-tabs-head`: padding 14/16, bottom border, primary title.
+                // `.cv-tabs-head`: padding 14/16, bottom border, primary title
+                // (font-weight 600, inherited 14px size).
                 Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 14),
@@ -1866,18 +2911,18 @@ class _TabsSheetState extends State<_TabsSheet> {
                           style: TextStyle(
                             color: c.primary,
                             fontWeight: FontWeight.w600,
-                            fontSize: 16,
+                            fontSize: 14,
                           ),
                         ),
                       ),
-                      IconButton(
+                      // `.cv-tabs-close` (columns.js:851): X glyph, text-dim →
+                      // text-bright on hover.
+                      _HoverCloseButton(
                         tooltip: 'Close',
-                        // `.cv-tabs-close` (columns.js:851) — feather X SVG.
-                        icon: NymSvgIcon(NymIcons.close, size: 18, color: c.textDim),
-                        onPressed: () => Navigator.of(context).pop(),
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
+                        size: 18,
+                        padding: const EdgeInsets.all(4),
+                        hoverColor: c.textBright,
+                        onTap: () => Navigator.of(context).pop(),
                       ),
                     ],
                   ),
@@ -1889,6 +2934,24 @@ class _TabsSheetState extends State<_TabsSheet> {
                     buildDefaultDragHandles: false,
                     padding: const EdgeInsets.all(8),
                     itemCount: _local.length,
+                    // `.cv-tab.cv-dragging { opacity:0.6; border-style:dashed }`
+                    // — the drag proxy is the row at 60% with a dashed border,
+                    // not Material's default elevated card.
+                    proxyDecorator: (child, index, animation) {
+                      final d = _local[index];
+                      return Material(
+                        type: MaterialType.transparency,
+                        child: _TabRow(
+                          index: index,
+                          active: widget.activeDesc == d,
+                          dragging: true,
+                          icon: widget.iconOf(d),
+                          title: widget.titleOf(d),
+                          onTap: () {},
+                          onClose: () {},
+                        ),
+                      );
+                    },
                     // `onReorder` over `onReorderItem`: the latter doesn't exist
                     // on the build toolchain's Flutter; this works on both
                     // (deprecated-only on newer SDKs).
@@ -1898,43 +2961,42 @@ class _TabsSheetState extends State<_TabsSheet> {
                       setState(() {
                         final moved = _local.removeAt(oldIndex);
                         _local.insert(newIndex, moved);
-                        _reordered = true;
-                        // Track the active row across reorders by identity.
-                        if (_activeDesc != null) {
-                          _activeKeyIndex = _local.indexOf(_activeDesc!);
-                        }
                       });
+                      // Commit instantly (`end()` re-sorts `_cvColumns`, moves
+                      // the strip DOM and saves — the sheet stays open).
+                      widget.onReorder(oldIndex, newIndex);
                     },
                     itemBuilder: (context, i) {
                       final desc = _local[i];
                       return _TabRow(
                         key: ValueKey('cvtab_${desc.key}'),
                         index: i,
-                        active: i == _activeKeyIndex,
+                        active: widget.activeDesc == desc,
                         icon: widget.iconOf(desc),
                         title: widget.titleOf(desc),
-                        onTap: () {
-                          if (_reordered) {
-                            // Commit the new order first, then select.
-                            Navigator.of(context)
-                                .pop(_TabsResult.reorder(_local));
-                          } else {
-                            Navigator.of(context).pop(_TabsResult.select(i));
+                        onTap: () => Navigator.of(context)
+                            .pop(_TabsResult.select(desc)),
+                        onClose: () async {
+                          // Remove by identity and keep the sheet open,
+                          // rebuilding the rows (columns.js:862-866).
+                          final removed = await widget.onRemove(desc);
+                          if (removed && mounted) {
+                            setState(() => _local.remove(desc));
                           }
                         },
-                        onClose: () =>
-                            Navigator.of(context).pop(_TabsResult.remove(i)),
                       );
                     },
                   ),
                 ),
-                // `.cv-tabs-add`: dashed "+ Add column" footer.
+                // `.cv-tabs-add`: dashed "+ Add column" footer (hover: primary
+                // border + bright text, NO bg fill — styles-columns.css:757-772).
                 Padding(
                   padding: const EdgeInsets.all(8),
                   child: _AddColumnButton(
                     c: c,
                     width: double.infinity,
                     height: 44,
+                    hoverFill: false,
                     onTap: () =>
                         Navigator.of(context).pop(const _TabsResult.add()),
                   ),
@@ -1949,7 +3011,9 @@ class _TabsSheetState extends State<_TabsSheet> {
 }
 
 /// A single `.cv-tab` row in the tabs sheet: drag handle + icon + title + close,
-/// active rows get a primary border (`styles-columns.css:690-755`).
+/// active rows get a primary border (`styles-columns.css:690-755`). With
+/// [dragging] the row renders the PWA `.cv-dragging` style (opacity 0.6, dashed
+/// border) — used as the reorder drag proxy.
 class _TabRow extends StatelessWidget {
   const _TabRow({
     super.key,
@@ -1959,75 +3023,93 @@ class _TabRow extends StatelessWidget {
     required this.title,
     required this.onTap,
     required this.onClose,
+    this.dragging = false,
   });
 
   final int index;
   final bool active;
   final Widget icon;
-  final String title;
+  final Widget title;
   final VoidCallback onTap;
   final VoidCallback onClose;
+  final bool dragging;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final borderColor = active ? c.primary : c.glassBorder;
+    final inner = Padding(
+      // `.cv-tab` padding 10, gap 10.
+      padding: const EdgeInsets.all(10),
+      child: Row(
+        children: [
+          // `.cv-tab-handle` (6-dot grip).
+          ReorderableDragStartListener(
+            index: index,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.grab,
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CustomPaint(
+                  painter: _SixDotPainter(color: c.textDim),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          SizedBox(width: 24, height: 24, child: Center(child: icon)),
+          const SizedBox(width: 10),
+          Expanded(child: title),
+          // `.cv-tab-close` (columns.js:899): the X glyph itself recolors
+          // text-dim → danger on hover (styles-columns.css:753-755).
+          _HoverCloseButton(
+            tooltip: 'Remove column',
+            size: 16,
+            padding: const EdgeInsets.all(4),
+            hoverColor: c.danger,
+            onTap: onClose,
+          ),
+        ],
+      ),
+    );
+
+    if (dragging) {
+      // `.cv-tab.cv-dragging { opacity: 0.6; border-style: dashed }`.
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Opacity(
+          opacity: 0.6,
+          child: CustomPaint(
+            painter: _DashedBorderPainter(
+              color: borderColor,
+              radius: NymRadius.sm,
+              strokeWidth: 1,
+              fill: Colors.white.withValues(alpha: 0.03),
+            ),
+            child: inner,
+          ),
+        ),
+      );
+    }
+
     return Padding(
       // `.cv-tab` margin-bottom 6.
       padding: const EdgeInsets.only(bottom: 6),
-      child: Material(
-        color: Colors.white.withValues(alpha: 0.03),
-        shape: RoundedRectangleBorder(
-          borderRadius: NymRadius.rsm,
-          side: BorderSide(color: active ? c.primary : c.glassBorder),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
+      // `.cv-tab` has `cursor: pointer` but NO hover state (styles-columns.css:
+      // 690-700) — a plain container, no Material ink tint or ripple.
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
           onTap: onTap,
-          child: Padding(
-            // `.cv-tab` padding 10, gap 10.
-            padding: const EdgeInsets.all(10),
-            child: Row(
-              children: [
-                // `.cv-tab-handle` (6-dot grip).
-                ReorderableDragStartListener(
-                  index: index,
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.grab,
-                    child: SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CustomPaint(
-                        painter: _SixDotPainter(color: c.textDim),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                SizedBox(width: 24, height: 24, child: Center(child: icon)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    title,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: c.secondary,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                // `.cv-tab-close` (columns.js:899; text-dim → danger on hover)
-                // — feather X SVG.
-                IconButton(
-                  tooltip: 'Remove column',
-                  icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
-                  hoverColor: c.danger.withValues(alpha: 0.12),
-                  onPressed: onClose,
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                ),
-              ],
+          behavior: HitTestBehavior.opaque,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.03),
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: borderColor),
             ),
+            child: inner,
           ),
         ),
       ),
@@ -2035,8 +3117,12 @@ class _TabRow extends StatelessWidget {
   }
 }
 
-/// `.cv-scroll-bottom`: 36×36 circle, glassBg fill, 1px border, primary chevron,
-/// shadow-md, hover scale 1.1 (gap F10).
+/// `.cv-scroll-bottom`: 36×36 circle, glass fill, 1px glass border, primary
+/// chevron, `--shadow-md`, hover scale 1.1 + primary tint (gap F10). Unlike the
+/// single-view `.scroll-to-bottom-btn`, this class has NO light-mode override
+/// (styles-themes-responsive.css:607-615 targets `.scroll-to-bottom-btn` only)
+/// — it keeps `var(--glass-bg)` / `var(--glass-border)` in both themes, with the
+/// theme's `--shadow-md` (light: 0 4px 16px black@0.1).
 class _ScrollBottomButton extends StatefulWidget {
   const _ScrollBottomButton({required this.onTap});
   final VoidCallback onTap;
@@ -2051,29 +3137,13 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final light = c.isLight;
-    // `.cv-scroll-bottom` shares the `.scroll-to-bottom-btn` light-mode flip
-    // (`styles-themes-responsive.css:607-615`): rest fill white@0.85, border
-    // primary@0.2, shadow `0 2px 12px black@0.15`; hover stays primary-tinted in
-    // both modes. (The columns copy previously omitted this, matching the
-    // single-view `_ScrollToBottomButton` fix.)
-    final fill = _hover
-        ? c.primaryA(0.15)
-        : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
-    final border = _hover
-        ? c.primaryA(0.30)
-        : (light ? c.primaryA(0.20) : c.glassBorder);
-    final shadow = light
-        ? const BoxShadow(
-            color: Color(0x26000000), // black @ 0.15
-            offset: Offset(0, 2),
-            blurRadius: 12,
-          )
-        : const BoxShadow(
-            color: Color(0x66000000), // black @ 0.4 (shadow-md)
-            offset: Offset(0, 4),
-            blurRadius: 16,
-          );
+    final fill = _hover ? c.primaryA(0.15) : c.glassBg;
+    final border = _hover ? c.primaryA(0.30) : c.glassBorder;
+    final shadow = BoxShadow(
+      color: Colors.black.withValues(alpha: c.isLight ? 0.1 : 0.4),
+      offset: const Offset(0, 4),
+      blurRadius: 16,
+    );
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -2093,7 +3163,7 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
               border: Border.all(color: border),
               boxShadow: [shadow],
             ),
-            // `.cv-add-column` strip scroll FAB (columns.js:418) — down chevron.
+            // `.cv-scroll-bottom` chevron (columns.js:418) — down chevron.
             child: NymSvgIcon(NymIcons.chevronDown, size: 20, color: c.primary),
           ),
         ),
@@ -2103,21 +3173,25 @@ class _ScrollBottomButtonState extends State<_ScrollBottomButton> {
 }
 
 /// The dashed "+ Add column" affordance (`.cv-add-column` / `.cv-tabs-add`).
-/// Hover (desktop) swaps the border/label to primary and fills primary@0.04
-/// (F24). Width/height are configurable so it can serve the 220px strip tile,
-/// the full-width mobile carousel page, and the 44px tabs-sheet footer.
+/// Hover (desktop) swaps the border/label to primary/bright; the strip tile
+/// also fills primary@0.04 (`.cv-add-column:hover`) while the tabs footer does
+/// NOT (`.cv-tabs-add:hover` sets border/color only) — gate via [hoverFill].
+/// Width/height are configurable so it can serve the 220px strip tile, the
+/// full-width mobile carousel page, and the 44px tabs-sheet footer.
 class _AddColumnButton extends StatefulWidget {
   const _AddColumnButton({
     required this.c,
     required this.onTap,
     this.width = _CvDimens.addColumn,
     this.height,
+    this.hoverFill = true,
   });
 
   final NymColors c;
   final VoidCallback onTap;
   final double width;
   final double? height;
+  final bool hoverFill;
 
   @override
   State<_AddColumnButton> createState() => _AddColumnButtonState();
@@ -2144,7 +3218,7 @@ class _AddColumnButtonState extends State<_AddColumnButton> {
           child: DottedBorderBox(
             color: borderColor,
             radius: NymRadius.md,
-            fill: _hover ? c.primaryA(0.04) : null,
+            fill: (_hover && widget.hoverFill) ? c.primaryA(0.04) : null,
             child: Center(
               child: Text(
                 '+ Add column',
@@ -2188,16 +3262,24 @@ class DottedBorderBox extends StatelessWidget {
 }
 
 class _DashedBorderPainter extends CustomPainter {
-  _DashedBorderPainter({required this.color, required this.radius, this.fill});
+  _DashedBorderPainter({
+    required this.color,
+    required this.radius,
+    this.fill,
+    this.strokeWidth = 2,
+  });
 
   final Color color;
   final double radius;
   final Color? fill;
+  final double strokeWidth;
 
   @override
   void paint(Canvas canvas, Size size) {
+    final inset = strokeWidth / 2;
     final rrect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(1, 1, size.width - 2, size.height - 2),
+      Rect.fromLTWH(
+          inset, inset, size.width - strokeWidth, size.height - strokeWidth),
       Radius.circular(radius),
     );
     if (fill != null) {
@@ -2205,7 +3287,7 @@ class _DashedBorderPainter extends CustomPainter {
     }
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 2
+      ..strokeWidth = strokeWidth
       ..style = PaintingStyle.stroke;
     final path = Path()..addRRect(rrect);
     const dash = 6.0, gap = 4.0;
@@ -2223,5 +3305,8 @@ class _DashedBorderPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_DashedBorderPainter old) =>
-      old.color != color || old.radius != radius || old.fill != fill;
+      old.color != color ||
+      old.radius != radius ||
+      old.fill != fill ||
+      old.strokeWidth != strokeWidth;
 }

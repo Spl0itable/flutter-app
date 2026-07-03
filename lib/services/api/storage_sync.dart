@@ -3,8 +3,10 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart' show sha256;
 
+import '../../core/constants/storage_keys.dart';
 import '../../models/settings.dart';
 import '../nostr/event_signer.dart';
+import '../storage/key_value_store.dart';
 import 'api_client.dart';
 import 'api_config.dart';
 
@@ -33,14 +35,51 @@ class StorageSync {
     required EventSigner signer,
     required String pubkey,
     required bool durableIdentity,
+    KeyValueStore? kv,
   })  : _api = api,
         _signer = signer,
         _pubkey = pubkey.toLowerCase(),
-        _durable = durableIdentity;
+        _durable = durableIdentity,
+        _kv = kv;
 
   final ApiClient _api;
   final EventSigner _signer;
   final String _pubkey;
+
+  /// The KV store the KV-backed synced prefs (moderation lists, pinned/hidden
+  /// channels, emoji favorites, columns layout, …) are read from at publish
+  /// time — the PWA reads the same values straight from `localStorage` /
+  /// lazily-stored sets in `_buildSettingsPayload` (settings.js:91-165). Null
+  /// (tests / legacy construction) restricts the payload to the typed
+  /// [Settings] subset.
+  final KeyValueStore? _kv;
+
+  /// Lazily-opened fallback for [_kv]. Legacy construction (no injected store)
+  /// would otherwise silently drop every KV-backed synced pref — columnsLayout,
+  /// moderation lists, emoji favorites, `wallpaperCustomUrl`, PoW, keypair
+  /// mode, … — publishing a payload far smaller than the PWA's
+  /// `_buildSettingsPayload` (settings.js:91-165) and stomping another device's
+  /// synced `columnsLayout` with `[]`. [KeyValueStore.open] wraps the same
+  /// SharedPreferences singleton the app's `keyValueStoreProvider` instance
+  /// wraps, so both wrappers read/write shared state. In headless tests the
+  /// platform channel is unavailable: the single attempted open fails and the
+  /// payload keeps the typed-[Settings] subset, byte-identical to before.
+  KeyValueStore? _openedKv;
+  bool _kvOpenAttempted = false;
+
+  Future<KeyValueStore?> _kvOrOpen() async {
+    if (_kv != null) return _kv;
+    if (!_kvOpenAttempted) {
+      _kvOpenAttempted = true;
+      try {
+        _openedKv = await KeyValueStore.open();
+      } catch (_) {
+        // No SharedPreferences backend (headless tests / early boot failure) —
+        // keep the typed-[Settings] subset.
+      }
+    }
+    return _openedKv;
+  }
 
   /// True for a logged-in (nsec/nip46/extension) identity — `isNostrLoggedIn()`
   /// in the PWA (`loginMethod != null`). Ephemeral identities skip the durable
@@ -54,14 +93,10 @@ class StorageSync {
   // ===========================================================================
 
   /// The settings-modal section -> core-key map the PWA splits the synced
-  /// payload into (`NYM_SETTINGS_SECTION_KEYS`, settings.js:8). Each section is
-  /// published as its own encrypted category `nymchat-settings-<section>` so a
-  /// single change is a small write. Keys NOT in any list fall into `misc`.
-  ///
-  /// Only the keys the native [Settings] model actually carries are listed here
-  /// (the PWA syncs many more localStorage-backed prefs; the native model is a
-  /// subset). Each value is the JSON key written into the blob, matching the
-  /// PWA payload field name (`_buildSettingsPayload`).
+  /// payload into (`NYM_SETTINGS_SECTION_KEYS`, settings.js:8-25), ported
+  /// 1:1. Each section is published as its own encrypted category
+  /// `nymchat-settings-<section>` so a single change is a small write. Keys
+  /// NOT in any list fall into `misc`.
   static const Map<String, List<String>> syncedSectionKeys = {
     'appearance': [
       'theme',
@@ -70,17 +105,26 @@ class StorageSync {
       'showTimestamps',
       'timeFormat',
       'dateFormat',
+      'blurOthersImages',
       'chatLayout',
       'chatViewMode',
-      'columnsLayout', // carried for parity; native columns layout is empty
-      'columnsWallpaper',
+      'columnsLayout',
       'nickStyle',
       'colorMode',
       'wallpaperType',
+      'wallpaperCustomUrl',
       'textSize',
       'transparencyEnabled',
+      'columnsWallpaper',
+      'sidebarSectionOrder',
     ],
     'privacy': [
+      'blockedUsers',
+      'friends',
+      'blockedKeywords',
+      'blockedChannels',
+      'hiddenChannels',
+      'lightningAddress',
       'dmForwardSecrecyEnabled',
       'dmTTLSeconds',
       'readReceiptsEnabled',
@@ -90,63 +134,75 @@ class StorageSync {
       'acceptPMs',
       'acceptCalls',
       'showStatus',
+      'powDifficulty',
+      'encryptAtRestPreferred',
+      'keypairMode',
     ],
     'messaging': [
       'groupChatPMOnlyMode',
       'translateLanguage',
+      'translateFavoriteLanguages',
+      'emojiPackFavorites',
+      'emojiCategoryFavorites',
+      'favoriteGifs',
+      'recentEmojis',
       'gesturesEnabled',
       'swipeLeftAction',
       'swipeRightAction',
       'swipeThreshold',
       'swipeReactEmoji',
       'notificationsEnabled',
+      'groupNotifyMentionsOnly',
+      'notifyFriendsOnly',
       'syncMLSHistory',
-      'seenCalls', // cross-device seen-call map (calls.js, settings.js:20)
+      'seenCalls',
     ],
     'channels': [
+      'pinnedChannels',
+      'userJoinedChannels',
       'sortByProximity',
-      'pinnedLandingChannel', // default landing channel ({type,geohash} object)
+      'pinnedLandingChannel',
+      'hideNonPinned',
+      'closedPMs',
+      'leftGroups',
+      'closedPMTimes',
+      'leftGroupTimes',
     ],
     'data': [
       'lowDataMode',
       'cachePMs',
+      'tutorialSeen',
+      'botPmWelcomed',
+      'botPmClearedAt',
     ],
   };
 
-  /// Settings that stay DEVICE-LOCAL and are never published (verified against
-  /// settings.js): the keypair mode and identity factors (`keypairMode`,
-  /// `encryptAtRestPreferred` are sync'd by the PWA but are device-setup hints,
-  /// and the native model doesn't expose them), the at-rest vault, and
-  /// `textSize` is treated by the native model as appearance — but `blurImages`
-  /// (image blur) and `powDifficulty` are stored purely in KV and not part of
-  /// the typed [Settings] sync surface here. Exposed for tests/documentation.
-  ///
-  /// NOTE: the PWA *does* sync `textSize`; we include it under `appearance`
-  /// above for parity. The genuinely-local set below is what we deliberately
-  /// exclude from the sync blob.
+  /// Settings that stay DEVICE-LOCAL and are never published. The PWA syncs
+  /// everything in [syncedSectionKeys] — including `keypairMode`,
+  /// `powDifficulty`, `blurOthersImages`, `hideNonPinned` and
+  /// `encryptAtRestPreferred` (settings.js:101/125/126/156-164) — so the only
+  /// genuinely-local surface is the identity key material itself: no key, salt
+  /// or credential ever leaves the device (settings.js:160-163 comment).
+  /// Exposed for tests/documentation.
   static const Set<String> deviceLocalKeys = {
-    'keypairMode', // identity behavior, set per-device
-    'powDifficulty', // KV-only, not in typed Settings sync surface
-    'blurImages', // image-blur, KV-only (nym_blur_others_images)
-    'hideNonPinned', // KV-only sidebar pref
-    'encryptAtRestPreferred', // per-device at-rest factor hint
     'vault', // keypair/secret material never leaves the device
   };
 
-  /// The category name for a section, matching the PWA's d-tag form
-  /// `nymchat-settings-<section>` (settings.js:566). The PWA further hashes this
-  /// into an opaque per-account D1 column (`_d1Category`) and rides the real
-  /// name inside the encrypted blob as `__cat`; we keep the same blob shape but
-  /// use the cleartext category as the column (the worker accepts any
-  /// `nymchat-[a-z0-9-]{1,120}` category, storage.js:493) so a fresh native
-  /// install and the PWA can both read each other's rows.
-  // TODO(verify): the PWA uses the *hashed* opaque category as the D1 column
-  // (`_d1Category` = `nymchat-<sha256(pubkey:d1:dTag)>`). Using the cleartext
-  // category here is simpler and still valid per the worker regex, but does NOT
-  // byte-match the PWA's column name, so PWA<->native settings rows won't
-  // cross-read until the hashed-category scheme is mirrored. Settings still sync
-  // across native devices. Confirm whether cross-client read is required.
+  /// The real (routing) category name for a section, matching the PWA's d-tag
+  /// form `nymchat-settings-<section>` (settings.js:566). This is what rides
+  /// INSIDE the encrypted blob as `__cat`; the cleartext D1 column is the
+  /// opaque per-account hash from [d1Category].
   static String sectionCategory(String section) => 'nymchat-settings-$section';
+
+  /// The opaque per-account D1 column for a routing [dTag]:
+  /// `nymchat-<sha256hex("<pubkey>:d1:<dTag>")>` (`_d1Category` →
+  /// `_syncOuterDTag('d1:' + dTag)`, settings.js:177-190). Hashing keeps
+  /// per-group categories from being joined across members to reveal group
+  /// membership; the real category is recovered from `__cat` in the blob.
+  /// Reads stay backward-compatible: [settingsGet] recovers `__cat` from any
+  /// row regardless of its column name.
+  String d1Category(String dTag) =>
+      'nymchat-${_sha256Hex('$_pubkey:d1:$dTag')}';
 
   // ===========================================================================
   // Encrypted settings sync.
@@ -162,16 +218,32 @@ class StorageSync {
   /// the PWA stores) read from KV by the caller. It is NOT a typed [Settings]
   /// field, so it is threaded in separately; when non-null and parseable it is
   /// emitted into the `channels` section as the same `{type,geohash}` OBJECT the
-  /// PWA syncs (`pinnedLandingChannel`, settings.js:21,116). A null/blank/invalid
-  /// value omits it (the section then only carries the other channels keys),
-  /// keeping every existing caller (which passes nothing) byte-identical.
+  /// PWA syncs (`pinnedLandingChannel`, settings.js:21,116).
+  ///
+  /// [kv] supplies the KV-backed synced prefs the PWA reads from localStorage /
+  /// lazily-stored sets (`_buildSettingsPayload`, settings.js:91-165):
+  /// moderation lists, pinned/hidden/joined channels, closed PMs, emoji/gif
+  /// favorites, columns layout, wallpaper URL, PoW, keypair mode, … With a [kv]
+  /// the landing channel also defaults to `{type:'geohash',geohash:'nymchat'}`
+  /// like the PWA (settings.js:116). Null (tests / the settings-transfer path)
+  /// keeps the typed-[Settings] subset, byte-identical to before.
+  ///
+  /// [selfPubkey] scopes the per-pubkey KV reads (`nym_image_blur_<pubkey>`,
+  /// `nym_lightning_address_<pubkey>` — settings.js:1144, zaps.js:234).
+  ///
+  /// [extras] merges controller-owned state that is neither typed nor KV-backed
+  /// on native (e.g. `leftGroups` / `leftGroupTimes` from the app state); its
+  /// entries override any same-named field.
   static Map<String, Map<String, dynamic>> buildSectionPayloads(
     Settings s, {
     String? pinnedLandingChannelJson,
     Map<String, dynamic>? seenCalls,
+    KeyValueStore? kv,
+    String? selfPubkey,
+    Map<String, dynamic>? extras,
   }) {
-    // The flat synced payload (PWA `_buildSettingsPayload`, subset the native
-    // model owns). Booleans/strings/ints map 1:1 to the PWA field names.
+    // The flat synced payload (PWA `_buildSettingsPayload`). Booleans/strings/
+    // ints map 1:1 to the PWA field names.
     final flat = <String, dynamic>{
       'theme': s.theme.id,
       'sound': s.sound,
@@ -181,7 +253,8 @@ class StorageSync {
       'dateFormat': s.dateFormat,
       'chatLayout': s.chatLayout,
       'chatViewMode': s.chatViewMode,
-      'columnsLayout': const <dynamic>[],
+      'columnsLayout':
+          kv != null ? _kvJsonList(kv, StorageKeys.columnsLayout) : const <dynamic>[],
       'columnsWallpaper': s.columnsWallpaper,
       'nickStyle': s.nickStyle,
       'colorMode': s.colorMode.name,
@@ -207,16 +280,87 @@ class StorageSync {
       'notificationsEnabled': s.notificationsEnabled,
       'syncMLSHistory': s.syncMLSHistory,
       'sortByProximity': s.sortByProximity,
+      // `nym_hide_non_pinned === 'true'` (settings.js:126) — typed on native.
+      'hideNonPinned': s.hideNonPinned,
       'lowDataMode': s.lowDataMode,
       'cachePMs': s.cachePMs,
     };
 
-    // Default landing channel: not a typed [Settings] field (KV-only), threaded
-    // in by the caller as JSON. Emit the same `{type,geohash}` OBJECT the PWA
-    // syncs (`pinnedLandingChannel`, settings.js:116) so the inbound apply on
-    // another device restores it. Drop a blank/invalid value (boot then defaults
-    // to `nymchat`); the `lookup` below routes it into the `channels` section.
-    final landing = _parsePinnedLandingChannel(pinnedLandingChannelJson);
+    if (kv != null) {
+      // KV-backed synced prefs (PWA `_buildSettingsPayload`, settings.js:91-165
+      // — the PWA reads these straight from localStorage / lazy stored sets).
+      // Image blur syncs as true | false | 'friends' (settings.js:101,
+      // `loadImageBlurSettings` per-pubkey-then-global with a blur default).
+      flat['blurOthersImages'] = _blurForSync(kv, selfPubkey);
+      flat['wallpaperCustomUrl'] =
+          kv.getString(StorageKeys.wallpaperCustomUrl) ?? '';
+      // Sidebar order falls back to the default section ids (`
+      // _getSidebarSectionOrder`, sidebar-sections.js:13-21).
+      flat['sidebarSectionOrder'] = _sidebarOrderForSync(kv);
+      // Moderation / social lists (settings.js:102-108) — JSON arrays in KV.
+      flat['blockedUsers'] = _kvJsonList(kv, StorageKeys.blocked);
+      flat['friends'] = _kvJsonList(kv, StorageKeys.friends);
+      flat['blockedKeywords'] = _kvJsonList(kv, StorageKeys.blockedKeywords);
+      flat['blockedChannels'] = _kvJsonList(kv, StorageKeys.blockedChannels);
+      flat['hiddenChannels'] = _kvJsonList(kv, StorageKeys.hiddenChannels);
+      flat['pinnedChannels'] = _kvJsonList(kv, StorageKeys.pinnedChannels);
+      flat['userJoinedChannels'] =
+          _kvJsonList(kv, StorageKeys.userJoinedChannels);
+      // Closed-PM / left-group read state (settings.js:146-149; the PWA's
+      // lazyStoredSet/Map keys, app.js:751-754).
+      flat['closedPMs'] = _kvJsonList(kv, StorageKeys.closedPms);
+      flat['leftGroups'] = _kvJsonList(kv, 'nym_left_groups');
+      flat['closedPMTimes'] = _kvJsonMap(kv, StorageKeys.closedPmTimes);
+      flat['leftGroupTimes'] = _kvJsonMap(kv, StorageKeys.leftGroupTimes);
+      // Lightning address is cached per-pubkey (`nym_lightning_address_<pk>`,
+      // zaps.js:234); the PWA syncs `this.lightningAddress` (null when unset).
+      flat['lightningAddress'] = selfPubkey == null
+          ? null
+          : kv.getString(StorageKeys.lightningAddressFor(selfPubkey));
+      flat['powDifficulty'] =
+          kv.getInt(StorageKeys.powDifficulty, defaultValue: 0);
+      flat['keypairMode'] =
+          kv.getString(StorageKeys.keypairMode) ?? 'persistent';
+      // Non-sensitive "I protect my identity key at rest" hint — no key
+      // material ever syncs (settings.js:160-164).
+      flat['encryptAtRestPreferred'] = kv.getBool(StorageKeys.encryptAtRestPref);
+      // Translate / emoji / gif favorites (settings.js:132-136).
+      flat['translateFavoriteLanguages'] =
+          _kvJsonList(kv, StorageKeys.translateFavorites);
+      flat['emojiPackFavorites'] =
+          _kvJsonList(kv, StorageKeys.emojiPackFavorites);
+      flat['emojiCategoryFavorites'] =
+          _kvJsonList(kv, StorageKeys.emojiCategoryFavorites);
+      final gifs = _favoriteGifsForSync(kv);
+      if (gifs.isNotEmpty) {
+        // Conditional spread like the PWA — the field is absent when empty.
+        flat['favoriteGifs'] = gifs;
+      }
+      flat['recentEmojis'] =
+          _kvJsonList(kv, StorageKeys.recentEmojis).take(24).toList();
+      flat['groupNotifyMentionsOnly'] =
+          kv.getString(StorageKeys.groupNotifyMentionsOnly) == 'true';
+      flat['notifyFriendsOnly'] =
+          kv.getString(StorageKeys.notifyFriendsOnly) == 'true';
+      // Device-spanning onboarding flags (settings.js:156-158).
+      flat['tutorialSeen'] = kv.getString(StorageKeys.tutorialSeen) == 'true';
+      flat['botPmWelcomed'] =
+          kv.getString(StorageKeys.botpmWelcomed) == 'true';
+      flat['botPmClearedAt'] =
+          kv.getInt(StorageKeys.botpmClearedAt, defaultValue: 0);
+    }
+
+    // Default landing channel: not a typed [Settings] field (KV-only). The
+    // threaded JSON takes precedence; with a [kv] it falls back to the stored
+    // value and then the PWA default (`this.pinnedLandingChannel ||
+    // {type:'geohash',geohash:'nymchat'}`, settings.js:116). Without a [kv] a
+    // null/blank/invalid value omits it, keeping legacy callers byte-identical.
+    final landing = _parsePinnedLandingChannel(pinnedLandingChannelJson) ??
+        (kv == null
+            ? null
+            : _parsePinnedLandingChannel(
+                    kv.getString(StorageKeys.pinnedLandingChannel)) ??
+                {'type': 'geohash', 'geohash': 'nymchat'});
     if (landing != null) {
       flat['pinnedLandingChannel'] = landing;
     }
@@ -229,6 +373,12 @@ class StorageSync {
     // existing callers pass null and stay byte-identical.
     if (seenCalls != null) {
       flat['seenCalls'] = seenCalls;
+    }
+
+    // Controller-owned state (e.g. leftGroups/leftGroupTimes live in the app
+    // state on native, not KV) overrides the defaults above.
+    if (extras != null) {
+      extras.forEach((k, v) => flat[k] = v);
     }
 
     final lookup = <String, String>{};
@@ -252,6 +402,73 @@ class StorageSync {
     if (showStatus == 'false') return false;
     if (showStatus == 'friends') return 'friends';
     return true;
+  }
+
+  /// Decodes a KV JSON array (the PWA's JSON-array localStorage values).
+  /// Anything absent/blank/non-array resolves to an empty list.
+  static List<dynamic> _kvJsonList(KeyValueStore kv, String key) {
+    final raw = kv.getString(key);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded;
+    } catch (_) {
+      // Corrupt JSON — treat as empty.
+    }
+    return const [];
+  }
+
+  /// Decodes a KV JSON object (`nym_closed_pm_times` and friends). Absent /
+  /// blank / non-object resolves to an empty map.
+  static Map<String, dynamic> _kvJsonMap(KeyValueStore kv, String key) {
+    final raw = kv.getString(key);
+    if (raw == null || raw.isEmpty) return <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      // Corrupt JSON — treat as empty.
+    }
+    return <String, dynamic>{};
+  }
+
+  /// The image-blur wire value `true | false | 'friends'`
+  /// (`this.blurOthersImages`, settings.js:101): per-pubkey key first, then
+  /// the global key, defaulting to blur=true (`loadImageBlurSettings`,
+  /// settings.js:1139-1156).
+  static dynamic _blurForSync(KeyValueStore kv, String? selfPubkey) {
+    String? v;
+    if (selfPubkey != null && selfPubkey.isNotEmpty) {
+      v = kv.getString(StorageKeys.imageBlurFor(selfPubkey));
+    }
+    v ??= kv.getString(StorageKeys.imageBlur);
+    if (v == null) return true; // default to blur
+    if (v == 'friends') return 'friends';
+    return v == 'true';
+  }
+
+  /// The sidebar section order for the wire (`_getSidebarSectionOrder`,
+  /// sidebar-sections.js:13-21): the stored JSON array when present, else the
+  /// default `['channels','pms','nyms']` (`_sidebarSectionIds`).
+  static List<dynamic> _sidebarOrderForSync(KeyValueStore kv) {
+    final stored = _kvJsonList(kv, StorageKeys.sidebarSectionOrder);
+    if (stored.isNotEmpty) return stored;
+    return const ['channels', 'pms', 'nyms'];
+  }
+
+  /// Favorite GIFs for the wire (`_getFavoriteGifs`, ui-context.js:2088-2094 +
+  /// settings.js:135): entries normalized to `{url, title}`, capped at 100.
+  static List<Map<String, dynamic>> _favoriteGifsForSync(KeyValueStore kv) {
+    final out = <Map<String, dynamic>>[];
+    for (final g in _kvJsonList(kv, StorageKeys.favoriteGifs)) {
+      if (g is! Map || g['url'] is! String) continue;
+      out.add({
+        'url': g['url'],
+        'title': g['title'] is String ? g['title'] : '',
+      });
+      if (out.length >= 100) break;
+    }
+    return out;
   }
 
   /// Parses the persisted landing-channel JSON
@@ -289,28 +506,162 @@ class StorageSync {
   /// [pinnedLandingChannelJson] is the KV-stored default-landing-channel choice
   /// (not a typed [Settings] field); the caller reads it via
   /// `SettingsController.pinnedLandingChannelJson` and passes it so it rides the
-  /// `channels` section like the PWA (settings.js:21,116). Omitting it (the
-  /// current callers) leaves the `channels` section landing-channel-free.
+  /// `channels` section like the PWA (settings.js:21,116). When omitted it is
+  /// read from the injected KV store (falling back to the PWA default).
+  /// [extras] threads controller-owned state (`leftGroups`/`leftGroupTimes`)
+  /// into the payload — see [buildSectionPayloads].
   Future<Set<String>> settingsSet(
     Settings settings, {
     String? pinnedLandingChannelJson,
     Map<String, dynamic>? seenCalls,
+    Map<String, dynamic>? extras,
   }) async {
     final sent = <String>{};
     final sections = buildSectionPayloads(
       settings,
       pinnedLandingChannelJson: pinnedLandingChannelJson,
       seenCalls: seenCalls,
+      kv: await _kvOrOpen(),
+      selfPubkey: _pubkey,
+      extras: extras,
     );
     for (final entry in sections.entries) {
-      final category = sectionCategory(entry.key);
-      final ok = await _setSettingsCategory(category, jsonEncode(_withCat(
-        entry.value,
-        category,
-      )));
+      // The real category (`nymchat-settings-<section>`) rides inside the
+      // encrypted blob as `__cat`; the D1 column is its opaque per-account
+      // hash (`_d1Category`, settings.js:189/725). Only the channels section
+      // carries a trim fn (`_trimChannelsReadState`, settings.js:567).
+      final ok = await _publishCategoryWrap(
+        Map<String, dynamic>.of(entry.value),
+        sectionCategory(entry.key),
+        trim: entry.key == 'channels' ? _trimChannelsReadState : null,
+      );
       if (ok) sent.add(entry.key);
     }
     return sent;
+  }
+
+  /// Relay-side NIP-59 `nym-sync` publisher (`_publishWrappedNostrEvent`,
+  /// settings.js:598-663), injected by the controller and wired to
+  /// `NostrService.publishNymSyncWrap`. Called with the plaintext payload
+  /// (WITHOUT `__cat` — the wrap rumor carries the real d-tag in its `d` tag
+  /// instead) after the D1 write, so other devices get a live push even when
+  /// the D1 worker is unreachable. Null (unwired) keeps the D1-only behavior.
+  Future<void> Function(Map<String, dynamic> payload, String dTag)?
+      _syncWrapPublisher;
+
+  /// Registers the relay `nym-sync` gift-wrap publisher (see
+  /// [_syncWrapPublisher]).
+  void setSyncWrapPublisher(
+    Future<void> Function(Map<String, dynamic> payload, String dTag) publisher,
+  ) {
+    _syncWrapPublisher = publisher;
+  }
+
+  /// Last-published payload JSON per d-tag, so an unchanged category is not
+  /// re-written/re-wrapped (`_publishedSectionJson`, settings.js:385-388).
+  final Map<String, String> _publishedSectionJson = {};
+
+  /// The payload is encrypted twice (seal kind 13 → gift wrap kind 1059) and
+  /// base64 expands it ~1.9x; bound the inner rumor so the wrapped event stays
+  /// under common ~64KiB relay caps (`_publishCategoryWrap`, settings.js:352-358).
+  static const int _rumorOverhead = 256;
+  static const int _maxWrappedBytes = 60000;
+  static final int _maxRumorBytes = (_maxWrappedBytes / 1.95).floor();
+
+  /// Approximate rumor byte size: UTF-8 length of the double-JSON-stringified
+  /// payload plus the fixed rumor overhead (settings.js:359-363).
+  static int _rumorByteSize(Map<String, dynamic> payload) =>
+      utf8.encode(jsonEncode(jsonEncode(payload))).length + _rumorOverhead;
+
+  /// Drops the oldest entries from the channels section's auto-growing
+  /// read-state maps so the payload fits under the NIP-44 limit instead of
+  /// being skipped (`_trimChannelsReadState`, settings.js:574-588). Only map
+  /// shapes are trimmed (the array forms of closedPMs/leftGroups are not).
+  static bool _trimChannelsReadState(Map<String, dynamic> p) {
+    for (final key in const [
+      'closedPMTimes',
+      'leftGroupTimes',
+      'closedPMs',
+      'leftGroups',
+    ]) {
+      final m = p[key];
+      if (m is! Map) continue;
+      if (m.length <= 30) continue;
+      final entries = m.entries.toList()
+        ..sort((a, b) {
+          final na = a.value is num ? a.value as num : 0;
+          final nb = b.value is num ? b.value as num : 0;
+          return na.compareTo(nb);
+        });
+      var drop = (entries.length * 0.25).floor();
+      if (drop < 1) drop = 1;
+      for (var i = 0; i < drop; i++) {
+        m.remove(entries[i].key);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// Drops the oldest 25% of seen-notification keys (`trimOldestSeen`,
+  /// settings.js:549-556).
+  static bool _trimOldestSeen(Map<String, dynamic> p) {
+    final o = p['seenNotifications'];
+    if (o is! Map) return false;
+    if (o.length <= 1) return false;
+    final keys = o.keys.toList()
+      ..sort((a, b) {
+        final na = o[a] is num ? o[a] as num : 0;
+        final nb = o[b] is num ? o[b] as num : 0;
+        return na.compareTo(nb);
+      });
+    var drop = (keys.length * 0.25).ceil();
+    if (drop < 1) drop = 1;
+    for (var i = 0; i < drop; i++) {
+      o.remove(keys[i]);
+    }
+    return true;
+  }
+
+  /// Publishes one data category as a D1 blob + a NIP-59 `nym-sync` relay
+  /// wrap, mirroring `_publishCategoryWrap` (settings.js:351-391): trims via
+  /// [trim] until the rumor fits the NIP-44 plaintext budget (≤500 rounds),
+  /// skips the publish entirely when still oversized, skips a payload that is
+  /// byte-identical to the last one sent for this [dTag], then writes the D1
+  /// blob and hands the plaintext payload to the injected wrap publisher.
+  /// Returns whether the D1 category was actually sent.
+  Future<bool> _publishCategoryWrap(
+    Map<String, dynamic> payload,
+    String dTag, {
+    bool Function(Map<String, dynamic> p)? trim,
+  }) async {
+    if (trim != null) {
+      var guard = 0;
+      while (_rumorByteSize(payload) > _maxRumorBytes && guard++ < 500) {
+        if (!trim(payload)) break;
+      }
+    }
+    if (_rumorByteSize(payload) > _maxRumorBytes) return false;
+
+    final json = jsonEncode(payload);
+    if (_publishedSectionJson[dTag] == json) return false; // unchanged
+    _publishedSectionJson[dTag] = json;
+
+    final ok = await _setSettingsCategory(
+      d1Category(dTag),
+      jsonEncode(_withCat(payload, dTag)),
+    );
+    // Relay wrap is best-effort and independent of the D1 result (the PWA
+    // fire-and-forgets `_saveSettingsBlobToD1` before wrapping).
+    final wrapPublisher = _syncWrapPublisher;
+    if (wrapPublisher != null) {
+      try {
+        await wrapPublisher(payload, dTag);
+      } catch (_) {
+        // Best-effort relay push.
+      }
+    }
+    return ok;
   }
 
   /// Publishes the cross-device notification read-state wrap — the PWA's
@@ -323,15 +674,15 @@ class StorageSync {
   Future<bool> notificationsWrapSet(
       Map<String, dynamic> seenNotifications) async {
     if (seenNotifications.isEmpty) return false;
-    const category = 'nymchat-notifications';
+    const dTag = 'nymchat-notifications';
     final payload = <String, dynamic>{
       'v': 2,
-      'seenNotifications': seenNotifications,
+      'seenNotifications': Map<String, dynamic>.of(seenNotifications),
     };
-    return _setSettingsCategory(
-      category,
-      jsonEncode(_withCat(payload, category)),
-    );
+    // Same hashed-column scheme + wrap path as the settings sections
+    // (settings.js:559-560 routes this category through `_publishCategoryWrap`
+    // with the oldest-seen trim, `trimOldestSeen`).
+    return _publishCategoryWrap(payload, dTag, trim: _trimOldestSeen);
   }
 
   /// Embeds the real category into the (to-be-encrypted) blob as `__cat`
@@ -707,6 +1058,38 @@ class StorageSync {
     }
   }
 
+  /// Removes archived gift wraps by id from OUR D1 inbox (`pm-delete`,
+  /// storage.js:945-961; the worker deletes only rows under our own pubkey).
+  /// Chunked to the server's 200-id cap, mirroring `_purgeBotPMArchive`
+  /// (pms.js:1883-1891) and the NIP-09 PM branch of `_propagateDeletionToD1`
+  /// (nostr-core.js:1879-1883). No-op for ephemeral identities. Returns the
+  /// number of rows the worker reported removed; failures are swallowed.
+  Future<int> pmDelete(List<String> ids) async {
+    if (!_durable) return 0;
+    final clean = <String>[];
+    final seen = <String>{};
+    for (final raw in ids) {
+      final id = raw.toLowerCase();
+      if (_isHex64(id) && seen.add(id)) clean.add(id);
+    }
+    var removed = 0;
+    for (var i = 0; i < clean.length; i += 200) {
+      final end = (i + 200) < clean.length ? i + 200 : clean.length;
+      try {
+        final res = await _api.storageAction({
+          'action': 'pm-delete',
+          'pubkey': _pubkey,
+          'ids': clean.sublist(i, end),
+          'auth': await _auth('pm-delete'),
+        });
+        removed += (res['removed'] as num?)?.toInt() ?? 0;
+      } catch (_) {
+        // Best-effort purge.
+      }
+    }
+    return removed;
+  }
+
   /// Oldest restored wrap ts (`_pmD1OldestTs`) + an end-of-history flag
   /// (`_pmD1NoMore`) driving the pager (pms.js:1502).
   int? _pmOldestTs;
@@ -895,6 +1278,29 @@ class StorageSync {
     return events;
   }
 
+  /// Purges a NIP-09-deleted channel message from the D1 archive
+  /// (`channel-delete`, storage.js:1123-1150). A PUBLIC call — the signed
+  /// kind-5 [deletionEvent] IS the authorization (the worker verifies its
+  /// signature and deletes only rows authored by its pubkey whose ids appear
+  /// in the `e` tags). [channel] is the channel name WITHOUT the leading `#`
+  /// (the PWA passes `key.slice(1)`, nostr-core.js:1874-1876). Best-effort.
+  Future<void> channelDelete(
+    String channel,
+    Map<String, dynamic> deletionEvent,
+  ) async {
+    if (channel.isEmpty) return;
+    try {
+      // Public: no pubkey/auth (`_storageApiRequest('channel-delete', …, false)`).
+      await _api.storageAction({
+        'action': 'channel-delete',
+        'channel': channel,
+        'deletionEvent': deletionEvent,
+      });
+    } catch (_) {
+      // Best-effort purge.
+    }
+  }
+
   // ===========================================================================
   // Channel activity discovery (D1 `channel-active`/`channel-active-named` +
   // `channel-activity`) — all PUBLIC reads, no auth. Mirrors channels.js
@@ -1002,6 +1408,114 @@ class StorageSync {
       });
     }
     return ChannelActivityResult(activity: activity, last: last);
+  }
+
+  // ===========================================================================
+  // Custom-emoji archive (D1 `emoji-get`) — emoji.js `_emojiRestoreFromD1`.
+  // ===========================================================================
+
+  /// Wall-clock (ms) of the last `emoji-get` fetch — the PWA re-fetches at
+  /// most every 10 minutes (`_emojiD1FetchedAt`, emoji.js:202-203).
+  int _emojiFetchedAt = 0;
+
+  /// Hydrates the deduped NIP-30 emoji set from the D1 archive (`emoji-get`,
+  /// storage.js:1168-1198): a PUBLIC NDJSON stream of the archived kind-30030
+  /// packs plus our own kind-10030 pack list. Mirrors `_emojiRestoreFromD1`
+  /// (emoji.js:198-222): throttled to one fetch per 10 minutes (reset on
+  /// transport failure so the next attempt retries); the caller replays each
+  /// returned event through the same ingest path live relay 30030/10030
+  /// events take. Returns the raw events; failures resolve to an empty list.
+  Future<List<Map<String, dynamic>>> emojiGet({bool force = false}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && _emojiFetchedAt != 0 && now - _emojiFetchedAt < 600000) {
+      return const [];
+    }
+    _emojiFetchedAt = now;
+    StorageStream stream;
+    try {
+      // Public read (`_storageApiStream('emoji-get', {}, false)`). The pubkey
+      // rides the body so the worker can append our own 10030 line
+      // (storage.js:1170/1186-1194); over the authed `/api` socket it is
+      // pinned server-side exactly like the PWA.
+      stream = await _api.storageStream({
+        'action': 'emoji-get',
+        'pubkey': _pubkey,
+      });
+    } catch (_) {
+      _emojiFetchedAt = 0; // allow a retry (emoji.js:208)
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
+  }
+
+  // ===========================================================================
+  // Zap-receipt archive (D1 `zap-put` / `zap-get`) — zaps.js:29-93.
+  // ===========================================================================
+
+  /// Uploads validated kind-9735 zap receipts to the D1 archive (`zap-put`,
+  /// storage.js:1328-1350; authed, ≤100 events per call — the caller batches).
+  /// The worker classifies each receipt by the `k` tag inside its
+  /// `description` (20000/23333→channel, 1059→pm, 0→profile) and re-verifies
+  /// the signature server-side. Best-effort; failures are swallowed (the
+  /// caller's queue re-flushes).
+  Future<bool> zapPut(List<Map<String, dynamic>> events) async {
+    if (events.isEmpty) return false;
+    try {
+      await _api.storageAction({
+        'action': 'zap-put',
+        'pubkey': _pubkey,
+        'events': events.take(100).toList(),
+        'auth': await _auth('zap-put'),
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Backfills archived kind-9735 receipts for the given zapped-message [ids]
+  /// (`zap-get`, storage.js:1286-1326 — a PUBLIC NDJSON stream, no auth, ≤500
+  /// ids). [scope] is `'pm'` or `'channel'` (anything else is coerced to
+  /// channel server-side); profile-scope receipts are keyed on the recipient
+  /// pubkey, so pass the pubkey as the id with scope `'channel'`'s DB —
+  /// mirroring `_backfillZapReceiptsFromD1([pubkey], 'profile')`, which the
+  /// worker also serves from the channels DB. Returns the raw receipt events;
+  /// failures resolve to an empty list.
+  Future<List<Map<String, dynamic>>> zapGet(
+    String scope,
+    List<String> ids,
+  ) async {
+    final clean = <String>[];
+    final seen = <String>{};
+    for (final raw in ids) {
+      final id = raw.toLowerCase();
+      if (!_isHex64(id) || !seen.add(id)) continue;
+      clean.add(id);
+      if (clean.length >= 500) break; // server caps at 500 (storage.js:1292)
+    }
+    if (clean.isEmpty) return const [];
+    StorageStream stream;
+    try {
+      // Public read: no pubkey/auth (`_storageApiStream('zap-get', …, false)`).
+      stream = await _api.storageStream({
+        'action': 'zap-get',
+        'scope': scope,
+        'ids': clean,
+      });
+    } catch (_) {
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
   }
 
   // ===========================================================================

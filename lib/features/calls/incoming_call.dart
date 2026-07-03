@@ -93,15 +93,18 @@ class IncomingCallModal extends ConsumerWidget {
             children: [
               // Pulsing avatar ring (`.incoming-call-avatar` incomingCallPulse:
               // a 1.6s primary box-shadow ring expanding 0→12px).
+              // `.incoming-call-avatar-wrap { margin-bottom: 14px }`.
               _PulsingAvatar(
                   seed: avatarSeed, primary: c.primary, imageUrl: picture),
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
               // Decorated caller name (#suffix + badges/flair), `_callNymHtml`.
+              // `.incoming-call-name`: 1.2rem (19.2px), weight 600,
+              // margin-bottom 4.
               DefaultTextStyle(
                 style: TextStyle(
                   color: c.textBright,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
+                  fontSize: 19.2,
+                  fontWeight: FontWeight.w600,
                 ),
                 child: (call.peerPubkey != null && call.peerPubkey!.isNotEmpty)
                     ? CallNym(
@@ -109,8 +112,8 @@ class IncomingCallModal extends ConsumerWidget {
                         nym: call.peerNym,
                         baseColor: c.textBright,
                         baseStyle: const TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
+                          fontSize: 19.2,
+                          fontWeight: FontWeight.w600,
                         ),
                         badgeSize: 16,
                       )
@@ -120,9 +123,10 @@ class IncomingCallModal extends ConsumerWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
               ),
-              const SizedBox(height: 6),
-              Text(label, style: TextStyle(color: c.textDim, fontSize: 14)),
-              const SizedBox(height: 28),
+              const SizedBox(height: 4),
+              // `.incoming-call-sub`: 0.85rem (13.6px), margin-bottom 22.
+              Text(label, style: TextStyle(color: c.textDim, fontSize: 13.6)),
+              const SizedBox(height: 22),
               // Buttons: 58px, fixed 36px gap, decline=danger (icon rotated
               // 135°), accept=primary bg with bg-coloured icon (PWA, not green).
               Row(
@@ -217,7 +221,7 @@ class _PulsingAvatarState extends State<_PulsingAvatar>
   }
 }
 
-class _RoundActionButton extends StatelessWidget {
+class _RoundActionButton extends StatefulWidget {
   const _RoundActionButton({
     required this.color,
     required this.svg,
@@ -238,23 +242,51 @@ class _RoundActionButton extends StatelessWidget {
   final double rotation;
 
   @override
+  State<_RoundActionButton> createState() => _RoundActionButtonState();
+}
+
+class _RoundActionButtonState extends State<_RoundActionButton> {
+  bool _hover = false;
+
+  /// CSS `filter: brightness(1.1)` — multiply the RGB channels by 1.1.
+  Color _brighten(Color color) => Color.from(
+        alpha: color.a,
+        red: math.min(1, color.r * 1.1),
+        green: math.min(1, color.g * 1.1),
+        blue: math.min(1, color.b * 1.1),
+      );
+
+  @override
   Widget build(BuildContext context) {
-    Widget glyph = NymSvgIcon(svg, color: iconColor, size: 26);
-    if (rotation != 0) {
-      glyph = Transform.rotate(angle: rotation * 2 * math.pi, child: glyph);
+    // `.incoming-call-btn:hover { transform: scale(1.08); filter:
+    // brightness(1.1); }` with `transition: transform 0.15s, filter 0.15s`.
+    final bg = _hover ? _brighten(widget.color) : widget.color;
+    final fg = _hover ? _brighten(widget.iconColor) : widget.iconColor;
+    Widget glyph = NymSvgIcon(widget.svg, color: fg, size: 26);
+    if (widget.rotation != 0) {
+      glyph =
+          Transform.rotate(angle: widget.rotation * 2 * math.pi, child: glyph);
     }
     return Tooltip(
-      message: tooltip,
-      child: Material(
-        color: color,
-        shape: const CircleBorder(),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 58,
-            height: 58,
-            child: Center(child: glyph),
+      message: widget.tooltip,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedScale(
+          scale: _hover ? 1.08 : 1,
+          duration: const Duration(milliseconds: 150),
+          child: Material(
+            color: bg,
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: widget.onTap,
+              child: SizedBox(
+                width: 58,
+                height: 58,
+                child: Center(child: glyph),
+              ),
+            ),
           ),
         ),
       ),

@@ -499,16 +499,16 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
           color: c.bgTertiary, // PWA `.tutorial-card` background
           borderRadius: NymRadius.rlg, // --radius-lg (20)
           border: Border.all(color: c.glassBorder),
-          // `body.light-mode .tutorial-card { box-shadow: 0 8px 40px
-          // rgba(0,0,0,0.12) }` — softer single shadow in light mode
-          // (styles-themes-responsive.css:1697-1699).
+          // `--shadow-lg` = 0 8px 32px black@0.5 (styles-core.css:93);
+          // `body.light-mode .tutorial-card { box-shadow: 0 8px 32px
+          // rgba(0,0,0,0.12) }` (styles-themes-responsive.css:697-699).
           boxShadow: [
             BoxShadow(
               color: c.isLight
                   ? const Color(0x1F000000) // black @ 0.12
-                  : Colors.black.withValues(alpha: 0.4),
-              blurRadius: c.isLight ? 40 : 30,
-              offset: c.isLight ? const Offset(0, 8) : const Offset(0, 16),
+                  : Colors.black.withValues(alpha: 0.5),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
             ),
           ],
         ),
@@ -537,7 +537,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
             const SizedBox(height: 10),
             Text(
               step.body,
-              style: TextStyle(color: c.text, fontSize: 13, height: 1.5),
+              style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
             ),
             const SizedBox(height: 10),
             Text(
@@ -581,6 +581,9 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
+          // `.tutorial-skip { background: rgba(255,255,255,0.05) }`
+          // (styles-components.css:2030-2043) — no light-mode override.
+          color: Colors.white.withValues(alpha: 0.05),
           borderRadius: NymRadius.rxs,
           border: Border.all(color: c.glassBorder),
         ),

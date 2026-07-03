@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../../core/theme/nym_colors.dart';
+
 /// The blue verified checkmark badge (`.verified-badge`, styles-components.css
-/// :1382-1411): a 20×20 #1DA1F2 circle with a white ✓ (12px, w700). Rendered
+/// :1382-1411): a 20×20 #1DA1F2 circle (light mode darkens it to #1a8cd8,
+/// styles-themes-responsive.css:76-78) with a white ✓ (12px, w700). Rendered
 /// after the nym for `isVerifiedDeveloper` / `isVerifiedBot`
 /// (ui-context.js:407-411). `margin-left:4px; margin-right:2px` is applied by
 /// the caller's row gap.
@@ -22,8 +25,11 @@ class VerifiedBadge extends StatelessWidget {
       width: size,
       height: size,
       alignment: Alignment.center,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1DA1F2),
+      decoration: BoxDecoration(
+        // `body.light-mode .verified-badge::before { background: #1a8cd8 }`.
+        color: context.nym.isLight
+            ? const Color(0xFF1A8CD8)
+            : const Color(0xFF1DA1F2),
         shape: BoxShape.circle,
       ),
       child: Text(
@@ -43,37 +49,45 @@ class VerifiedBadge extends StatelessWidget {
 }
 
 /// The friend badge (`.friend-badge`, styles-features.css:1483-1495): a
-/// people-with-check glyph in #4fc3f7, appended after the nym for friends
-/// (ui-context.js:412-414). Drawn to match the PWA's inline SVG
-/// (16×16 viewBox: head circle + shoulders arc + a small plus to the right).
+/// people-with-check glyph in #4fc3f7 (light mode darkens it to #0288d1,
+/// `body.light-mode .friend-badge`, styles-themes-responsive.css:1300-1307),
+/// appended after the nym for friends (ui-context.js:412-414). Drawn to match
+/// the PWA's inline SVG (16×16 viewBox: head circle + shoulders arc + a small
+/// plus to the right).
 class FriendBadge extends StatelessWidget {
   const FriendBadge({super.key, this.size = 20});
-
-  static const Color color = Color(0xFF4FC3F7);
 
   final double size;
 
   @override
   Widget build(BuildContext context) {
+    // `body.light-mode .friend-badge svg { fill: #0288d1; stroke: #0288d1 }`.
+    final color = context.nym.isLight
+        ? const Color(0xFF0288D1)
+        : const Color(0xFF4FC3F7);
     return SizedBox(
       width: size,
       height: size,
-      child: CustomPaint(painter: _FriendBadgePainter()),
+      child: CustomPaint(painter: _FriendBadgePainter(color)),
     );
   }
 }
 
 class _FriendBadgePainter extends CustomPainter {
+  const _FriendBadgePainter(this.color);
+
+  final Color color;
+
   @override
   void paint(Canvas canvas, Size size) {
     // The PWA SVG is authored in a 16×16 box; scale uniformly to [size].
     final s = size.width / 16.0;
     final fill = Paint()
-      ..color = FriendBadge.color
+      ..color = color
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
     final stroke = Paint()
-      ..color = FriendBadge.color
+      ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5 * s
       ..strokeCap = StrokeCap.round
@@ -97,5 +111,6 @@ class _FriendBadgePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _FriendBadgePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _FriendBadgePainter oldDelegate) =>
+      oldDelegate.color != color;
 }

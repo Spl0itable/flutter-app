@@ -231,13 +231,23 @@ class _BotCommandPaletteState extends State<BotCommandPalette> {
   }
 }
 
-/// Shared `.command-palette` container decoration for both palettes. The PWA
-/// fill is `rgba(20,20,35,.9)` dark and flips to `rgba(255,255,255,.92)` in
-/// light mode (themes-responsive.css:1155-1158); the `--shadow-lg` is
-/// `0 8px 32px rgba(0,0,0,.5)` dark, overridden to `rgba(0,0,0,.12)` light
-/// (themes-responsive.css:1149-1153). The glass border is already mode-aware.
+/// Shared `.command-palette` container decoration for both palettes. In
+/// solid-ui (the PWA default) `body.solid-ui .command-palette` is overridden to
+/// the opaque `--glass-bg` — #14141e dark / #ffffff light
+/// (themes-responsive.css:1593-1627); NymColors carries no solid flag, but
+/// solid-ui is the only mode whose --glass-bg is fully opaque, so detect it
+/// from the resolved token. In glass mode the base fill applies:
+/// `rgba(20,20,35,.9)` dark (styles-components.css:849-854), flipping to
+/// `rgba(255,255,255,.92)` in light mode (themes-responsive.css:1155-1158).
+/// The `--shadow-lg` is `0 8px 32px rgba(0,0,0,.5)` dark, overridden to
+/// `rgba(0,0,0,.12)` light (themes-responsive.css:1149-1153). The glass border
+/// is already mode-aware.
 BoxDecoration commandPaletteDecoration(NymColors c) => BoxDecoration(
-      color: c.isLight ? const Color(0xEBFFFFFF) : const Color(0xE6141423),
+      color: c.glassBg.a == 1.0
+          ? c.glassBg
+          : c.isLight
+              ? const Color(0xEBFFFFFF)
+              : const Color(0xE6141423),
       border: Border.all(color: c.glassBorder),
       borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
       boxShadow: [
