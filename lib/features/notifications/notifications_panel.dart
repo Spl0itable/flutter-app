@@ -219,8 +219,10 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
                   // .modal-header (`.nm-h-76`): 22px UPPERCASE primary + ls1.5.
                   // In this modal the header drops its own bottom rule (padding
                   // 32/32/10, `border-bottom: none`) — the rule moves onto the
-                  // toggle block below (no-inline.css:94).
+                  // toggle block below (no-inline.css:94). A block element —
+                  // full width, LEFT-aligned (never centered).
                   Container(
+                    width: double.infinity,
                     padding: const EdgeInsets.fromLTRB(32, 32, 32, 10),
                     child: Text(
                       'NOTIFICATIONS',

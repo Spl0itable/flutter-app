@@ -71,6 +71,9 @@ class ModalChrome {
   /// bottom rule (padding-bottom 14, margin-bottom 24).
   static Widget header(NymColors c, String title) {
     return Container(
+      // `.modal-header` is a block element: full width, LEFT-aligned text —
+      // never centered, even when the host Column defaults to center.
+      width: double.infinity,
       padding: const EdgeInsets.fromLTRB(32, 32, 32, 14),
       margin: const EdgeInsets.only(bottom: 24),
       decoration: BoxDecoration(
