@@ -2052,15 +2052,22 @@ class NostrController {
     switch (kind) {
       case EventKind.dmRumor: // 14 — PM or group message
         // Archive the durable DM wrap to D1 (PMs + group messages; the PWA
-        // archives `event` in `handleGiftWrapDM` before the group/PM split,
-        // pms.js:1021). Receipts/typing (kind 69420) are NOT archived.
+        // archives `event` in `handleGiftWrapDM` BEFORE the group/PM/reaction
+        // split, pms.js:1021 — durable content only: messages, reactions, and
+        // private zap announcements. Receipts/typing (69420), call signaling,
+        // presence, and settings wraps are NOT archived).
         _archiveGiftWrap(u);
         _onRumorMessage(u, appState, self);
       case EventKind.nymReceiptRumor: // 69420 — receipt or typing
         _onReceiptOrTyping(rumor, appState);
       case EventKind.reaction: // 7 — gift-wrapped reaction
+        // Durable content: archived like messages (pms.js:1021 runs before the
+        // kind-7 branch) — without this, PM/group reactions never reach D1 and
+        // vanish on relaunch instead of backfilling.
+        _archiveGiftWrap(u);
         _onPrivateReaction(rumor, appState);
       case EventKind.zapReceipt: // 9735 — gift-wrapped private zap announcement
+        _archiveGiftWrap(u);
         _onPrivateZap(rumor, appState, u.wrapId);
       case EventKind.callSignaling: // 25053 — call signaling transport
         if (u.senderVerified) _callSignalHandler?.call(rumor);
@@ -3590,6 +3597,7 @@ class NostrController {
           rumor: rumor,
           recipientPubkey: view.id,
           settings: _msgSettings,
+          onWrap: _archiveSentWrap,
         );
         // Queue for automatic re-send until a delivery receipt acks it
         // (pms.js `trackPendingDM`). Cleared in [_onReceiptOrTyping] the moment
@@ -3647,6 +3655,7 @@ class NostrController {
         recipients: group.members,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
+        onWrap: _archiveSentWrap,
       );
     }
   }
@@ -4891,6 +4900,7 @@ class NostrController {
         recipients: group.members,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
+        onWrap: _archiveSentWrap,
       );
       return true;
     }
@@ -5474,6 +5484,10 @@ class NostrController {
         rumor: rumor,
         recipients: group.members,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+        // Durable content: archive/deposit the sent wraps like the PWA
+        // (reactions ride `_depositPMEvent`, pms.js:467) so the reaction
+        // BACKFILLS for offline members and on relaunch.
+        onWrap: _archiveSentWrap,
       );
     }
 
@@ -5495,6 +5509,9 @@ class NostrController {
     return service.publishGiftWrappedRumor(
       rumor: rumor,
       recipients: [identity.pubkey, peer],
+      // Archive our copy + deposit the peer's at send (pms.js:467) so PM
+      // reactions restore from D1 on both sides.
+      onWrap: _archiveSentWrap,
     );
   }
 
@@ -8301,7 +8318,27 @@ class NostrController {
   /// deposited into the recipient's inbox (`pm-deposit`). No-op for ephemeral
   /// identities or when the raw wrap isn't available. Mirrors `_archivePMEvent`
   /// / `_depositPMEvent`.
+  /// Archives a wrap we just PUBLISHED (send-time): the self-addressed copy to
+  /// our own inbox (`pm-put`) and recipient-addressed wraps into theirs
+  /// (`pm-deposit`) — the PWA's `_depositPMEvent(nymWrapped)` +
+  /// `_archivePMEvent(selfWrapped)` at send (pms.js:365-378; reactions :467,
+  /// group fan-out :3181/:3207). Without the deposit an OFFLINE peer never
+  /// receives the wrap in pool mode (relays carry no history — their next
+  /// `pm-get` restore is the only delivery path). The worker dedups by wrap id,
+  /// so overlap with the live loop-back archive is harmless.
+  void _archiveSentWrap(NostrEvent wrap) {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    if (!_ref.read(settingsProvider).cachePMs) return;
+    final raw = wrap.toJson();
+    unawaited(sync.pmPut([raw]));
+    unawaited(sync.pmDeposit([raw]));
+  }
+
   void _archiveGiftWrap(GiftWrapUnwrapped u) {
+    // Never re-upload a wrap that CAME from the archive (`pm-get` boot /
+    // reconnect replay) — the PWA's `if (!fromD1)` gate at pms.js:1021.
+    if (u.fromArchive) return;
     final sync = _storageSync;
     if (sync == null || !sync.durableIdentity) return;
     if (!_ref.read(settingsProvider).cachePMs) return;
@@ -8503,6 +8540,7 @@ class NostrController {
           rumor: rumor,
           recipientPubkey: view.id,
           settings: _msgSettings,
+          onWrap: _archiveSentWrap,
         );
       } catch (_) {
         // PM send paths don't expose the echo id here; leave the optimistic
@@ -8546,6 +8584,7 @@ class NostrController {
         recipients: group.members,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
+        onWrap: _archiveSentWrap,
       );
       return;
     }

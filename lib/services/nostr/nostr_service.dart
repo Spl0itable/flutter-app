@@ -64,7 +64,14 @@ class GiftWrapUnwrapped {
     required this.senderVerified,
     required this.isBitchat,
     this.rawWrap,
+    this.fromArchive = false,
   });
+
+  /// True when this wrap was replayed from the D1 archive (`pm-get` boot /
+  /// reconnect restore) rather than arriving live off a relay — the PWA's
+  /// `fromD1` flag (pms.js:1021 gates `_archivePMEvent` on `!fromD1` so a
+  /// replay never re-uploads, and reaction/zap bursts only fire live).
+  final bool fromArchive;
 
   /// The kind-1059 gift-wrap event id (used as the message id).
   final String wrapId;
@@ -780,10 +787,10 @@ class NostrService {
   /// same handler can be reused safely.
   void unwrapArchivedWrap(NostrEvent wrap) {
     if (wrap.kind != EventKind.giftWrap) return;
-    unawaited(_handleGiftWrap(wrap));
+    unawaited(_handleGiftWrap(wrap, fromArchive: true));
   }
 
-  Future<void> _handleGiftWrap(NostrEvent wrap) async {
+  Future<void> _handleGiftWrap(NostrEvent wrap, {bool fromArchive = false}) async {
     final handlers = _handlers;
     if (handlers?.onGiftWrap == null) return;
     final candidates = _candidates();
@@ -797,7 +804,8 @@ class NostrService {
     if (sig != null && sig.isRemote && _isAddressedToSelf(wrap)) {
       final res = await _unwrapRemote(wrap, sig);
       if (res != null) {
-        _emitUnwrapped(handlers!, wrap, res.seal, res.rumor, isBitchat: false);
+        _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
+            isBitchat: false, fromArchive: fromArchive);
         return;
       }
     }
@@ -813,6 +821,7 @@ class NostrService {
     if (res == null) return;
 
     _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
+        fromArchive: fromArchive,
         isBitchat: res.isBitchat);
   }
 
@@ -854,6 +863,7 @@ class NostrService {
     NostrEvent seal,
     Map<String, dynamic> rumor, {
     required bool isBitchat,
+    bool fromArchive = false,
   }) {
     final rumorPubkey = rumor['pubkey'] as String?;
     if (rumorPubkey == null || rumorPubkey.isEmpty) return;
@@ -885,6 +895,7 @@ class NostrService {
       senderVerified: senderVerified,
       isBitchat: isBitchat,
       rawWrap: wrap.toJson(),
+      fromArchive: fromArchive,
     ));
   }
 
@@ -1230,6 +1241,7 @@ class NostrService {
     required List<String> recipients,
     String Function(String memberPubkey)? encryptTo,
     int? expiration,
+    void Function(NostrEvent wrap)? onWrap,
   }) async {
     if (signer == null || recipients.isEmpty) return false;
     var any = false;
@@ -1239,6 +1251,7 @@ class NostrService {
         encryptTo?.call(pk) ?? pk,
         expiration: expiration,
       );
+      if (wrap != null) onWrap?.call(wrap);
       any = any || wrap != null;
     }
     return any;
@@ -1307,14 +1320,24 @@ class NostrService {
     required UnsignedEvent rumor,
     required String recipientPubkey,
     MessagingSettings settings = const MessagingSettings(),
+    void Function(NostrEvent wrap)? onWrap,
   }) async {
     if (signer == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final expiration = settings.expirationFor(nowSec);
 
-    await _wrapAndPublish(rumor, recipientPubkey, expiration: expiration);
+    // Report each produced wrap so the controller can archive/deposit at SEND
+    // time like the PWA (`_depositPMEvent(nymWrapped)` + `_archivePMEvent(
+    // selfWrapped)`, pms.js:365-378) — without the deposit an offline peer
+    // never receives the wrap at all in pool mode (relays carry no history;
+    // their next `pm-get` restore is the only delivery path).
+    final recipientWrap =
+        await _wrapAndPublish(rumor, recipientPubkey, expiration: expiration);
+    if (recipientWrap != null) onWrap?.call(recipientWrap);
     if (recipientPubkey != identity.pubkey) {
-      await _wrapAndPublish(rumor, identity.pubkey, expiration: expiration);
+      final selfWrap =
+          await _wrapAndPublish(rumor, identity.pubkey, expiration: expiration);
+      if (selfWrap != null) onWrap?.call(selfWrap);
     }
     return true;
   }
@@ -1327,6 +1350,7 @@ class NostrService {
     required List<String> recipients,
     required String Function(String memberPubkey) encryptTo,
     MessagingSettings settings = const MessagingSettings(),
+    void Function(NostrEvent wrap)? onWrap,
   }) async {
     final sig = signer;
     if (sig == null) return false;
@@ -1348,13 +1372,18 @@ class NostrService {
         expiration: expiration,
       );
       for (final wrap in wraps) {
-        if (wrap != null) await pool.publishDm(wrap);
+        if (wrap != null) {
+          await pool.publishDm(wrap);
+          onWrap?.call(wrap);
+        }
       }
       return true;
     }
 
     for (final pk in recipients) {
-      await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
+      final wrap =
+          await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
+      if (wrap != null) onWrap?.call(wrap);
     }
     return true;
   }

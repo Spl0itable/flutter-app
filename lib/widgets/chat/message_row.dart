@@ -2118,6 +2118,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         ZapBadge(message: message),
         for (final r in reactions)
           _ReactionBadge(
+            messageId: message.id,
             reaction: r,
             onTap: (rect) => _toggleReaction(context, r),
             onLongPress: (rect) => _showReactors(context, r, rect),
@@ -2157,8 +2158,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // toggle skips the local update and stays silent, reactions.js:946).
     if (!wasReacted && _selfReactedLocally(r.emoji)) {
       HapticFeedback.mediumImpact();
-      final center = _globalCenterOfContext(context);
-      if (center != null) ReactionBurst.play(context, center, r.emoji);
+      // Anchor at the reaction badge for this emoji once the optimistic add
+      // has laid it out (post-frame), falling back to the message centre —
+      // `_burstOnBadge(messageId, emoji, messageEl)`, reactions.js:977.
+      ReactionBurst.playAtBadge(context, message.id, r.emoji,
+          fallbackCenter: _globalCenterOfContext(context));
     }
   }
 
@@ -2643,10 +2647,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 /// modal instead", reactions.js:512).
 class _ReactionBadge extends StatefulWidget {
   const _ReactionBadge({
+    required this.messageId,
     required this.reaction,
     required this.onTap,
     required this.onLongPress,
   });
+  final String messageId;
   final MessageReaction reaction;
   final void Function(Rect) onTap;
   final void Function(Rect) onLongPress;
@@ -2658,6 +2664,58 @@ class _ReactionBadge extends StatefulWidget {
 class _ReactionBadgeState extends State<_ReactionBadge> {
   bool _pressed = false;
   bool _hover = false;
+
+  /// Registered with [ReactionBurst] so bursts anchor at THIS badge — the
+  /// PWA's `_burstOnBadge` badge query (reactions.js:50-52).
+  final GlobalKey _anchorKey = GlobalKey();
+
+  /// Last seen count/own-flag, for the live-increment self-burst below.
+  int _lastCount = -1;
+  bool _lastUserReacted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    ReactionBurst.registerBadge(
+        widget.messageId, widget.reaction.emoji, _anchorKey);
+    _lastCount = widget.reaction.count;
+    _lastUserReacted = widget.reaction.userReacted;
+  }
+
+  @override
+  void didUpdateWidget(covariant _ReactionBadge old) {
+    super.didUpdateWidget(old);
+    if (old.messageId != widget.messageId ||
+        old.reaction.emoji != widget.reaction.emoji) {
+      ReactionBurst.unregisterBadge(
+          old.messageId, old.reaction.emoji, _anchorKey);
+      ReactionBurst.registerBadge(
+          widget.messageId, widget.reaction.emoji, _anchorKey);
+      _lastCount = widget.reaction.count;
+      _lastUserReacted = widget.reaction.userReacted;
+      return;
+    }
+    // Burst when ANOTHER user's live reaction ticks this badge up while it is
+    // mounted (the PWA bursts on the badge for live inbound reactions,
+    // reactions.js:328-332). Our OWN adds are excluded (userReacted flips in
+    // the same update) — those burst from the toggle call sites, which anchor
+    // here via the registry.
+    final r = widget.reaction;
+    if (_lastCount >= 0 &&
+        r.count > _lastCount &&
+        r.userReacted == _lastUserReacted) {
+      ReactionBurst.playAtBadge(context, widget.messageId, r.emoji);
+    }
+    _lastCount = r.count;
+    _lastUserReacted = r.userReacted;
+  }
+
+  @override
+  void dispose() {
+    ReactionBurst.unregisterBadge(
+        widget.messageId, widget.reaction.emoji, _anchorKey);
+    super.dispose();
+  }
 
   Rect _rect(BuildContext context) {
     final box = context.findRenderObject() as RenderBox?;
@@ -2674,6 +2732,7 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
     final c = context.nym;
     final r = widget.reaction;
     return RawGestureDetector(
+      key: _anchorKey,
       // The PWA cancels the badge's pending 500ms reactors-modal hold on the
       // FIRST `touchmove` (reactions.js:543-549) — the same tight pre-fire
       // slop as the message quick-react hold — so a slow scroll started on a

@@ -483,6 +483,7 @@ class CosmeticAura {
     this.gradient,
     this.bubbleGradient,
     this.bubblePaintsGradient = false,
+    this.bubbleStyledFill,
     this.background,
     this.watermark,
     this.edgeWatermark = false,
@@ -540,6 +541,18 @@ class CosmeticAura {
   /// fill. gold=true (PWA bubble gold has a gold wash); neon/phoenix/cosmic=false
   /// (PWA bubble is box-shadow-only — the gradient is the IRC row's only).
   final bool bubblePaintsGradient;
+
+  /// solid-ui only: the opaque bubble plate this aura paints on a message that
+  /// ALSO carries a `style-…` class. `body.solid-ui.chat-bubbles .message.
+  /// cosmetic-aura-gold .message-content { background: #38311e !important }`
+  /// (styles-themes-responsive.css:1740) has no `:not([class*="style-"])` gate
+  /// and outcascades every solid style plate (same/lower specificity, declared
+  /// earlier); on an UNSTYLED message the last-loaded features-sheet glass wash
+  /// (`body.chat-bubbles .message:not([class*="style-"]).cosmetic-aura-gold …
+  /// !important`, styles-features.css:3700, equal specificity 0,5,1) wins in
+  /// DARK mode, so [bubbleGradient] carries that instead. Null for glass mode
+  /// and non-gold auras. Consumed by `message_row`'s bubble-fill resolution.
+  final Color? bubbleStyledFill;
 
   /// A flat background fill (frost icy wash) when there's no gradient.
   final Color? background;
