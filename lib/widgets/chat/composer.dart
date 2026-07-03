@@ -121,9 +121,13 @@ class _ComposerState extends ConsumerState<Composer> {
   // --- Quote-reply / edit preview chips (F1/F2) ----------------------------
   // The PWA defers the quote/edit until SEND: a colored chip sits above the
   // input while the user's typed text stays clean (messages.js setQuoteReply /
-  // startEditMessage). `_pendingQuote` carries the author + stripped text;
+  // startEditMessage). `_pendingQuote` carries the author, the nested-quote-
+  // STRIPPED text used by the send prepend (`pendingQuote.text`), and the FULL
+  // original content the chip snippet is cleaned from (`setQuoteReply` builds
+  // `cleanText` from its `text` ARGUMENT, messages.js:1845-1846, so nested
+  // `> …` lines still show in the 120-char preview with the `>` removed);
   // `_pendingEdit` carries the message id + original content.
-  ({String author, String text})? _pendingQuote;
+  ({String author, String text, String fullText})? _pendingQuote;
   PendingEdit? _pendingEdit;
 
   // --- Per-conversation unsent drafts ---------------------------------------
@@ -293,7 +297,11 @@ class _ComposerState extends ConsumerState<Composer> {
             TextSelection.collapsed(offset: _controller.text.length);
       case QuoteAction(:final fullNym, :final content):
         // Set the quote chip; the input text stays clean (messages.js:1816).
-        _pendingQuote = (author: fullNym, text: _strippedQuoteText(content));
+        _pendingQuote = (
+          author: fullNym,
+          text: _strippedQuoteText(content),
+          fullText: content,
+        );
     }
     _focus.requestFocus();
     setState(() {});
@@ -595,12 +603,17 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// Toggle [code] in the favorites list and persist (translate.js:102-108):
-  /// append when absent, remove when present.
+  /// append when absent, remove when present. Persistence routes through
+  /// [_ensurePrefs] so the write NEVER silently no-ops — the PWA's
+  /// `_toggleTranslateFavorite` always hits localStorage. (In practice prefs
+  /// are already resolved here: the dropdown open awaits [_ensurePrefs], and
+  /// stars only exist inside the dropdown.)
   void _toggleTranslateFavorite(String code) {
     final next = [..._translateFavorites];
     if (!next.remove(code)) next.add(code);
     setState(() => _translateFavorites = next);
-    _prefs?.setString(kTranslateFavoritesKey, jsonEncode(next));
+    _ensurePrefs()
+        .then((prefs) => prefs.setString(kTranslateFavoritesKey, jsonEncode(next)));
   }
 
   /// Insert text at the current selection (mirrors PWA `insertEmoji`/`insertGif`
@@ -1063,7 +1076,10 @@ class _ComposerState extends ConsumerState<Composer> {
     // publish when an identity is live, falling back to local echo otherwise.
     // `?`/@Nymbot interception and `/` commands are handled inside sendCurrent.
     controller.sendCurrent(content);
-    _pushSentHistory(typed);
+    // The PWA records the FINAL composed content — quote prepend included —
+    // in the ↑/↓ recall history (`commandHistory.push(content)` AFTER the
+    // quote prepend, messages.js:2363-2364).
+    _pushSentHistory(content);
     _controller.clear();
     _popout = false;
     _syncPopoutPortal();
@@ -1146,7 +1162,9 @@ class _ComposerState extends ConsumerState<Composer> {
     // Publish the draft under a FRESH ephemeral keypair (unlinkable to the
     // durable nym), mirroring the normal send's fire-and-forget dispatch.
     controller.sendCurrentPseudonymous(content);
-    _pushSentHistory(typed);
+    // Recall history gets the composed content incl. the quote prepend
+    // (messages.js:2363-2364) — see [_send].
+    _pushSentHistory(content);
     _controller.clear();
     _popout = false;
     _syncPopoutPortal();
@@ -1416,19 +1434,15 @@ class _ComposerState extends ConsumerState<Composer> {
   /// column (author nym / label over the snippet) + close ✕. The chip slot is
   /// ALWAYS present (an [AnimatedSize] collapsing to 0) so toggling a chip
   /// never re-parents the TextField below it — the keyboard stays up.
+  ///
+  /// While the tall draft floats (`_popout`), the chip moves INTO the popout
+  /// overlay above the grown field: the PWA lifts it by the overhang
+  /// (`.input-container.composer-popout .quote-preview/.edit-preview
+  /// { bottom: calc(100% + var(--popout-overhang)); z-index: 20 }`,
+  /// styles-chat.css:1749-1752) so it stays visible — and its cancel ✕
+  /// tappable — over the field that would otherwise paint on top of it.
   Widget _inputWithChips(BuildContext context, bool inputEnabled) {
-    final chip = _pendingEdit != null
-        ? _EditPreviewChip(
-            text: _quotePreviewText(_pendingEdit!.content),
-            onClose: _cancelEdit,
-          )
-        : (_pendingQuote != null
-            ? _QuotePreviewChip(
-                author: _pendingQuote!.author,
-                text: _quotePreviewText(_pendingQuote!.text),
-                onClose: _clearQuote,
-              )
-            : null);
+    final block = _popout ? null : _chipBlock();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -1437,26 +1451,46 @@ class _ComposerState extends ConsumerState<Composer> {
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
           alignment: Alignment.bottomLeft,
-          child: chip == null
-              ? const SizedBox(height: 0, width: double.infinity)
-              : Padding(
-                  // `margin-bottom: 8px` between the chip and the field.
-                  padding: const EdgeInsets.only(bottom: 8),
-                  // Re-mounts (and so replays the slide-in) when the chip KIND
-                  // changes — the PWA recreates the element on each
-                  // setQuoteReply/startEditMessage.
-                  child: _ChipSlideIn(
-                    key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
-                    // Keyed so the autocomplete dropdown can clear the chip
-                    // height (`--ac-offset`, 04-F2). Measures the chip alone
-                    // (the +8 gap is added in the offset, matching the PWA's
-                    // `previewH + 8`).
-                    child: KeyedSubtree(key: _chipKey, child: chip),
-                  ),
-                ),
+          child: block ?? const SizedBox(height: 0, width: double.infinity),
         ),
         _input(context, inputEnabled),
       ],
+    );
+  }
+
+  /// The quote/edit preview chip with its 8px bottom gap and slide-in, or null
+  /// when neither is pending. Rendered in-flow above the field normally, or
+  /// inside the popout overlay while the field floats (see [_inputWithChips]).
+  Widget? _chipBlock() {
+    final chip = _pendingEdit != null
+        ? _EditPreviewChip(
+            text: _quotePreviewText(_pendingEdit!.content),
+            onClose: _cancelEdit,
+          )
+        : (_pendingQuote != null
+            ? _QuotePreviewChip(
+                author: _pendingQuote!.author,
+                // Snippet from the FULL original content, not the stripped
+                // send text (messages.js:1845-1846).
+                text: _quotePreviewText(_pendingQuote!.fullText),
+                onClose: _clearQuote,
+              )
+            : null);
+    if (chip == null) return null;
+    return Padding(
+      // `margin-bottom: 8px` between the chip and the field.
+      padding: const EdgeInsets.only(bottom: 8),
+      // Re-mounts (and so replays the slide-in) when the chip KIND
+      // changes — the PWA recreates the element on each
+      // setQuoteReply/startEditMessage.
+      child: _ChipSlideIn(
+        key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
+        // Keyed so the autocomplete dropdown can clear the chip
+        // height (`--ac-offset`, 04-F2). Measures the chip alone
+        // (the +8 gap is added in the offset, matching the PWA's
+        // `previewH + 8`).
+        child: KeyedSubtree(key: _chipKey, child: chip),
+      ),
     );
   }
 
@@ -1599,9 +1633,14 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// The floating `.composer-popout .message-input` box: anchored to the in-flow
   /// slot's bottom-left, it grows upward and overlays the messages. Same width as
-  /// the input (`_anchorWidth`), capped at `min(40vh,360)`.
+  /// the input (`_anchorWidth`), capped at `min(40vh,360)`. A pending quote/edit
+  /// chip rides ABOVE the grown field here — the PWA repositions it by the
+  /// popout overhang at z-index 20 over the field's z-index 12
+  /// (styles-chat.css:1749-1752) so the chip (and its cancel ✕) is never
+  /// occluded by a tall draft.
   Widget _popoutOverlay(BuildContext context, Widget field) {
     if (!_popout) return const SizedBox.shrink();
+    final chipBlock = _chipBlock();
     return CompositedTransformFollower(
       link: _acAnchor,
       targetAnchor: Alignment.bottomLeft,
@@ -1609,10 +1648,22 @@ class _ComposerState extends ConsumerState<Composer> {
       showWhenUnlinked: false,
       child: Align(
         alignment: Alignment.bottomLeft,
-        child: SizedBox(
-          key: _popoutFieldKey,
-          width: _anchorWidth(context),
-          child: field,
+        child: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(
+            width: _anchorWidth(context),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (chipBlock != null) chipBlock,
+                // [_popoutFieldKey] wraps ONLY the field: `--ac-offset`'s
+                // overhang term measures the field's growth past the base row
+                // (the chip carries its own `+ chipH + 8` term).
+                SizedBox(key: _popoutFieldKey, child: field),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -1901,7 +1952,7 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  void _toggleTranslateDropdown() {
+  Future<void> _toggleTranslateDropdown() async {
     if (_translatePortal.isShowing) {
       _translatePortal.hide();
       return;
@@ -1909,7 +1960,16 @@ class _ComposerState extends ConsumerState<Composer> {
     if (_controller.text.trim().isEmpty || _translating) return;
     _emojiPortal.hide();
     _gifPortal.hide();
+    // The PWA lazily loads `nym_translate_favorites` from localStorage on
+    // first dropdown render (`_getTranslateFavorites`, translate.js:93-99) —
+    // resolve prefs and RE-read the favorites on every open so a fresh
+    // session (no emoji/GIF picker opened yet) shows the saved stars, and
+    // favorites toggled elsewhere (bot chat / relay settings sync) aren't
+    // stale here.
+    final prefs = await _ensurePrefs();
+    if (!mounted) return;
     setState(() {
+      _translateFavorites = _loadTranslateFavorites(prefs);
       _translateQuery = '';
       // Snapshot the favorites-pinned order at open (re-pins only on reopen).
       _translateLangOrder =

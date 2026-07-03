@@ -53,10 +53,26 @@ class NymbotService {
   /// (logged out / tests), mirroring the PWA's `if (this.pubkey)` gate.
   Future<Map<String, dynamic>?> Function()? _apiWsAuthBuilder;
 
+  /// The identity the wired [_apiWsAuthBuilder] signs as — the socket, once
+  /// AUTHed, stays pinned to it server-side (`context._wsAuthedPubkey`,
+  /// bot.js:1238-1242), so every ledger frame acts on THAT account.
+  String? _apiWsAuthPubkey;
+
+  /// [authPubkey] is the pubkey [builder] signs as. When the bound identity
+  /// changes (in-session nsec login / sign-out → new identity), the still-open
+  /// socket is AUTHed as the PREVIOUS pubkey, so it is torn down here and the
+  /// next request re-connects + re-AUTHs as the new identity. The PWA gets
+  /// this for free: an identity switch reloads the page, dropping `_apiSock`.
   void setApiWsAuthBuilder(
-    Future<Map<String, dynamic>?> Function()? builder,
-  ) {
+    Future<Map<String, dynamic>?> Function()? builder, {
+    String? authPubkey,
+  }) {
     _apiWsAuthBuilder = builder;
+    if (authPubkey != _apiWsAuthPubkey) {
+      _apiWsAuthPubkey = authPubkey;
+      _socket?.dispose();
+      _socket = null;
+    }
   }
 
   ApiSocket? _socket;
@@ -64,10 +80,14 @@ class NymbotService {
   /// The multiplexed `wss://<host>/api` socket (`_apiWsUrl`, shop.js:5-8) —
   /// the SAME endpoint the storage sync rides; the worker routes by action.
   /// Constructed with the LONGEST per-action wait (`pm`'s 180s); shorter
-  /// actions bound their wait with an outer timeout in [_botRequest].
+  /// actions bound their wait with an outer timeout in [_botRequest]. Every
+  /// frame is tallied into the shared network-stats sink, the PWA's
+  /// `_trackApiData` on each auth/REQ/RES frame (shop.js:60-70, 147).
   ApiSocket _ensureSocket() => _socket ??= ApiSocket(
         url: Uri.parse('wss://${ApiConfig.apiHost}/api'),
         requestTimeout: _pmTimeout,
+        onTraffic: (String action, {int sent = 0, int recv = 0}) =>
+            ApiClient.apiStatsSink?.recordApiData(action, sent: sent, recv: recv),
       );
 
   /// One private-chat/ledger action: WS-first over the authenticated socket
@@ -421,7 +441,7 @@ class NymbotService {
           headers: headers);
       Object? data;
       try {
-        data = jsonDecode(utf8.decode(res.bodyBytes));
+        data = jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
       } catch (_) {
         data = null;
       }
@@ -513,14 +533,17 @@ class NymbotService {
       },
       body: jsonEncode(body),
     );
+    // `allowMalformed` mirrors TextDecoder / `response.json()` (U+FFFD
+    // replacement, never throwing) like `ApiClient._utf8Body`.
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw NymbotException(
         'Nymbot request failed (${res.statusCode})',
         statusCode: res.statusCode,
-        body: utf8.decode(res.bodyBytes),
+        body: utf8.decode(res.bodyBytes, allowMalformed: true),
       );
     }
-    final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+    final decoded =
+        jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
     if (decoded is! Map<String, dynamic>) {
       throw const NymbotException('Unexpected Nymbot response shape');
     }
@@ -546,7 +569,8 @@ class NymbotService {
         .timeout(timeout);
     Map<String, dynamic> data;
     try {
-      final decoded = jsonDecode(utf8.decode(res.bodyBytes));
+      final decoded =
+          jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
       data = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
     } catch (_) {
       data = <String, dynamic>{};

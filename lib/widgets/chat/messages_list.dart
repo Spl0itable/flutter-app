@@ -209,13 +209,20 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     final mentionToken = '@${_baseNym(app.selfNym)}';
 
     // Merge messages + polls into one chronological list (oldest first), each
-    // message carrying its resolved reactions + mention flag.
+    // message carrying its resolved reactions + mention flag. The fast probe
+    // mirrors the PWA gates: `.mentioned` never applies to self or PM/group
+    // rows (else-if class chain, messages.js:686-692), and `isMentioned`
+    // bails while the self nym is unknown (messages.js:400) — a bare '@'
+    // token at boot must not flag every '@'-containing message.
     final merged = <_ListEntry>[
       for (final m in messages)
         _MsgEntry(MessageGroupEntry(
           message: m,
           reactions: reactions[m.id] ?? const [],
-          mentioned: !m.isOwn && m.content.contains(mentionToken),
+          mentioned: mentionToken.length > 1 &&
+              !m.isOwn &&
+              !m.isPM &&
+              m.content.contains(mentionToken),
         )),
       for (final p in polls) _PollEntry(p),
     ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));

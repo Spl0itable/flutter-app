@@ -728,6 +728,14 @@ class NostrService {
       unawaited(_handleGiftWrap(event));
       return;
     }
+    // Advance the self kind-0 watermark on our OWN inbound profiles
+    // (nostr-core.js:625-627) so the next [publishProfile] strictly outranks
+    // them — e.g. a kind-0 published from another device with clock skew.
+    if (event.kind == EventKind.profile &&
+        event.pubkey == identity.pubkey &&
+        event.createdAt > _lastKind0Ts) {
+      _lastKind0Ts = event.createdAt;
+    }
     _handlers?.onEvent?.call(event);
   }
 
@@ -907,7 +915,9 @@ class NostrService {
     final sub = pool.subscribe([
       NostrFilter(kinds: [EventKind.profile], authors: pubkeys, limit: pubkeys.length),
     ]);
-    final s = sub.events.listen((e) => _handlers?.onEvent?.call(e));
+    // Route through [_routeInbound] so a fetched SELF kind-0 also advances the
+    // profile-save watermark (nostr-core.js:625-627).
+    final s = sub.events.listen(_routeInbound);
     sub.eose.then((_) {
       s.cancel();
       sub.close();
@@ -1097,16 +1107,29 @@ class NostrService {
 
   Subscription? _vouchSub;
 
+  /// created_at of the newest self kind-0 we've published OR received
+  /// (nostr-core.js `_lastKind0Ts`, advanced at 148 on publish and 625-627 on
+  /// inbound): the monotonic floor for [publishProfile] timestamps.
+  int _lastKind0Ts = 0;
+
   /// Publishes a kind-0 profile metadata event with [content] (the JSON-encoded
   /// profile object). Returns the signed event. (docs/specs/03 §Appendix A)
+  ///
+  /// The timestamp is the PWA's jittered-with-monotonic-floor value
+  /// (nostr-core.js:145-148): `max(randomNow(), _lastKind0Ts + 1)`, so every
+  /// saved kind-0 is strictly newer than the last one published or received
+  /// for self — a fast double-save can't tie on created_at (relays keep the
+  /// lexically-lower id on a tie, silently dropping the second edit), and a
+  /// slightly-future self kind-0 from another device can't out-rank this one.
   Future<NostrEvent?> publishProfile(String content) async {
     final sig = signer;
     if (sig == null) return null;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final createdAt = max(giftwrap.randomNow(), _lastKind0Ts + 1);
+    _lastKind0Ts = createdAt;
     final signed = await sig.sign(
       UnsignedEvent(
         pubkey: identity.pubkey,
-        createdAt: nowSec,
+        createdAt: createdAt,
         kind: EventKind.profile,
         tags: const [],
         content: content,

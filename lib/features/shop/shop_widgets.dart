@@ -549,6 +549,7 @@ class ShopAuraBubble extends StatelessWidget {
     required this.bubble,
     this.padding,
     this.defaultFill = true,
+    this.styleActive = false,
   });
 
   final List<CosmeticAura> auras;
@@ -566,6 +567,14 @@ class ShopAuraBubble extends StatelessWidget {
   /// active-items preview wrapping a styled content bubble).
   final bool defaultFill;
 
+  /// True when the previewed message carries an active `style-…` message
+  /// style. The PWA gates several aura layers on `:not([class*="style-"])`:
+  /// gold's bubble wash (styles-features.css:3700), frost's flat fill (:1165),
+  /// the cosmic bubble starfield (:1192) and the hologram iridescent
+  /// fill/sheen (:1203-1211) — a styled bubble keeps only rings/glows.
+  /// Item-card demos never carry a style, so the default is false.
+  final bool styleActive;
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -575,20 +584,25 @@ class ShopAuraBubble extends StatelessWidget {
     // Fill: the bubble paints the aura gradient only when the PWA bubble has
     // one (gold); otherwise the aura's flat wash (frost) or the layout default.
     // IRC paints the 135° row gradient / flat wash with no default fill.
+    // An active message style drops gold's bubble wash (`body.chat-bubbles
+    // .message:not([class*="style-"]).cosmetic-aura-gold .message-content`,
+    // styles-features.css:3700) and frost's flat fill (`:not([class*=
+    // "style-"]).cosmetic-frost`, :1165 — BOTH layouts); the IRC gold ROW
+    // gradient (:1099) carries no such gate.
     List<Color>? fillGradient;
     Color? fillColor;
     if (bubble) {
-      if (last.bubblePaintsGradient) {
+      if (last.bubblePaintsGradient && !styleActive) {
         fillGradient = last.bubbleFillGradient;
       } else {
-        fillColor = last.background ??
+        fillColor = (styleActive ? null : last.background) ??
             (defaultFill
                 ? (c.isLight ? const Color(0x1A000000) : const Color(0x24FFFFFF))
                 : null);
       }
     } else {
       fillGradient = last.gradient;
-      fillColor = last.background;
+      fillColor = styleActive ? null : last.background;
     }
 
     // Every aura's outer glow (`0 0 {blur}px {color}`), at the layout's
@@ -611,9 +625,14 @@ class ShopAuraBubble extends StatelessWidget {
             .firstWhere((b) => b != null, orElse: () => null);
 
     // Watermark (first aura carrying one) + overlay (first prism/holo/ring aura).
+    // The cosmic BUBBLE starfield only tiles when no message style is active
+    // (`body.chat-bubbles .message:not([class*="style-"]).cosmetic-aura-cosmic
+    // .message-content`, styles-features.css:1192-1195); frost's EDGE
+    // snowflakes (:1149-1161) and the ungated IRC row starfield (:1179) stay.
     CosmeticAura? watermarkAura;
     for (final a in auras) {
-      if (a.watermark != null) {
+      if (a.watermark != null &&
+          (a.edgeWatermark || !bubble || !styleActive)) {
         watermarkAura = a;
         break;
       }
@@ -685,6 +704,10 @@ class ShopAuraBubble extends StatelessWidget {
                           aura: overlayAura,
                           radius: radius,
                           bubble: bubble,
+                          // Drops the hologram iridescent fill + sheen when a
+                          // `style-…` class is active (styles-features.css:
+                          // 1203-1211) — the ring/glow stay.
+                          styleActive: styleActive,
                         ),
                       ),
                     ),

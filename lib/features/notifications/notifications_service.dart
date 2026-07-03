@@ -279,6 +279,8 @@ class NotificationsService {
     final settings = _ref.read(settingsProvider);
     if (!settings.notificationsEnabled) return;
     if (context.isBlocked) return;
+    // Digest bodies ("10 recent messages:") never alert (notifications.js:13).
+    if (body.contains('10 recent messages:')) return;
     if (context.isBot) return;
     // notifyFriendsOnly: skip non-friends (notifications.js line 12).
     if (notifyFriendsOnly &&

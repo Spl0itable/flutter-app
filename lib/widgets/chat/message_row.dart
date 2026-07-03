@@ -360,11 +360,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// The bare `contains` missed real mentions (e.g. an iOS-auto-capitalised
   /// "@Nym" against the lowercase self nym), leaving the highlight off.
   ///
-  /// Self and PM rows never highlight locally — the PWA class chain is an
-  /// else-if (`self` / `pm` win over `mentioned`, messages.js:684-693).
+  /// Self and PM/group rows never highlight — the PWA class chain is an
+  /// else-if (`self` / `pm` win over `mentioned`, messages.js:686-692), so a
+  /// PM or group message never gets the `.mentioned` treatment. The guard runs
+  /// BEFORE the caller's fast flag so it can't be bypassed.
   bool _isMentionedRow() {
-    if (widget.mentioned) return true;
     if (message.isOwn || message.isPM) return false;
+    if (widget.mentioned) return true;
     final cleanNym = stripPubkeySuffix(ref.read(appStateProvider).selfNym);
     if (cleanNym.isEmpty) return false;
     final selfPubkey = ref.read(nostrControllerProvider).identity?.pubkey;
@@ -490,6 +492,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final style = _authorStyle(c, self: self, size: size);
     final bracketColor = style.color;
     final suffix = getPubkeySuffix(message.pubkey);
+    // `.nym-suffix` base weight is 100 (styles-chat.css:706-709), but a
+    // Genesis holder's suffix is raised to 400 (`.message-author
+    // .has-genesis-flair .nym-suffix { font-weight: 400 }`,
+    // styles-features.css:1224-1227) alongside the 700 nym bolding.
+    final suffixWeight =
+        hasGenesisFlair(_cosmetics) ? FontWeight.w400 : FontWeight.w100;
     // `message.author` carries the stored nym which already includes its
     // `#suffix` (User.nym / the `anon#xxxx` fallback). Strip it so the canonical
     // suffix below isn't appended twice (PWA renders the base nym + a separate
@@ -510,7 +518,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   style: style.copyWith(
                     color: style.color?.withValues(alpha: 0.7),
                     fontSize: size * 0.9,
-                    fontWeight: FontWeight.w100,
+                    fontWeight: suffixWeight,
                   ),
                 ),
             ]),
@@ -1556,7 +1564,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // replacement fill (styles-features.css:3675-3686, the gradient clips to the
     // text over a `linear-gradient(transparent, transparent)` border-box layer).
     // The frost flat wash applies only when no message style is active
-    // (`.message:not([class*="style-"]).cosmetic-frost`, :1163-1166).
+    // (`.message:not([class*="style-"]).cosmetic-frost`, :1163-1166) — and
+    // only on OTHERS' bubbles: the frost rule's specificity (0,4,0, no
+    // !important) LOSES to `body.chat-bubbles .message.self .message-content`
+    // (0,4,1, styles-features.css:3642-3647), so a SELF frost bubble keeps the
+    // primary self fill in both themes. (Gold's wash and hologram's fill carry
+    // !important and do apply to self — those flow through [bubbleGradient] /
+    // the overlay painter, not here.)
     //
     // SELF + fire/ice: `body.chat-bubbles .message.self.style-fire/.style-ice
     // .message-content { background: rgb(from var(--primary) r g b / 0.25)
@@ -1571,7 +1585,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final bubbleColor = selfFireIce
         ? c.primaryA(0.25)
         : deco?.contentBackgroundFor(bubble: true) ??
-            (_styleClassActive ? null : lastAura?.background) ??
+            (_styleClassActive || self ? null : lastAura?.background) ??
             (self
                 ? c.primaryA(c.isLight ? 0.20 : 0.25)
                 : (c.isLight
@@ -1683,15 +1697,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           mentionRing:
               mentioned ? c.secondaryA(c.isLight ? 0.2 : 0.25) : null,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            // Default bubble padding 8px 12px 6px (styles-features.css:3607).
+            // A style's own `.message-content` padding OUTRANKS it — satoshi's
+            // `padding: 10px 15px` (specificity 0,3,0, styles-features.css:
+            // 548-549) beats the chat-bubbles rule (0,2,1), so a satoshi
+            // bubble is padded 10/15 in BOTH layouts.
+            padding: deco?.contentPadding ??
+                const EdgeInsets.fromLTRB(12, 8, 12, 6),
             // The 180px floor above lands on the DECORATED box, but the loose
             // Stack inside [_decorateBubble] would let the interior (and the
             // time's right-edge pin) collapse to the body's width. Re-assert
-            // the floor on the interior — 180 minus the 12+12 horizontal
-            // padding — so the Positioned time hugs the true right padding
-            // edge of a min-width bubble, exactly like `margin-left: auto`.
+            // the floor on the interior — 180 minus the horizontal padding —
+            // so the Positioned time hugs the true right padding edge of a
+            // min-width bubble, exactly like `margin-left: auto`.
             child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 180 - 24),
+              constraints: BoxConstraints(
+                  minWidth: 180 - (deco?.contentPadding?.horizontal ?? 24)),
               child: innerContent,
             ),
           ),
@@ -3903,8 +3924,14 @@ List<List<MessageGroupEntry>> buildMessageGroups(
     final entry = MessageGroupEntry(
       message: m,
       reactions: reactions[m.id] ?? const [],
-      mentioned:
-          mentionToken.isNotEmpty && !m.isOwn && m.content.contains(mentionToken),
+      // PWA `.mentioned` never applies to self or PM/group rows (else-if class
+      // chain, messages.js:686-692), and `isMentioned` bails while the self nym
+      // is unknown (`if (!content || !this.nym) return false`, messages.js:400)
+      // — a bare '@' token (empty nym at boot) must not flag every '@'.
+      mentioned: mentionToken.length > 1 &&
+          !m.isOwn &&
+          !m.isPM &&
+          m.content.contains(mentionToken),
     );
     if (useBubbles &&
         groups.isNotEmpty &&

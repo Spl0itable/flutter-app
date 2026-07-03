@@ -169,9 +169,15 @@ class IdentityVault {
 
     final check = _kv.getString(StorageKeys.vaultCheck);
     if (check != null && check.startsWith('enc:v1:')) {
-      final v = await _decrypt(key, check); // throws on wrong key
-      if (v != _checkPlaintext) {
-        throw StateError('Wrong password/PIN.');
+      // The PWA wraps any check-token failure (bad decrypt OR a mismatched
+      // plaintext) into one user-facing message (key-vault.js:262-274).
+      try {
+        final v = await _decrypt(key, check); // throws on wrong key
+        if (v != _checkPlaintext) {
+          throw StateError('Vault verification failed.');
+        }
+      } catch (_) {
+        throw StateError('Wrong password/PIN or unrecognised passkey.');
       }
     }
     final out = <String, String>{};

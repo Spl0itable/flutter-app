@@ -122,6 +122,14 @@ class SettingsController extends StateNotifier<Settings> {
 
   void setWallpaperType(String type) {
     _kv.setString(StorageKeys.wallpaperType, type);
+    // Selecting a non-custom wallpaper clears the stored custom URL — the PWA's
+    // `saveWallpaper(type)` does `localStorage.removeItem('nym_wallpaper_custom_url')`
+    // for every preset type (users.js:901-909), so the stale URL neither
+    // lingers on-device nor keeps riding the outbound settings sync
+    // (`wallpaperCustomUrl`, settings.js:124 syncs '' once cleared).
+    if (type != 'custom') {
+      _kv.remove(StorageKeys.wallpaperCustomUrl);
+    }
     state = state.copyWith(wallpaperType: type);
     _syncedChanged();
   }

@@ -1062,6 +1062,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     return KeyEventResult.ignored;
   }
 
+  /// Insert text at the current selection (mirrors PWA `insertEmoji`/`insertGif`
+  /// which splice at the caret), keeping focus in the input — both call
+  /// `input.focus()` after the splice (reactions.js:1236-1240 /
+  /// ui-context.js:2180-2186).
   void _insertAtCaret(String insert) {
     final text = _controller.text;
     final sel = _controller.selection;
@@ -1072,7 +1076,26 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
       text: next,
       selection: TextSelection.collapsed(offset: at + insert.length),
     );
+    _focus.requestFocus();
   }
+
+  /// Hides an emoji/GIF picker WITHOUT a selection (✕ / tap-out / button
+  /// toggle) and, on desktop widths, returns focus to the message input —
+  /// `closeEnhancedEmojiModal`/`closeGifPicker` → `_focusMessageInput`
+  /// (reactions.js:908 / ui-context.js:2194), which bails at ≤768px
+  /// (channels.js:1383-1393) so a phone keyboard isn't yanked open.
+  void _hidePickerAndRefocus(OverlayPortalController portal) {
+    portal.hide();
+    if (!mounted) return;
+    if (MediaQuery.of(context).size.width <= NymDimens.mobileBreakpoint) {
+      return;
+    }
+    _focus.requestFocus();
+  }
+
+  void _hideEmojiPicker() => _hidePickerAndRefocus(_emojiPortal);
+
+  void _hideGifPicker() => _hidePickerAndRefocus(_gifPortal);
 
   Future<void> _onEmojiSelected(String emoji) async {
     _insertAtCaret(emoji);
@@ -1091,7 +1114,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
 
   Future<void> _toggleEmojiPicker() async {
     if (_emojiPortal.isShowing) {
-      _emojiPortal.hide();
+      _hideEmojiPicker();
       return;
     }
     _gifPortal.hide();
@@ -1103,7 +1126,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
 
   Future<void> _toggleGifPicker() async {
     if (_gifPortal.isShowing) {
-      _gifPortal.hide();
+      _hideGifPicker();
       return;
     }
     _emojiPortal.hide();
@@ -1461,9 +1484,12 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                         border:
                             Border(bottom: BorderSide(color: c.glassBorder)),
                       ),
+                      // NOT autofocused: the PWA never focuses the dropdown
+                      // search on open (only the Select-Your-Language MODAL
+                      // focuses its search, translate.js:190) — grabbing focus
+                      // here would yank the IME away from the message input.
                       child: TextField(
                         controller: _translateSearchController,
-                        autofocus: true,
                         onChanged: (v) => setState(() => _translateQuery = v),
                         style: TextStyle(color: c.text, fontSize: 13),
                         cursorColor: c.isLight ? Colors.black : Colors.white,
@@ -1540,14 +1566,27 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     try {
       final res = await TranslateService().translate(text, targetLang);
       if (!mounted) return;
-      final out = res.translatedText.trim();
-      if (out.isNotEmpty) {
-        _controller.text = out;
-        _controller.selection =
-            TextSelection.collapsed(offset: _controller.text.length);
+      final out = res.translatedText;
+      // Don't clobber the input if the upstream returned nothing or echoed
+      // the original (detected language already matches the target) —
+      // `translateInputText` (translate.js:479-483).
+      if (out.trim().isEmpty || out.trim() == text) {
+        _systemLine(
+            'Nothing to translate (text may already be in the target language).');
+        return;
       }
-    } catch (_) {
-      if (mounted) _systemLine('Translation failed.');
+      _controller.text = out;
+      _controller.selection =
+          TextSelection.collapsed(offset: _controller.text.length);
+    } catch (e) {
+      // `'Translation failed: ' + (err.message || 'Unknown error')`
+      // (translate.js:488) — [TranslateException.message] already carries the
+      // "Translation failed: …" prefix.
+      if (mounted) {
+        _systemLine(e is TranslateException
+            ? e.message
+            : 'Translation failed: Unknown error');
+      }
     } finally {
       if (mounted) setState(() => _translating = false);
     }
@@ -1788,11 +1827,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         controller: _emojiPortal,
         overlayChildBuilder: (context) => _popover(
           link: _emojiAnchor,
-          onDismiss: _emojiPortal.hide,
+          onDismiss: _hideEmojiPicker,
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
-            onClose: _emojiPortal.hide,
+            onClose: _hideEmojiPicker,
           ),
         ),
         child: _BotIconBtn(
@@ -1816,11 +1855,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           if (prefs == null) return const SizedBox.shrink();
           return _popover(
             link: _gifAnchor,
-            onDismiss: _gifPortal.hide,
+            onDismiss: _hideGifPicker,
             child: GifPicker(
               favoritesStore: FavoriteGifsStore(prefs),
               onSelect: _onGifSelected,
-              onClose: _gifPortal.hide,
+              onClose: _hideGifPicker,
             ),
           );
         },

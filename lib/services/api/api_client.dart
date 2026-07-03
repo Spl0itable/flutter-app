@@ -1146,7 +1146,15 @@ class ApiClient {
     );
     _trackApiData(action,
         sent: _bodyLen(payload), recv: _bodyLen(res.bodyBytes));
-    if (res.statusCode < 200 || res.statusCode >= 300) {
+    // The worker streams `application/x-ndjson` for these actions; the PWA
+    // rejects even a 2xx whose Content-Type isn't NDJSON, surfacing the JSON
+    // `{error}` body (shop.js:232-237: `!resp.ok || ct.indexOf(
+    // 'application/x-ndjson') < 0`). Without this gate a 200 JSON/HTML error
+    // body would be line-split into bogus "items" instead of throwing.
+    final contentType = res.headers['content-type'] ?? '';
+    if (res.statusCode < 200 ||
+        res.statusCode >= 300 ||
+        !contentType.contains('application/x-ndjson')) {
       final decoded = _decodeJson(res);
       throw ApiException(
         (body['action'] ?? 'storage').toString(),

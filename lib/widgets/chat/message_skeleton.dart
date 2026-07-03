@@ -362,10 +362,12 @@ class _MessageSkeletonState extends State<MessageSkeleton>
         ),
     ];
     return ConstrainedBox(
-      // The real bubble constraints: `.message-content { min-width: 180px;
-      // max-width: 85% }` (styles-features.css:3602-3616).
+      // The live bubble's 180px floor is deliberately ZEROED for skeletons
+      // (`body.chat-bubbles .msg-skeleton .message-content { min-width: 0 }`,
+      // styles-chat.css:2040), so narrow placeholder bubbles shrink-wrap to
+      // their line and the shimmer groups keep their varied widths. Only the
+      // `max-width: 85%` cap applies (styles-features.css:3602-3616).
       constraints: BoxConstraints(
-        minWidth: 180,
         maxWidth: MediaQuery.sizeOf(context).width * 0.85,
       ),
       child: Container(
