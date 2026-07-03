@@ -1055,7 +1055,7 @@ class _AddMembersDialogState extends ConsumerState<_AddMembersDialog> {
       setState(() {});
       return;
     }
-    final nym = stripPubkeySuffix(users[pk]?.nym ?? 'anon');
+    final nym = stripPubkeySuffix(users[pk]?.nym ?? 'nym');
     setState(() {
       _picked.add((pubkey: pk, nym: nym));
       _controller.clear();

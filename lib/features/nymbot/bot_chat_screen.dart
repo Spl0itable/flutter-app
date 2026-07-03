@@ -137,7 +137,16 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
                 .setModelDirect(null),
             onTapPro: () => _showModelPicker(context),
           ),
-          Expanded(child: _buildMessagesArea(c)),
+          Expanded(
+            // Tap on the messages region drops focus (dismisses the keyboard)
+            // when no interactive child consumes it — same wiring as the
+            // canonical ChatPane; the browser gives the PWA this for free.
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: () => FocusScope.of(context).unfocus(),
+              child: _buildMessagesArea(c),
+            ),
+          ),
           // The shared `.typing-indicator` strip pinned above the composer —
           // "Nymbot is thinking" with the 18px avatar + bouncing dots
           // (pms.js `_setBotTyping` → `_renderTypingInto`).
@@ -394,6 +403,9 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
             child: ListView.builder(
               controller: _scroll,
               reverse: true,
+              // Drag on the list dismisses the keyboard, like the canonical
+              // MessagesList's on-drag unfocus.
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               // Scroller padding (`styles-shell.css:941`).
               padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
               itemCount: units.length,

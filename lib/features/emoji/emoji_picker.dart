@@ -60,7 +60,8 @@ class EmojiPicker extends ConsumerStatefulWidget {
   ConsumerState<EmojiPicker> createState() => _EmojiPickerState();
 }
 
-class _EmojiPickerState extends ConsumerState<EmojiPicker> {
+class _EmojiPickerState extends ConsumerState<EmojiPicker>
+    with WidgetsBindingObserver {
   final _searchController = TextEditingController();
   String _query = '';
 
@@ -77,7 +78,16 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
   @override
   void initState() {
     super.initState();
+    // The panel lifts above the keyboard by reading View.viewInsets (see
+    // build); that read establishes no rebuild dependency, so observe metrics
+    // changes to repaint as the keyboard animates in/out.
+    WidgetsBinding.instance.addObserver(this);
     _loadFavorites();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadFavorites() async {
@@ -113,6 +123,7 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
     super.dispose();
   }
@@ -265,11 +276,15 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
     }
 
     // Keyboard-aware, like the PWA riding the visual viewport: overlay hosts
-    // anchor the panel to the SCREEN bottom (their own MediaQuery has the
-    // keyboard inset consumed by the resizing Scaffold), so the panel itself
-    // pads up by the ambient view inset and shrinks to the space left above
-    // the keyboard — keeping the search field + results visible while typing.
-    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    // anchor the panel to the SCREEN bottom, so the panel itself pads up by
+    // the keyboard height and shrinks to the space left above it — keeping
+    // the search field + results visible while typing. We read the inset from
+    // the raw FlutterView rather than MediaQuery: inside an OverlayPortal that
+    // sits under a resizing Scaffold, MediaQuery.viewInsets is already
+    // consumed (reports 0), so the panel would never lift. View.viewInsets is
+    // in physical px and is never consumed by an ancestor.
+    final view = View.of(context);
+    final keyboardInset = view.viewInsets.bottom / view.devicePixelRatio;
     final maxPanelHeight = keyboardInset > 0
         // Screen minus keyboard, status bar, and the 60px bottom-bar offset
         // the phone popover anchors at (+8 breathing room).

@@ -19,6 +19,23 @@ class EphemeralKey {
     final sk = generatePrivateKey();
     return EphemeralKey(sk: sk, pk: getPublicKeyHex(sk));
   }
+
+  /// Serializes to `{sk: <hex>, pk}` for cross-device sync, mirroring the PWA's
+  /// `{ sk: this._skToHex(k.sk), pk: k.pk }` (groups.js:196-197).
+  Map<String, dynamic> toJson() => {'sk': bytesToHex(sk), 'pk': pk};
+
+  /// Rebuilds a key from its `{sk: <hex>, pk}` sync form (`_hexToSk`,
+  /// groups.js:209-210). Returns null when the `sk` isn't a valid hex string.
+  static EphemeralKey? tryFromJson(Map<String, dynamic> j) {
+    final skHex = j['sk'];
+    final pk = j['pk'];
+    if (skHex is! String || pk is! String) return null;
+    try {
+      return EphemeralKey(sk: hexToBytes(skHex), pk: pk);
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 /// Per-group rotating ephemeral key state. Mirrors the PWA's
@@ -76,6 +93,91 @@ class GroupEphemeralKeys {
         if (selfCurrent != null) selfCurrent!.sk,
         for (final k in selfPrev) k.sk,
       ];
+
+  /// Serializes this entry for the `nymchat-keys-<groupId>` cross-device sync
+  /// category, byte-matching the PWA's `_serializeEphemeralKeys` (groups.js:191):
+  /// `{ members, memberKeyTs?, self?: { current, prev[] } }`. `memberKeyTs` is
+  /// only emitted when non-empty (the PWA gates it on `ek._memberKeyTs`).
+  Map<String, dynamic> toSyncJson() {
+    final entry = <String, dynamic>{'members': Map<String, String>.from(members)};
+    if (memberKeyTs.isNotEmpty) {
+      entry['memberKeyTs'] = Map<String, int>.from(memberKeyTs);
+    }
+    if (selfCurrent != null) {
+      entry['self'] = {
+        'current': selfCurrent!.toJson(),
+        'prev': [for (final k in selfPrev) k.toJson()],
+      };
+    }
+    return entry;
+  }
+
+  /// Merges a synced ephemeral-key [entry] (as produced by [toSyncJson] on
+  /// another device) into this state, mirroring the PWA's `_mergeEphemeralKeys`
+  /// (groups.js:221): member keys keep whichever device saw the more recent
+  /// advertisement (by `memberKeyTs`); self keys ACCUMULATE across devices
+  /// (deduped by pubkey, prev window capped at [kEphemeralPrevKeysMax]) so either
+  /// device can decrypt a gift wrap addressed to any of our ephemeral pubkeys.
+  /// The local current key is never replaced — a synced current is folded into
+  /// prev — so on a fresh device (no local self) the synced current becomes the
+  /// current and immediately unwraps live/backfilled group wraps.
+  void mergeSyncJson(Map<String, dynamic> entry) {
+    final syncedMembers = entry['members'];
+    final syncedTs = entry['memberKeyTs'];
+    if (syncedMembers is Map) {
+      syncedMembers.forEach((realPk, ephPk) {
+        if (realPk is! String || ephPk is! String) return;
+        final localTs = memberKeyTs[realPk] ?? 0;
+        final remoteTs = (syncedTs is Map && syncedTs[realPk] is num)
+            ? (syncedTs[realPk] as num).toInt()
+            : 0;
+        if (!members.containsKey(realPk) || remoteTs > localTs) {
+          members[realPk] = ephPk;
+          memberKeyTs[realPk] = remoteTs;
+        }
+      });
+    }
+
+    final self = entry['self'];
+    if (self is! Map) return;
+    final current = self['current'];
+    final syncedCurrent = current is Map
+        ? EphemeralKey.tryFromJson(current.cast<String, dynamic>())
+        : null;
+    final syncedPrev = <EphemeralKey>[];
+    final prev = self['prev'];
+    if (prev is List) {
+      for (final k in prev) {
+        if (k is! Map) continue;
+        final key = EphemeralKey.tryFromJson(k.cast<String, dynamic>());
+        if (key != null) syncedPrev.add(key);
+      }
+    }
+
+    if (selfCurrent == null) {
+      // No local self — adopt the synced keys wholesale (PWA `local.self =
+      // synced.self`). The synced current becomes our current so it decrypts.
+      selfCurrent = syncedCurrent;
+      selfPrev
+        ..clear()
+        ..addAll(syncedPrev);
+    } else {
+      final known = <String>{selfCurrent!.pk, for (final k in selfPrev) k.pk};
+      if (syncedCurrent != null && !known.contains(syncedCurrent.pk)) {
+        selfPrev.add(syncedCurrent);
+        known.add(syncedCurrent.pk);
+      }
+      for (final k in syncedPrev) {
+        if (!known.contains(k.pk)) {
+          selfPrev.add(k);
+          known.add(k.pk);
+        }
+      }
+    }
+    if (selfPrev.length > kEphemeralPrevKeysMax) {
+      selfPrev.removeRange(kEphemeralPrevKeysMax, selfPrev.length);
+    }
+  }
 }
 
 /// Pure, socket-free group logic: rumor construction, role checks, control

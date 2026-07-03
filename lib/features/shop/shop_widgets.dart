@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
 import 'cosmetics.dart'
     show
         CosmeticAura,
@@ -640,7 +641,14 @@ class ShopAuraBubble extends StatelessWidget {
     final inner = padding == null
         ? child
         : Padding(padding: padding!, child: child);
+    // IRC row-level auras (`body:not(.chat-bubbles) .message.cosmetic-X` —
+    // gold/neon/phoenix/cosmic, the ones carrying a border-left) decorate the
+    // BLOCK message row, so the wash/bar/glow spans the available width; the
+    // content-level auras (rainbow/frost/hologram style the inline-block
+    // `.message-content` in both layouts) hug their child.
+    final expand = !bubble && auras.any((a) => a.borderAccent != null);
     return Container(
+      width: expand ? double.infinity : null,
       decoration: BoxDecoration(
         color: fillGradient == null ? fillColor : null,
         gradient: fillGradient != null
@@ -716,12 +724,26 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
     if (cosmeticId == 'cosmetic-redacted') {
       return Container(
         constraints: const BoxConstraints(minWidth: 120),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        // In chat-bubbles mode the demo content is still the rounded bubble —
+        // `body.chat-bubbles .message-content` (padding 8px 12px 6px, radius
+        // 16 / top-left 4) outspecifies `.cosmetic-redacted-message`'s
+        // `--radius-xs`; only the IRC layout keeps the shop-demo `6px 10px`
+        // padding + the redacted radius-xs 8.
+        padding: bubble
+            ? const EdgeInsets.fromLTRB(12, 8, 12, 6)
+            : const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
           color: c.isLight
               ? const Color(0x1F000000) // rgba(0,0,0,.12)
               : const Color(0x26FFFFFF), // rgba(255,255,255,.15)
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: bubble
+              ? const BorderRadius.only(
+                  topLeft: Radius.circular(4),
+                  topRight: Radius.circular(16),
+                  bottomLeft: Radius.circular(16),
+                  bottomRight: Radius.circular(16),
+                )
+              : BorderRadius.circular(8),
         ),
         // Transparent text reserves the 1.2em line-height of a real message.
         child: Text(
@@ -734,20 +756,60 @@ class ShopCosmeticBubblePreview extends StatelessWidget {
     if (aura == null) {
       return Text(text, style: TextStyle(color: c.text, fontSize: 13));
     }
+    final label = Text(text, style: TextStyle(color: c.text, fontSize: 13));
+    // An IRC row-level aura spans the demo width ([ShopAuraBubble] expands it)
+    // with the inline-block sample centered inside (`.shop-msg-demo
+    // { text-align: center }`); content-level auras hug the text.
+    final rowLevel = !bubble && aura.borderAccent != null;
     return ShopAuraBubble(
       auras: [aura],
       bubble: bubble,
       padding: bubble
           ? const EdgeInsets.fromLTRB(12, 8, 12, 6)
           : const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      child: Text(text, style: TextStyle(color: c.text, fontSize: 13)),
+      child: rowLevel ? Center(child: label) : label,
     );
   }
 }
 
-/// Renders the preview region for a single shop item card depending on its type.
-/// Styles + cosmetics use the live message-bubble demos (F4); flair shows the
-/// nym + badge; supporter shows the badge over a gold demo bubble.
+/// The `.shop-item-preview` box (styles-features.css:181-193): full-width,
+/// `padding: 12px`, `rgba(255,255,255,.03)` fill, glass border, radius-sm,
+/// `min-height: 50px`, flex-centered content, 12px `--text` type (no light
+/// override — the tint stays in both modes). ONLY the flair nym rows and the
+/// supporter-badge rows sit in this box in the PWA — the message-style /
+/// cosmetic demos and the bundle chips render BARE in the card.
+class ShopPreviewBox extends StatelessWidget {
+  const ShopPreviewBox({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      alignment: Alignment.center,
+      constraints: const BoxConstraints(minHeight: 50),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.03),
+        border: Border.all(color: c.glassBorder),
+        borderRadius: NymRadius.rsm,
+      ),
+      child: DefaultTextStyle.merge(
+        style: TextStyle(color: c.text, fontSize: 12),
+        textAlign: TextAlign.center,
+        child: child,
+      ),
+    );
+  }
+}
+
+/// Renders the preview region for a single shop item card depending on its
+/// type, with the PWA's box-vs-bare split: the flair nym row (and the
+/// supporter nym+badge row) sit in the `.shop-item-preview` box, while the
+/// message-style / cosmetic demos are BARE `.shop-msg-demo` blocks — centered,
+/// no card-within-a-card box (shop.js `_shopStyleDemo`/`_shopCosmeticDemo`).
 class ShopItemPreview extends StatelessWidget {
   const ShopItemPreview({super.key, required this.item, this.bubble = true});
 
@@ -765,39 +827,55 @@ class ShopItemPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     switch (item.type) {
       case 'message-style':
-        return ShopStyleBubblePreview(styleId: item.id, bubble: bubble);
+        // Bare `.shop-msg-demo` — block, `text-align: center`, no box.
+        return Center(
+          child: ShopStyleBubblePreview(styleId: item.id, bubble: bubble),
+        );
       case 'nickname-flair':
         // The Genesis card stamps a sample edition (#69) on the badge, matching
         // `_renderLimitedCard`.
         final sampleEdition = item.id == 'flair-genesis' ? 69 : null;
         // The flair-tab preview nym is REGULAR weight (`<span>Your_Nick …`,
         // shop.js:759) — only the limited-tab flair card (:864) and the
-        // supporter demo (:786) wrap it in `<strong>`.
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('Your_Nick'),
-            FlairBadge(flairId: item.id, edition: sampleEdition),
-          ],
+        // supporter demo (:786) wrap it in `<strong>`. The markup keeps a
+        // literal space between the nym and the badge's 5px margin.
+        return ShopPreviewBox(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Your_Nick '),
+              FlairBadge(flairId: item.id, edition: sampleEdition),
+            ],
+          ),
         );
       case 'supporter':
+        // TWO blocks (shop.js:783): the boxed `.shop-item-preview` nym+badge
+        // row, then a separate BARE `.shop-msg-demo` supporter-style bubble.
+        // Box `margin-bottom: 10px` collapses with the demo's 10px top margin.
         return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                Text('Your_Nick', style: TextStyle(fontWeight: FontWeight.w600)),
-                SupporterBadge(),
-              ],
+            const ShopPreviewBox(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Your_Nick ',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                  SupporterBadge(),
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             // supporter-style demo bubble (gold text + wash).
-            _SupporterStyleBubble(bubble: bubble),
+            Center(child: _SupporterStyleBubble(bubble: bubble)),
           ],
         );
       case 'cosmetic':
-        return ShopCosmeticBubblePreview(cosmeticId: item.id, bubble: bubble);
+        // Bare `.shop-msg-demo`, centered — no box.
+        return Center(
+          child: ShopCosmeticBubblePreview(cosmeticId: item.id, bubble: bubble),
+        );
       default:
         return const SizedBox.shrink();
     }
@@ -836,7 +914,12 @@ class _SupporterStyleBubble extends StatelessWidget {
       ),
     );
     if (!bubble) {
+      // IRC: the wash + 3px gold bar sit on the BLOCK `.message` row, so they
+      // span the demo width with the inline-block sample centered inside
+      // (`.shop-msg-demo { text-align: center }`).
       return Container(
+        width: double.infinity,
+        alignment: Alignment.center,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -919,8 +1002,8 @@ class ShopSupplyBadge extends StatelessWidget {
     final fg = context.nym.isLight ? tier.lightFg : tier.fg;
     return Container(
       // `.shop-supply-badge { margin: 6px 0; padding: 2px 10px }`
-      // (styles-features.css:1336-1344).
-      margin: const EdgeInsets.symmetric(vertical: 6),
+      // (styles-features.css:1332-1340). The 6px CSS margins collapse with the
+      // neighbours' margins, so callers provide the collapsed gaps instead.
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
       decoration: BoxDecoration(
         color: tier.bg,
@@ -940,9 +1023,10 @@ class ShopSupplyBadge extends StatelessWidget {
   }
 }
 
-/// The bundle content chips + savings badge (F6 — `_renderBundleCard`):
-/// each component as a `.shop-bundle-chip` (icon + name, capped at 10 with
-/// "+N more"), above a "Save X% · N sats value" badge.
+/// The bundle savings badge + content chips (F6 — `_renderBundleCard`):
+/// a "Save X% · N sats value" badge above each component as a
+/// `.shop-bundle-chip` (icon + name, capped at 10 with "+N more"). Renders
+/// BARE in the card — the PWA `.shop-bundle-contents` has no box.
 class ShopBundlePreview extends StatelessWidget {
   const ShopBundlePreview({super.key, required this.item});
 
@@ -958,16 +1042,23 @@ class ShopBundlePreview extends StatelessWidget {
     final value = ShopCatalog.bundleValue(item.id);
     return Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (savePct > 0)
-          ShopSupplyBadge(
-            availability: ShopAvailability(
-              ShopAvailabilityState.available,
-              'Save $savePct% · $value sats value',
+        if (savePct > 0) ...[
+          // The save badge is an inline-block div in the card's LEFT-aligned
+          // flow (`.shop-supply-badge`), not centered; its 6px bottom margin
+          // collapses with `.shop-bundle-contents`' 8px top margin → 8px gap.
+          Align(
+            alignment: Alignment.centerLeft,
+            child: ShopSupplyBadge(
+              availability: ShopAvailability(
+                ShopAvailabilityState.available,
+                'Save $savePct% · $value sats value',
+              ),
             ),
           ),
-        const SizedBox(height: 6),
+          const SizedBox(height: 8),
+        ],
         Wrap(
           spacing: 6,
           runSpacing: 6,

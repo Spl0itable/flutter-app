@@ -18,7 +18,7 @@ import 'dev_nsec_modal.dart';
 import 'modal_chrome.dart';
 import 'nostr_login_modal.dart';
 
-/// Opens an absolute [url] in the external browser (NOTE-banner links).
+/// Opens an absolute [url] in the external browser (ToS/PP footer links).
 TapGestureRecognizer _linkTap(String url) {
   return TapGestureRecognizer()
     ..onTap = () =>
@@ -308,47 +308,11 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       maxLines: 3,
                       showCounter: true,
                     ),
-                    const SizedBox(height: 15),
-                    // `.nm-h-52`: warning callout box (warning #ffff00 text,
-                    // padding 12/14, border rgba(255,255,0,0.2), radius 12, bg
-                    // rgba(255,255,0,0.04)); "Bitchat"/"Nostr" = secondary links.
-                    Container(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: c.warning.withValues(alpha: 0.04),
-                        borderRadius: NymRadius.rsm,
-                        border:
-                            Border.all(color: c.warning.withValues(alpha: 0.2)),
-                      ),
-                      child: Text.rich(
-                        TextSpan(
-                          style: TextStyle(color: c.warning, fontSize: 12),
-                          children: [
-                            const TextSpan(text: 'NOTE: Nymchat is bridged with '),
-                            TextSpan(
-                              text: 'Bitchat',
-                              style: TextStyle(color: c.secondary),
-                              recognizer: _linkTap('https://bitchat.free'),
-                            ),
-                            const TextSpan(
-                              text: ' geohash channels and the messages are '
-                                  'public and ephemeral; sent across the ',
-                            ),
-                            TextSpan(
-                              text: 'Nostr',
-                              style: TextStyle(color: c.secondary),
-                              recognizer: _linkTap('https://nostr.com'),
-                            ),
-                            const TextSpan(
-                              text: ' relay network. Only private messages and '
-                                  'group chats are end-to-end encrypted.',
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 18),
+                    // (The PWA's `.nm-h-52` "NOTE: Nymchat is bridged with…"
+                    // callout is intentionally absent in the native app —
+                    // product decision. Bio `.form-group` margin-bottom 20 is
+                    // the gap to the actions.)
+                    const SizedBox(height: 20),
                     // `.send-btn` (translucent primary pill), h42.
                     Padding(
                       key: const Key('setupEnterBtn'),
@@ -369,11 +333,41 @@ class _SetupModalState extends ConsumerState<SetupModal> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    Text(
-                      'By entering, you agree to our Terms of Service and '
-                      'Privacy Policy.',
+                    // `.setup-modal-content>span` footer (index.html:1337-1340):
+                    // centered `.nm-dim` line at the inherited 16px default;
+                    // "Terms of Service"/"Privacy Policy" are `.nm-secondary`
+                    // anchors (secondary color, browser-default underline)
+                    // opening /static/tos.html / /static/pp.html externally.
+                    Text.rich(
+                      TextSpan(
+                        style: TextStyle(color: c.textDim, fontSize: 16),
+                        children: [
+                          const TextSpan(text: 'By entering, you agree to our '),
+                          TextSpan(
+                            text: 'Terms of Service',
+                            style: TextStyle(
+                              color: c.secondary,
+                              decoration: TextDecoration.underline,
+                              decorationColor: c.secondary,
+                            ),
+                            recognizer: _linkTap(
+                                'https://web.nymchat.app/static/tos.html'),
+                          ),
+                          const TextSpan(text: ' and '),
+                          TextSpan(
+                            text: 'Privacy Policy',
+                            style: TextStyle(
+                              color: c.secondary,
+                              decoration: TextDecoration.underline,
+                              decorationColor: c.secondary,
+                            ),
+                            recognizer: _linkTap(
+                                'https://web.nymchat.app/static/pp.html'),
+                          ),
+                          const TextSpan(text: '.'),
+                        ],
+                      ),
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: c.textDim, fontSize: 11),
                     ),
                   ],
                 ),

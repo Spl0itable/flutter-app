@@ -1988,9 +1988,12 @@ class _ComposerState extends ConsumerState<Composer> {
                         border: Border(
                             bottom: BorderSide(color: c.glassBorder)),
                       ),
+                      // NOT autofocused: the PWA never focuses the dropdown
+                      // search on open (only the Select-Your-Language MODAL
+                      // focuses its search, translate.js:190) — grabbing focus
+                      // here would yank the IME away from the message input.
                       child: TextField(
                         controller: _translateSearchController,
-                        autofocus: true,
                         onChanged: (v) => setState(() => _translateQuery = v),
                         style: TextStyle(color: c.text, fontSize: 13),
                         cursorColor: c.isLight ? Colors.black : Colors.white,
@@ -2073,14 +2076,27 @@ class _ComposerState extends ConsumerState<Composer> {
     try {
       final res = await TranslateService().translate(text, targetLang);
       if (!mounted) return;
-      final out = res.translatedText.trim();
-      if (out.isNotEmpty) {
-        _controller.text = out;
-        _controller.selection =
-            TextSelection.collapsed(offset: _controller.text.length);
+      final out = res.translatedText;
+      // Don't clobber the input if the upstream returned nothing or echoed
+      // the original (detected language already matches the target) —
+      // `translateInputText` (translate.js:479-483).
+      if (out.trim().isEmpty || out.trim() == text) {
+        _onSystemMessage(
+            'Nothing to translate (text may already be in the target language).');
+        return;
       }
-    } catch (_) {
-      if (mounted) _onSystemMessage('Translation failed.');
+      _controller.text = out;
+      _controller.selection =
+          TextSelection.collapsed(offset: _controller.text.length);
+    } catch (e) {
+      // `'Translation failed: ' + (err.message || 'Unknown error')`
+      // (translate.js:488) — [TranslateException.message] already carries the
+      // "Translation failed: …" prefix.
+      if (mounted) {
+        _onSystemMessage(e is TranslateException
+            ? e.message
+            : 'Translation failed: Unknown error');
+      }
     } finally {
       if (mounted) {
         setState(() => _translating = false);
@@ -2921,8 +2937,13 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
         child: glyph,
       );
     }
+    // `.translating`'s keyframes animate the SAME opacity property, so the
+    // 0.4↔0.8 pulse REPLACES the base opacity (styles-chat.css:1784-1800) —
+    // don't also apply the disabled 0.4 or the pulse dims to 0.16–0.32.
     return Opacity(
-      opacity: widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4,
+      opacity: widget.translating
+          ? 1.0
+          : (widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4),
       child: Tooltip(
         message: 'Translate text',
         child: MouseRegion(
@@ -2933,6 +2954,12 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
           onExit: (_) => setState(() => _hover = false),
           child: GestureDetector(
             onTap: widget.enabled ? widget.onTap : null,
+            // OPAQUE is load-bearing: the default deferToChild never hits —
+            // the Container's decoration color is null at rest and the SVG
+            // glyph's render object doesn't hit-test itself, so taps fell
+            // straight through (the PWA's 26×26 `<button>` is clickable over
+            // its whole box).
+            behavior: HitTestBehavior.opaque,
             child: Container(
               width: 26,
               height: 26,

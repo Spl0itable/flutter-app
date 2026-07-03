@@ -34,6 +34,15 @@ class SettingsController extends StateNotifier<Settings> {
     if (cb != null) cb();
   }
 
+  /// Reloads settings from the (now-wiped) store back to first-run defaults —
+  /// the panic path's analogue of the PWA's page reload re-reading empty
+  /// localStorage. Called by [NostrController.resetAfterPanic] after the KV
+  /// store has been cleared, so theme/layout/etc. return to defaults without a
+  /// process restart.
+  void resetToDefaults() {
+    state = Settings.fromStore(_kv);
+  }
+
   void setTheme(NymThemeKey theme) {
     _kv.setString(StorageKeys.theme, theme.id);
     state = state.copyWith(theme: theme);

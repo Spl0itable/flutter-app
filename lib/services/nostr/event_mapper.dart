@@ -39,7 +39,7 @@ class EventMapper {
     if (isGeo && geohash == null) return null;
     if (!isGeo && channel == null) return null;
 
-    final baseNym = e.tagValue('n') ?? 'anon';
+    final baseNym = e.tagValue('n') ?? 'nym';
     final author = getNymFromPubkey(baseNym, e.pubkey);
     final ms = int.tryParse(e.tagValue('ms') ?? '') ?? 0;
 

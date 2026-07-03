@@ -45,6 +45,30 @@ class GroupManager {
     _service.setEphemeralKeys(allEphemeralSecretKeys());
   }
 
+  /// Serialized per-group ephemeral key state for the `nymchat-keys-<gid>`
+  /// cross-device sync categories (`gid → _serializeEphemeralKeys(ek)`, the map
+  /// the PWA iterates in `_publishEncryptedSettings`, settings.js:435-461).
+  Map<String, Map<String, dynamic>> ephemeralKeysForSync() {
+    final out = <String, Map<String, dynamic>>{};
+    _keys.forEach((groupId, ek) => out[groupId] = ek.toSyncJson());
+    return out;
+  }
+
+  /// Merges a synced ephemeral-key [entry] for [groupId] into the local state
+  /// (cross-device restore; `_mergeEphemeralKeys`, groups.js:221). Creates the
+  /// per-group entry if absent, then accumulates the synced keys. Returns true
+  /// when at least one previously-unknown self ephemeral pubkey was added — the
+  /// controller uses this to know it must re-arm decryption / backfill history.
+  bool mergeEphemeralKeys(String groupId, Map<String, dynamic> entry) {
+    final ek = keysFor(groupId);
+    final before = _selfPkCount(ek);
+    ek.mergeSyncJson(entry);
+    return _selfPkCount(ek) > before;
+  }
+
+  int _selfPkCount(GroupEphemeralKeys ek) =>
+      (ek.selfCurrent != null ? 1 : 0) + ek.selfPrev.length;
+
   /// Records a peer member's advertised ephemeral pubkey (out-of-order guarded).
   void recordMemberKey(
       String groupId, String memberPubkey, String ephemeralPk, int messageTs) {

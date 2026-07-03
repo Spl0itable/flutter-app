@@ -559,6 +559,7 @@ class NymOutlineButton extends StatelessWidget {
     required this.onPressed,
     this.danger = false,
     this.uppercase = true,
+    this.height,
   });
 
   final String label;
@@ -569,14 +570,31 @@ class NymOutlineButton extends StatelessWidget {
   /// is not.
   final bool uppercase;
 
+  /// Fixed pill height. `.modal-actions` sets no `align-items`, so flex's
+  /// default stretch sizes an `.icon-btn` to the 42px `.send-btn` beside it
+  /// (label centered — `.icon-btn` is `inline-flex; align-items: center`).
+  /// Null keeps the natural padded height.
+  final double? height;
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     final accent = danger ? c.danger : c.text;
+    final text = Text(
+      uppercase ? label.toUpperCase() : label,
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: accent,
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        letterSpacing: uppercase ? 0.8 : 0,
+      ),
+    );
     return InkWell(
       onTap: onPressed,
       borderRadius: NymRadius.rxs,
       child: Container(
+        height: height,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
           // `.icon-btn`: bg white@5%, 1px glass border, radius xs.
@@ -588,16 +606,9 @@ class NymOutlineButton extends StatelessWidget {
             color: danger ? accent.withValues(alpha: 0.3) : c.glassBorder,
           ),
         ),
-        child: Text(
-          uppercase ? label.toUpperCase() : label,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: accent,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: uppercase ? 0.8 : 0,
-          ),
-        ),
+        // Center + widthFactor keeps the pill shrink-wrapped while centering
+        // the label within the pinned height.
+        child: height == null ? text : Center(widthFactor: 1, child: text),
       ),
     );
   }

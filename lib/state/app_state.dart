@@ -49,6 +49,31 @@ const String kNymbotPubkey =
 /// single Nymbot; kept as a set to match the PWA shape and `_isPubkeyGated`.
 const Set<String> kVerifiedBotPubkeys = {kNymbotPubkey};
 
+/// The seeded verified-bot [User]. The PWA's `getEffectiveUserStatus` is ONE
+/// central function whose bot override (`verifiedBotPubkeys.has(pubkey) →
+/// 'online'`, users.js:1112) every status render inherits automatically; the
+/// Flutter port spread the check across call sites via
+/// `effectiveStatus(isVerifiedBot:)`, and any site that forgot the flag showed
+/// the bot offline once its seeded `lastSeen` aged past the 5-minute recency
+/// window. This subclass restores the PWA's at-the-source semantics: the seeded
+/// bot user forces the override itself, so EVERY `effectiveStatus()` read
+/// (sidebar rows, chat-header dot, profile popover status row, autocomplete
+/// ordering) reports `online` — while delegating to [User.effectiveStatus]
+/// keeps the `hidden` short-circuit ordering identical to users.js:1111-1112.
+class VerifiedBotUser extends User {
+  VerifiedBotUser({
+    required super.pubkey,
+    super.nym,
+    super.lastSeen,
+    super.status,
+    super.profile,
+  });
+
+  @override
+  UserStatus effectiveStatus({int? nowMs, bool isVerifiedBot = false}) =>
+      super.effectiveStatus(nowMs: nowMs, isVerifiedBot: true);
+}
+
 /// The web-of-trust roots seeded into `nymchatPubkeys` on go-live
 /// (app.js:1100-1101): the verified developer + Nymbot. Every transitive vouch
 /// chain is anchored here.
@@ -85,6 +110,10 @@ bool appSpamFilterAggressive = true;
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
 /// `inPMMode` state (docs/specs/03 §3.5).
 enum ViewKind { channel, pm, group }
+
+/// Case-insensitive 64-hex pubkey check (used to canonicalize PM view ids —
+/// see [AppStateNotifier.switchView]).
+final RegExp _hex64AnyCaseRe = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// The active conversation selector. [storageKey] matches the keying used by
 /// the in-memory [AppState.messages] map (channel = `#<key>`, PM = `pm-<pubkey>`,
@@ -967,6 +996,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// and counts only `created_at > lastRead`, channels.js:1709). Best-effort.
   void Function()? onChannelReadChanged;
 
+  /// Fired whenever the group store mutates — a group is upserted/merged, a
+  /// group message is ingested, or a group control is applied. The controller
+  /// wires this to the debounced cross-device group sync (`nymchat-groups` /
+  /// `nymchat-keys-<gid>` / `nymchat-history-<gid>`), mirroring the PWA's
+  /// `_debouncedNostrSettingsSave()` peppered through every `groups.js` mutation
+  /// (groups.js:690/772/803/…). Best-effort; may be null before boot / in tests.
+  void Function()? onGroupStoreChanged;
+
   /// Per-conversation read watermark: storage key → last-read created_at (sec).
   /// A message bumps the unread badge only when `created_at > lastRead` — the
   /// PWA's `_recomputeUnreadCount` / `channelLastRead` (channels.js:1709-1735),
@@ -1219,7 +1256,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // channel bubble, premium PM bubble, header/welcome) — without this seed
     // `users[kNymbotPubkey]` is null and each surface falls back to a different
     // generated identicon / emoji (F10-1). One seed repairs them all at once.
-    state.users[kNymbotPubkey] = User(
+    // [VerifiedBotUser] forces the always-online override at the source
+    // (users.js:1112) so no render site can show the bot offline once the
+    // seeded `lastSeen` ages out of the 5-minute recency window.
+    state.users[kNymbotPubkey] = VerifiedBotUser(
       pubkey: kNymbotPubkey,
       nym: 'Nymbot',
       status: UserStatus.online,
@@ -1534,12 +1574,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
     } else {
+      // Missing-name fallback is 'nym' (the PWA never renders 'anon' — its
+      // `getNymFromPubkey` default is `nym#xxxx`, users.js:1085).
       state.users[e.pubkey] = User(
         pubkey: e.pubkey,
-        nym: getNymFromPubkey(p.name ?? 'anon', e.pubkey),
+        nym: getNymFromPubkey(p.name ?? 'nym', e.pubkey),
         profile: p,
       );
       changed = true;
+    }
+    // Sync the PM sidebar row's displayed nym with the kind-0 name — the PWA's
+    // `updatePMNicknameFromProfile(event.pubkey, profileName)` run on every
+    // stored kind-0 (nostr-core.js:2308-2329, name capped at 20 chars). Without
+    // it a conversation created before the profile arrived keeps its fallback
+    // name forever.
+    if (e.pubkey != state.selfPubkey && (p.name ?? '').isNotEmpty) {
+      if (_syncPmConversationNym(e.pubkey)) changed = true;
     }
     // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
     // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
@@ -1655,7 +1705,31 @@ class AppStateNotifier extends StateNotifier<AppState> {
   String _nymForPubkey(String pubkey) {
     final u = state.users[pubkey];
     if (u != null && u.nym.isNotEmpty) return u.nym;
-    return getNymFromPubkey('anon', pubkey);
+    // Unknown-user fallback is 'nym' (`getNymFromPubkey` → `nym#xxxx`,
+    // users.js:1085 — the PWA never shows 'anon').
+    return getNymFromPubkey('nym', pubkey);
+  }
+
+  /// Refreshes a PM conversation row's nym from the users map — the PWA's
+  /// `updatePMNicknameFromProfile` (pms.js:2618-2625, name capped at 20 chars)
+  /// + the exists-branch sync in `addPMConversation` (pms.js:2806-2812).
+  /// Returns true when the stored nym changed. Does NOT emit state — callers
+  /// own the repaint.
+  bool _syncPmConversationNym(String pubkey) {
+    final known = state.users[pubkey]?.nym;
+    if (known == null || known.isEmpty) return false;
+    final base = stripPubkeySuffix(known);
+    final clean = base.length > 20 ? base.substring(0, 20) : base;
+    if (clean.isEmpty) return false;
+    for (final c in state.pmConversations) {
+      if (c.pubkey == pubkey) {
+        final next = getNymFromPubkey(clean, pubkey);
+        if (c.nym == next) return false;
+        c.nym = next;
+        return true;
+      }
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -1817,7 +1891,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     list.add(m);
     list.sort(compareMessages);
 
-    // Maintain the conversation meta entry.
+    // Maintain the conversation meta entry. The PWA's `addPMConversation`
+    // prefers the users-map nym over the message author on EVERY message
+    // (pms.js:2716-2718, plus the exists-branch re-sync at :2806-2812), so a
+    // kind-0 that landed after the thread was created still corrects the row.
     final convo = state.pmConversations.firstWhere(
       (c) => c.pubkey == peer,
       orElse: () {
@@ -1826,7 +1903,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         return c;
       },
     );
-    if (!m.isOwn && convo.nym.isEmpty) convo.nym = m.author;
+    if (!_syncPmConversationNym(peer)) {
+      if (!m.isOwn && convo.nym.isEmpty) convo.nym = m.author;
+    }
     if (m.timestamp > convo.lastMessageTime) {
       convo.lastMessageTime = m.timestamp;
     }
@@ -1861,13 +1940,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Inserts a decrypted group message [m] into the `group-<id>` store.
-  void ingestGroupMessage(Message m) {
+  /// Returns true when the message landed (false on dedup / left group), so
+  /// the controller can skip the per-message metadata merge for replayed
+  /// copies exactly like the PWA's dup-check `return` runs before
+  /// `addGroupConversation` (groups.js:1230-1292).
+  bool ingestGroupMessage(Message m) {
     final gid = m.groupId;
-    if (gid == null) return;
-    if (_leftGroups.contains(gid)) return;
-    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return;
+    if (gid == null) return false;
+    if (_leftGroups.contains(gid)) return false;
+    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return false;
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
-      return;
+      return false;
     }
     m.seq = _nextIngestSeq();
 
@@ -1907,6 +1990,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
     onPmMessageIngested?.call(key);
+    onGroupStoreChanged?.call();
+    return true;
   }
 
   /// Registers/updates a [Group] in the store (on create or on receiving a
@@ -1920,6 +2005,56 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.groups.add(group);
     }
     state = state.copyWith();
+    onGroupStoreChanged?.call();
+  }
+
+  /// Merges an inbound group MESSAGE's carried metadata into the group entry —
+  /// the PWA's `addGroupConversation(groupId, groupName, memberPubkeys, ts)`
+  /// call on every group message (groups.js:1292 → :2454). Existing group:
+  /// merge the members, adopt the message's `subject` as the name
+  /// (`name: name || existing.name`, :2506) and raise `lastMessageTime`.
+  /// Unknown group: create the entry (unless left, :2460) so a rename carried
+  /// on regular traffic reaches members who missed the `group-metadata`
+  /// control event — this is how the PWA keeps sidebar/header titles current
+  /// even when the owner's rename broadcast never arrived.
+  void mergeGroupFromMessage({
+    required String groupId,
+    required String name,
+    required List<String> memberPubkeys,
+    required int timestampMs,
+  }) {
+    final existing = groupById(groupId);
+    if (existing == null) {
+      if (_leftGroups.contains(groupId)) return;
+      state.groups.add(Group(
+        id: groupId,
+        name: name,
+        members: memberPubkeys.toSet().toList(),
+        lastMessageTime: timestampMs,
+      ));
+      state = state.copyWith();
+      return;
+    }
+    var changed = false;
+    // Merge members (new invitees may arrive with an updated list).
+    for (final pk in memberPubkeys) {
+      if (!existing.members.contains(pk)) {
+        existing.members.add(pk);
+        changed = true;
+      }
+    }
+    if (name.isNotEmpty && name != existing.name) {
+      existing.name = name;
+      changed = true;
+    }
+    if (timestampMs > existing.lastMessageTime) {
+      existing.lastMessageTime = timestampMs;
+      changed = true;
+    }
+    if (changed) {
+      state = state.copyWith();
+      onGroupStoreChanged?.call();
+    }
   }
 
   /// Looks up a group by id (null if unknown).
@@ -1928,6 +2063,199 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (g.id == id) return g;
     }
     return null;
+  }
+
+  /// Cross-device history cap per group conversation (PWA `pmStorageLimit`,
+  /// app.js:650) applied after merging a restored backlog.
+  static const int _kGroupHistoryCap = 1000;
+
+  /// Applies one decoded `nymchat-groups` entry (`groupId → serialized group`)
+  /// from cross-device sync, mirroring the PWA's `applyGroupData` additive branch
+  /// (app.js:5938-6000). A group unknown to this device is created — so a FRESH
+  /// device restores its membership from D1; a known group has its owner / roles /
+  /// metadata merged monotonically (newer `metaUpdatedAt` wins; mods / banned /
+  /// modLog union, modLog deduped + capped at 50). A left group is skipped.
+  /// Returns true when the store changed. Does NOT fire [onGroupStoreChanged] —
+  /// this IS the inbound apply, so re-publishing the just-restored state would be
+  /// a redundant (content-hash-deduped) echo.
+  bool applyGroupConversationSync(String groupId, Map<String, dynamic> data) {
+    if (_leftGroups.contains(groupId)) return false;
+    List<String> strList(Object? v) =>
+        (v is List) ? v.map((e) => e.toString()).toList() : <String>[];
+    String? nz(Object? v) => (v is String && v.isNotEmpty) ? v : null;
+    List<ModLogEntry> parseLog(Object? v) {
+      final out = <ModLogEntry>[];
+      if (v is List) {
+        for (final e in v) {
+          if (e is Map) {
+            try {
+              out.add(ModLogEntry.fromJson(e.cast<String, dynamic>()));
+            } catch (_) {
+              // Skip a malformed log entry.
+            }
+          }
+        }
+      }
+      return out;
+    }
+
+    final existing = groupById(groupId);
+    if (existing == null) {
+      state.groups.add(Group(
+        id: groupId,
+        name: (data['name'] ?? '') as String,
+        members: strList(data['members']),
+        lastMessageTime: (data['lastMessageTime'] as num?)?.toInt() ??
+            DateTime.now().millisecondsSinceEpoch,
+        createdBy: nz(data['createdBy']),
+        mods: strList(data['mods']),
+        banned: strList(data['banned']),
+        avatar: nz(data['avatar']),
+        banner: nz(data['banner']),
+        description: nz(data['description']),
+        allowMemberInvites: data['allowMemberInvites'] != false,
+        inviteEnabled: data['inviteEnabled'] == true,
+        inviteEpoch: (data['inviteEpoch'] as num?)?.toInt() ?? 0,
+        metaUpdatedAt: (data['metaUpdatedAt'] as num?)?.toInt() ?? 0,
+        lastModTs: (data['lastModTs'] as num?)?.toInt() ?? 0,
+        lastModEventId: nz(data['lastModEventId']),
+        modLog: parseLog(data['modLog']),
+      ));
+      state = state.copyWith();
+      return true;
+    }
+
+    final g = existing;
+    var changed = false;
+    if ((g.createdBy == null || g.createdBy!.isEmpty)) {
+      final owner = nz(data['createdBy']);
+      if (owner != null) {
+        g.createdBy = owner;
+        changed = true;
+      }
+    }
+    final incomingMetaTs = (data['metaUpdatedAt'] as num?)?.toInt() ?? 0;
+    if (incomingMetaTs > g.metaUpdatedAt) {
+      final name = data['name'];
+      if (name is String && name.isNotEmpty) g.name = name;
+      g.banner = nz(data['banner']);
+      g.avatar = nz(data['avatar']);
+      g.description = nz(data['description']);
+      g.allowMemberInvites = data['allowMemberInvites'] != false;
+      g.inviteEnabled = data['inviteEnabled'] == true;
+      g.inviteEpoch = (data['inviteEpoch'] as num?)?.toInt() ?? 0;
+      g.metaUpdatedAt = incomingMetaTs;
+      changed = true;
+    } else {
+      if (g.banner == null && nz(data['banner']) != null) {
+        g.banner = nz(data['banner']);
+        changed = true;
+      }
+      if (g.avatar == null && nz(data['avatar']) != null) {
+        g.avatar = nz(data['avatar']);
+        changed = true;
+      }
+      if (g.description == null && nz(data['description']) != null) {
+        g.description = nz(data['description']);
+        changed = true;
+      }
+    }
+    for (final pk in strList(data['mods'])) {
+      if (!g.mods.contains(pk)) {
+        g.mods.add(pk);
+        changed = true;
+      }
+    }
+    for (final pk in strList(data['banned'])) {
+      if (!g.banned.contains(pk)) {
+        g.banned.add(pk);
+        changed = true;
+      }
+    }
+    final incomingLog = parseLog(data['modLog']);
+    if (incomingLog.isNotEmpty) {
+      String key(ModLogEntry e) => '${e.type}:${e.actor}:${e.target}:${e.ts}';
+      final seen = g.modLog.map(key).toSet();
+      for (final e in incomingLog) {
+        if (seen.add(key(e))) {
+          g.modLog.add(e);
+          changed = true;
+        }
+      }
+      g.modLog.sort((a, b) => a.ts - b.ts);
+      if (g.modLog.length > 50) {
+        g.modLog.removeRange(0, g.modLog.length - 50);
+      }
+    }
+    // Moderation-dedup watermark advances on its own timeline (a mod event can
+    // land without a metadata edit), so merge monotonically regardless of the
+    // metaUpdatedAt gate — keep the newest lastModTs and its event id.
+    final incomingModTs = (data['lastModTs'] as num?)?.toInt() ?? 0;
+    if (incomingModTs > g.lastModTs) {
+      g.lastModTs = incomingModTs;
+      g.lastModEventId = nz(data['lastModEventId']);
+      changed = true;
+    }
+    if (changed) state = state.copyWith();
+    return changed;
+  }
+
+  /// Merges decoded group message history (`group-<gid>` → stripped message
+  /// maps) from cross-device sync into the message store, mirroring the PWA's
+  /// `groupMessageHistory` apply (app.js:6028-6076): each backup message is
+  /// inflated (isGroup / isPM / isHistorical / conversationKey / author / seq),
+  /// deduped by id (against both the existing thread AND the global seen-id set,
+  /// so a later live delivery of the same wrap can't duplicate it), merged,
+  /// re-sorted, and capped to the most recent [_kGroupHistoryCap]. Skips left
+  /// groups. Returns the conversation keys that changed. Does NOT fire
+  /// [onGroupStoreChanged] (inbound apply — see [applyGroupConversationSync]).
+  Set<String> applyGroupHistorySync(Map<String, List<dynamic>> byConvKey) {
+    final changed = <String>{};
+    byConvKey.forEach((convKey, backup) {
+      if (backup.isEmpty || !convKey.startsWith('group-')) return;
+      final gid = convKey.substring(6);
+      if (_leftGroups.contains(gid)) return;
+      final existing = state.messages[convKey] ?? <Message>[];
+      final existingIds = existing.map((m) => m.id).toSet();
+      final newMsgs = <Message>[];
+      for (final raw in backup) {
+        if (raw is! Map) continue;
+        final id = raw['id'];
+        if (id is! String || id.isEmpty || existingIds.contains(id)) continue;
+        // Register globally so a subsequent live/backfilled wrap for this same
+        // message is deduped by [ingestGroupMessage] (`!_seenIds.add`).
+        if (!_seenIds.add(id)) continue;
+        final pubkey = (raw['pubkey'] ?? '') as String;
+        final nymMessageId = raw['nymMessageId'] as String?;
+        if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
+        newMsgs.add(Message(
+          id: id,
+          pubkey: pubkey,
+          author: _nymForPubkey(pubkey),
+          content: (raw['content'] ?? '') as String,
+          createdAt: (raw['created_at'] as num?)?.toInt() ?? 0,
+          isOwn: raw['isOwn'] == true,
+          isPM: true,
+          isGroup: true,
+          groupId: (raw['groupId'] as String?) ?? gid,
+          conversationKey: convKey,
+          isHistorical: true,
+          nymMessageId: nymMessageId,
+          seq: _nextIngestSeq(),
+          deliveryStatus: DeliveryStatus.sent,
+        ));
+        existingIds.add(id);
+      }
+      if (newMsgs.isEmpty) return;
+      final merged = [...existing, ...newMsgs]..sort(compareMessages);
+      final capped = merged.length > _kGroupHistoryCap
+          ? merged.sublist(merged.length - _kGroupHistoryCap)
+          : merged;
+      state.messages[convKey] = capped;
+      changed.add(convKey);
+    });
+    if (changed.isNotEmpty) state = state.copyWith();
+    return changed;
   }
 
   /// Applies a verified group control rumor to the named group, returning the
@@ -1975,6 +2303,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
       state = state.copyWith();
+      onGroupStoreChanged?.call();
     }
     return result;
   }
@@ -2086,7 +2415,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }) {
     final u = state.users.putIfAbsent(
       pubkey,
-      () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('anon', pubkey)),
+      () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('nym', pubkey)),
     );
     u.status = status;
     if (nym != null && nym.isNotEmpty) u.nym = getNymFromPubkey(nym, pubkey);
@@ -2151,12 +2480,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (wasClosed) onClosedPmsChanged?.call();
     final exists = state.pmConversations.any((c) => c.pubkey == peerPubkey);
     if (!exists) {
+      // Nym resolution mirrors `addPMConversation` (pms.js:2716-2718): prefer
+      // the users-map nym, then the caller-supplied one, then the PWA's
+      // `getNymFromPubkey` default `nym#xxxx` (users.js:1085) — never 'anon'.
+      final known = state.users[peerPubkey]?.nym;
       state.pmConversations.add(PMConversation(
         pubkey: peerPubkey,
-        nym: nym ?? getNymFromPubkey('anon', peerPubkey),
+        nym: (known != null && known.isNotEmpty)
+            ? known
+            : (nym ?? getNymFromPubkey('nym', peerPubkey)),
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
       state = state.copyWith();
+    } else {
+      // Existing thread → re-sync the row nym from the users map (the PWA's
+      // exists-branch, pms.js:2806-2812).
+      if (_syncPmConversationNym(peerPubkey)) state = state.copyWith();
     }
   }
 
@@ -2169,6 +2508,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _closedPMs.addAll(closed);
     _closedPMTimes.addAll(closedTimes);
   }
+
+  /// Additively merges synced/boot-restored left-group state (PWA
+  /// `applyNostrSettings` leftGroups block + retroactive removal,
+  /// app.js:6549-6561 / 6692-6712): union the ids, keep the newest leave time
+  /// per group, and retroactively drop any group now marked left from the live
+  /// store (a group left on another device disappears here too — a later
+  /// membership event newer than the leave time can still resurrect it via the
+  /// normal ingest gate). Idempotent.
+  void mergeLeftGroups(Set<String> ids, Map<String, int> times) {
+    if (ids.isEmpty && times.isEmpty) return;
+    _leftGroups.addAll(ids);
+    times.forEach((gid, ts) {
+      if (ts > (_leftGroupTimes[gid] ?? 0)) _leftGroupTimes[gid] = ts;
+    });
+    var changed = false;
+    for (final gid in _leftGroups) {
+      final idx = state.groups.indexWhere((g) => g.id == gid);
+      if (idx < 0) continue;
+      state.groups.removeAt(idx);
+      state.messages.remove(GroupLogic.groupStorageKey(gid));
+      changed = true;
+    }
+    if (changed) state = state.copyWith();
+  }
+
+  /// Snapshot of the left-group ids → leave timestamp (sec), for the
+  /// controller's KV persistence and outbound settings sync.
+  Set<String> get leftGroups => Set.unmodifiable(_leftGroups);
+  Map<String, int> get leftGroupTimes => Map.unmodifiable(_leftGroupTimes);
 
   /// Snapshot of the closed-PM peer pubkeys → close timestamp (sec), for the
   /// controller's KV persistence (paired with [closedPMs]).
@@ -2189,6 +2557,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   void switchView(ChatView view, {bool forceNewColumn = false}) {
+    // Canonicalize a PM peer id to lowercase hex at the single choke point
+    // every entry path funnels through (sidebar tap, startPM, new-PM modal,
+    // notification tap, columns focus). Every downstream comparison is an
+    // exact string match against lowercase-hex constants/keys — the
+    // Nymbot-routing check (`view.id == kNymbotPubkey`, chat_pane), the
+    // `pm-<pubkey>` storage key, unread/read watermarks — so an uppercase-hex
+    // id from any source would silently open a parallel "generic" thread.
+    if (view.kind == ViewKind.pm &&
+        _hex64AnyCaseRe.hasMatch(view.id) &&
+        view.id != view.id.toLowerCase()) {
+      view = ChatView.pm(view.id.toLowerCase());
+    }
     _forceNewColumnHint = forceNewColumn;
     // Clear unread for the target on entry (mirrors marking-as-read), and stamp
     // the read watermark to NOW so a later D1 backfill of this conversation's
@@ -2561,6 +2941,42 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (key.isEmpty || msgs.isEmpty) return;
       if (_hydrateMessagesInto(key, msgs)) changed = true;
     });
+    // Rebuild the PM sidebar rows from the hydrated threads — the PWA's
+    // `_populateSidebarFromHydration` (persistence.js:533-549): every cached
+    // 1:1 thread gets its conversation entry back at boot, named from the
+    // (already-hydrated) users map with the `nym` fallback. Without this the
+    // rows only reappear if the D1 replay delivers a NOT-yet-cached message
+    // (the cached copies dedup out before `ingestPMMessage` touches
+    // `pmConversations`). Groups are skipped like the PWA (their entries come
+    // from the group metadata store); closed PMs stay closed (the PWA's cache
+    // has no thread for a deleted PM — `deletePM` purges it — so hydration
+    // never resurrects one there either).
+    for (final entry in state.messages.entries) {
+      final msgs = entry.value;
+      if (!entry.key.startsWith('pm-') || msgs.isEmpty) continue;
+      if (msgs.any((m) => m.isGroup)) continue;
+      String? peer;
+      for (final m in msgs) {
+        final p = m.conversationPubkey;
+        if (p != null && p.isNotEmpty) {
+          peer = p;
+          break;
+        }
+      }
+      if (peer == null || _closedPMs.contains(peer)) continue;
+      if (state.pmConversations.any((c) => c.pubkey == peer)) continue;
+      final ts = msgs.last.timestamp;
+      final known = state.users[peer]?.nym;
+      state.pmConversations.add(PMConversation(
+        pubkey: peer,
+        nym: (known != null && known.isNotEmpty)
+            ? known
+            : getNymFromPubkey('nym', peer),
+        lastMessageTime:
+            ts > 0 ? ts : DateTime.now().millisecondsSinceEpoch,
+      ));
+      changed = true;
+    }
     if (changed) state = state.copyWith();
   }
 
@@ -2602,9 +3018,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
           }
         }
       } else {
+        // Missing-name fallback is 'nym' (`getNymFromPubkey` → `nym#xxxx`,
+        // users.js:1085 — the PWA never shows 'anon').
         state.users[pubkey] = User(
           pubkey: pubkey,
-          nym: getNymFromPubkey(p.name ?? 'anon', pubkey),
+          nym: getNymFromPubkey(p.name ?? 'nym', pubkey),
           profile: p,
         );
       }

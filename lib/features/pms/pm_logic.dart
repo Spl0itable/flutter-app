@@ -110,7 +110,10 @@ class PmLogic {
     final createdAt = createdAtRaw > nowSec ? nowSec : createdAtRaw;
 
     final isOwn = senderPubkey == selfPubkey;
-    final author = getNymFromPubkey('anon', senderPubkey);
+    // Pure-mapper fallback: `nym#xxxx` (the PWA's `getNymFromPubkey` default,
+    // users.js:1085 — never 'anon'). The controller re-resolves the author
+    // against the users map after mapping, like the PWA's `senderName`.
+    final author = getNymFromPubkey('nym', senderPubkey);
 
     return Message(
       id: wrapId.isNotEmpty ? wrapId : (nymMessageId ?? ''),

@@ -1254,7 +1254,7 @@ class _PollVotersModal extends ConsumerWidget {
   ) {
     final c = context.nym;
     final isYou = pk == selfPubkey;
-    final nym = stripPubkeySuffix(users[pk]?.nym ?? getNymFromPubkey('anon', pk));
+    final nym = stripPubkeySuffix(users[pk]?.nym ?? getNymFromPubkey('nym', pk));
     final suffix = getPubkeySuffix(pk);
     return InkWell(
       onTap: () => onTapRow(pk),

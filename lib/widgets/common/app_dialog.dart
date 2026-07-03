@@ -313,10 +313,10 @@ class _AppDialogState extends State<_AppDialog> {
                           ),
                         ),
                       ),
-                      // `.modal-body`.
+                      // `.modal-body { margin-bottom: 20px }`.
                       Flexible(
                         child: SingleChildScrollView(
-                          padding: const EdgeInsets.fromLTRB(32, 0, 32, 4),
+                          padding: const EdgeInsets.fromLTRB(32, 0, 32, 20),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             mainAxisSize: MainAxisSize.min,
@@ -337,7 +337,9 @@ class _AppDialogState extends State<_AppDialog> {
                           ),
                         ),
                       ),
-                      // `.modal-actions` — display:flex; gap:10px; justify:center.
+                      // `.modal-actions` — display:flex; gap:10px;
+                      // justify:center; `.app-dialog-content .modal-actions
+                      // { margin-top: 8px }` on top of the body's 20px.
                       Padding(
                         padding: const EdgeInsets.fromLTRB(32, 8, 32, 32),
                         child: Row(
@@ -506,25 +508,32 @@ class _AppDialogState extends State<_AppDialog> {
   }
 
   /// `.icon-btn` Cancel — bg white/0.05, glass border, radius 8 (`rxs`),
-  /// color `--text`, UPPERCASE 12px w500 ls0.8, padding 7/14.
+  /// color `--text`, UPPERCASE 12px w500 ls0.8, padding 7/14. `.modal-actions`
+  /// has no `align-items`, so flex's default stretch sizes it to the 42px
+  /// `.send-btn` beside it, label centered (`.icon-btn` is `inline-flex;
+  /// align-items: center`).
   Widget _cancelButton(NymColors c) {
     return InkWell(
       onTap: _cancel,
       borderRadius: NymRadius.rxs,
       child: Container(
+        height: 42,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.05),
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rxs,
         ),
-        child: Text(
-          widget.cancelLabel.toUpperCase(),
-          style: TextStyle(
-            color: c.text,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.8,
+        child: Center(
+          widthFactor: 1,
+          child: Text(
+            widget.cancelLabel.toUpperCase(),
+            style: TextStyle(
+              color: c.text,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
           ),
         ),
       ),

@@ -4,6 +4,7 @@ import 'package:local_auth/local_auth.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../services/storage/secure_store.dart';
+import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import 'identity_vault.dart' show SecureStoreLike;
 import 'modal_chrome.dart';
@@ -172,10 +173,20 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final isBio = _isBiometric;
-    // Boot unlock is a `.modal active nm-vault-overlay` over rgba(0,0,0,0.7)
-    // with a floating `.modal-content nm-vault-box` card (420 max, padding 32).
+    // Boot unlock is a `.modal active nm-vault-overlay` — the `.modal` overlay
+    // over the page `--bg`: glass default rgba(0,0,0,0.7) (styles-chat.css:
+    // 1974); `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1636) — with a floating
+    // `.modal-content nm-vault-box` card (420 max, padding 32).
+    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
+    final overlay = !solidUi
+        ? Colors.black.withValues(alpha: 0.7)
+        : c.isLight
+            ? const Color(0x73000000) // black @ 0.45
+            : const Color(0xBF000000); // black @ 0.75
     return Scaffold(
-      backgroundColor: const Color(0xB3000000),
+      backgroundColor: Color.alphaBlend(overlay, c.bg),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -209,7 +220,8 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
                           ),
                         ),
                       ),
-                      // `.form-hint.nm-vault-text`: 13px, line-height 1.5, left.
+                      // `.form-hint.nm-vault-text`: 13px, line-height 1.5,
+                      // left, `margin: 0 0 16px`.
                       Text(
                         'Your Nymchat identity key is encrypted on this device.'
                         '${isBio ? ' Use your biometric to unlock.' : ''}',
@@ -240,16 +252,21 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
                           style: TextStyle(color: c.danger, fontSize: 13),
                         ),
                       ],
-                      const SizedBox(height: 24),
-                      // `.modal-actions`: center, gap 10. Wrap so the two pills
-                      // stack instead of overflowing on a narrow viewport.
-                      Wrap(
-                        alignment: WrapAlignment.center,
-                        spacing: 10,
-                        runSpacing: 10,
+                      // Body → actions gap: the password `.form-group` carries
+                      // `margin-bottom: 20px` and `.modal-body` another 20px
+                      // (40 total); the biometric prompt has no field, so only
+                      // the text's 16px margin + the body's 20px apply.
+                      SizedBox(height: isBio ? 20 : 40),
+                      // `.modal-actions`: flex row, gap 10, justify center; no
+                      // `align-items`, so the default stretch sizes the
+                      // `.icon-btn` to the 42px `.send-btn` beside it.
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           ModalChrome.iconButton(c, 'Forget identity',
-                              _busy ? null : _forget),
+                              _busy ? null : _forget,
+                              height: 42),
+                          const SizedBox(width: 10),
                           ModalChrome.sendButton(
                             c,
                             'Unlock',

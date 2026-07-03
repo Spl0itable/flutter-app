@@ -550,9 +550,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // `.icon-btn` Cancel: `.modal-actions` sets no `align-items`, so
+          // flex's default stretch sizes it to the 42px `.send-btn` Save.
           NymOutlineButton(
             label: 'Cancel',
             onPressed: () => Navigator.of(context).maybePop(),
+            height: 42,
           ),
           const SizedBox(width: 10),
           // `.send-btn`: primary-tinted (bg primary@0.1, border primary@0.3),
@@ -2599,7 +2602,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   String _nymLabelFor(String pubkey) {
     final user = ref.read(appStateProvider).users[pubkey];
     if (user != null && user.nym.isNotEmpty) return user.nym;
-    return getNymFromPubkey('anon', pubkey);
+    return getNymFromPubkey('nym', pubkey);
   }
 }
 

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
@@ -58,7 +59,23 @@ class CacheStore {
   static const String _dbName = 'nym_cache.db';
   static const int _dbVersion = 2;
 
+  /// Every logical store, mirroring persistence.js `STORES` + the unbounded
+  /// `meta` store.
+  static const List<String> _allTables = [
+    'meta',
+    'profiles',
+    'channels',
+    'pms',
+    'reactions',
+    'avatars',
+    'banners',
+  ];
+
   Database? _db;
+
+  /// On-disk path recorded by [open] so [panicWipe] can delete the database
+  /// FILE itself. Null for injected (test/in-memory) databases.
+  String? _path;
 
   Database get _database {
     final db = _db;
@@ -79,6 +96,7 @@ class CacheStore {
     if (_db != null) return;
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, _dbName);
+    _path = path;
     _db = await openDatabase(
       path,
       version: _dbVersion,
@@ -617,16 +635,56 @@ class CacheStore {
 
   /// Wipe every cache table (`resetCache` — logout / nuke).
   Future<void> resetCache() async {
-    for (final table in const [
-      'meta',
-      'profiles',
-      'channels',
-      'pms',
-      'reactions',
-      'avatars',
-      'banners',
-    ]) {
+    for (final table in _allTables) {
       await _database.delete(table);
+    }
+  }
+
+  /// EMERGENCY destruction for the panic wipe (panic.js `_panicWipeDb`,
+  /// :237-277): overwrite a few junk records into every store, clear the
+  /// stores, then close the connection and delete the database FILE itself —
+  /// the sqflite analogue of the PWA's junk `put`s + `indexedDB.deleteDatabase`.
+  /// Every step is best-effort and isolated so a locked table can't block the
+  /// wipe. Injected (test/in-memory) databases have no file; for those the
+  /// junk-overwrite + clear + close is the whole wipe.
+  Future<void> panicWipe() async {
+    final db = _db;
+    if (db != null) {
+      final rng = Random.secure();
+      for (final table in _allTables) {
+        try {
+          final keyColumn = _keyColumnFor(table);
+          // 3 junk records per store, like the PWA's `__panic_<i>` puts.
+          for (var i = 0; i < 3; i++) {
+            final record = <String, Object?>{keyColumn: '__panic_$i'};
+            if (table == 'avatars' || table == 'banners') {
+              record['bytes'] = Uint8List.fromList(
+                List<int>.generate(2048, (_) => rng.nextInt(256)),
+              );
+            } else {
+              record['json'] = base64Encode(
+                List<int>.generate(2048, (_) => rng.nextInt(256)),
+              );
+            }
+            if (table != 'meta') record['lastTouched'] = _now();
+            await db.insert(
+              table,
+              record,
+              conflictAlgorithm: ConflictAlgorithm.replace,
+            );
+          }
+          await db.delete(table);
+        } catch (_) {}
+      }
+    }
+    try {
+      await close();
+    } catch (_) {}
+    final path = _path;
+    if (path != null) {
+      try {
+        await deleteDatabase(path);
+      } catch (_) {}
     }
   }
 
