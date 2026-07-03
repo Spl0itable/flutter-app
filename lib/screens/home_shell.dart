@@ -492,9 +492,9 @@ class _AmbientGlowPainter extends CustomPainter {
       final rx = math.sqrt2 * m * size.width;
       final ry = math.sqrt2 * m * size.height;
       final matrix = Matrix4.identity()
-        ..translateByDouble(center.dx, center.dy, 0, 1)
-        ..scaleByDouble(1.0, ry / rx, 1, 1)
-        ..translateByDouble(-center.dx, -center.dy, 0, 1);
+        ..translate(center.dx, center.dy)
+        ..scale(1.0, ry / rx)
+        ..translate(-center.dx, -center.dy);
       canvas.drawRect(
         rect,
         Paint()
