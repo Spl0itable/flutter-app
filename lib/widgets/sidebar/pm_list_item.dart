@@ -103,11 +103,14 @@ class PMListItem extends ConsumerWidget {
                     // `.avatar-pm`: 26px, margin-right 4 (no sidebar status dot).
                     NymAvatar(seed: pubkey, size: 26, imageUrl: picture),
                     const SizedBox(width: 4),
-                    Flexible(
-                      // `.pm-name`: color --text-dim, normal weight, with a dim
-                      // `.nym-suffix` tail. `white-space:normal` +
-                      // `word-break:break-word` (styles-shell.css:418-429) —
-                      // long names WRAP onto multiple lines, no ellipsis.
+                    Expanded(
+                      // `.pm-name { flex: 1 }`: color --text-dim, normal
+                      // weight, with a dim `.nym-suffix` tail. `white-space:
+                      // normal` + `word-break:break-word` (styles-shell.css:
+                      // 418-429) — long names WRAP onto multiple lines, no
+                      // ellipsis. Flair/verified/friend badges live INSIDE the
+                      // name span in the PWA DOM (pms.js:2759), so they hug
+                      // (and wrap with) the text instead of floating right.
                       child: Text.rich(
                         TextSpan(
                           children: [
@@ -120,6 +123,34 @@ class PMListItem extends ConsumerWidget {
                                 fontWeight: FontWeight.w100,
                               ),
                             ),
+                            WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: Consumer(
+                                builder: (context, ref, _) =>
+                                    CosmeticNymBadges(
+                                  cosmetics:
+                                      ref.watch(userCosmeticsProvider(pubkey)),
+                                  flairSize: 14,
+                                  supporterHeight: 14,
+                                ),
+                              ),
+                            ),
+                            if (isDev || isBot)
+                              const WidgetSpan(
+                                alignment: PlaceholderAlignment.middle,
+                                child: Padding(
+                                  padding: EdgeInsets.only(left: 4),
+                                  child: VerifiedBadge(size: 14),
+                                ),
+                              ),
+                            if (isFriend)
+                              const WidgetSpan(
+                                alignment: PlaceholderAlignment.middle,
+                                child: Padding(
+                                  padding: EdgeInsets.only(left: 2),
+                                  child: FriendBadge(size: 14),
+                                ),
+                              ),
                           ],
                         ),
                         style: TextStyle(
@@ -130,23 +161,12 @@ class PMListItem extends ConsumerWidget {
                         ),
                       ),
                     ),
-                    Consumer(
-                      builder: (context, ref, _) => CosmeticNymBadges(
-                        cosmetics: ref.watch(userCosmeticsProvider(pubkey)),
-                        flairSize: 14,
-                        supporterHeight: 14,
-                      ),
-                    ),
-                    if (isDev || isBot) ...[
-                      const SizedBox(width: 4),
-                      const VerifiedBadge(size: 14),
+                    // `.channel-badges { margin-left: 5px; flex-shrink: 0 }` —
+                    // the unread pill sits flush right, forming a column.
+                    if (unread > 0) ...[
+                      const SizedBox(width: 5),
+                      _UnreadPill(count: unread),
                     ],
-                    if (isFriend) ...[
-                      const SizedBox(width: 2),
-                      const FriendBadge(size: 14),
-                    ],
-                    const Spacer(),
-                    if (unread > 0) _UnreadPill(count: unread),
                   ],
                 ),
               ),

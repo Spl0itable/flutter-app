@@ -1814,10 +1814,12 @@ class _GroupListItem extends ConsumerWidget {
                           padding: const EdgeInsets.only(right: 6),
                           child: _GroupIconWrap(c: c),
                         ),
-                      Flexible(
-                        // `.pm-name` (shared by group rows): white-space:normal
-                        // + word-break:break-word (styles-shell.css:418-429) —
-                        // long names WRAP, no ellipsis.
+                      Expanded(
+                        // `.pm-name { flex: 1 }` (shared by group rows):
+                        // white-space:normal + word-break:break-word
+                        // (styles-shell.css:418-429) — long names WRAP, no
+                        // ellipsis; flex:1 pushes the unread pill flush right
+                        // so badges align in a column across rows.
                         child: RichText(
                           text: TextSpan(
                             style: TextStyle(
@@ -1843,8 +1845,11 @@ class _GroupListItem extends ConsumerWidget {
                           ),
                         ),
                       ),
-                      const Spacer(),
-                      if (unread > 0) _GroupUnreadPill(count: unread),
+                      // `.channel-badges { margin-left: 5px }`.
+                      if (unread > 0) ...[
+                        const SizedBox(width: 5),
+                        _GroupUnreadPill(count: unread),
+                      ],
                     ],
                   ),
                 ),
