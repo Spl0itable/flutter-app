@@ -1260,19 +1260,20 @@ class _ReactionBadges extends StatelessWidget {
                     // Custom `:shortcode:` reaction renders as its image (PWA
                     // `renderReactionEmoji`, calls.js:1689 — whole-string
                     // only) at `.call-chat-reaction .custom-emoji { width/
-                    // height: 1.4em; vertical-align: -0.2em }` = 18.2px of the
-                    // 13px badge font (styles-features.css:5003); unicode
-                    // falls through to a plain Text.
+                    // height: 1.4em; vertical-align: -0.2em }` = 17.5px of the
+                    // 0.78rem = 12.5px badge font (styles-features.css:
+                    // 4989-5003); unicode falls through to a plain Text.
                     InlineEmojiText(
                         text: entry.key,
-                        style: const TextStyle(fontSize: 13),
-                        emojiSize: 18.2,
+                        style: const TextStyle(fontSize: 12.5),
+                        emojiSize: 17.5,
                         wholeStringOnly: true,
                         emojiMargin: EdgeInsets.zero,
                         emojiBaselineDropEm: 0.2),
                     const SizedBox(width: 3),
+                    // `.call-chat-reaction-count` 0.72rem = 11.5px.
                     Text('${entry.value.length}',
-                        style: TextStyle(color: c.textDim, fontSize: 11)),
+                        style: TextStyle(color: c.textDim, fontSize: 11.5)),
                   ],
                 ),
               ),

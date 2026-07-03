@@ -1057,6 +1057,25 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (removed) state = state.copyWith();
   }
 
+  /// Clears the unread badge of every column the [columnsReadGate] passes —
+  /// the PWA's `_cvMarkVisibleColumnsRead` (columns.js:44-47), fired when the
+  /// app returns to the foreground (relays.js:532/584 on `visibilitychange`).
+  /// Messages that arrived while the app was hidden accrued unread even for
+  /// the focused column (the gate returns false while hidden); becoming
+  /// visible again clears the focused + at-bottom column's count. No-op in
+  /// single view (no gate registered) — there the active conversation never
+  /// accrues unread in the first place.
+  void markVisibleColumnsRead() {
+    final gate = columnsReadGate;
+    if (gate == null) return;
+    // Iterate a snapshot: `clearUnread` mutates `unreadCounts`. Keys may be
+    // stored under the storage key OR the bare id depending on the ingest
+    // path, so the deck-registered gate must accept either form.
+    for (final key in state.unreadCounts.keys.toList()) {
+      if (gate(key)) clearUnread(key);
+    }
+  }
+
   int _localSeq = 1000000;
   int _ingestSeq = 1;
   final Set<String> _seenIds = <String>{};

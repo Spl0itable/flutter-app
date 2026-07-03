@@ -102,7 +102,12 @@ class HomeShellState extends ConsumerState<HomeShell>
     if (ref.read(appStateProvider).selfPubkey.isEmpty) return;
     // Reading the provider instantiates the engine + its observer.
     final engine = ref.read(botChatControllerProvider.notifier);
-    ref.read(nostrControllerProvider).bindBotChat();
+    final nostr = ref.read(nostrControllerProvider);
+    nostr.bindBotChat();
+    // Route paid-auth signing through the ACTIVE signer (local or NIP-46
+    // remote) — the PWA's `_signBotAuth` generic dispatch (pms.js:1649-1679),
+    // so money actions sign fresh per request on remote-signer accounts too.
+    engine.attachSigner(nostr.signer);
     unawaited(engine.maybeSendBotWelcomePM());
   }
 
@@ -215,7 +220,9 @@ class HomeShellState extends ConsumerState<HomeShell>
       if (next == null) return;
       // Consume immediately so a rebuild can't re-open the modal.
       ref.read(giftCreditsRequestProvider.notifier).consume();
-      ref.read(nostrControllerProvider).bindBotChat();
+      final nostr = ref.read(nostrControllerProvider);
+      nostr.bindBotChat();
+      ref.read(botChatControllerProvider.notifier).attachSigner(nostr.signer);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         BotCreditsModal.show(
@@ -234,7 +241,9 @@ class HomeShellState extends ConsumerState<HomeShell>
     ref.listen<BotBuyRequest?>(botBuyRequestProvider, (prev, next) {
       if (next == null) return;
       ref.read(botBuyRequestProvider.notifier).consume();
-      ref.read(nostrControllerProvider).bindBotChat();
+      final nostr = ref.read(nostrControllerProvider);
+      nostr.bindBotChat();
+      ref.read(botChatControllerProvider.notifier).attachSigner(nostr.signer);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         BotCreditsModal.show(

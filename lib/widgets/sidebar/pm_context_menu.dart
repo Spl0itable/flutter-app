@@ -291,7 +291,9 @@ class _QuickMenuRowState extends State<_QuickMenuRow> {
         onTapUp: (_) => setState(() => _pressed = false),
         onTapCancel: () => setState(() => _pressed = false),
         child: AnimatedContainer(
+          // `transition: background 0.12s ease` (styles-features.css:2811).
           duration: const Duration(milliseconds: 120),
+          curve: Curves.ease,
           // `.quick-context-item`: padding 8/12, gap 10, radius 8, font 14.
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(

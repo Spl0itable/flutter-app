@@ -5754,9 +5754,11 @@ class NostrController {
   /// backfillFromD1OnReconnect`. Live relay feeds resume via the service's own
   /// socket reconnect, so this only needs the per-view archive top-up. Also
   /// re-checks pending shop purchases (the PWA's visibility/connect trigger,
-  /// relays.js:490).
+  /// relays.js:490) and clears the focused at-bottom column's unread badge in
+  /// columns mode (`_cvMarkVisibleColumnsRead`, relays.js:532/584).
   void onAppResumed() {
     _onViewOpened(_ref.read(appStateProvider).view);
+    _ref.read(appStateProvider.notifier).markVisibleColumnsRead();
     unawaited(_reconcileShopPurchases());
   }
 

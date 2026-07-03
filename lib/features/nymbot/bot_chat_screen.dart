@@ -1,6 +1,10 @@
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/theme/nym_colors.dart';
@@ -23,6 +27,8 @@ import '../emoji/emoji_data.dart';
 import '../emoji/emoji_picker.dart';
 import '../emoji/gif_picker.dart';
 import '../reactions/reaction_picker.dart';
+import '../translate/translate_languages.dart';
+import '../translate/translate_service.dart';
 import 'bot_credits_modal.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
@@ -70,11 +76,15 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       // Bind the paid surface to the live identity, make the bot PM the active
       // view (receipts / read-marking / typing all key off it, like openPM),
       // then render the empty-thread intro + refresh credits.
-      ref.read(nostrControllerProvider).bindBotChat();
+      final nostr = ref.read(nostrControllerProvider);
+      nostr.bindBotChat();
       ref
           .read(appStateProvider.notifier)
           .switchView(const ChatView.pm(kNymbotPubkey));
       final engine = ref.read(botChatControllerProvider.notifier);
+      // Paid-auth signs through the ACTIVE signer (local or NIP-46 remote) —
+      // the PWA's `_signBotAuth` generic dispatch (pms.js:1649-1679).
+      engine.attachSigner(nostr.signer);
       engine.ensureIntro();
       engine.refreshBalance();
     });
@@ -824,6 +834,38 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   SharedPreferences? _prefs;
   List<String> _recents = const [];
 
+  // --- Attachments (`selectImage` / `selectP2PFile`, index.html:759-775) ----
+  // The bot PM shares the canonical `.input-buttons` in the PWA, so the
+  // Image/Video upload and P2P-file buttons are present here too.
+
+  /// `#uploadProgress` state (0..1, null = hidden) — the progress panel shown
+  /// during `uploadImage` (users.js:971+).
+  double? _uploadProgress;
+  String? _uploadMime;
+  bool _uploadCancelled = false;
+
+  /// 1-based index + total of the current multi-file upload ("Uploading i of
+  /// N…" when N>1, users.js:1006-1008). 0/0 = single-file.
+  int _uploadIndex = 0;
+  int _uploadTotal = 0;
+
+  // --- In-composer translate (`#translateInputBtn` + its 230px dropdown, ----
+  // translate.js:563-600) — the bot PM shares the same `.message-input-row`.
+  final _translatePortal = OverlayPortalController();
+  final _translateAnchor = LayerLink();
+  final _translateSearchController = TextEditingController();
+  String _translateQuery = '';
+  bool _translating = false;
+
+  /// Translate-dropdown favorites (`nym_translate_favorites`), pinned to the
+  /// top of the language list (translate.js:93-108).
+  List<String> _translateFavorites = const [];
+
+  /// Favorites-pinned order snapshotted when the dropdown opens ("the next
+  /// time the dropdown opens", translate.js:563-571) — toggling a star
+  /// mid-open doesn't reshuffle.
+  List<MapEntry<String, String>> _translateLangOrder = const [];
+
   @override
   void initState() {
     super.initState();
@@ -836,6 +878,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focus.dispose();
+    _translateSearchController.dispose();
     super.dispose();
   }
 
@@ -1053,6 +1096,447 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     _gifPortal.show();
   }
 
+  // --- Attachments: image upload (Blossom) + P2P file share -----------------
+
+  /// A system line in the bot conversation (the failure/notice surface the
+  /// canonical composer's `_onSystemMessage` uses for upload errors).
+  void _systemLine(String text) => ref
+      .read(appStateProvider.notifier)
+      .addSystemMessage(text, storageKey: BotChatController.conversationKey);
+
+  void _cancelUpload() {
+    setState(() {
+      _uploadCancelled = true;
+      _uploadProgress = null;
+      _uploadMime = null;
+      _uploadIndex = 0;
+      _uploadTotal = 0;
+    });
+  }
+
+  /// Image/Video button (`selectImage` → fileInput `multiple`, accepts image +
+  /// video): pick one OR MANY media, upload each to a Blossom server, then
+  /// append ALL resulting URLs (space-joined) to the input — the formatter
+  /// renders them as media (users.js:971-1028).
+  Future<void> _pickAndUploadImage() async {
+    List<XFile> picked;
+    try {
+      picked = await ImagePicker().pickMultipleMedia();
+    } catch (_) {
+      return; // picker unavailable (tests/desktop)
+    }
+    if (picked.isEmpty) return;
+    const maxUpload = 50 * 1024 * 1024; // 50 MB cap (users.js:977)
+
+    if (!mounted) return;
+    setState(() {
+      _uploadCancelled = false;
+      _uploadTotal = picked.length;
+    });
+
+    final controller = ref.read(nostrControllerProvider);
+    final urls = <String>[];
+    for (var i = 0; i < picked.length; i++) {
+      if (!mounted || _uploadCancelled) break;
+      final file = picked[i];
+      final Uint8List bytes;
+      try {
+        bytes = await file.readAsBytes();
+      } catch (_) {
+        continue;
+      }
+      if (bytes.length > maxUpload) {
+        _systemLine('Files must be under 50MB.');
+        continue;
+      }
+      final contentType = file.mimeType ?? _guessMime(file.name);
+      if (!mounted) return;
+      setState(() {
+        _uploadProgress = 0.1;
+        _uploadMime = contentType;
+        _uploadIndex = i + 1;
+      });
+      final url = await controller.uploadImage(
+        bytes,
+        contentType: contentType,
+        onProgress: (p) {
+          if (mounted && !_uploadCancelled) setState(() => _uploadProgress = p);
+        },
+      );
+      if (!mounted) return;
+      if (_uploadCancelled) break;
+      if (url == null) {
+        _systemLine('Failed to upload media.');
+        continue;
+      }
+      urls.add(url);
+    }
+
+    if (!mounted) return;
+    final wasCancelled = _uploadCancelled;
+    setState(() {
+      _uploadProgress = null;
+      _uploadMime = null;
+      _uploadCancelled = false;
+      _uploadIndex = 0;
+      _uploadTotal = 0;
+    });
+    // Drop the results entirely if the user pressed ✕ mid-batch.
+    if (wasCancelled || urls.isEmpty) return;
+    // Append all URLs space-joined (then a trailing space), like the PWA.
+    final existing = _controller.text;
+    final needsSpace = existing.isNotEmpty && !existing.endsWith(' ');
+    _controller.text = '$existing${needsSpace ? ' ' : ''}${urls.join(' ')} ';
+    _controller.selection =
+        TextSelection.collapsed(offset: _controller.text.length);
+    _focus.requestFocus();
+  }
+
+  /// File button (`selectP2PFile` → p2pFileInput): pick any file and offer it
+  /// as a P2P transfer (`shareP2PFile`, p2p.js:86).
+  Future<void> _pickAndShareFile() async {
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(withData: true);
+    } catch (_) {
+      return;
+    }
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      _systemLine('Could not read the selected file.');
+      return;
+    }
+    await ref.read(nostrControllerProvider).shareP2PFile(
+          bytes: bytes,
+          name: file.name,
+          type: _guessMime(file.name),
+        );
+    if (mounted) _systemLine('File offered for P2P download.');
+  }
+
+  static String _guessMime(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.gif')) return 'image/gif';
+    if (lower.endsWith('.webp')) return 'image/webp';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    return 'application/octet-stream';
+  }
+
+  /// `.upload-progress` — a panel (12px padding, 8px bottom gap, top corners
+  /// radius-sm) floating above the input with a label + cancel ✕ + a thin
+  /// primary→secondary gradient bar (users.js:988-1008). Single: "Uploading
+  /// image/video..."; multi: "Uploading i of N...".
+  Widget _uploadBar(BuildContext context) {
+    final c = widget.colors;
+    final isVideo = (_uploadMime ?? '').startsWith('video/');
+    final kind = isVideo ? 'video' : 'image';
+    final label = _uploadTotal > 1
+        ? 'Uploading $_uploadIndex of $_uploadTotal...'
+        : 'Uploading $kind...';
+    final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
+    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
+    return Container(
+      // `.upload-progress`: bg rgba(20,20,35,0.9) dark / white@0.92 light
+      // (solid-ui repaints with --glass-bg), 1px glass border, radius-sm top
+      // corners (styles-components.css:1142-1153).
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: solidUi
+            ? c.glassBg
+            : (c.isLight
+                ? Colors.white.withValues(alpha: 0.92)
+                : const Color(0xE6141423)),
+        border: Border.all(color: c.glassBorder),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(label,
+                    style: TextStyle(color: c.textDim, fontSize: 12)),
+              ),
+              // `.upload-progress-close` (22×22 ✕, radius-sm), cancels the
+              // in-flight upload.
+              Material(
+                type: MaterialType.transparency,
+                borderRadius: NymRadius.rsm,
+                child: InkWell(
+                  onTap: _cancelUpload,
+                  borderRadius: NymRadius.rsm,
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: Center(
+                      child: NymSvgIcon(NymIcons.close,
+                          size: 14, color: c.textDim),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          // `.progress-bar`: height 6, white@0.05, radius 10; `.progress-fill`
+          // linear-gradient(90deg, primary, secondary).
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              height: 6,
+              color: Colors.white.withValues(alpha: 0.05),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: FractionallySizedBox(
+                  widthFactor: fraction,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      gradient: LinearGradient(
+                        colors: [c.primary, c.secondary],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- In-composer translate (`#translateInputBtn` + dropdown) --------------
+
+  /// `#translateInputBtn` (+ its dropdown). Exists only while the field has
+  /// text; pulses while translating. Anchors the 230px language dropdown.
+  Widget _translateButton(BuildContext context) {
+    final hasText = _controller.text.trim().isNotEmpty;
+    return CompositedTransformTarget(
+      link: _translateAnchor,
+      child: OverlayPortal(
+        controller: _translatePortal,
+        overlayChildBuilder: _translateDropdown,
+        child: _BotTranslateButton(
+          enabled: hasText && !_translating,
+          translating: _translating,
+          onTap: _toggleTranslateDropdown,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _toggleTranslateDropdown() async {
+    if (_translatePortal.isShowing) {
+      _translatePortal.hide();
+      return;
+    }
+    if (_controller.text.trim().isEmpty || _translating) return;
+    _emojiPortal.hide();
+    _gifPortal.hide();
+    final prefs = await _ensurePrefs();
+    if (!mounted) return;
+    setState(() {
+      _translateFavorites = _loadTranslateFavorites(prefs);
+      _translateQuery = '';
+      // Snapshot the favorites-pinned order at open (re-pins only on reopen).
+      _translateLangOrder =
+          sortedTranslateLanguagesWithFavorites(_translateFavorites);
+    });
+    _translateSearchController.clear();
+    _translatePortal.show();
+  }
+
+  /// Read the persisted translate favorites (`nym_translate_favorites`).
+  static List<String> _loadTranslateFavorites(SharedPreferences prefs) {
+    final raw = prefs.getString(kTranslateFavoritesKey);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.whereType<String>().toList();
+    } catch (_) {}
+    return const [];
+  }
+
+  /// Toggle [code] in the favorites list and persist (translate.js:102-108):
+  /// append when absent, remove when present.
+  void _toggleTranslateFavorite(String code) {
+    final next = [..._translateFavorites];
+    if (!next.remove(code)) next.add(code);
+    setState(() => _translateFavorites = next);
+    _prefs?.setString(kTranslateFavoritesKey, jsonEncode(next));
+  }
+
+  /// `.translate-input-dropdown`: a 230px search + language list anchored
+  /// above the translate button. Choosing a language translates the draft in
+  /// place (identical chrome to the canonical composer's dropdown).
+  Widget _translateDropdown(BuildContext context) {
+    final c = widget.colors;
+    final q = _translateQuery.trim().toLowerCase();
+    // Star FILL reads the live favorites set; row ORDER uses the open-time
+    // snapshot so toggling a star doesn't reshuffle mid-open (PWA parity).
+    final favSet = _translateFavorites.toSet();
+    final order = _translateLangOrder.isEmpty
+        ? sortedTranslateLanguagesWithFavorites(_translateFavorites)
+        : _translateLangOrder;
+    final langs = order
+        .where((e) => q.isEmpty || e.value.toLowerCase().contains(q))
+        .toList();
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _translatePortal.hide,
+          ),
+        ),
+        CompositedTransformFollower(
+          link: _translateAnchor,
+          targetAnchor: Alignment.topRight,
+          followerAnchor: Alignment.bottomRight,
+          offset: const Offset(0, -4),
+          showWhenUnlinked: false,
+          child: Align(
+            alignment: Alignment.bottomRight,
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                width: 230,
+                constraints: const BoxConstraints(maxHeight: 320),
+                decoration: BoxDecoration(
+                  // `.translate-input-dropdown` bg --bg-secondary / glass
+                  // border / shadow black@0.4; light flips to white@0.98 /
+                  // black@0.12 (styles-themes-responsive.css:1278-1282).
+                  color: c.isLight
+                      ? Colors.white.withValues(alpha: 0.98)
+                      : c.bgSecondary,
+                  border: Border.all(
+                      color: c.isLight
+                          ? Colors.black.withValues(alpha: 0.12)
+                          : c.glassBorder),
+                  borderRadius: NymRadius.rmd,
+                  boxShadow: [
+                    BoxShadow(
+                        color: c.isLight
+                            ? Colors.black.withValues(alpha: 0.12)
+                            : const Color(0x66000000),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8)),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // `.translate-dropdown-search`: 8px padding + a bottom
+                    // hairline under the search region.
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        border:
+                            Border(bottom: BorderSide(color: c.glassBorder)),
+                      ),
+                      child: TextField(
+                        controller: _translateSearchController,
+                        autofocus: true,
+                        onChanged: (v) => setState(() => _translateQuery = v),
+                        style: TextStyle(color: c.text, fontSize: 13),
+                        cursorColor: c.isLight ? Colors.black : Colors.white,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          hintText: 'Search languages...',
+                          hintStyle: TextStyle(color: c.textDim, fontSize: 13),
+                          filled: true,
+                          fillColor: c.isLight
+                              ? Colors.black.withValues(alpha: 0.04)
+                              : Colors.white.withValues(alpha: 0.05),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 7),
+                          border: OutlineInputBorder(
+                            borderRadius: NymRadius.rsm,
+                            borderSide: BorderSide(color: c.glassBorder),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: NymRadius.rsm,
+                            borderSide: BorderSide(color: c.glassBorder),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: NymRadius.rsm,
+                            borderSide: BorderSide(color: c.primary),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Flexible(
+                      // `.translate-dropdown-list`: padding 4px 0.
+                      child: langs.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: Text('No languages found',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: c.textDim, fontSize: 13)),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 4),
+                              itemCount: langs.length,
+                              itemBuilder: (_, i) {
+                                final e = langs[i];
+                                return _BotTranslateLangRow(
+                                  name: e.value,
+                                  favorited: favSet.contains(e.key),
+                                  onTap: () => _translateDraft(e.key),
+                                  onToggleFavorite: () =>
+                                      _toggleTranslateFavorite(e.key),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Translates the typed draft into [targetLang] and replaces the input text
+  /// (the PWA's in-input translate flow). Sentinel emoji expand to their
+  /// literal `:code:` before the external round-trip.
+  Future<void> _translateDraft(String targetLang) async {
+    _translatePortal.hide();
+    final text = _controller.expand(_controller.text).trim();
+    if (text.isEmpty) return;
+    setState(() => _translating = true);
+    try {
+      final res = await TranslateService().translate(text, targetLang);
+      if (!mounted) return;
+      final out = res.translatedText.trim();
+      if (out.isNotEmpty) {
+        _controller.text = out;
+        _controller.selection =
+            TextSelection.collapsed(offset: _controller.text.length);
+      }
+    } catch (_) {
+      if (mounted) _systemLine('Translation failed.');
+    } finally {
+      if (mounted) setState(() => _translating = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = widget.colors;
@@ -1122,6 +1606,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
+            // `#uploadProgress` floats above the input while a Blossom upload
+            // runs (users.js:988-1008).
+            if (_uploadProgress != null) _uploadBar(context),
             // `#commandPalette` for the bot-PM `?` commands, above the input
             // (hidden by Escape until the input changes again).
             if (_suggestions.isNotEmpty && !_suppressPalette) _palette(c),
@@ -1155,6 +1642,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   Widget _textField(BuildContext context, bool phone) {
     final c = widget.colors;
     final focused = _focus.hasFocus;
+    final hasText = _controller.text.trim().isNotEmpty;
     final flatFill = c.isLight
         ? Colors.black.withValues(alpha: focused ? 0.02 : 0.04)
         : Colors.white.withValues(alpha: focused ? 0.07 : 0.05);
@@ -1184,7 +1672,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
             fontSize: phone ? 16 : 15),
         filled: true,
         fillColor: flatFill,
-        contentPadding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+        // The translate button only exists when there's text, so only then
+        // does the input reserve right padding for it (`paddingRight 38px`).
+        contentPadding: EdgeInsets.fromLTRB(16, 10, hasText ? 38 : 16, 10),
         border: border,
         enabledBorder: border,
         focusedBorder: OutlineInputBorder(
@@ -1192,6 +1682,19 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           borderSide: BorderSide(color: c.primaryA(0.30)),
         ),
       ),
+    );
+    final stack = Stack(
+      children: [
+        field,
+        // `#translateInputBtn` starts `.nm-hidden` and `display:flex` ONLY
+        // when the field has text (translate.js:588-600).
+        if (hasText)
+          Positioned(
+            right: 8,
+            bottom: 10,
+            child: _translateButton(context),
+          ),
+      ],
     );
     // `.message-input:focus`: a 3px primary@0.06 ring (spread, no blur).
     return DecoratedBox(
@@ -1207,16 +1710,31 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
               ]
             : const [],
       ),
-      child: field,
+      child: stack,
     );
   }
 
-  /// `.input-buttons`: Emoji / GIF icon buttons + the SEND pill. (The PWA row
-  /// also carries Image-upload and P2P-file buttons — those live in the
-  /// canonical composer's upload plumbing; see handoffs.)
+  /// `.input-buttons` (index.html:758-790): EXACTLY five children — Image,
+  /// File (P2P), Emoji, GIF and the SEND pill — shared by the bot PM.
   Widget _toolbar(
       BuildContext context, bool sendEnabled, bool compact, bool phone) {
     final buttons = <Widget>[
+      _BotIconBtn(
+        svg: NymIcons.composerImage,
+        tooltip: 'Upload Image/Video',
+        expand: compact,
+        // Inert until relays connect (same `sendEnabled` as SEND), then the
+        // in-upload guard takes over.
+        enabled: sendEnabled,
+        onTap: _uploadProgress != null ? null : _pickAndUploadImage,
+      ),
+      _BotIconBtn(
+        svg: NymIcons.composerFile,
+        tooltip: 'Share File (P2P)',
+        expand: compact,
+        enabled: sendEnabled,
+        onTap: _pickAndShareFile,
+      ),
       _emojiButton(context, sendEnabled, compact),
       _gifButton(context, sendEnabled, compact),
       _BotSendButton(
@@ -1659,6 +2177,200 @@ class _BotSendButtonState extends State<_BotSendButton> {
                 letterSpacing: 1.5,
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `#translateInputBtn`: the 26×26 translate glyph overlaid bottom-right of
+/// the input (styles-chat.css `.translate-input-btn`); pulses (opacity
+/// 0.4↔0.8) while a translation runs. Identical to the canonical composer's
+/// button — the PWA bot PM shares the same `.message-input-row`.
+class _BotTranslateButton extends StatefulWidget {
+  const _BotTranslateButton({
+    required this.enabled,
+    required this.translating,
+    required this.onTap,
+  });
+
+  final bool enabled;
+  final bool translating;
+  final VoidCallback onTap;
+
+  @override
+  State<_BotTranslateButton> createState() => _BotTranslateButtonState();
+}
+
+class _BotTranslateButtonState extends State<_BotTranslateButton>
+    with SingleTickerProviderStateMixin {
+  bool _hover = false;
+  late final AnimationController _pulse;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulse = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _BotTranslateButton old) {
+    super.didUpdateWidget(old);
+    if (widget.translating && !_pulse.isAnimating) {
+      _pulse.repeat(reverse: true);
+    } else if (!widget.translating && _pulse.isAnimating) {
+      _pulse.stop();
+      _pulse.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final color = _hover && widget.enabled ? c.primary : c.textDim;
+    Widget glyph = NymSvgIcon(NymIcons.translate, size: 16, color: color);
+    if (widget.translating) {
+      // `.translating` pulse: opacity 0.4 ↔ 0.8.
+      glyph = FadeTransition(
+        opacity: Tween(begin: 0.4, end: 0.8).animate(_pulse),
+        child: glyph,
+      );
+    }
+    return Opacity(
+      opacity: widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4,
+      child: Tooltip(
+        message: 'Translate text',
+        child: MouseRegion(
+          cursor: widget.enabled
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          onEnter: (_) => setState(() => _hover = true),
+          onExit: (_) => setState(() => _hover = false),
+          child: GestureDetector(
+            onTap: widget.enabled ? widget.onTap : null,
+            child: Container(
+              width: 26,
+              height: 26,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                // `.translate-input-btn:hover` white@0.08 dark / black@0.06
+                // light (styles-themes-responsive.css:1274).
+                color: _hover && widget.enabled
+                    ? (c.isLight
+                        ? Colors.black.withValues(alpha: 0.06)
+                        : Colors.white.withValues(alpha: 0.08))
+                    : null,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: glyph,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One `.translate-dropdown-item` row: the language name + a trailing favorite
+/// star (`#f5c518` when favorited) — styles-chat.css:1850-1897.
+class _BotTranslateLangRow extends StatefulWidget {
+  const _BotTranslateLangRow({
+    required this.name,
+    required this.favorited,
+    required this.onTap,
+    required this.onToggleFavorite,
+  });
+
+  final String name;
+  final bool favorited;
+  final VoidCallback onTap;
+  final VoidCallback onToggleFavorite;
+
+  @override
+  State<_BotTranslateLangRow> createState() => _BotTranslateLangRowState();
+}
+
+class _BotTranslateLangRowState extends State<_BotTranslateLangRow> {
+  bool _hover = false;
+  bool _starHover = false;
+
+  static const Color _favColor = Color(0xFFF5C518);
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          // `.translate-dropdown-item:hover` white@0.08 dark / black@0.05
+          // light (styles-themes-responsive.css:1284).
+          color: _hover
+              ? (c.isLight
+                  ? Colors.black.withValues(alpha: 0.05)
+                  : Colors.white.withValues(alpha: 0.08))
+              : null,
+          // `.translate-dropdown-item`: padding 7px 8px 7px 14px; gap 8.
+          padding: const EdgeInsets.fromLTRB(14, 7, 8, 7),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _hover ? c.textBright : c.text,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              // `.translate-dropdown-star`: 24×24, radius-sm.
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                onEnter: (_) => setState(() => _starHover = true),
+                onExit: (_) => setState(() => _starHover = false),
+                child: GestureDetector(
+                  onTap: widget.onToggleFavorite,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _starHover
+                          ? (c.isLight
+                              ? Colors.black.withValues(alpha: 0.06)
+                              : Colors.white.withValues(alpha: 0.1))
+                          : null,
+                      borderRadius: NymRadius.rsm,
+                    ),
+                    child: NymSvgIcon(
+                      widget.favorited
+                          ? NymIcons.starFilled
+                          : NymIcons.starOutline,
+                      size: 14,
+                      color: widget.favorited
+                          ? _favColor
+                          : (_starHover ? c.textBright : c.textDim),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

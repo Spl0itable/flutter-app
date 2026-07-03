@@ -77,79 +77,81 @@ class _UserListItemState extends ConsumerState<UserListItem> {
           onEnter: (_) => setState(() => _hover = true),
           onExit: (_) => setState(() => _hover = false),
           child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onLongPressStart: (d) =>
-              showUserContextMenu(context, ref, user, d.globalPosition),
-          onSecondaryTapDown: (d) =>
-              showUserContextMenu(context, ref, user, d.globalPosition),
-          child: InkWell(
-          onTap: widget.onTap,
-          borderRadius: NymRadius.rxs,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              // `:hover` fill white@0.04 (light: black@0.04,
-              // styles-themes-responsive.css:1251-1255), radius-xs.
-              color: _hover
-                  ? (c.isLight
-                      ? Colors.black.withValues(alpha: 0.04)
-                      : Colors.white.withValues(alpha: 0.04))
-                  : null,
+            behavior: HitTestBehavior.opaque,
+            onLongPressStart: (d) =>
+                showUserContextMenu(context, ref, user, d.globalPosition),
+            onSecondaryTapDown: (d) =>
+                showUserContextMenu(context, ref, user, d.globalPosition),
+            child: InkWell(
+              onTap: widget.onTap,
               borderRadius: NymRadius.rxs,
-            ),
-            child: Row(
-              children: [
-                // `.user-avatar-wrap` (20×20, position:relative) with the
-                // `.user-status-dot` overlaid bottom-right (-1px), 8px + a 2px
-                // #0a0a0f ring (content-box → 12px outer).
-                _AvatarWithStatus(
-                  seed: user.pubkey,
-                  imageUrl: user.profile?.picture,
-                  status: status,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  // `:hover` fill white@0.04 (light: black@0.04,
+                  // styles-themes-responsive.css:1251-1255), radius-xs.
+                  color: _hover
+                      ? (c.isLight
+                          ? Colors.black.withValues(alpha: 0.04)
+                          : Colors.white.withValues(alpha: 0.04))
+                      : null,
+                  borderRadius: NymRadius.rxs,
                 ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(text: displayNym),
+                child: Row(
+                  children: [
+                    // `.user-avatar-wrap` (20×20, position:relative) with the
+                    // `.user-status-dot` overlaid bottom-right (-1px), 8px + a 2px
+                    // #0a0a0f ring (content-box → 12px outer).
+                    _AvatarWithStatus(
+                      seed: user.pubkey,
+                      imageUrl: user.profile?.picture,
+                      status: status,
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text.rich(
                         TextSpan(
-                          // `.nym-suffix`: opacity .7, 0.9em, weight 100.
-                          text: '#$suffix',
-                          style: TextStyle(
-                            color: nymColor.withValues(alpha: 0.7),
-                            fontSize: (textSize - 3) * 0.9,
-                            fontWeight: FontWeight.w100,
-                          ),
+                          children: [
+                            TextSpan(text: displayNym),
+                            TextSpan(
+                              // `.nym-suffix`: opacity .7, 0.9em, weight 100.
+                              text: '#$suffix',
+                              style: TextStyle(
+                                color: nymColor.withValues(alpha: 0.7),
+                                fontSize: (textSize - 3) * 0.9,
+                                fontWeight: FontWeight.w100,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: nymColor,
+                          fontSize: textSize - 3,
+                        ),
+                      ),
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: nymColor,
-                      fontSize: textSize - 3,
+                    CosmeticNymBadges(
+                      cosmetics: userCosmeticsFromUser(user),
+                      flairSize: 13,
+                      supporterHeight: 13,
                     ),
-                  ),
+                    // Verified developer / bot ✓ then friend badge
+                    // (`_fillUserLabel`: `verified-badge` margin-left 4, friend after).
+                    if (isDev || isBot) ...[
+                      const SizedBox(width: 4),
+                      const VerifiedBadge(size: 13),
+                    ],
+                    if (isFriend) ...[
+                      const SizedBox(width: 2),
+                      const FriendBadge(size: 13),
+                    ],
+                  ],
                 ),
-                CosmeticNymBadges(
-                  cosmetics: userCosmeticsFromUser(user),
-                  flairSize: 13,
-                  supporterHeight: 13,
-                ),
-                // Verified developer / bot ✓ then friend badge
-                // (`_fillUserLabel`: `verified-badge` margin-left 4, friend after).
-                if (isDev || isBot) ...[
-                  const SizedBox(width: 4),
-                  const VerifiedBadge(size: 13),
-                ],
-                if (isFriend) ...[
-                  const SizedBox(width: 2),
-                  const FriendBadge(size: 13),
-                ],
-              ],
+              ),
             ),
-          ),
           ),
         ),
       ),

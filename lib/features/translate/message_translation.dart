@@ -96,6 +96,11 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `.message-translation { font-size: 0.9em }` — em of the `.message` font,
+    // which is `var(--user-text-size)` (styles-chat.css:54), so the block
+    // scales with the text-size setting (styles-features.css:4316).
+    final baseSize =
+        ref.watch(settingsProvider.select((s) => s.textSize)).toDouble() * 0.9;
     // Nothing to show until a target language is resolved: while the picker is
     // open (_future still null) or if the user cancelled it (translate.js:200).
     final future = _future;
@@ -123,14 +128,17 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
               style: TextStyle(
                 color: c.textDim.withValues(alpha: 0.6),
                 fontStyle: FontStyle.italic,
-                fontSize: 13,
+                fontSize: baseSize,
+                height: 1.4,
               ),
             );
           }
           if (snap.hasError) {
+            // `.translation-error { font-size: 0.85em }` of the block base.
             return Text(
               'Translation failed',
-              style: TextStyle(color: c.danger, fontSize: 12),
+              style: TextStyle(
+                  color: c.danger, fontSize: baseSize * 0.85, height: 1.4),
             );
           }
           final res = snap.data!;
@@ -139,32 +147,39 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
               res.translatedText.trim() == plain.trim();
           if (isNoop) {
             return Text.rich(
-              TextSpan(children: [
-                const TextSpan(text: '🌐 '),
-                TextSpan(
-                  text:
-                      'Already in ${languageName(_target)} (nothing to translate)',
-                  // `.translation-error`: 0.85em of the 0.9em (=13) base ≈ 11.
-                  style: TextStyle(color: c.danger, fontSize: 13 * 0.85),
-                ),
-              ]),
+              TextSpan(
+                style: TextStyle(
+                    color: c.textDim, fontSize: baseSize, height: 1.4),
+                children: [
+                  const TextSpan(text: '🌐 '),
+                  TextSpan(
+                    text:
+                        'Already in ${languageName(_target)} (nothing to translate)',
+                    // `.translation-error`: 0.85em of the block base.
+                    style: TextStyle(
+                        color: c.danger, fontSize: baseSize * 0.85),
+                  ),
+                ],
+              ),
             );
           }
           final showLang = res.detectedLanguage != 'auto' &&
               res.detectedLanguage != _target;
           return Text.rich(
             TextSpan(
-              style: TextStyle(color: c.textDim, fontSize: 13, height: 1.4),
+              style:
+                  TextStyle(color: c.textDim, fontSize: baseSize, height: 1.4),
               children: [
                 const TextSpan(text: '🌐 '),
                 TextSpan(text: res.translatedText),
                 if (showLang)
                   TextSpan(
+                    // `.translation-lang`: 0.8em of the block base.
                     text:
                         '  ${languageName(res.detectedLanguage)} → ${languageName(_target)}',
                     style: TextStyle(
                       color: c.textDim.withValues(alpha: 0.7),
-                      fontSize: 13 * 0.8,
+                      fontSize: baseSize * 0.8,
                     ),
                   ),
               ],

@@ -54,6 +54,33 @@ class StorageSync {
   /// [Settings] subset.
   final KeyValueStore? _kv;
 
+  /// Lazily-opened fallback for [_kv]. Legacy construction (no injected store)
+  /// would otherwise silently drop every KV-backed synced pref — columnsLayout,
+  /// moderation lists, emoji favorites, `wallpaperCustomUrl`, PoW, keypair
+  /// mode, … — publishing a payload far smaller than the PWA's
+  /// `_buildSettingsPayload` (settings.js:91-165) and stomping another device's
+  /// synced `columnsLayout` with `[]`. [KeyValueStore.open] wraps the same
+  /// SharedPreferences singleton the app's `keyValueStoreProvider` instance
+  /// wraps, so both wrappers read/write shared state. In headless tests the
+  /// platform channel is unavailable: the single attempted open fails and the
+  /// payload keeps the typed-[Settings] subset, byte-identical to before.
+  KeyValueStore? _openedKv;
+  bool _kvOpenAttempted = false;
+
+  Future<KeyValueStore?> _kvOrOpen() async {
+    if (_kv != null) return _kv;
+    if (!_kvOpenAttempted) {
+      _kvOpenAttempted = true;
+      try {
+        _openedKv = await KeyValueStore.open();
+      } catch (_) {
+        // No SharedPreferences backend (headless tests / early boot failure) —
+        // keep the typed-[Settings] subset.
+      }
+    }
+    return _openedKv;
+  }
+
   /// True for a logged-in (nsec/nip46/extension) identity — `isNostrLoggedIn()`
   /// in the PWA (`loginMethod != null`). Ephemeral identities skip the durable
   /// PM archive entirely (pms.js `_pmArchiveAllowed`).
@@ -494,7 +521,7 @@ class StorageSync {
       settings,
       pinnedLandingChannelJson: pinnedLandingChannelJson,
       seenCalls: seenCalls,
-      kv: _kv,
+      kv: await _kvOrOpen(),
       selfPubkey: _pubkey,
       extras: extras,
     );

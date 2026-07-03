@@ -1793,6 +1793,12 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
     // (shop.js `_listenForShopReceipt` → zaps.js:1181-1189 →
     // `handleShopPaymentSuccess`); false = the 180s timeout fired, then the
     // PWA's receipt-timeout copy (shop.js:1499-1510).
+    //
+    // PARITY GAP (needs nostr_controller.dart): `listenForShopReceipt`
+    // completes with a bare bool, so the matched kind-9735 event can't be
+    // forwarded into `_claim(receipt: …)` the way the PWA sends `inv.receipt`
+    // with shop-claim (shop.js:1189 `currentShopInvoice.receipt = event`,
+    // :1545). Once it surfaces the event JSON, pass it here.
     unawaited(() async {
       final detected = await ref
           .read(nostrControllerProvider)
@@ -1815,7 +1821,15 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   bool get _settling =>
       _phase == _BuyPhase.claiming || _phase == _BuyPhase.paid;
 
-  Future<void> _claim(ShopInvoice inv, ShopIdentity identity) async {
+  /// [receipt] is the matched NIP-57 kind-9735 receipt event when the
+  /// receipt-mode listener detected the payment — the PWA attaches it to
+  /// shop-claim (`_claimShopPurchase(inv.invoiceId, inv.receipt)`,
+  /// shop.js:1545); the verify/serverVerify/manual paths claim without one.
+  Future<void> _claim(
+    ShopInvoice inv,
+    ShopIdentity identity, {
+    Map<String, dynamic>? receipt,
+  }) async {
     // Stop any detection loop still running (e.g. the manual "I've paid" path
     // confirms while the periodic poll is live), and close a pending receipt
     // REQ (shop.js `handleShopPaymentSuccess` → `_clearShopReceiptWait()`).
@@ -1829,6 +1843,7 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       final data = await _ctrl.claim(
         inv.invoiceId,
         identity: identity,
+        receipt: receipt,
         gifterNym: _gifterNym(ref),
       );
       if (!mounted) return;

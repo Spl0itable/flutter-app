@@ -1504,22 +1504,10 @@ class _EdgeTiledSvg extends StatelessWidget {
 /// inner ring (stroked fully inside the bubble edge) plus a soft inward feather,
 /// instead of the outset glow `BoxShadow` can only approximate.
 ///
-/// CROSS-FILE NOTE (needs a one-line `message_row.dart` edit — outside this
-/// slice's owned files): `message_row.dart._decorateBubble` now routes
-/// `auras.where((a) => a.hasOverlay)` through this painter (its `overlays`
-/// filter, ~line 590), and [CosmeticAura.hasOverlay] includes `insetRing`. So
-/// every inset-ring aura (gold/neon/phoenix/cosmic/frost + hologram) DOES reach
-/// this painter and gets its fully-inset ring drawn here. BUT `_decorateBubble`
-/// ALSO still sets `border: Border.all(inset.insetColor, inset.insetWidth)`
-/// (~line 605) whenever the last aura carries an `insetColor` — i.e. the same
-/// four pure-ring auras now get BOTH a centred `Border.all` AND this painter's
-/// inset ring → two overlapping rings of the same hue (a visible double ring).
-/// FIX (in `message_row.dart`, not here): suppress that `Border.all` for auras
-/// routed through the painter, e.g. guard it with `inset != null &&
-/// inset.insetColor != null && !inset.hasOverlay`. Every aura with an
-/// `insetColor` today is an `insetRing`/`hasOverlay` aura, so this leaves only
-/// the painter's single inset ring. Nothing else needs to change — the painter
-/// already strokes the ring for all `insetRing` auras.
+/// `message_row.dart._decorateBubble` routes `auras.where((a) => a.hasOverlay)`
+/// through this painter and suppresses its own `Border.all` fallback for those
+/// auras (`!lastAura.hasOverlay` guard), so every inset-ring aura draws exactly
+/// ONE ring — the fully-inset stroke painted here.
 class CosmeticOverlayPainter extends CustomPainter {
   CosmeticOverlayPainter({
     required this.aura,

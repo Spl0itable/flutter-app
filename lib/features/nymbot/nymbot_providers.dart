@@ -315,6 +315,16 @@ class BotChatController extends StateNotifier<BotChatState> {
     _signer = signer ?? (privkey != null ? LocalSigner(privkey) : null);
   }
 
+  /// Late-attaches the ACTIVE [EventSigner] (local key OR NIP-46 remote) on
+  /// top of [bind], so per-action NIP-98 auth signs through the generic
+  /// dispatch like the PWA's `_signBotAuth` (pms.js:1649-1679) — a
+  /// remote-signer account gets a FRESH single-use signature per money action
+  /// instead of a static pre-bound auth blob. Keeps the bound privkey (the
+  /// local reply-unwrap path) intact.
+  void attachSigner(EventSigner? signer) {
+    if (signer != null) _signer = signer;
+  }
+
   bool get isBound => _pubkey != null;
 
   /// The worker's single-use ledger actions — signed FRESH every time

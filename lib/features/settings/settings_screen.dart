@@ -774,15 +774,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             .read(nostrControllerProvider)
             .uploadImage(bytes, contentType: _imageContentType(picked.path));
       } catch (e) {
-        // `uploadWallpaper`'s catch branch (users.js:864-866).
-        _systemMessage('Failed to upload wallpaper: $e');
+        // `uploadWallpaper`'s catch branch (users.js:864-866) surfaces
+        // `error.message` — strip Dart's `Exception: ` toString prefix so the
+        // system message reads like the PWA's.
+        final msg = '$e'.replaceFirst(RegExp(r'^Exception:\s*'), '');
+        _systemMessage('Failed to upload wallpaper: $msg');
         return;
       }
       if (url == null || url.isEmpty) {
-        // Every server failed (`_uploadWithFallback` throws → uploadWallpaper
-        // returns null): the tile reverts and the selection stays unchanged,
-        // like `handleWallpaperUpload`'s null branch (app.js:4203-4205).
-        _systemMessage('Failed to upload wallpaper: upload failed');
+        // Every server failed (`uploadImage` swallows per-server errors and
+        // returns null; `_uploadWithFallback`'s no-lastErr throw is
+        // `'All Blossom servers failed'`, users.js:562 → uploadWallpaper's
+        // catch, users.js:864-866): the tile reverts and the selection stays
+        // unchanged, like `handleWallpaperUpload`'s null branch
+        // (app.js:4203-4205).
+        _systemMessage('Failed to upload wallpaper: All Blossom servers failed');
         return;
       }
       await ref.read(keyValueStoreProvider).setString(

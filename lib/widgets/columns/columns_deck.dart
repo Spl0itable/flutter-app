@@ -331,46 +331,33 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     }
     // `cvAddColumn` → `_cvSubscribeChannel` for every seeded channel column
     // (columns.js:188/200 seed with `cvAddColumn`, which subscribes at :224).
-    // The first column is the one `_cvEnable` focuses (columns.js:77-78), so it
-    // gets the full relay-side activation; the rest are registry-only until the
-    // controller grows a no-view-switch subscribe API (see handoff).
     for (final d in _columns) {
-      _subscribeChannel(d, activate: identical(d, _columns.first));
+      _subscribeChannel(d);
     }
   }
 
-  /// `_cvSubscribeChannel` (columns.js:520-540). Always registers the channel
-  /// (`addChannel`) and persists the joined-channel list, so channel columns
-  /// restored from a saved layout exist in the sidebar and survive a restart.
-  /// Runs post-frame because seeding happens during build.
-  ///
-  /// With [activate] (a column that is — or is about to become — the focused
-  /// one: picker adds, nav-sink adds/repurposes, the seeded first column) it
-  /// instead routes through the controller's `switchChannel`, which bundles the
-  /// PWA's relay-side effects: geo-relay connect for a geohash channel
-  /// (`connectToGeoRelays`, columns.js:529), the active-channel typing sub
-  /// (`_ensureChannelTypingSub`, columns.js:536-538) and — via `switchView` →
-  /// `onViewOpened` — the per-open D1 archive restore (`channelRestoreFromD1`,
-  /// columns.js:527). Guarded like [_syncFocusedView] so the deck-driven view
-  /// switch doesn't recurse into the nav-sink. NON-focused columns still miss
-  /// the geo-relay/typing/restore work (plus `startGeoRelayKeepAlive`, which
-  /// has no native counterpart) — that needs a controller API that subscribes
-  /// without switching the view; see the handoff on
-  /// `lib/state/nostr_controller.dart`.
-  void _subscribeChannel(_ColumnDesc desc, {bool activate = false}) {
+  /// `_cvSubscribeChannel` (columns.js:520-540), fired for every channel column
+  /// the deck seeds/adds/repurposes. Routes through the controller's
+  /// `subscribeChannelColumn`, which bundles the PWA's side effects WITHOUT
+  /// switching the shared view: register + persist the channel (`addChannel` +
+  /// `userJoinedChannels`, columns.js:523-526), the D1 archive restore
+  /// (`channelRestoreFromD1`, columns.js:527), geo-relay connect for a geohash
+  /// channel (`connectToGeoRelays`, columns.js:529 — the native relay pool owns
+  /// reconnection, so `startGeoRelayKeepAlive`/`ensureDefaultRelaysConnected`
+  /// need no counterpart, and the always-on shared channel subscription does
+  /// `loadChannelFromRelays`'s job), and the channel typing sub when this
+  /// column IS the active conversation (`_ensureChannelTypingSub`,
+  /// columns.js:536-538 — the native sub is single/latest-wins, so a
+  /// background column must not steal the focused column's feed; focus-driven
+  /// switches re-point it via [_syncFocusedView] → `switchChannel`). Runs
+  /// post-frame because seeding happens during build.
+  void _subscribeChannel(_ColumnDesc desc) {
     if (desc.kind != _ColumnKind.channel) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final controller = ref.read(nostrControllerProvider);
-      if (activate) {
-        _syncingFromDeck = true;
-        controller.switchChannel(desc.channel, geohash: desc.geohash);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _syncingFromDeck = false;
-        });
-      } else {
-        controller.addChannel(desc.channel, geohash: desc.geohash);
-      }
+      ref
+          .read(nostrControllerProvider)
+          .subscribeChannelColumn(desc.channel, geohash: desc.geohash);
     });
   }
 
@@ -588,8 +575,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         // The repurposed column stays the primary under its new key.
         _primaryKey = desc.key;
         // `_cvNavigateColumn` → `_cvSubscribeChannel` (geo relays + typing sub
-        // + D1 restore; the view already points here, so no visible re-switch).
-        _subscribeChannel(desc, activate: true);
+        // + D1 restore; the view already points here, so no re-switch needed).
+        _subscribeChannel(desc);
         _saveLayout();
         _scrollToIndex(primary);
         return;
@@ -601,9 +588,8 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       _columns.add(desc);
       _focused = _columns.length - 1;
     });
-    // `cvAddColumn` → `_cvSubscribeChannel` (relay-side work included — the
-    // added column is the focused one).
-    _subscribeChannel(desc, activate: true);
+    // `cvAddColumn` → `_cvSubscribeChannel` (relay-side work included).
+    _subscribeChannel(desc);
     _saveLayout();
     _scrollToIndex(_columns.length - 1);
   }
@@ -1004,9 +990,10 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       }
     });
     if (existing < 0) {
-      // `cvAddColumn` → `_cvSubscribeChannel`; the picked column gets focus, so
-      // the relay-side work (geo relays, typing sub, D1 restore) rides along.
-      _subscribeChannel(desc, activate: true);
+      // `cvAddColumn` → `_cvSubscribeChannel` (geo relays, D1 restore); the
+      // picked column gets focus via `_scrollToIndex` → `_syncFocusedView`,
+      // which re-points the typing sub through `switchChannel`.
+      _subscribeChannel(desc);
       _saveLayout();
     }
     _scrollToIndex(_focused);
