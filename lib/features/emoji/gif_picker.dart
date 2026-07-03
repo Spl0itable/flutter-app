@@ -150,7 +150,8 @@ class GifPicker extends ConsumerStatefulWidget {
   ConsumerState<GifPicker> createState() => _GifPickerState();
 }
 
-class _GifPickerState extends ConsumerState<GifPicker> {
+class _GifPickerState extends ConsumerState<GifPicker>
+    with WidgetsBindingObserver {
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
   Timer? _debounce;
@@ -166,6 +167,10 @@ class _GifPickerState extends ConsumerState<GifPicker> {
   @override
   void initState() {
     super.initState();
+    // The panel lifts above the keyboard by reading View.viewInsets (see
+    // build); that read establishes no rebuild dependency, so observe metrics
+    // changes to repaint as the keyboard animates in/out.
+    WidgetsBinding.instance.addObserver(this);
     _favorites = widget.favoritesStore.load();
     // Rebuild on focus to apply the `.gif-search-input:focus` fill + glow ring.
     _searchFocus.addListener(() {
@@ -177,10 +182,16 @@ class _GifPickerState extends ConsumerState<GifPicker> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _debounce?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadTrending() async {
@@ -262,11 +273,15 @@ class _GifPickerState extends ConsumerState<GifPicker> {
     final transparency =
         ref.watch(settingsProvider.select((s) => s.transparencyEnabled));
     // Keyboard-aware, like the PWA riding the visual viewport: overlay hosts
-    // anchor the panel to the SCREEN bottom (their own MediaQuery has the
-    // keyboard inset consumed by the resizing Scaffold), so the panel itself
-    // pads up by the ambient view inset and shrinks to the space left above
-    // the keyboard — keeping the search field + results visible while typing.
-    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    // anchor the panel to the SCREEN bottom, so the panel itself pads up by
+    // the keyboard height and shrinks to the space left above it — keeping
+    // the search field + results visible while typing. We read the inset from
+    // the raw FlutterView rather than MediaQuery: inside an OverlayPortal that
+    // sits under a resizing Scaffold, MediaQuery.viewInsets is already
+    // consumed (reports 0), so the panel would never lift. View.viewInsets is
+    // in physical px and is never consumed by an ancestor.
+    final view = View.of(context);
+    final keyboardInset = view.viewInsets.bottom / view.devicePixelRatio;
     final maxPanelHeight = keyboardInset > 0
         // Screen minus keyboard, status bar, and the 60px bottom-bar offset
         // the phone popover anchors at (+8 breathing room).
