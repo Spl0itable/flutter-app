@@ -80,13 +80,12 @@ class _PanicOverlayState extends State<PanicOverlay>
 
   Future<void> _runWipe() async {
     final startedAt = DateTime.now();
-    // Stage strings ported verbatim from panic.js (84/96/109/137).
-    if (mounted) {
-      setState(() => _status = 'Encrypting local store with a random key…');
-    }
-    await widget.wipe.wipe();
-    if (mounted) setState(() => _status = 'Shredding local databases…');
-    if (mounted) setState(() => _status = 'Purging caches…');
+    // Stage strings ported verbatim from panic.js (84/96/109/137): the wipe
+    // reports each destruction stage as it starts so the status line tracks
+    // real progress, then we land on the final "Keys destroyed." line.
+    await widget.wipe.wipe(onStatus: (status) {
+      if (mounted) setState(() => _status = status);
+    });
     if (mounted) setState(() => _status = 'Keys destroyed.');
     // Hold the animation a minimum so the effect reads as deliberate (PWA: 1.5s).
     final elapsed = DateTime.now().difference(startedAt).inMilliseconds;
