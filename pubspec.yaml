@@ -142,8 +142,3 @@ flutter_launcher_icons:
   remove_alpha_ios: true
   adaptive_icon_foreground: assets/images/NYM-circle.png
   adaptive_icon_background: "#0A0A0F"
-
-hooks:
-  user_defines:
-    sqlite3:
-      source: system

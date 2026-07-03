@@ -99,10 +99,17 @@ class ChatPane extends ConsumerWidget {
     // the `?` command interception / welcome intro / thinking strip. Columns
     // mode keeps the canonical pane (the deck renders the bot column; the
     // engine still runs via the always-alive app-state observer).
+    //
+    // The detection is the known bot-pubkey CONSTANT (`verifiedBot.pubkey`,
+    // app.js:1096) compared case-insensitively — never an async-loaded list —
+    // so a conversation restored from D1/cache before anything else has
+    // loaded, or a row whose stored id predates the lowercase-hex
+    // canonicalization in `switchView`, still routes here on every entry path
+    // (sidebar tap, new-PM, notification, deep link, boot restore).
     final view = ref.watch(currentViewProvider);
     if (!useColumns &&
         view.kind == ViewKind.pm &&
-        view.id == kNymbotPubkey) {
+        view.id.toLowerCase() == kNymbotPubkey) {
       return BotChatScreen(onOpenSidebar: onOpenSidebar);
     }
 

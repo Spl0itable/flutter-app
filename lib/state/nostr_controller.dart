@@ -8740,7 +8740,12 @@ class NostrController {
   bool isVerifiedDeveloper(String pubkey) => pubkey == verifiedDeveloperPubkey;
 
   /// True when [pubkey] is the verified Nymbot (`isVerifiedBot`, users.js:71).
-  bool isVerifiedBot(String pubkey) => pubkey == nymbotPubkey;
+  /// Case-insensitive against the known constant so an id restored from
+  /// D1/cache in a legacy (non-lowercased) encoding still counts — every
+  /// bot-routing gate (BotChatScreen swap, columns bot header, composer `?`
+  /// interception) shares this one detection.
+  bool isVerifiedBot(String pubkey) =>
+      pubkey == nymbotPubkey || pubkey.toLowerCase() == nymbotPubkey;
 
   /// True when [text] in a CHANNEL view should be routed to Nymbot instead of
   /// published as a normal message: a `?` command or an `@Nymbot` mention

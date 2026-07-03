@@ -1893,8 +1893,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// into the `pm-<peer>` store, creating/refreshing the conversation. Dedups
   /// on event id and nymMessageId. Honors [closedPMs] for backlog.
   void ingestPMMessage(Message m) {
-    final peer = m.conversationPubkey;
-    if (peer == null) return;
+    final rawPeer = m.conversationPubkey;
+    if (rawPeer == null) return;
+    // Canonical lowercase hex (mirrors [switchView]): the peer id keys the
+    // conversation row, the unread counts, and — for the Nymbot — the
+    // `view.id == kNymbotPubkey` BotChatScreen routing, all exact string
+    // matches against lowercase-hex constants. An archived/legacy wrap must
+    // never mint a parallel non-canonical row.
+    final peer =
+        _hex64AnyCaseRe.hasMatch(rawPeer) ? rawPeer.toLowerCase() : rawPeer;
     // A closed conversation only re-opens when a message strictly newer than
     // the close time arrives; older relay backlog is ignored (pms.js).
     if (_closedPMs.contains(peer)) {
@@ -1914,7 +1921,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     m.seq = _nextIngestSeq();
 
-    final key = m.conversationKey ?? PmLogic.pmStorageKey(peer);
+    final key = _canonicalPmStorageKey(
+        m.conversationKey ?? PmLogic.pmStorageKey(peer));
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
     list.add(m);
     list.sort(compareMessages);
@@ -3059,7 +3067,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
     var changed = false;
     byKey.forEach((key, msgs) {
       if (key.isEmpty || msgs.isEmpty) return;
-      if (_hydrateMessagesInto(key, msgs)) changed = true;
+      // Re-key a legacy-encoded PM thread onto the canonical lowercase-hex
+      // storage key ([switchView]'s canonicalization) so restored history and
+      // the live view always share ONE thread — a `pm-<PUBKEY>` cache row
+      // must not open as an empty parallel conversation.
+      if (_hydrateMessagesInto(_canonicalPmStorageKey(key), msgs)) {
+        changed = true;
+      }
     });
     // Rebuild the PM sidebar rows from the hydrated threads — the PWA's
     // `_populateSidebarFromHydration` (persistence.js:533-549): every cached
@@ -3083,7 +3097,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
           break;
         }
       }
-      if (peer == null || _closedPMs.contains(peer)) continue;
+      if (peer == null) continue;
+      // Canonical lowercase hex, matching [switchView]'s PM-id
+      // canonicalization: the row's pubkey feeds `ChatView.pm(...)` on tap and
+      // the exact-match routing/unread keys downstream (the Nymbot
+      // `view.id == kNymbotPubkey` screen swap), so a legacy-encoded restored
+      // id must never produce a row that misses them.
+      if (_hex64AnyCaseRe.hasMatch(peer)) peer = peer.toLowerCase();
+      if (_closedPMs.contains(peer)) continue;
       if (state.pmConversations.any((c) => c.pubkey == peer)) continue;
       final ts = msgs.last.timestamp;
       final known = state.users[peer]?.nym;
@@ -3098,6 +3119,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
       changed = true;
     }
     if (changed) state = state.copyWith();
+  }
+
+  /// Canonicalizes a `pm-<pubkey>` storage key's peer id to lowercase 64-hex,
+  /// mirroring [switchView]'s PM-id canonicalization. Non-PM keys and already
+  /// canonical (or non-hex) ids pass through unchanged. Keeps every restored
+  /// thread on the SAME key the live view/unread/routing paths use.
+  String _canonicalPmStorageKey(String key) {
+    if (!key.startsWith('pm-')) return key;
+    final id = key.substring(3);
+    if (_hex64AnyCaseRe.hasMatch(id) && id != id.toLowerCase()) {
+      return 'pm-${id.toLowerCase()}';
+    }
+    return key;
   }
 
   /// Shared hydration insert: dedup-seed + append + resort one key's cached
