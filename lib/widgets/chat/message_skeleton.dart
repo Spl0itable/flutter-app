@@ -204,21 +204,27 @@ class _MessageSkeletonState extends State<MessageSkeleton>
             child: _bar(c, width: authorWidth, height: 10),
           ),
           const SizedBox(width: 10),
-          // `.message-content` — one or more `sk-line skl-N` (height 9, 5px gap),
-          // widths as a fraction of the remaining content column.
+          // `.message-content` — one or more `sk-line skl-N` (height 9,
+          // `margin: 5px 0` → 5px above the first line, 5px collapsed between
+          // lines, 5px below the last; styles-chat.css:2022), widths as a
+          // fraction of the remaining content column.
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final w = constraints.maxWidth;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    for (var j = 0; j < lineFractions.length; j++)
-                      Padding(
-                        padding: EdgeInsets.only(top: j == 0 ? 0 : 5),
-                        child: _bar(c, width: w * lineFractions[j], height: 9),
-                      ),
-                  ],
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (var j = 0; j < lineFractions.length; j++)
+                        Padding(
+                          padding: EdgeInsets.only(top: j == 0 ? 0 : 5),
+                          child:
+                              _bar(c, width: w * lineFractions[j], height: 9),
+                        ),
+                    ],
+                  ),
                 );
               },
             ),
@@ -230,9 +236,11 @@ class _MessageSkeletonState extends State<MessageSkeleton>
 
   // ---- Bubble variant ----
   // Mirrors the PWA `_bubbleSkeletonHtml` (`messages.js:2985-3012`): grouped
-  // bubbles alternating other/self, a 32px avatar for others' groups, each
-  // bubble holding `skb-{1..4}` lines (110/160/210/260 wide) that step DOWN per
-  // line (`base - j`), exactly like the real grouped bubble layout.
+  // bubbles alternating other/self — self bubbles primary-GREEN and
+  // right-aligned with no avatar, others gray and left-aligned behind a 32px
+  // avatar circle — each bubble holding `skb-{1..4}` lines (110/160/210/260
+  // wide) that step DOWN per line (`base - j`), exactly like the real grouped
+  // bubble layout.
   List<Widget> _bubbleRows(NymColors c, int rowCount) {
     // {self, bubbles:[[baseWidthClass, lineCount], …]} — verbatim from the PWA.
     const pattern = <_BubbleGroup>[
@@ -255,26 +263,21 @@ class _MessageSkeletonState extends State<MessageSkeleton>
   Widget _bubbleGroup(NymColors c, _BubbleGroup g) {
     final stack = <Widget>[];
     for (var idx = 0; idx < g.bubbles.length; idx++) {
-      final base = g.bubbles[idx][0];
-      final n = g.bubbles[idx][1];
-      // Each bubble: one or more `skb-N` lines stepping down (`base - j`).
-      final lines = <Widget>[
-        for (var j = 0; j < n; j++)
-          Padding(
-            padding: EdgeInsets.only(top: j == 0 ? 0 : 5),
-            child: _bar(
-              c,
-              width: _skbWidth((base - j).clamp(1, 4)),
-              height: 9,
-            ),
-          ),
-      ];
       stack.add(
         Padding(
-          // Continuation bubbles sit ~2px below the previous (matches the live
-          // `bubble-grouped` -4px margin reduced to a small positive gap).
-          padding: EdgeInsets.only(top: idx == 0 ? 0 : 2),
-          child: _bubbleBox(c, self: g.self, lines: lines),
+          // `.message { padding: 2px 14px }` (a group drops the horizontal
+          // padding, the skeleton drops the bottom) opens 2px above a group
+          // lead; a `.bubble-grouped` continuation's collapsed `6px/-4px`
+          // margins add another 2px, so it sits 4px below the previous bubble
+          // box — the same 2px in-group rhythm the live MessageRow renders.
+          padding: EdgeInsets.only(top: idx == 0 ? 2 : 4),
+          child: _bubbleBox(
+            c,
+            self: g.self,
+            grouped: idx > 0,
+            base: g.bubbles[idx][0],
+            lineCount: g.bubbles[idx][1],
+          ),
         ),
       );
     }
@@ -300,31 +303,76 @@ class _MessageSkeletonState extends State<MessageSkeleton>
       ],
     );
 
-    // Group padding mirrors MessageRow._buildBubble: self 14, others 6 left.
+    // `.message-group { padding: 0 14px 0 6px; margin-bottom: 6px }` (self
+    // groups `padding: 0 14px`, styles-features.css:3506-3525) — the 6px
+    // inter-group air hangs BELOW each group, like the live list.
     return Padding(
-      padding: EdgeInsets.fromLTRB(g.self ? 14 : 6, 6, 14, 0),
+      padding: EdgeInsets.fromLTRB(g.self ? 14 : 6, 0, 14, 6),
       child: row,
     );
   }
 
-  Widget _bubbleBox(NymColors c, {required bool self, required List<Widget> lines}) {
-    // The placeholder bubble uses the skeleton fill (`bg-tertiary`) rather than
-    // the live bubble tint, rounded-16 with the tail corner like a real bubble.
+  Widget _bubbleBox(
+    NymColors c, {
+    required bool self,
+    required bool grouped,
+    required int base,
+    required int lineCount,
+  }) {
+    // The PWA skeleton reuses the REAL `.message`/`.message-content` classes
+    // (`_bubbleSkeletonHtml`, messages.js:2985-3012), so the placeholder
+    // bubble carries the LIVE bubble fill — a self bubble is the primary GREEN
+    // (`rgb(from var(--primary) r g b / 0.25)` dark / `.20` light,
+    // styles-features.css:3642 / themes:1400) and an others' bubble the
+    // translucent gray (`rgba(255,255,255,0.14)` dark / `rgba(0,0,0,0.10)`
+    // light, :3602 / themes:1408). Only the `sk-line` bars inside use the
+    // `bg-tertiary` shimmer fill.
+    final fill = self
+        ? c.primaryA(c.isLight ? 0.20 : 0.25)
+        : (c.isLight
+            ? const Color(0x1A000000) // rgba(0,0,0,0.10)
+            : Colors.white.withValues(alpha: 0.14));
+    // A group lead keeps the 4px tail corner; a `.bubble-grouped` continuation
+    // is fully rounded-16 (`body.chat-bubbles .message.bubble-grouped
+    // .message-content`, styles-features.css:3493-3500).
     const r = Radius.circular(16);
     const tail = Radius.circular(4);
-    final radius = self
-        ? const BorderRadius.only(
-            topLeft: r, topRight: tail, bottomLeft: r, bottomRight: r)
-        : const BorderRadius.only(
-            topLeft: tail, topRight: r, bottomLeft: r, bottomRight: r);
+    final BorderRadius radius;
+    if (grouped) {
+      radius = const BorderRadius.all(r);
+    } else if (self) {
+      radius = const BorderRadius.only(
+          topLeft: r, topRight: tail, bottomLeft: r, bottomRight: r);
+    } else {
+      radius = const BorderRadius.only(
+          topLeft: tail, topRight: r, bottomLeft: r, bottomRight: r);
+    }
+    // `skb-N` lines stepping down per line (`base - j`), each with the
+    // `.sk-line { margin: 5px 0 }` rhythm: 5px above the first, 5px collapsed
+    // between lines, 5px below the last (styles-chat.css:2022).
+    final lines = <Widget>[
+      for (var j = 0; j < lineCount; j++)
+        Padding(
+          padding: EdgeInsets.only(top: 5, bottom: j == lineCount - 1 ? 5 : 0),
+          child: _bar(
+            c,
+            width: _skbWidth((base - j).clamp(1, 4)),
+            height: 9,
+          ),
+        ),
+    ];
     return ConstrainedBox(
-      // `.message-content { min-width: 180px }` (the skeleton CSS keeps min-width
-      // via the real class; we cap a touch tighter so narrow panes don't clip).
-      constraints: const BoxConstraints(minWidth: 140, maxWidth: 280),
+      // The real bubble constraints: `.message-content { min-width: 180px;
+      // max-width: 85% }` (styles-features.css:3602-3616).
+      constraints: BoxConstraints(
+        minWidth: 180,
+        maxWidth: MediaQuery.sizeOf(context).width * 0.85,
+      ),
       child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        // `body.chat-bubbles .message-content { padding: 8px 12px 6px }`.
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
         decoration: BoxDecoration(
-          color: c.bgTertiary,
+          color: fill,
           borderRadius: radius,
         ),
         child: Column(

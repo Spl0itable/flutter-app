@@ -1541,17 +1541,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
       );
       changed = true;
     }
-    if (changed) {
-      // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
-      // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
-      // app.js:5510). Without this, restoring our own profile on login fixes the
-      // avatar but leaves the header text as the ephemeral derived nym.
-      final selfNym =
-          (e.pubkey == state.selfPubkey && (p.name ?? '').isNotEmpty)
-              ? getNymFromPubkey(p.name!, e.pubkey)
-              : null;
-      state =
-          selfNym != null ? state.copyWith(selfNym: selfNym) : state.copyWith();
+    // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
+    // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
+    // app.js:5510). Without this, restoring our own profile on login fixes the
+    // avatar but leaves the header text as the ephemeral derived nym. Checked
+    // OUTSIDE the no-op guard above: boot hydration ([hydrateProfiles]) can
+    // seed this same profile into `users` before the login's D1/relay re-fetch
+    // lands, making that re-fetch a "no-op" while `selfNym` still holds the
+    // boot identity's ephemeral nick — the header must still be repaired.
+    // Reads the STORED (newest-wins) profile, not the event payload, so a
+    // stale kind-0 can never regress the name.
+    String? selfNym;
+    if (e.pubkey == state.selfPubkey) {
+      final name = state.users[e.pubkey]?.profile?.name;
+      if (name != null && name.isNotEmpty) {
+        final resolved = getNymFromPubkey(name, e.pubkey);
+        if (resolved != state.selfNym) selfNym = resolved;
+      }
+    }
+    if (changed || selfNym != null) {
+      state = state.copyWith(selfNym: selfNym);
     }
   }
 
@@ -2536,14 +2545,48 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Hydrates cached messages for a channel/PM/group key (boot from CacheStore).
   void hydrateMessages(String key, List<Message> msgs) {
     if (msgs.isEmpty) return;
+    _hydrateMessagesInto(key, msgs);
+    state = state.copyWith();
+  }
+
+  /// Bulk boot hydration of ALL cached channel + PM/group histories — the
+  /// native `hydrateFromCache` message pass (persistence.js:427-475). Every
+  /// message id is seeded into [_seenIds] so the D1 replay ([ingestEvent] /
+  /// the PM archive restore) dedups against the cached copies, channel keys
+  /// raise `channelLastActivity` for the sidebar sort (persistence.js:438-453),
+  /// and ONE `copyWith` at the end repaints the (possibly already-open) view.
+  void hydrateAllMessages(Map<String, List<Message>> byKey) {
+    var changed = false;
+    byKey.forEach((key, msgs) {
+      if (key.isEmpty || msgs.isEmpty) return;
+      if (_hydrateMessagesInto(key, msgs)) changed = true;
+    });
+    if (changed) state = state.copyWith();
+  }
+
+  /// Shared hydration insert: dedup-seed + append + resort one key's cached
+  /// messages, tracking channel last-activity. Returns true if anything landed.
+  /// Does NOT emit state — callers own the repaint.
+  bool _hydrateMessagesInto(String key, List<Message> msgs) {
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
+    var added = false;
+    var lastTs = 0;
     for (final m in msgs) {
       if (m.id.isNotEmpty && !_seenIds.add(m.id)) continue;
       m.seq = _nextIngestSeq();
       list.add(m);
+      added = true;
+      if (m.timestamp > lastTs) lastTs = m.timestamp;
     }
-    list.sort(compareMessages);
-    state = state.copyWith();
+    if (added) list.sort(compareMessages);
+    // Channel keys feed the sidebar recency sort (persistence.js sets
+    // `channelLastActivity` from the hydrated history); PM/group keys don't.
+    if (lastTs > 0 && !key.startsWith('pm-') && !key.startsWith('group-')) {
+      if (lastTs > (state.channelLastActivity[key] ?? 0)) {
+        state.channelLastActivity[key] = lastTs;
+      }
+    }
+    return added;
   }
 
   /// Hydrates cached profiles into the user store (boot from CacheStore).
@@ -2566,7 +2609,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
         );
       }
     });
-    state = state.copyWith();
+    // Cached SELF profile → restore the header nym immediately, the native
+    // analogue of the PWA applying the cached login profile name before
+    // relays connect (`nym_nostr_login_profile`, app.js:4514-4522). Without
+    // this the boot identity's ephemeral/derived nick stays in `selfNym`
+    // until a live kind-0 lands — which `_ingestProfile`'s no-op guard may
+    // then skip because this hydration already stored the same profile.
+    String? selfNym;
+    if (state.selfPubkey.isNotEmpty) {
+      final name = state.users[state.selfPubkey]?.profile?.name;
+      if (name != null && name.isNotEmpty) {
+        final resolved = getNymFromPubkey(name, state.selfPubkey);
+        if (resolved != state.selfNym) selfNym = resolved;
+      }
+    }
+    state = state.copyWith(selfNym: selfNym);
   }
 
   /// Hydrates cached reactions (entries shape `[[emoji,[[reactor,nym]]]]`) into
@@ -3362,11 +3419,24 @@ class NotificationHistoryNotifier
   /// store stays in-memory, matching the pre-N3 behavior the tests assert).
   NotificationHistoryNotifier([this._ref])
       : super(const NotificationHistoryState()) {
-    if (_ref != null) _hydrate();
+    if (_ref != null) {
+      _hydrating = true;
+      _hydrate();
+    }
   }
 
   final Ref? _ref;
   SharedPreferences? _prefs;
+
+  /// True while [_hydrate] is loading the persisted history + seen-map. A
+  /// [record] landing in this window would be deduped against an EMPTY
+  /// history/seen-map and then thrown away when `_hydrate` overwrites the
+  /// state (the boot race: the D1 backfill can fire in the same frame the
+  /// provider is first read). Such calls are buffered in [_pendingRecords]
+  /// and replayed once hydration completes, so they ingest against the real
+  /// history exactly as if they had arrived after boot.
+  bool _hydrating = false;
+  final List<void Function()> _pendingRecords = [];
 
   /// PWA localStorage key for the persisted bell history
   /// (`_loadNotificationHistory`/`_saveNotificationHistory`,
@@ -3433,6 +3503,21 @@ class NotificationHistoryNotifier
       );
     } catch (_) {
       // Best-effort; an unavailable/corrupt store just yields an empty history.
+    } finally {
+      // Hydration is settled (loaded, empty, or failed) — replay any records
+      // buffered during the window so they merge into the hydrated history
+      // instead of being clobbered by it. Replaying AFTER the state overwrite
+      // keeps the invariant: ingest never precedes hydration.
+      _hydrating = false;
+      if (_pendingRecords.isNotEmpty && mounted) {
+        final pending = List.of(_pendingRecords);
+        _pendingRecords.clear();
+        for (final replay in pending) {
+          replay();
+        }
+      } else {
+        _pendingRecords.clear();
+      }
     }
   }
 
@@ -3473,17 +3558,21 @@ class NotificationHistoryNotifier
   }
 
   /// Unread badge count over [entries] — the PWA's `_doUpdateNotificationBadge`
-  /// predicate restricted to the terms the native store can evaluate: `!viewed`
-  /// AND sender not blocked (notifications.js:404-426). The 24h window is
-  /// already enforced by [record]'s trimming; the `lastRead` / per-conversation
-  /// `_notificationAlreadySeen` gates are handled by flipping `viewed` on read
-  /// (see [markConversationSeen]).
+  /// predicate restricted to the terms the native store can evaluate: within
+  /// the 24h window (`n.timestamp <= cutoff24h → false`, notifications.js:415)
+  /// AND `!viewed` AND sender not blocked (notifications.js:404-426). The
+  /// count-time 24h term matters because entries only get TRIMMED when the
+  /// next [record] lands — a quiet bell would otherwise keep counting an
+  /// aged-out entry until something new arrived. The `lastRead` /
+  /// per-conversation `_notificationAlreadySeen` gates are handled by flipping
+  /// `viewed` on read (see [markConversationSeen]).
   int _countUnread(List<NotificationEntry> entries) {
-    if (_blocked.isEmpty) {
-      return entries.where((e) => !e.viewed).length;
-    }
+    final cutoff = DateTime.now().millisecondsSinceEpoch - _maxAgeMs;
     return entries
-        .where((e) => !e.viewed && !_blocked.contains(e.senderPubkey))
+        .where((e) =>
+            !e.viewed &&
+            e.ts > cutoff &&
+            (_blocked.isEmpty || !_blocked.contains(e.senderPubkey)))
         .length;
   }
 
@@ -3504,8 +3593,28 @@ class NotificationHistoryNotifier
     String? senderPubkey,
     String? contextLabel,
   }) {
+    // Boot race: hydration hasn't resolved yet — buffer and replay after it,
+    // so this record is deduped/seen-checked against the REAL history instead
+    // of an empty one (and isn't clobbered by `_hydrate`'s state overwrite).
+    if (_hydrating) {
+      _pendingRecords.add(() => record(
+            type: type,
+            title: title,
+            body: body,
+            route: route,
+            ts: ts,
+            eventId: eventId,
+            senderPubkey: senderPubkey,
+            contextLabel: contextLabel,
+          ));
+      return;
+    }
     final now = DateTime.now().millisecondsSinceEpoch;
     final stamp = ts ?? now;
+    // The PWA's `_addNotificationToHistory` age gate (notifications.js:135):
+    // an event older than the 24h bell window never lands, no matter which
+    // path delivered it — the caller-side silent gate isn't the only defense.
+    if (now - stamp >= _maxAgeMs) return;
 
     // Dedup against existing history (live + replay can both fire).
     final isDupe = state.entries.any((e) {
@@ -3743,6 +3852,7 @@ class NotificationHistoryNotifier
   /// (N26) so a panic / clear-data leaves no read-state behind, matching the PWA
   /// (`nym_notification_seen` is in the clear-data list, settings_helpers.dart).
   void clear() {
+    _pendingRecords.clear(); // Drop boot-buffered records too (signOut/panic).
     _seenKeys = <String, int>{};
     _prefs?.remove(_seenKeysStoreKey);
     state = const NotificationHistoryState();

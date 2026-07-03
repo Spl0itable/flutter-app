@@ -16,6 +16,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../services/notification_service.dart';
+import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import 'notification_sounds.dart';
 
@@ -67,6 +68,8 @@ class NotifyContext {
     this.isBot = false,
     this.isBlocked = false,
     this.payload,
+    this.eventId,
+    this.timestampMs,
   });
 
   final String? senderPubkey;
@@ -80,6 +83,16 @@ class NotifyContext {
 
   /// Opaque payload forwarded to [NotificationService] (e.g. a deep link).
   final String? payload;
+
+  /// The source event id (notifications.js `channelInfo.eventId`). Keys the
+  /// alert dedup against the bell history and the persisted seen-key
+  /// (`e:<id>`), so a replayed/resynced copy of an event can't re-alert.
+  final String? eventId;
+
+  /// The event's `created_at` in milliseconds (notifications.js `timestamp`).
+  /// Drives the backlog age gate plus the no-eventId dedup/seen fallbacks.
+  /// Null/zero falls back to "now", exactly like the PWA (notifications.js:22).
+  final int? timestampMs;
 }
 
 /// The conversation surface an inbound message belongs to, for notification
@@ -233,9 +246,23 @@ class NotificationsService {
     return _wavCache.putIfAbsent(name, () => renderSoundWav(descriptor));
   }
 
+  /// 24h backlog cutoff shared with the bell history (notifications.js:59/135):
+  /// an event older than this must never raise a loud alert, no matter how it
+  /// reached us (relay rehydration, reconnect replay, cross-device resync).
+  static const int _maxAlertAgeMs = 24 * 60 * 60 * 1000;
+
   /// Shows a local notification for a new message/mention/PM, applying the
   /// notifications.js `showNotification` gate against the current settings.
   /// Also plays the configured sound (unless silenced) like the PWA.
+  ///
+  /// Beyond the settings gates, this enforces the PWA's replay guards
+  /// (notifications.js:22-69) so old or already-seen events can never re-alert:
+  /// the 24h backlog age cutoff, the dedup against the bell history (live +
+  /// replay paths can both fire for the same underlying event), and the
+  /// persisted 48h seen-key map (read on this device in a previous session, or
+  /// on another device via the synced read-state). A gated event is still
+  /// recorded into the bell history by the caller; only the sound/popup is
+  /// suppressed — exactly the PWA's `previouslySeen`/dupe behavior.
   ///
   /// [notifyFriendsOnly] and [groupNotifyMentionsOnly] map to the PWA prefs of
   /// the same name. They aren't on the native `Settings` model yet, so the
@@ -263,6 +290,7 @@ class NotificationsService {
     if (context.isGroup && groupNotifyMentionsOnly && !context.isMention) {
       return;
     }
+    if (_isReplayedOrSeen(title: title, body: body, context: context)) return;
 
     if (soundIsAudible(settings.sound)) {
       await playSound(settings.sound);
@@ -272,6 +300,59 @@ class NotificationsService {
       body: body,
       payload: context.payload,
     );
+  }
+
+  /// The PWA `showNotification` replay guards (notifications.js:22-69), in the
+  /// same order. True → the event must NOT alert (it's backlog, a duplicate, or
+  /// already read):
+  /// * Age: older than the 24h bell window (`_addNotificationToHistory`'s
+  ///   cutoff, notifications.js:135) — relay rehydration of hours-old messages
+  ///   never re-alerts. A missing timestamp is treated as "now" (a live event),
+  ///   matching notifications.js:22.
+  /// * Dupe: already in the bell history — same event id, or same
+  ///   title+body+sender within 60s (notifications.js:27-37). The history store
+  ///   dedups its own entries the same way, but that runs AFTER the alert, so
+  ///   the loud path must check independently or a multi-relay duplicate /
+  ///   reconnect replay re-fires the popup for an event the bell already holds.
+  /// * Seen: the event's stable key is in the persisted 48h seen-map
+  ///   (`_isNotificationSeen`, notifications.js:53) — viewed here in a previous
+  ///   session or on another device (synced read-state). The PWA records such
+  ///   an entry silently and returns before the sound/popup (line 69); here the
+  ///   caller's `record()` still lands it pre-viewed, so skipping the alert
+  ///   yields the identical outcome.
+  bool _isReplayedOrSeen({
+    required String title,
+    required String body,
+    required NotifyContext context,
+  }) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final rawTs = context.timestampMs ?? 0;
+    final ts = rawTs > 0 ? rawTs : now;
+    if (now - ts > _maxAlertAgeMs) return true;
+
+    final eventId = context.eventId ?? '';
+    final sender = context.senderPubkey ?? '';
+    final history = _ref.read(notificationHistoryProvider).entries;
+    final isDupe = history.any((e) {
+      if (eventId.isNotEmpty && e.eventId == eventId) return true;
+      return e.title == title &&
+          e.body == body &&
+          (e.senderPubkey ?? '') == sender &&
+          (e.ts - ts).abs() < 60000;
+    });
+    if (isDupe) return true;
+
+    // Stable seen-key, byte-matching the history store's `_seenKey` (and the
+    // PWA's `_notificationSeenKey`, notifications.js:238-248): event id when
+    // known, else sender+minute+body-prefix (body clipped to 40 chars so the
+    // key matches the 240-char-truncated synced copy).
+    final prefix = body.length > 40 ? body.substring(0, 40) : body;
+    final seenKey =
+        eventId.isNotEmpty ? 'e:$eventId' : 'f:$sender:${ts ~/ 60000}:$prefix';
+    final seen = _ref
+        .read(notificationHistoryProvider.notifier)
+        .seenNotificationsForSync();
+    return seen.containsKey(seenKey);
   }
 
   Future<void> _playWav(String name, Uint8List wav) async {

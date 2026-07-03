@@ -24,6 +24,7 @@ import '../../services/api/api_client.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/nym_icons.dart';
 import '../messages/format/message_content.dart' show proxiedMedia;
+import 'modal_close_chip.dart';
 
 /// Giphy API key — same key the PWA uses (`this.giphyApiKey`, app.js:679).
 /// Requests are routed through the backend `/api/proxy?action=giphy` worker
@@ -260,46 +261,65 @@ class _GifPickerState extends ConsumerState<GifPicker> {
     final c = context.nym;
     final transparency =
         ref.watch(settingsProvider.select((s) => s.transparencyEnabled));
-    return Container(
-      // .gif-picker: 350 wide, max 450 tall, glass, radius md, padding 12.
-      constraints: const BoxConstraints(maxWidth: 350, maxHeight: 450),
-      width: 350,
-      decoration: BoxDecoration(
-        // `.gif-picker` bg: with Transparency ON (no `solid-ui` body class) the
-        // PWA hardcodes rgba(20,20,35,0.9) dark (styles-features.css:1565) /
-        // rgba(255,255,255,0.92) light (styles-themes-responsive.css:1173-1177);
-        // with Transparency OFF (`solid-ui`, the default) it's the opaque
-        // `var(--glass-bg)` (#14141e dark / #ffffff light,
-        // styles-themes-responsive.css:1583-1600) — exactly `c.glassBg`.
-        color: transparency
-            ? (c.isLight
-                ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
-                : const Color(0xE6141423)) // rgba(20,20,35,0.9)
-            : c.glassBg,
-        border: Border.all(color: c.glassBorder),
-        borderRadius: NymRadius.rmd,
-        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); light mode redefines it to
-        // rgba(0,0,0,0.12) (styles-themes-responsive.css:537, and explicitly on
-        // `body.light-mode .gif-picker` at :1173-1177).
-        boxShadow: [
-          BoxShadow(
-            color:
-                c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
-            blurRadius: 32,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _header(c),
-          const SizedBox(height: 10),
-          Flexible(child: _results(c)),
-          _attribution(c),
-        ],
+    // Keyboard-aware, like the PWA riding the visual viewport: overlay hosts
+    // anchor the panel to the SCREEN bottom (their own MediaQuery has the
+    // keyboard inset consumed by the resizing Scaffold), so the panel itself
+    // pads up by the ambient view inset and shrinks to the space left above
+    // the keyboard — keeping the search field + results visible while typing.
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final maxPanelHeight = keyboardInset > 0
+        // Screen minus keyboard, status bar, and the 60px bottom-bar offset
+        // the phone popover anchors at (+8 breathing room).
+        ? (MediaQuery.sizeOf(context).height -
+                keyboardInset -
+                MediaQuery.paddingOf(context).top -
+                68)
+            .clamp(160.0, 450.0)
+            .toDouble()
+        : 450.0;
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboardInset),
+      child: Container(
+        // .gif-picker: 350 wide, max 450 tall, glass, radius md, padding 12.
+        constraints: BoxConstraints(maxWidth: 350, maxHeight: maxPanelHeight),
+        width: 350,
+        decoration: BoxDecoration(
+          // `.gif-picker` bg: with Transparency ON (no `solid-ui` body class) the
+          // PWA hardcodes rgba(20,20,35,0.9) dark (styles-features.css:1565) /
+          // rgba(255,255,255,0.92) light (styles-themes-responsive.css:1173-1177);
+          // with Transparency OFF (`solid-ui`, the default) it's the opaque
+          // `var(--glass-bg)` (#14141e dark / #ffffff light,
+          // styles-themes-responsive.css:1583-1600) — exactly `c.glassBg`.
+          color: transparency
+              ? (c.isLight
+                  ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
+                  : const Color(0xE6141423)) // rgba(20,20,35,0.9)
+              : c.glassBg,
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rmd,
+          // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); light mode redefines it to
+          // rgba(0,0,0,0.12) (styles-themes-responsive.css:537, and explicitly on
+          // `body.light-mode .gif-picker` at :1173-1177).
+          boxShadow: [
+            BoxShadow(
+              color:
+                  c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _header(c),
+            const SizedBox(height: 10),
+            Flexible(child: _results(c)),
+            _attribution(c),
+          ],
+        ),
       ),
     );
   }
@@ -315,9 +335,7 @@ class _GifPickerState extends ConsumerState<GifPicker> {
         boxShadow: focused
             ? [
                 BoxShadow(
-                    color: c.primaryA(0.06),
-                    blurRadius: 0,
-                    spreadRadius: 3),
+                    color: c.primaryA(0.06), blurRadius: 0, spreadRadius: 3),
               ]
             : null,
       ),
@@ -329,8 +347,8 @@ class _GifPickerState extends ConsumerState<GifPicker> {
         // (`body.light-mode .gif-search-input { color: var(--text) !important }`,
         // styles-themes-responsive.css:1063-1068 — more specific than the
         // generic `body.light-mode input { color: #000000 !important }`).
-        style: TextStyle(
-            color: c.isLight ? c.text : c.textBright, fontSize: 12),
+        style:
+            TextStyle(color: c.isLight ? c.text : c.textBright, fontSize: 12),
         cursorColor: c.isLight ? Colors.black : Colors.white,
         decoration: InputDecoration(
           isDense: true,
@@ -367,7 +385,7 @@ class _GifPickerState extends ConsumerState<GifPicker> {
           Expanded(child: field),
           const SizedBox(width: 10),
           // `.modal-close.gif-modal-close` ✕ chip.
-          _GifModalCloseChip(
+          ModalCloseChip(
             onTap: widget.onClose ?? () => Navigator.of(context).maybePop(),
           ),
         ],
@@ -434,6 +452,11 @@ class _GifPickerState extends ConsumerState<GifPicker> {
       crossAxisCount: 2,
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
+      // Without an explicit padding, GridView absorbs the ambient
+      // MediaQuery.padding (the status-bar inset inside the overlay) as its
+      // default sliver padding — a phantom empty band above the GIFs. The
+      // PWA's `.gif-grid` has no padding.
+      padding: EdgeInsets.zero,
       mainAxisSpacing: 8,
       crossAxisSpacing: 8,
       children: [for (final g in gifs) _gifTile(g)],
@@ -503,62 +526,6 @@ class _GifPickerState extends ConsumerState<GifPicker> {
   }
 }
 
-/// The header's `.modal-close.gif-modal-close` chip: 28×28 (the `.modal-close`
-/// base 32×32 is overridden, styles-components.css:1234-1243), circular,
-/// white@0.05 fill, 1px glass border, 14px ✕ in `--text-dim`; hover swaps to
-/// the danger palette (`.modal-close:hover`, styles-components.css:111-115).
-class _GifModalCloseChip extends StatefulWidget {
-  const _GifModalCloseChip({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  State<_GifModalCloseChip> createState() => _GifModalCloseChipState();
-}
-
-class _GifModalCloseChipState extends State<_GifModalCloseChip> {
-  bool _hover = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: Container(
-          width: 28,
-          height: 28,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _hover
-                ? const Color(0x1FFF4444) // rgba(255,68,68,0.12)
-                : Colors.white.withValues(alpha: 0.05),
-            border: Border.all(
-              color: _hover
-                  ? const Color(0x4DFF4444) // rgba(255,68,68,0.3)
-                  : c.glassBorder,
-            ),
-          ),
-          // `.modal-close.gif-modal-close` is a literal "✕" char in the PWA
-          // (ui-context.js:2009) — styled text.
-          child: Text(
-            '✕',
-            style: TextStyle(
-              color: _hover ? c.danger : c.textDim,
-              fontSize: 14,
-              height: 1,
-              decoration: TextDecoration.none,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// `.gif-item`: a square thumbnail with a `.gif-fav-btn` star. On hover the
 /// border goes primary@0.3, a `--shadow-md` (0 4px 16px rgba(0,0,0,0.4)) lifts
 /// it, and it scales to 1.03 (styles-features.css:1616-1638).
@@ -602,8 +569,7 @@ class _GifTileState extends State<_GifTile> {
           decoration: BoxDecoration(
             // `.gif-item`: 2px transparent border (→ primary@0.3 on hover).
             border: Border.all(
-                color: _hover ? c.primaryA(0.3) : Colors.transparent,
-                width: 2),
+                color: _hover ? c.primaryA(0.3) : Colors.transparent, width: 2),
             borderRadius: NymRadius.rsm,
             boxShadow: _hover
                 ? const [
@@ -634,8 +600,8 @@ class _GifTileState extends State<_GifTile> {
                         imageUrl: proxiedMedia(widget.gif.url),
                         fit: BoxFit.cover,
                         placeholder: (_, __) => const SizedBox.shrink(),
-                        errorWidget: (_, __, ___) =>
-                            Icon(Icons.broken_image, size: 18, color: c.textDim),
+                        errorWidget: (_, __, ___) => Icon(Icons.broken_image,
+                            size: 18, color: c.textDim),
                       ),
                     ),
                     Positioned(

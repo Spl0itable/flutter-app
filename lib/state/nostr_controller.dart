@@ -241,6 +241,18 @@ class NostrController {
       _identity = identity;
       _signer = signer;
 
+      // Durable login (nsec/NIP-46): never surface the boot chain's leftover
+      // auto-ephemeral / derived nick as the account's name — the PWA seeds
+      // the header from the CACHED kind-0 profile name
+      // (`nym_nostr_login_profile`, app.js:4514-4522, fallback 'nym') and
+      // lets the profile fetch below overwrite it. [_syncSelfNymFromProfile]
+      // rewrites that cache whenever our own profile resolves, so relaunches
+      // restore the account nick instantly.
+      if (identity.loginMethod != null) {
+        identity.nym = getNymFromPubkey(
+            _cachedLoginProfileName(kv) ?? 'nym', identity.pubkey);
+      }
+
       final appState = _ref.read(appStateProvider.notifier);
       appState.goLive(identity.pubkey, identity.nym);
 
@@ -298,6 +310,13 @@ class NostrController {
         onTimeout: () {},
       );
 
+      // The hydrated cache may hold our own kind-0 (flushed by a previous
+      // session) — mirror its name onto the live identity BEFORE the first
+      // presence broadcast below, so `recordOwnActivity` / channel `['n', …]`
+      // tags never announce the ephemeral boot nick when the real one is
+      // already known locally.
+      _syncSelfNymFromProfile();
+
       final service = NostrService(identity: identity, signer: signer);
       _service = service;
       _groups = GroupManager(service);
@@ -341,12 +360,17 @@ class NostrController {
       // our own profile so the sidebar header shows our real nym + avatar instead
       // of the ephemeral derived nym. `resolveProfiles` reads the D1 database
       // FIRST (`profile-get`, the source of truth) and only falls back to a relay
-      // kind-0 fetch if D1 holds no profile for us — so a brand-new account with
-      // no saved profile correctly stays on the derived nym. It has no self-guard
-      // (unlike `_maybeBackfillProfiles`), and `_ingestProfile` now updates
-      // `selfNym` for self, so this restores both the avatar and the header text.
-      // Covers `loginWithNsec` too (it re-runs `init`). Best-effort.
-      unawaited(resolveProfiles([identity.pubkey]));
+      // kind-0 fetch if D1 holds no profile for us. It has no self-guard (unlike
+      // `_maybeBackfillProfiles`), and `_ingestProfile` updates `selfNym` for
+      // self, so this restores both the avatar and the header text; the chained
+      // [_syncSelfNymFromProfile] then mirrors the resolved name onto the live
+      // [Identity] (presence / `n` tags / mentions) and rewrites the
+      // instant-restore login-profile cache (`updateSidebarFromProfile`,
+      // app.js:5507-5528). The relay-fallback results land via [_onEvent], which
+      // runs the same sync. Covers `loginWithNsec` too (it re-runs `init`).
+      // Best-effort.
+      unawaited(resolveProfiles([identity.pubkey])
+          .then((_) => _syncSelfNymFromProfile()));
 
       // Immediately backfill the active channel's D1 archive on boot — the PWA
       // loads the current channel's (e.g. #nymchat) history right away on load,
@@ -561,6 +585,57 @@ class NostrController {
       return (identity, Nip46SignerAdapter(svc));
     } catch (_) {
       return null;
+    }
+  }
+
+  /// The cached kind-0 profile name persisted for the durable login — the
+  /// PWA's `nym_nostr_login_profile` instant-restore cache (written in
+  /// `updateSidebarFromProfile`, app.js:5523-5527; read on boot BEFORE relays
+  /// connect, app.js:4514-4522). Null when absent/corrupt.
+  String? _cachedLoginProfileName(KeyValueStore kv) {
+    final raw = kv.getString(StorageKeys.nostrLoginProfile);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map<String, dynamic>) {
+        final name = decoded['name'];
+        if (name is String && name.isNotEmpty) return name;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Mirrors the resolved SELF kind-0 profile name onto the live [Identity]
+  /// and refreshes the durable login's instant-restore profile cache — the
+  /// PWA's `updateSidebarFromProfile` (`nym.nym = user.nym` + the
+  /// `nym_nostr_login_profile` write, app.js:5507-5528).
+  ///
+  /// `_ingestProfile` / `hydrateProfiles` already keep `AppState.selfNym` (the
+  /// sidebar header, composer/self messages, mention token, settings) in sync;
+  /// this covers every `identity.nym` read site too — presence broadcasts,
+  /// channel `['n', …]` tags, mention detection, group invites/leaves, polls,
+  /// settings transfers, `/who` — so peers and self-surfaces all see the
+  /// account nick, never the boot identity's ephemeral nick. No-op while our
+  /// own profile has no name (a brand-new account keeps its fallback).
+  void _syncSelfNymFromProfile() {
+    final identity = _identity;
+    if (identity == null) return;
+    final profile = _ref.read(appStateProvider).users[identity.pubkey]?.profile;
+    final name = profile?.name;
+    if (name == null || name.isEmpty) return;
+    final nym = getNymFromPubkey(name, identity.pubkey);
+    if (identity.nym != nym) identity.nym = nym;
+    if (_ref.read(appStateProvider).selfNym != nym) {
+      _ref.read(appStateProvider.notifier).setIdentity(identity.pubkey, nym);
+    }
+    // Persist for instant restore on the next launch (durable logins only —
+    // an ephemeral identity's nick lives in `nym_auto_ephemeral_nick`).
+    if (identity.loginMethod != null) {
+      final kv = _ref.read(keyValueStoreProvider);
+      unawaited(kv.setString(
+        StorageKeys.nostrLoginProfile,
+        jsonEncode({'name': name, 'avatar': profile?.picture}),
+      ));
     }
   }
 
@@ -877,6 +952,12 @@ class NostrController {
       _storageSync?.markProfileCached(event.pubkey);
     }
     appState.ingestEvent(event);
+    // A SELF kind-0 (live relay update or the login profile-fetch fallback)
+    // must also flow onto the live identity + the instant-restore login
+    // profile cache (PWA `updateSidebarFromProfile`, app.js:5507-5528).
+    if (event.kind == EventKind.profile && event.pubkey == _identity?.pubkey) {
+      _syncSelfNymFromProfile();
+    }
     // Public reaction (kind 7) to our message → notify + record (reactions.js
     // `handleReaction` notify block). Skip removals.
     if (event.kind == EventKind.reaction) {
@@ -1254,6 +1335,13 @@ class NostrController {
               isFriend: isFriend,
               isMention: isMention,
               isGroup: isGroup,
+              // eventId + timestamp engage the service's replay guards
+              // (notifications.js:22-69): the 24h backlog age gate, the
+              // eventId-precise dedup against the bell history, and the
+              // persisted `e:<id>` seen-key — without them the guards fell
+              // back to the fuzzy title/body key and "now" timestamps.
+              eventId: eventId,
+              timestampMs: tsMs,
             ),
           ));
     }
@@ -5059,6 +5147,10 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     appState.setIdentity(identity.pubkey, identity.nym);
     appState.ingestEvent(signed); // routes kind-0 → _ingestProfile
+    // Refresh the durable login's instant-restore profile cache with the new
+    // name/avatar (PWA `updateSidebarFromProfile` re-caches after every self
+    // kind-0, app.js:5519-5528) so a relaunch shows the new nick immediately.
+    _syncSelfNymFromProfile();
 
     // Mirror the signed kind-0 to D1 (`profile-set`) in addition to the relay
     // publish, so other clients get a fast public read (`_saveProfileToD1`,
@@ -5494,14 +5586,34 @@ class NostrController {
       final cache = CacheStore();
       await cache.open();
       _cache = cache;
+      // PMs hydrate only when caching is enabled; disabled → wipe the store,
+      // exactly the PWA's `cachePMsAllowed ? … : this.clearPMCache()`
+      // (persistence.js:455-475).
+      final cachePms = _ref.read(settingsProvider).cachePMs;
       // Load stores in parallel (mirrors hydrateFromCache's Promise.all).
       final results = await Future.wait([
         cache.loadAllProfiles(),
         cache.loadAllReactions(),
+        cache.loadAllChannelMessages(),
+        cachePms
+            ? cache.loadAllPmMessages()
+            : Future.value(<String, List<Message>>{}),
       ]);
       final profiles = results[0] as Map<String, UserProfile>;
       final reactions = results[1] as Map<String, List<dynamic>>;
+      final channelMsgs = results[2] as Map<String, List<Message>>;
+      final pmMsgs = results[3] as Map<String, List<Message>>;
       if (profiles.isNotEmpty) appState.hydrateProfiles(profiles);
+      // Boot message hydration (persistence.js:427-475): every cached channel
+      // + PM/group history lands in state BEFORE the D1/relay backfills, so
+      // the open view paints instantly and the archive replay dedups against
+      // the seeded `_seenIds` instead of double-inserting. One copyWith inside.
+      if (channelMsgs.isNotEmpty || pmMsgs.isNotEmpty) {
+        appState.hydrateAllMessages({...channelMsgs, ...pmMsgs});
+      }
+      if (!cachePms) unawaited(cache.clearPms());
+      // Reactions hydrate AFTER messages so their tallies attach to rows that
+      // now exist (same effective order as the PWA's single hydration pass).
       if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
       // Web-of-trust graph: restore the persisted nymchatPubkeys / vouches /
       // trusted sets so the spam gate isn't cold on launch (it still grows live
@@ -5512,8 +5624,6 @@ class NostrController {
         cache.loadMetaSet(CacheStore.metaTrustedPubkeys),
       ]);
       appState.hydrateTrustSets(trust[0], trust[1], trust[2]);
-      // Channel/PM message rehydration happens lazily as channels are opened
-      // (loadChannelMessages); the cache is wired so saves persist 1000 caps.
     } catch (e) {
       debugPrint('hydrateFromCache failed: $e');
     }
@@ -5810,10 +5920,16 @@ class NostrController {
     unawaited(_reconcileShopPurchases());
   }
 
-  /// Per-channel "backfilled" gate (channels.js `_channelD1FetchedAt`). The
-  /// 60s freshness window lives in [StorageSync.channelGet]; this set just
-  /// avoids redundant in-flight calls within the same tight switch loop.
-  final Set<String> _channelBackfillInFlight = <String>{};
+  /// Per-channel in-flight backfill (channels.js `_channelD1FetchedAt`). The
+  /// 60s freshness window lives in [StorageSync.channelGet]; this map lets
+  /// concurrent triggers for the same channel SHARE the running fetch instead
+  /// of being dropped — the previous `Set` guard silently swallowed the
+  /// reconnect-edge and view-reopen retries while a hung boot fetch sat in
+  /// flight, leaving the channel empty with no second chance. Each future
+  /// resolves to whether the fetch produced any events; a waiter whose shared
+  /// run came back empty re-runs the fetch itself.
+  final Map<String, Future<bool>> _channelBackfillInFlight =
+      <String, Future<bool>>{};
 
   // --- D1 profile backfill (PWA `queueProfileFetch` / `_flushProfileBatch`) ---
 
@@ -5902,7 +6018,34 @@ class NostrController {
     final sync = _storageSync;
     if (sync == null || channelKey.isEmpty) return;
     final name = channelKey.toLowerCase();
-    if (!_channelBackfillInFlight.add(name)) return;
+    final inFlight = _channelBackfillInFlight[name];
+    if (inFlight != null) {
+      // A fetch for this channel is already running: await ITS outcome rather
+      // than dropping this trigger. If it produced events we're done; if it
+      // hung (10s timeout), errored, or came back empty, fall through and run
+      // a fresh attempt — unless another waiter already started one (the map
+      // was repopulated by the time we resumed).
+      final produced = await inFlight;
+      if (produced || _channelBackfillInFlight.containsKey(name)) return;
+    }
+    final run = _runChannelBackfill(name, channelKey, sync);
+    _channelBackfillInFlight[name] = run;
+    try {
+      await run;
+    } finally {
+      // Clear only our own entry — a waiter that re-ran may have replaced it.
+      if (identical(_channelBackfillInFlight[name], run)) {
+        _channelBackfillInFlight.remove(name);
+      }
+    }
+  }
+
+  /// One `channel-get` attempt for [_backfillChannelArchive]: fetch
+  /// (time-bounded), replay through the live ingest path, top up zap badges.
+  /// Returns whether any archived events were produced, so a sharing waiter
+  /// knows an immediate retry is warranted. Never throws.
+  Future<bool> _runChannelBackfill(
+      String name, String channelKey, StorageSync sync) async {
     try {
       // FORCE the fetch, bypassing channelGet's 60s freshness window — this is an
       // explicit channel OPEN/boot, which the PWA always forces
@@ -5913,7 +6056,17 @@ class NostrController {
       // doesn't unmark on error) would suppress the boot/open restore for 60s,
       // leaving #nymchat empty with no retry. `_channelBackfillInFlight` still
       // de-dups concurrent calls for the same channel.
-      final events = await sync.channelGet([name], force: true);
+      //
+      // TIME-BOUND the fetch (10s → empty): an orphaned socket request must not
+      // pin the in-flight slot until the transport's own 45s timeout — the PWA
+      // fails a pending request the moment its socket closes, so the next
+      // trigger (reconnect edge / view reopen) retries immediately. The empty
+      // result reads as "produced nothing", which is exactly what tells a
+      // concurrent waiter to re-run.
+      final events = await sync.channelGet([name], force: true).timeout(
+            const Duration(seconds: 10),
+            onTimeout: () => const <Map<String, dynamic>>[],
+          );
       final appState = _ref.read(appStateProvider.notifier);
       for (final raw in events) {
         try {
@@ -5927,10 +6080,10 @@ class NostrController {
       // `channel-get` streams zaps rows only within the channel window — this
       // also recovers receipts on older cached messages.
       _backfillZapReceiptsFor('#$channelKey', scope: 'channel');
+      return events.isNotEmpty;
     } catch (_) {
       // Best-effort: live subscription continues regardless.
-    } finally {
-      _channelBackfillInFlight.remove(name);
+      return false;
     }
   }
 

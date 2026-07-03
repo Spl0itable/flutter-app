@@ -208,13 +208,14 @@ class _ComposerState extends ConsumerState<Composer> {
   /// autocomplete (a single leader supports multiple followers).
   final _popoutPortal = OverlayPortalController();
 
-  /// Hosts the floating quote/edit preview chip. The PWA's `.quote-preview` /
-  /// `.edit-preview` are `position:absolute; bottom:100%` (styles-chat.css:
-  /// 1412-1425 / 1496-1511): the chip OVERLAYS the message area above the
-  /// input without growing the composer bar. Shown permanently (from
-  /// [initState]); the overlay builder renders nothing while no chip is
-  /// pending.
-  final _chipPortal = OverlayPortalController();
+  /// Keeps the ONE TextField element alive across the `_popout` layout switch.
+  /// The field lives in-flow while flat but moves into [_popoutPortal]'s
+  /// overlay when the draft grows past the popout threshold — two different
+  /// tree locations. Without a GlobalKey the flip REMOUNTS the EditableText
+  /// (new element, new TextInputConnection), which force-closes the on-screen
+  /// keyboard mid-typing; with it the element is reparented intact, so focus
+  /// and the IME connection survive both directions of the switch.
+  final GlobalKey _fieldKey = GlobalKey();
 
   /// Measures the message-input box so the autocomplete dropdown spans the
   /// INPUT width (`.autocomplete-dropdown{left:0;right:0}` = `.input-wrapper`),
@@ -374,9 +375,6 @@ class _ComposerState extends ConsumerState<Composer> {
             onSystemMessage: _onSystemMessage,
             hooks: _buildCommandHooks(),
           );
-      // Mount the chip portal once; [_chipOverlay] renders nothing until a
-      // quote/edit is actually pending.
-      _chipPortal.show();
       // A REMOUNT (e.g. returning from the bot chat, which swaps this composer
       // out) must restore the incoming conversation's stashed draft — the
       // PWA's persistent input still holds it; ours starts empty.
@@ -1360,9 +1358,9 @@ class _ComposerState extends ConsumerState<Composer> {
       _onViewSwitched(next);
     });
 
-    // The quote/edit chip no longer sits in-flow — it floats above the input
-    // via [_chipOverlay] (`bottom:100%`), so the input IS the composer body.
-    final input = _input(context, sendEnabled);
+    // The quote/edit preview chip stacks flush above the input
+    // (`.quote-preview` / `.edit-preview`, `bottom:100%` + 8px gap).
+    final input = _inputWithChips(context, sendEnabled);
     // `.input-container` is `padding: 12px 16px` (desktop/tablet); the phone
     // breakpoint (≤768) collapses it to a flat `padding: 10px`
     // (styles-themes-responsive.css:221/304). `compact` spans the whole ≤1024
@@ -1409,14 +1407,16 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// The floating quote/edit preview chip (`.quote-preview` / `.edit-preview`:
-  /// `position:absolute; bottom:100%` with `margin-bottom:8px`, styles-chat.css
-  /// :1412-1425 / 1496-1511): anchored ABOVE the input, overlaying the message
-  /// area — the composer bar does NOT grow — and sliding in per
-  /// `quoteSlideIn` (0.2s ease-out, opacity 0→1 / translateY 8px→0). With the
-  /// popout active the chip lifts past the floating field's overhang, matching
-  /// the autocomplete's `--ac-offset` stack (dropdown above chip above field).
-  Widget _chipOverlay(BuildContext context) {
+  /// The input column with the quote/edit preview chip stacked directly above
+  /// it — the PWA's `.quote-preview` / `.edit-preview` (index.html:720-745):
+  /// `position:absolute; bottom:100%` with `margin-bottom:8px` (styles-chat.css
+  /// :1412-1427 / 1496-1512), i.e. the chip sits flush above the field with an
+  /// 8px gap, sliding in per `quoteSlideIn` (0.2s ease-out, opacity 0→1 /
+  /// translateY 8px→0). Structure per the PWA markup: colored bar + content
+  /// column (author nym / label over the snippet) + close ✕. The chip slot is
+  /// ALWAYS present (an [AnimatedSize] collapsing to 0) so toggling a chip
+  /// never re-parents the TextField below it — the keyboard stays up.
+  Widget _inputWithChips(BuildContext context, bool inputEnabled) {
     final chip = _pendingEdit != null
         ? _EditPreviewChip(
             text: _quotePreviewText(_pendingEdit!.content),
@@ -1429,37 +1429,34 @@ class _ComposerState extends ConsumerState<Composer> {
                 onClose: _clearQuote,
               )
             : null);
-    if (chip == null) return const SizedBox.shrink();
-    final overhang = _popout
-        ? math.max(0.0, _boxHeight(_popoutFieldKey) - _composerRowBase)
-        : 0.0;
-    return CompositedTransformFollower(
-      link: _acAnchor,
-      targetAnchor: Alignment.topLeft,
-      followerAnchor: Alignment.bottomLeft,
-      // `margin-bottom: 8px` between the chip and the field (+ the popout
-      // overhang when the field floats).
-      offset: Offset(0, -(overhang + 8)),
-      showWhenUnlinked: false,
-      child: Align(
-        alignment: Alignment.bottomLeft,
-        child: Material(
-          type: MaterialType.transparency,
-          child: SizedBox(
-            width: _anchorWidth(context),
-            // Re-mounts (and so replays the slide-in) when the chip KIND
-            // changes — the PWA recreates the element on each
-            // setQuoteReply/startEditMessage.
-            child: _ChipSlideIn(
-              key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
-              // Keyed so the autocomplete dropdown can clear the chip height
-              // (`--ac-offset`, 04-F2). Measures the chip alone (the +8 gap
-              // is added in the offset, matching the PWA's `previewH + 8`).
-              child: KeyedSubtree(key: _chipKey, child: chip),
-            ),
-          ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          alignment: Alignment.bottomLeft,
+          child: chip == null
+              ? const SizedBox(height: 0, width: double.infinity)
+              : Padding(
+                  // `margin-bottom: 8px` between the chip and the field.
+                  padding: const EdgeInsets.only(bottom: 8),
+                  // Re-mounts (and so replays the slide-in) when the chip KIND
+                  // changes — the PWA recreates the element on each
+                  // setQuoteReply/startEditMessage.
+                  child: _ChipSlideIn(
+                    key: ValueKey(_pendingEdit != null ? 'edit' : 'quote'),
+                    // Keyed so the autocomplete dropdown can clear the chip
+                    // height (`--ac-offset`, 04-F2). Measures the chip alone
+                    // (the +8 gap is added in the offset, matching the PWA's
+                    // `previewH + 8`).
+                    child: KeyedSubtree(key: _chipKey, child: chip),
+                  ),
+                ),
         ),
-      ),
+        _input(context, inputEnabled),
+      ],
     );
   }
 
@@ -1583,22 +1580,18 @@ class _ComposerState extends ConsumerState<Composer> {
       child: OverlayPortal(
         controller: _popoutPortal,
         overlayChildBuilder: (ctx) => _popoutOverlay(ctx, focus),
-        // The chip portal nests between the popout field (behind) and the
-        // autocomplete (topmost), so the dropdown paints over the chip and the
-        // chip over the floating field — the PWA's `--ac-offset` stack.
         child: OverlayPortal(
-          controller: _chipPortal,
-          overlayChildBuilder: _chipOverlay,
-          child: OverlayPortal(
-            controller: _acPortal,
-            overlayChildBuilder: _overlayChild,
-            // In-flow we reserve only the base row height while the field
-            // floats; flat (non-popout) the field stays in place.
-            child: _popout
-                ? const SizedBox(
-                    height: _composerRowBase, width: double.infinity)
-                : focus,
-          ),
+          controller: _acPortal,
+          overlayChildBuilder: _overlayChild,
+          // In-flow we reserve only the base row height while the field
+          // floats; flat (non-popout) the field stays in place. The [_fieldKey]
+          // GlobalKey on the TextField reparents the SAME element between the
+          // in-flow slot and the popout overlay, so the flip never tears down
+          // the EditableText (which would force-close the keyboard).
+          child: _popout
+              ? const SizedBox(
+                  height: _composerRowBase, width: double.infinity)
+              : focus,
         ),
       ),
     );
@@ -1767,6 +1760,12 @@ class _ComposerState extends ConsumerState<Composer> {
     // the composer — every draft read headed for the wire goes through
     // [_draftText] (= `expand`), which maps each sentinel back to its `:code:`.
     final field = TextField(
+      // GlobalKey: the ONE field element survives the `_popout` flip (in-flow
+      // slot ↔ popout overlay slot, and the DecoratedBox ↔ Container wrapper
+      // swap below) by reparenting instead of remounting — remounting would
+      // drop the IME connection and force-close the on-screen keyboard the
+      // moment the draft crosses the popout threshold.
+      key: _fieldKey,
       controller: _controller,
       focusNode: _focus,
       // `#messageInput` starts `disabled` and the PWA flips it to enabled ONLY
@@ -2166,6 +2165,7 @@ class _ComposerState extends ConsumerState<Composer> {
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
+            onClose: _emojiPortal.hide,
           ),
         ),
         child: _IconBtn(
@@ -2613,11 +2613,20 @@ class _PreviewChip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: c.bgTertiary,
+        // `border: 1px solid var(--glass-border)`; `body.light-mode
+        // .quote-preview/.edit-preview` re-states rgba(0,0,0,0.08) — the light
+        // glassBorder — so both themes resolve to glassBorder.
         border: Border.all(color: c.glassBorder),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
-        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
-        boxShadow: const [
-          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); `body.light-mode` softens
+        // it to 0 8px 32px rgba(0,0,0,0.12) (styles-themes-responsive.css:
+        // 1070-1083).
+        boxShadow: [
+          BoxShadow(
+            color: c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+            blurRadius: 32,
+            offset: const Offset(0, 8),
+          ),
         ],
       ),
       child: Row(

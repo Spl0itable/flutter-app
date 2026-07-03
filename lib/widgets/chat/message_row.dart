@@ -342,6 +342,58 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
   }
 
+  /// `_RX_HTML_TAG` — strip markup before mention matching (messages.js:410).
+  static final RegExp _htmlTagRe = RegExp(r'<[^>]*>');
+
+  /// `_RX_DUP_SUFFIX` — collapse a doubled `@nym#abcd#abcd` to one suffix
+  /// before matching (messages.js:5 / :411).
+  static final RegExp _dupSuffixRe =
+      RegExp(r'@([^@#\s]+)#([0-9a-f]{4})#\2\b', caseSensitive: false);
+
+  /// Whether this row renders the PWA `.message.mentioned` highlight. The
+  /// caller's [MessageRow.mentioned] flag (a fast case-SENSITIVE `contains`
+  /// probe) is OR'ed with a faithful port of the PWA `isMentioned`
+  /// (messages.js:400-425): a CASE-INSENSITIVE `@nym` match with an optional
+  /// `#suffix` tail (`_getMentionPattern`, :12-22), HTML stripped and doubled
+  /// suffixes deduped first, quoted `>` lines dropped — though a quote-reply
+  /// addressed to us (`> @me[#sfx]:`, `_getQuoteToMePattern`) still counts.
+  /// The bare `contains` missed real mentions (e.g. an iOS-auto-capitalised
+  /// "@Nym" against the lowercase self nym), leaving the highlight off.
+  ///
+  /// Self and PM rows never highlight locally — the PWA class chain is an
+  /// else-if (`self` / `pm` win over `mentioned`, messages.js:684-693).
+  bool _isMentionedRow() {
+    if (widget.mentioned) return true;
+    if (message.isOwn || message.isPM) return false;
+    final cleanNym = stripPubkeySuffix(ref.read(appStateProvider).selfNym);
+    if (cleanNym.isEmpty) return false;
+    final selfPubkey = ref.read(nostrControllerProvider).identity?.pubkey;
+    final rawSuffix = selfPubkey != null ? getPubkeySuffix(selfPubkey) : '';
+    // `getPubkeySuffix` yields '????' for a non-hex tail — treat as no suffix.
+    final sfx = rawSuffix == '????' ? '' : RegExp.escape(rawSuffix);
+    final esc = RegExp.escape(cleanNym);
+    var clean = message.content
+        .replaceAll(_htmlTagRe, '')
+        .replaceAllMapped(_dupSuffixRe, (m) => '@${m[1]}#${m[2]}');
+    // "> @ourNym[#sfx]: …" quote-reply addressed to us counts even though the
+    // line is itself a blockquote (messages.js:414-416, `^\s*>+\s*@nym(?:#sfx)?\s*:`).
+    final quoteToMe = RegExp('^\\s*>+\\s*@$esc(?:#$sfx)?\\s*:',
+        caseSensitive: false, multiLine: true);
+    if (quoteToMe.hasMatch(clean)) return true;
+    // Strip the remaining blockquoted lines so mentions inside quoted text
+    // don't highlight (messages.js:418-420).
+    clean = clean
+        .split('\n')
+        .where((line) => !line.trimLeft().startsWith('>'))
+        .join('\n');
+    // `@nym` followed by our `#suffix` (word-bounded) or by anything that is
+    // NOT some other 4-hex suffix (messages.js:15-18).
+    final tail = sfx.isNotEmpty
+        ? '(?:#$sfx\\b|(?!#[0-9a-f]{4})(?:\\b|\$))'
+        : '(?!#[0-9a-f]{4})(?:\\b|\$)';
+    return RegExp('@$esc$tail', caseSensitive: false).hasMatch(clean);
+  }
+
   /// True when this message has accrued zaps (`zapsProvider`), so the reactions
   /// row must render to host the `⚡ N` zap badge even without reactions.
   bool get _hasZaps {
@@ -999,12 +1051,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final self = message.isOwn;
 
     final deco = _styleDecoration(context);
+    final mentioned = _isMentionedRow();
 
     Color? bg;
     Color? barColor;
     // The accent bar's glow (`::before` box-shadow) — secondary@0.4 for a
-    // mention, magenta for the PM-hover bar below.
-    Color? barGlow = widget.mentioned ? c.secondaryA(0.4) : null;
+    // mention (`.message.mentioned::before { box-shadow: 0 0 8px … }`,
+    // styles-chat.css:71-80, no light override), magenta for the PM-hover bar
+    // below.
+    Color? barGlow = mentioned ? c.secondaryA(0.4) : null;
     if (self) {
       bg = c.secondaryA(0.05);
       // `.message.self::before` accent bar: white@0.3 dark; light-mode →
@@ -1012,8 +1067,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       barColor = c.isLight
           ? const Color(0x40000000) // black @ 0.25
           : const Color(0x4DFFFFFF); // white @ 0.30
-    } else if (widget.mentioned) {
-      bg = c.secondaryA(0.06);
+    } else if (mentioned) {
+      // `.message.mentioned { background: rgb(from var(--secondary) r g b /
+      // 0.06) }` (styles-chat.css:65-69); light mode flattens the tint to
+      // `rgba(0,0,0,0.03)` (`body.light-mode .message.mentioned`,
+      // styles-themes-responsive.css:1145-1147). The 3px secondary bar +
+      // glow stay in both themes.
+      bg = c.isLight
+          ? const Color(0x08000000) // rgba(0,0,0,0.03)
+          : c.secondaryA(0.06);
       barColor = c.secondary;
     }
     // `@media(hover:hover) .message:hover { background: rgba(255,255,255,0.03) }`
@@ -1466,6 +1528,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final fontSize = settings.textSize.toDouble();
     final self = message.isOwn;
     final deco = _styleDecoration(context);
+    final mentioned = _isMentionedRow();
 
     // In bubble mode the CSS applies the message style to `.message-content`
     // (the bubble): a translucent style background plus a soft glow halo.
@@ -1523,83 +1586,118 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // (`messages.js:940`, `flex-basis:100%; text-align:right`), so they render as
     // a full-width right-aligned line BELOW the bubble — see [stack] below. The
     // `.message-translation` is likewise a sibling after `.message-content`.
-    final innerContent = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    // The `.bubble-time-inner` line: `(edited)` + relative time + crypto lock.
+    // Shrink-wrapped (`width:fit-content`); instantiated twice below — a ghost
+    // in the flow and the visible pinned copy.
+    final timeLine = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
-            deco: deco, bubble: true),
-        // `.bubble-time-inner { display:block; width:fit-content; margin-left:
-        // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
-        // below the body, pinned to the bottom-RIGHT INSIDE the bubble. The Row
-        // shrink-wraps (`width:fit-content`); an [Align] supplies the
-        // `margin-left:auto` (right-edge pin) the bare Row's `mainAxisAlignment`
-        // can't, since a min-size Row in a `start`-aligned ≥180px Column would
-        // otherwise sit bottom-LEFT.
-        const SizedBox(height: 4),
-        Align(
-          alignment: Alignment.centerRight,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              if (message.isEdited)
-                Text(
-                  '(edited) ',
-                  // `.edited-indicator` base (styles-chat.css:1549-1554): 10px
-                  // italic text-dim AT OPACITY 0.7 — the in-bubble variant
-                  // (`.bubble-time-inner .edited-indicator`) inherits it.
-                  style: TextStyle(
-                      color: c.textDim.withValues(alpha: 0.7),
-                      fontSize: 10,
-                      fontStyle: FontStyle.italic),
-                ),
-              // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
-              // Tapping it opens the styled `.timestamp-popup`
-              // (showTimestampPopup); hover tints it `--primary`
-              // (`.clickable-timestamp:hover`).
-              _TimestampText(
-                label: formatRelativeTime(message.dateTime),
-                fullTimestamp: formatFullTimestamp(
-                    message.dateTime, settings.timeFormat, settings.dateFormat),
+        if (message.isEdited)
+          Text(
+            '(edited) ',
+            // `.edited-indicator` base (styles-chat.css:1549-1554): 10px
+            // italic text-dim AT OPACITY 0.7 — the in-bubble variant
+            // (`.bubble-time-inner .edited-indicator`) inherits it.
+            style: TextStyle(
+                color: c.textDim.withValues(alpha: 0.7),
                 fontSize: 10,
-                height: 1,
-              ),
-              // `.crypto-lock-bubble`: the verification lock follows the in-bubble
-              // time (PM/group only).
-              if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
-            ],
+                fontStyle: FontStyle.italic),
           ),
+        // `.bubble-time-text`: RELATIVE time ("now"/"2m ago"), not clock.
+        // Tapping it opens the styled `.timestamp-popup`
+        // (showTimestampPopup); hover tints it `--primary`
+        // (`.clickable-timestamp:hover`).
+        _TimestampText(
+          label: formatRelativeTime(message.dateTime),
+          fullTimestamp: formatFullTimestamp(
+              message.dateTime, settings.timeFormat, settings.dateFormat),
+          fontSize: 10,
+          height: 1,
         ),
+        // `.crypto-lock-bubble`: the verification lock follows the in-bubble
+        // time (PM/group only).
+        if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
+      ],
+    );
+    // `.bubble-time-inner { display:block; width:fit-content; margin-left:
+    // auto; margin-top:4px; text-align:right }` — the relative time sits 4px
+    // below the body, pinned to the bottom-RIGHT INSIDE the bubble. The bubble
+    // itself is `display:inline-block`, i.e. it SHRINK-WRAPS to its content
+    // between the 180px floor and the 85%/90% cap — so the time's right-edge
+    // pin must not widen it. A bare [Align] would expand to the incoming max
+    // cap (stretching every bubble to full width), and [IntrinsicWidth] is off
+    // the table because the media gallery's shrink-wrapped [GridView] viewport
+    // rejects intrinsic queries. Instead the column flow carries an INVISIBLE
+    // ghost of the time line — reserving its exact height, its width joining
+    // the shrink-wrap like the PWA's fit-content block — while the visible
+    // copy is [Positioned] on the (now content-sized) bubble's bottom-right.
+    final innerContent = Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
+                deco: deco, bubble: true),
+            const SizedBox(height: 4),
+            ExcludeSemantics(
+              child: IgnorePointer(
+                child: Opacity(opacity: 0, child: timeLine),
+              ),
+            ),
+          ],
+        ),
+        Positioned(right: 0, bottom: 0, child: timeLine),
       ],
     );
 
     // Re-render the relative time on a cadence (cheap; matches the PWA timer).
     _ensureRelativeTimer();
 
-    final bubble = ConstrainedBox(
-      // `.message-content` bubble: `min-width:180px; max-width:85%`.
-      constraints: BoxConstraints(
-        minWidth: 180,
-        maxWidth: MediaQuery.of(context).size.width * 0.85,
-      ),
-      child: _decorateBubble(
-        radius: radius,
-        bubbleColor: bubbleColor,
-        glow: deco?.glow,
-        // Only gold paints its gradient as the bubble fill; neon/phoenix/
-        // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
-        gradient: bubbleGradient,
-        auras: auras,
-        // `.message.mentioned .message-content`: inset 0 0 0 1px secondary@0.25
-        // — rendered as a 1px secondary@0.25 inner border on the bubble.
-        mentionRing: widget.mentioned ? c.secondaryA(0.25) : null,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-          child: innerContent,
+    final bubble = LayoutBuilder(builder: (context, box) {
+      // `.message-content` bubble (`body.chat-bubbles`, styles-features.css:
+      // 3603-3615): `min-width: 180px; max-width: 85%` — the ≤768px viewport
+      // raises the cap to 90% (styles-themes-responsive.css:1452-1455). The
+      // percentage resolves against the `.message` row (the group-stack width
+      // this LayoutBuilder sees), NOT the screen — columns mode adds no
+      // override of its own, so a column's bubbles cap at 85%/90% of the
+      // COLUMN. CSS min-width beats max-width, so a container narrower than
+      // the floor never squeezes the cap below 180.
+      final screenW = MediaQuery.of(context).size.width;
+      final availW = box.maxWidth.isFinite ? box.maxWidth : screenW;
+      final pct = screenW <= NymDimens.mobileBreakpoint ? 0.90 : 0.85;
+      final capW = (availW * pct).clamp(180.0, double.infinity);
+      return ConstrainedBox(
+        constraints: BoxConstraints(minWidth: 180, maxWidth: capW),
+        child: _decorateBubble(
+          radius: radius,
+          bubbleColor: bubbleColor,
+          // Only gold paints its gradient as the bubble fill; neon/phoenix/
+          // cosmic are box-shadow-only in the bubble (gradient is IRC-only).
+          gradient: bubbleGradient,
+          auras: auras,
+          // `.message.mentioned .message-content`: `box-shadow: inset 0 0 0 1px
+          // rgb(from var(--secondary) r g b / 0.25)` (styles-features.css:3657)
+          // — light mode strokes .2 (themes:1404) — rendered as a 1px inner
+          // border on the bubble.
+          mentionRing:
+              mentioned ? c.secondaryA(c.isLight ? 0.2 : 0.25) : null,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            // The 180px floor above lands on the DECORATED box, but the loose
+            // Stack inside [_decorateBubble] would let the interior (and the
+            // time's right-edge pin) collapse to the body's width. Re-assert
+            // the floor on the interior — 180 minus the 12+12 horizontal
+            // padding — so the Positioned time hugs the true right padding
+            // edge of a min-width bubble, exactly like `margin-left: auto`.
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minWidth: 180 - 24),
+              child: innerContent,
+            ),
+          ),
         ),
-      ),
-    );
+      );
+    });
 
     // `.message-group-stack` (`flex:1 1 auto; min-width:0`, a flex column). It
     // holds the name, the content bubble, then the full-width siblings the PWA
@@ -1776,16 +1874,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   Widget _decorateBubble({
     required BorderRadius radius,
     required Color bubbleColor,
-    required Color? glow,
     required List<Color>? gradient,
     required List<CosmeticAura> auras,
     required Widget child,
     Color? mentionRing,
   }) {
+    // NOTE: no bubble box-shadow is derived from the message STYLE. The PWA
+    // style glow is a `text-shadow` on the glyphs only (`.message.style-X
+    // .message-content { text-shadow }`, styles-features.css) — no
+    // `.message-content` box-shadow exists for any style, in either theme.
+    // Painting `deco.glow` here as a BoxShadow bled the (high-alpha, e.g.
+    // fire's rgba(255,160,0,.8)) shadow rect through the translucent bubble
+    // fill, turning the whole dark-mode bubble into an opaque orange blob
+    // with a huge halo. The glyph glow renders via [MessageStyleDecoration.
+    // textShadows] in `_content`. Only cosmetic AURAS cast bubble box-shadows.
     final shadows = <BoxShadow>[];
-    if (glow != null) {
-      shadows.add(BoxShadow(color: glow, blurRadius: 18, spreadRadius: -2));
-    }
     for (final a in auras) {
       // Inset ring (approximated as a tight 0-blur spread inside the box via a
       // border below) + the outer glow at the bubble's colour + blur (light

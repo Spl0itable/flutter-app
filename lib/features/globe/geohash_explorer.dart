@@ -597,6 +597,8 @@ class _GeohashExplorerState extends ConsumerState<GeohashExplorer> {
     return Container(
       // `.geohash-explorer-header { padding: 16px 24px; padding-right: 56px; }`
       // — the right gutter reserves room for the absolute `.modal-close` chip.
+      // A block element: full width, LEFT-aligned title (never centered).
+      width: double.infinity,
       padding: const EdgeInsets.fromLTRB(24, 16, 56, 16),
       decoration: BoxDecoration(
         color: const Color(0x26000000), // rgba(0,0,0,0.15)

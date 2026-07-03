@@ -20,7 +20,8 @@ import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/relays/relay_stats_modal.dart';
 import '../../features/settings/about_screen.dart';
-import '../../features/settings/settings_helpers.dart' show geohashLocationLabel;
+import '../../features/settings/settings_helpers.dart'
+    show geohashLocationLabel;
 import '../../features/settings/settings_screen.dart';
 import '../../features/shop/shop_modal.dart';
 import '../../models/channel.dart';
@@ -193,7 +194,11 @@ class _SidebarState extends ConsumerState<Sidebar> {
       }
     } catch (_) {
       // Fall back to a bare comma list (defensive).
-      return raw.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+      return raw
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
     }
     return const [];
   }
@@ -250,10 +255,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
     // NEVER hides `#nymchat` or the ACTIVE row — neither via the per-channel
     // hidden set nor via hide-non-pinned — which is exactly what keeps the
     // "Unhide channel" menu label reachable on the channel you're in.
-    final sortByProximity = ref.watch(
-        settingsProvider.select((settings) => settings.sortByProximity));
-    final hideNonPinned = ref.watch(
-        settingsProvider.select((settings) => settings.hideNonPinned));
+    final sortByProximity = ref
+        .watch(settingsProvider.select((settings) => settings.sortByProximity));
+    final hideNonPinned = ref
+        .watch(settingsProvider.select((settings) => settings.hideNonPinned));
     final location = ref.watch(userLocationProvider);
     final activeChannelKey =
         view.kind == ViewKind.channel ? view.id.toLowerCase() : '';
@@ -344,8 +349,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
     // self check (self is seeded into the map, nostr-core.js:2813), so your
     // own nym renders as a normal row and counts toward `activeCount`.
     final onlineUsers = users.values
-        .where(
-            (u) => pmOnlyPubkeys == null || pmOnlyPubkeys.contains(u.pubkey))
+        .where((u) => pmOnlyPubkeys == null || pmOnlyPubkeys.contains(u.pubkey))
         .toList()
       ..sort((a, b) {
         int rank(User u) {
@@ -566,8 +570,8 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 if (e.group != null)
                   _GroupListItem(
                     group: e.group!,
-                    active: view.kind == ViewKind.group &&
-                        view.id == e.group!.id,
+                    active:
+                        view.kind == ViewKind.group && view.id == e.group!.id,
                     unread:
                         unread[GroupLogic.groupStorageKey(e.group!.id)] ?? 0,
                     textSize: textSize,
@@ -579,8 +583,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   PMListItem(
                     nym: e.pm!.nym,
                     pubkey: e.pm!.pubkey,
-                    active:
-                        view.kind == ViewKind.pm && view.id == e.pm!.pubkey,
+                    active: view.kind == ViewKind.pm && view.id == e.pm!.pubkey,
                     unread: unread[e.pm!.pubkey] ?? 0,
                     textSize: textSize,
                     onTap: () => select(ChatView.pm(e.pm!.pubkey)),
@@ -785,92 +788,98 @@ class _SidebarState extends ConsumerState<Sidebar> {
             ? null
             : Border(bottom: BorderSide(color: c.glassBorder)),
       ),
-      child: _PanicHoldDetector(
-        onTap: () => NickEditModal.open(context),
-        onHold: () => _triggerPanic(context),
-        child: Column(
-          children: [
-            // `.nym-display { margin-top:15px }` — the top gap above the box
-            // (cosmetic in app mode where the ASCII logo above is hidden).
-            const SizedBox(height: 15),
+      child: Column(
+        children: [
+          // `.nym-display { margin-top:15px }` — the top gap above the box
+          // (cosmetic in app mode where the ASCII logo above is hidden).
+          const SizedBox(height: 15),
+          // Click-to-edit AND the 2s panic hold bind to `.nym-display` only
+          // (panic.js:14, app.js nick-edit click) — NOT to the status
+          // indicator below it. The detector is a raw Listener (bypasses the
+          // gesture arena), so wrapping the whole header made a status-row
+          // tap open the nick editor behind the Network Stats modal.
+          _PanicHoldDetector(
+            onTap: () => NickEditModal.open(context),
+            onHold: () => _triggerPanic(context),
             // `.nym-display`: padding 10/14, bg white@0.04 (light-mode →
             // black@0.04), glass border, radius-sm. `:hover` → bg white@0.07,
             // border primary@0.3, glow 0 0 15px primary@0.08 (styles-shell
             // .css:69-73); light mode overrides only the bg to black@0.07 —
             // its higher-specificity rest rule keeps the black@0.08 border
             // (styles-themes-responsive.css:1242-1249) while the glow applies.
-            MouseRegion(
+            child: MouseRegion(
               onEnter: (_) => setState(() => _nymHover = true),
               onExit: (_) => setState(() => _nymHover = false),
               child: Container(
-              key: TutorialTargets.keyFor(TutorialTarget.nymDisplay),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: _nymHover
-                    ? (c.isLight
-                        ? Colors.black.withValues(alpha: 0.07)
-                        : Colors.white.withValues(alpha: 0.07))
-                    : c.insetFill,
-                border: Border.all(
-                  color: _nymHover && !c.isLight
-                      ? c.primaryA(0.3)
-                      : c.glassBorder,
+                key: TutorialTargets.keyFor(TutorialTarget.nymDisplay),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: _nymHover
+                      ? (c.isLight
+                          ? Colors.black.withValues(alpha: 0.07)
+                          : Colors.white.withValues(alpha: 0.07))
+                      : c.insetFill,
+                  border: Border.all(
+                    color: _nymHover && !c.isLight
+                        ? c.primaryA(0.3)
+                        : c.glassBorder,
+                  ),
+                  borderRadius: NymRadius.rsm,
+                  boxShadow: _nymHover
+                      ? [BoxShadow(color: c.primaryA(0.08), blurRadius: 15)]
+                      : null,
                 ),
-                borderRadius: NymRadius.rsm,
-                boxShadow: _nymHover
-                    ? [BoxShadow(color: c.primaryA(0.08), blurRadius: 15)]
-                    : null,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // `.nym-label` (block, `.sidebar-header { text-align:center }`):
-                  // 10px uppercase ls 1.5 textDim weight 500, centered. Copy is
-                  // "Your Nym (click to edit)" in the PWA (gap F16).
-                  Text(
-                    'YOUR NYM (CLICK TO EDIT)',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: c.textDim,
-                      fontSize: 10,
-                      letterSpacing: 1.5,
-                      fontWeight: FontWeight.w500,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // `.nym-label` (block, `.sidebar-header { text-align:center }`):
+                    // 10px uppercase ls 1.5 textDim weight 500, centered. Copy is
+                    // "Your Nym (click to edit)" in the PWA (gap F16).
+                    Text(
+                      'YOUR NYM (CLICK TO EDIT)',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: c.textDim,
+                        fontSize: 10,
+                        letterSpacing: 1.5,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  // `.nym-identity` (flex) stays LEFT-aligned inside the box:
-                  // avatar 32 (`.avatar.nm-h-14`) + nym, gap 10.
-                  Row(
-                    children: [
-                      NymAvatar(
-                        seed: ref.read(appStateProvider).selfPubkey,
-                        size: 32,
-                        imageUrl: ref
-                            .read(appStateProvider)
-                            .users[ref.read(appStateProvider).selfPubkey]
-                            ?.profile
-                            ?.picture,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: _NymValueText(
-                          nym: nym,
-                          pubkey: ref.read(appStateProvider).selfPubkey,
+                    const SizedBox(height: 6),
+                    // `.nym-identity` (flex) stays LEFT-aligned inside the box:
+                    // avatar 32 (`.avatar.nm-h-14`) + nym, gap 10.
+                    Row(
+                      children: [
+                        NymAvatar(
+                          seed: ref.read(appStateProvider).selfPubkey,
+                          size: 32,
+                          imageUrl: ref
+                              .read(appStateProvider)
+                              .users[ref.read(appStateProvider).selfPubkey]
+                              ?.profile
+                              ?.picture,
                         ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: _NymValueText(
+                            nym: nym,
+                            pubkey: ref.read(appStateProvider).selfPubkey,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
-            // `.status-indicator` (index.html:434-437) is a SIBLING of
-            // `.nym-display` inside `.sidebar-header`, NOT nested in it. Its
-            // `margin-top:10px` is the gap below the nym box.
-            const SizedBox(height: 10),
-            _ConnectionStatusIndicator(connectedCount: connectedRelays),
-          ],
-        ),
+          ),
+          // `.status-indicator` (index.html:434-437) is a SIBLING of
+          // `.nym-display` inside `.sidebar-header`, NOT nested in it. Its
+          // `margin-top:10px` is the gap below the nym box.
+          const SizedBox(height: 10),
+          _ConnectionStatusIndicator(connectedCount: connectedRelays),
+        ],
       ),
     );
   }
@@ -1019,9 +1028,8 @@ class _NymValueText extends StatelessWidget {
         suffix = m.group(1)!;
       } else {
         base = nym;
-        suffix = pubkey.length >= 4
-            ? pubkey.substring(pubkey.length - 4)
-            : '????';
+        suffix =
+            pubkey.length >= 4 ? pubkey.substring(pubkey.length - 4) : '????';
       }
     }
     return Text.rich(
@@ -1218,8 +1226,7 @@ class _ActionButtonState extends State<_ActionButton> {
     final Color fg;
     if (c.isLight) {
       fill = Colors.black.withValues(alpha: _hover ? 0.06 : 0.03);
-      borderColor =
-          _hover ? c.primary : Colors.black.withValues(alpha: 0.1);
+      borderColor = _hover ? c.primary : Colors.black.withValues(alpha: 0.1);
       fg = c.primary;
     } else {
       fill = _hover ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05);
@@ -1575,9 +1582,7 @@ class _ReorderBtnState extends State<_ReorderBtn> {
               // `.section-reorder-btn` bg is a fixed rgba(255,255,255,0.08)
               // in BOTH color modes (styles-shell.css:164-176 — the CSS has
               // no light-theme override for it).
-              color: hovered
-                  ? c.primary
-                  : Colors.white.withValues(alpha: 0.08),
+              color: hovered ? c.primary : Colors.white.withValues(alpha: 0.08),
               borderRadius: NymRadius.rxs,
             ),
             // 12px stroke-width-3 chevron (index.html:466-472).
@@ -1756,124 +1761,129 @@ class _GroupListItem extends ConsumerWidget {
           return true;
         },
         builder: (context, hovered) => Stack(
-              children: [
-                Container(
-                  constraints: const BoxConstraints(minHeight: 36),
-                  // `:hover { padding-left: 14px }` (rest 12px).
-                  padding: EdgeInsets.fromLTRB(hovered ? 14 : 12, 9, 12, 9),
-                  decoration: BoxDecoration(
-                    // `.pm-item.active` (shared by group rows): primary@0.10 fill
-                    // + primary@0.05 glow (dark); `body.light-mode` neutralises to
-                    // black@0.06 with `box-shadow:none` (styles-themes-responsive
-                    // .css:1139), border + accent bar stay primary. Hover (loses
-                    // to active): white@0.06 dark / black@0.04 light.
-                    color: active
+          children: [
+            Container(
+              constraints: const BoxConstraints(minHeight: 36),
+              // `:hover { padding-left: 14px }` (rest 12px).
+              padding: EdgeInsets.fromLTRB(hovered ? 14 : 12, 9, 12, 9),
+              decoration: BoxDecoration(
+                // `.pm-item.active` (shared by group rows): primary@0.10 fill
+                // + primary@0.05 glow (dark); `body.light-mode` neutralises to
+                // black@0.06 with `box-shadow:none` (styles-themes-responsive
+                // .css:1139), border + accent bar stay primary. Hover (loses
+                // to active): white@0.06 dark / black@0.04 light.
+                color: active
+                    ? (c.isLight
+                        ? Colors.black.withValues(alpha: 0.06)
+                        : c.primaryA(0.10))
+                    : hovered
                         ? (c.isLight
-                            ? Colors.black.withValues(alpha: 0.06)
-                            : c.primaryA(0.10))
-                        : hovered
-                            ? (c.isLight
-                                ? Colors.black.withValues(alpha: 0.04)
-                                : Colors.white.withValues(alpha: 0.06))
-                            : Colors.transparent,
-                    borderRadius: NymRadius.rxs,
-                    border: Border.all(
-                      color: active ? c.primaryA(0.20) : Colors.transparent,
-                      width: 1,
-                    ),
-                    boxShadow: active && !c.isLight
-                        ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
-                        : null,
-                  ),
-                  child: Row(
-                    children: [
-                      // Custom avatar (`.group-avatar-wrap`, margin-right 4px,
-                      // styles-features.css:5348) → 34×22 member stack → 26px
-                      // icon-wrap fallback (both margin-right 6px).
-                      if (avatarUrl != null && avatarUrl.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: ClipOval(
-                            child: NymAvatar(
-                              seed: group.id,
-                              size: 26,
-                              imageUrl: group.avatar,
-                            ),
-                          ),
-                        )
-                      else if (otherMembers.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 6),
-                          child: _GroupAvatarStack(
-                            members: otherMembers.take(3).toList(),
-                            users: users,
-                          ),
-                        )
-                      else
-                        Padding(
-                          padding: const EdgeInsets.only(right: 6),
-                          child: _GroupIconWrap(c: c),
-                        ),
-                      Flexible(
-                        // `.pm-name` (shared by group rows): white-space:normal
-                        // + word-break:break-word (styles-shell.css:418-429) —
-                        // long names WRAP, no ellipsis.
-                        child: RichText(
-                          text: TextSpan(
-                            style: TextStyle(
-                              color: c.textDim,
-                              fontSize: textSize,
-                              fontWeight: FontWeight.w400,
-                              height: 1.3,
-                            ),
-                            children: [
-                              TextSpan(text: name),
-                              // `.group-member-count`: 0.8em, opacity .55,
-                              // weight 300, abbreviated total member count.
-                              TextSpan(
-                                text:
-                                    ' · ${_abbreviateNumber(group.members.length)}',
-                                style: TextStyle(
-                                  color: c.textDim.withValues(alpha: 0.55),
-                                  fontSize: textSize * 0.8,
-                                  fontWeight: FontWeight.w300,
-                                ),
-                              ),
-                            ],
-                          ),
+                            ? Colors.black.withValues(alpha: 0.04)
+                            : Colors.white.withValues(alpha: 0.06))
+                        : Colors.transparent,
+                borderRadius: NymRadius.rxs,
+                border: Border.all(
+                  color: active ? c.primaryA(0.20) : Colors.transparent,
+                  width: 1,
+                ),
+                boxShadow: active && !c.isLight
+                    ? [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)]
+                    : null,
+              ),
+              child: Row(
+                children: [
+                  // Custom avatar (`.group-avatar-wrap`, margin-right 4px,
+                  // styles-features.css:5348) → 34×22 member stack → 26px
+                  // icon-wrap fallback (both margin-right 6px).
+                  if (avatarUrl != null && avatarUrl.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: ClipOval(
+                        child: NymAvatar(
+                          seed: group.id,
+                          size: 26,
+                          imageUrl: group.avatar,
                         ),
                       ),
-                      const Spacer(),
-                      if (unread > 0) _GroupUnreadPill(count: unread),
-                    ],
+                    )
+                  else if (otherMembers.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: _GroupAvatarStack(
+                        members: otherMembers.take(3).toList(),
+                        users: users,
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: _GroupIconWrap(c: c),
+                    ),
+                  Expanded(
+                    // `.pm-name { flex: 1 }` (shared by group rows):
+                    // white-space:normal + word-break:break-word
+                    // (styles-shell.css:418-429) — long names WRAP, no
+                    // ellipsis; flex:1 pushes the unread pill flush right
+                    // so badges align in a column across rows.
+                    child: RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          color: c.textDim,
+                          fontSize: textSize,
+                          fontWeight: FontWeight.w400,
+                          height: 1.3,
+                        ),
+                        children: [
+                          TextSpan(text: name),
+                          // `.group-member-count`: 0.8em, opacity .55,
+                          // weight 300, abbreviated total member count.
+                          TextSpan(
+                            text:
+                                ' · ${_abbreviateNumber(group.members.length)}',
+                            style: TextStyle(
+                              color: c.textDim.withValues(alpha: 0.55),
+                              fontSize: textSize * 0.8,
+                              fontWeight: FontWeight.w300,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // `.channel-badges { margin-left: 5px }`.
+                  if (unread > 0) ...[
+                    const SizedBox(width: 5),
+                    _GroupUnreadPill(count: unread),
+                  ],
+                ],
+              ),
+            ),
+            if (active)
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: FractionallySizedBox(
+                    heightFactor: 0.6,
+                    child: Container(
+                      width: 3,
+                      decoration: BoxDecoration(
+                        color: c.primary,
+                        borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(3),
+                          bottomRight: Radius.circular(3),
+                        ),
+                        boxShadow: [
+                          BoxShadow(color: c.primaryA(0.4), blurRadius: 8),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-                if (active)
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    bottom: 0,
-                    child: Center(
-                      child: FractionallySizedBox(
-                        heightFactor: 0.6,
-                        child: Container(
-                          width: 3,
-                          decoration: BoxDecoration(
-                            color: c.primary,
-                            borderRadius: const BorderRadius.only(
-                              topRight: Radius.circular(3),
-                              bottomRight: Radius.circular(3),
-                            ),
-                            boxShadow: [
-                              BoxShadow(color: c.primaryA(0.4), blurRadius: 8),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -2227,7 +2237,8 @@ class _SearchFieldState extends State<_SearchField> {
         // The global `input { color: #ffffff !important }` rule forces pure
         // white in dark mode; `body.light-mode .search-input` resolves to
         // `var(--text)` (styles-themes-responsive.css:571-593, 1063-1068).
-        style: TextStyle(color: c.isLight ? c.text : Colors.white, fontSize: 12),
+        style:
+            TextStyle(color: c.isLight ? c.text : Colors.white, fontSize: 12),
         cursorColor: c.isLight ? Colors.black : Colors.white,
         onChanged: (v) {
           widget.onChanged(v);

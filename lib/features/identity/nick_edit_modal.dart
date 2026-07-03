@@ -199,8 +199,10 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     );
   }
 
-  // `.modal-header`: 22px primary UPPERCASE ls1.5 w700 + bottom rule.
+  // `.modal-header`: 22px primary UPPERCASE ls1.5 w700 + bottom rule. A block
+  // element in the PWA — full width, LEFT-aligned (never centered).
   Widget _modalHeader(NymColors c) => Container(
+        width: double.infinity,
         padding: const EdgeInsets.fromLTRB(24, 22, 24, 14),
         decoration: BoxDecoration(
           border: Border(bottom: BorderSide(color: c.glassBorder)),

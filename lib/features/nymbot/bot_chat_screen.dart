@@ -1780,6 +1780,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
+            onClose: _emojiPortal.hide,
           ),
         ),
         child: _BotIconBtn(

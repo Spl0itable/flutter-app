@@ -704,10 +704,27 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
                 : MouseRegion(
                     cursor: SystemMouseCursors.click,
                     child: GestureDetector(
-                      onTap: () => launchUrl(
-                        Uri.parse(loc.url!),
-                        mode: LaunchMode.externalApplication,
-                      ),
+                      // Opaque: the tap target is the whole rendered text box,
+                      // not just glyph pixels. externalApplication can report
+                      // failure on some iOS/Android configurations — fall back
+                      // to the platform default (in-app browser view), which
+                      // still leaves the app like the PWA's target="_blank".
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () async {
+                        final uri = Uri.parse(loc.url!);
+                        var ok = false;
+                        try {
+                          ok = await launchUrl(
+                            uri,
+                            mode: LaunchMode.externalApplication,
+                          );
+                        } catch (_) {}
+                        if (!ok) {
+                          try {
+                            await launchUrl(uri);
+                          } catch (_) {}
+                        }
+                      },
                       child: placeText,
                     ),
                   ),

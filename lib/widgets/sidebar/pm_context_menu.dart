@@ -219,45 +219,52 @@ class _QuickMenu extends ConsumerWidget {
       },
       child: Material(
         type: MaterialType.transparency,
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 200),
-          padding: const EdgeInsets.all(4),
-          decoration: BoxDecoration(
-            // `.quick-context-menu` bg: with Transparency ON (no `solid-ui`
-            // body class) the PWA paints translucent rgba(20,20,35,0.92) dark
-            // (styles-features.css:2783) / rgba(255,255,255,0.96) light
-            // (styles-themes-responsive.css:1340); with Transparency OFF
-            // (`solid-ui`, the default) it's the opaque `var(--glass-bg)`
-            // (styles-themes-responsive.css:1590-1600).
-            color: transparency
-                ? (c.isLight
-                    ? const Color(0xF5FFFFFF) // rgba(255,255,255,0.96)
-                    : const Color(0xEB141423)) // rgba(20,20,35,0.92)
-                : c.glassBg,
-            borderRadius: BorderRadius.circular(14),
-            // Border: `var(--glass-border)` dark; light mode overrides to
-            // rgba(0,0,0,0.1) (styles-themes-responsive.css:1341).
-            border: Border.all(
-              color: c.isLight ? const Color(0x1A000000) : c.glassBorder,
-            ),
-            // Shadow: 0 8 32 rgba(0,0,0,0.4) dark / rgba(0,0,0,0.15) light.
-            boxShadow: [
-              BoxShadow(
-                color: c.isLight
-                    ? const Color(0x26000000)
-                    : const Color(0x66000000),
-                blurRadius: 32,
-                offset: const Offset(0, 8),
+        // The CSS menu is a fixed-position flex column with `min-width: 200px`
+        // and NO max-width — shrink-to-fit, so its width is
+        // max(200, widest item), never the viewport. IntrinsicWidth gives the
+        // same sizing (the Column's stretch alignment would otherwise inflate
+        // to the loose screen-wide constraint from the layout delegate).
+        child: IntrinsicWidth(
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 200),
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              // `.quick-context-menu` bg: with Transparency ON (no `solid-ui`
+              // body class) the PWA paints translucent rgba(20,20,35,0.92)
+              // dark (styles-features.css:2783) / rgba(255,255,255,0.96)
+              // light (styles-themes-responsive.css:1340); with Transparency
+              // OFF (`solid-ui`, the default) it's the opaque
+              // `var(--glass-bg)` (styles-themes-responsive.css:1590-1600).
+              color: transparency
+                  ? (c.isLight
+                      ? const Color(0xF5FFFFFF) // rgba(255,255,255,0.96)
+                      : const Color(0xEB141423)) // rgba(20,20,35,0.92)
+                  : c.glassBg,
+              borderRadius: BorderRadius.circular(14),
+              // Border: `var(--glass-border)` dark; light mode overrides to
+              // rgba(0,0,0,0.1) (styles-themes-responsive.css:1341).
+              border: Border.all(
+                color: c.isLight ? const Color(0x1A000000) : c.glassBorder,
               ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (final a in items)
-                _QuickMenuRow(item: a),
-            ],
+              // Shadow: 0 8 32 rgba(0,0,0,0.4) dark / rgba(0,0,0,0.15) light.
+              boxShadow: [
+                BoxShadow(
+                  color: c.isLight
+                      ? const Color(0x26000000)
+                      : const Color(0x66000000),
+                  blurRadius: 32,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final a in items)
+                  _QuickMenuRow(item: a),
+              ],
+            ),
           ),
         ),
       ),

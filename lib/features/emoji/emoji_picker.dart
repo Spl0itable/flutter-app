@@ -24,6 +24,7 @@ import '../messages/format/message_content.dart' show proxiedMedia;
 import '../messages/inline_network_image.dart';
 import 'custom_emoji.dart';
 import 'emoji_data.dart';
+import 'modal_close_chip.dart';
 
 /// Width breakpoint below which the grid drops to 5 columns
 /// (styles-themes-responsive.css:428 `max-width: 480px`).
@@ -37,6 +38,7 @@ class EmojiPicker extends ConsumerStatefulWidget {
     super.key,
     required this.recents,
     required this.onSelect,
+    this.onClose,
     this.proxyBase,
   });
 
@@ -45,6 +47,11 @@ class EmojiPicker extends ConsumerStatefulWidget {
 
   /// Called with the chosen emoji (unicode char or `:shortcode:`).
   final ValueChanged<String> onSelect;
+
+  /// Dismisses the picker (`.emoji-modal-close` ✕, reactions.js:710). When
+  /// null the ✕ falls back to popping an enclosing modal route (dialog /
+  /// bottom-sheet hosts); overlay-portal hosts should pass their `hide`.
+  final VoidCallback? onClose;
 
   /// Optional media/emoji proxy base for custom emoji images.
   final String? proxyBase;
@@ -115,11 +122,14 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
   /// picker recents at 20 on mobile (`innerWidth<=768`) / 24 on desktop.
   List<String> _visibleRecents(CustomEmojiState custom, double width) {
     final cap = width <= 768 ? 20 : kRecentEmojisCap;
-    return widget.recents.where((e) {
-      final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
-      if (m == null) return true;
-      return custom.codeToUrl.containsKey(m.group(1));
-    }).take(cap).toList();
+    return widget.recents
+        .where((e) {
+          final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
+          if (m == null) return true;
+          return custom.codeToUrl.containsKey(m.group(1));
+        })
+        .take(cap)
+        .toList();
   }
 
   /// True when an emoji passes the current search (emoji.js `_applyEmojiSearch`:
@@ -160,12 +170,10 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
     final sections = <_Section>[];
 
     // Recently Used.
-    final recents = _visibleRecents(custom, width)
-        .where((e) {
-          final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
-          return m == null ? _matches(e) : _matchesCustom(m.group(1)!);
-        })
-        .toList();
+    final recents = _visibleRecents(custom, width).where((e) {
+      final m = RegExp(r'^:([a-zA-Z0-9_]+):$').firstMatch(e);
+      return m == null ? _matches(e) : _matchesCustom(m.group(1)!);
+    }).toList();
     if (recents.isNotEmpty) {
       sections.add(_section(
         c,
@@ -256,74 +264,133 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ));
     }
 
+    // Keyboard-aware, like the PWA riding the visual viewport: overlay hosts
+    // anchor the panel to the SCREEN bottom (their own MediaQuery has the
+    // keyboard inset consumed by the resizing Scaffold), so the panel itself
+    // pads up by the ambient view inset and shrinks to the space left above
+    // the keyboard — keeping the search field + results visible while typing.
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final maxPanelHeight = keyboardInset > 0
+        // Screen minus keyboard, status bar, and the 60px bottom-bar offset
+        // the phone popover anchors at (+8 breathing room).
+        ? (MediaQuery.sizeOf(context).height -
+                keyboardInset -
+                MediaQuery.paddingOf(context).top -
+                68)
+            .clamp(160.0, 400.0)
+            .toDouble()
+        : 400.0;
+
     // NOTE: This widget is used inside overlays/portals in a few places.
     // TextField requires a Material ancestor, and Flexible/Expanded require a
     // bounded main-axis constraint. We enforce both here so the picker is safe
     // to mount anywhere.
     return Material(
       type: MaterialType.transparency,
-      child: ConstrainedBox(
-        // .emoji-picker: max 360×400.
-        constraints: const BoxConstraints(maxWidth: 360, maxHeight: 400),
-        child: LayoutBuilder(builder: (context, constraints) {
-          final height = constraints.maxHeight.isFinite ? constraints.maxHeight : 400.0;
-          return Container(
-            height: height,
-            decoration: BoxDecoration(
-              // `.emoji-picker` bg: with Transparency ON (no `solid-ui` body
-              // class) the PWA hardcodes rgba(20,20,35,0.9) dark
-              // (styles-components.css:2094) / rgba(255,255,255,0.92) light
-              // (styles-themes-responsive.css:1167-1171); with Transparency OFF
-              // (`solid-ui`, the default) it's the opaque `var(--glass-bg)`
-              // (#14141e dark / #ffffff light, styles-themes-responsive.css:
-              // 1583-1600) — which is exactly `c.glassBg`.
-              color: transparency
-                  ? (c.isLight
-                      ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
-                      : const Color(0xE6141423)) // rgba(20,20,35,0.9)
-                  : c.glassBg,
-              border: Border.all(color: c.glassBorder),
-              borderRadius: NymRadius.rmd,
-              // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); light mode redefines
-              // it to rgba(0,0,0,0.12) (styles-themes-responsive.css:537, and
-              // explicitly on `body.light-mode .emoji-picker` at :1167-1171).
-              boxShadow: [
-                BoxShadow(
-                  color: c.isLight
-                      ? const Color(0x1F000000)
-                      : const Color(0x80000000),
-                  blurRadius: 32,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              mainAxisSize: MainAxisSize.max,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _search(c),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: CustomScrollView(
-                    // Lazy: each SliverGrid only mounts the cells in (and just
-                    // around) the viewport, so ONLY visible custom-emoji images
-                    // fetch + decode — the PWA's `loading="lazy"`. The old
-                    // SingleChildScrollView + shrinkWrap GridView mounted EVERY
-                    // cell across every pack at once, loading hundreds of images
-                    // simultaneously → out-of-memory crash on open.
-                    slivers: [
-                      for (final s in sections)
-                        ..._sectionSlivers(c, s, columns),
-                    ],
+      child: Padding(
+        padding: EdgeInsets.only(bottom: keyboardInset),
+        child: ConstrainedBox(
+          // .emoji-picker: max 360×400.
+          constraints: BoxConstraints(maxWidth: 360, maxHeight: maxPanelHeight),
+          child: LayoutBuilder(builder: (context, constraints) {
+            final height = constraints.maxHeight.isFinite
+                ? constraints.maxHeight
+                : maxPanelHeight;
+            return Container(
+              height: height,
+              decoration: BoxDecoration(
+                // `.emoji-picker` bg: with Transparency ON (no `solid-ui` body
+                // class) the PWA hardcodes rgba(20,20,35,0.9) dark
+                // (styles-components.css:2094) / rgba(255,255,255,0.92) light
+                // (styles-themes-responsive.css:1167-1171); with Transparency OFF
+                // (`solid-ui`, the default) it's the opaque `var(--glass-bg)`
+                // (#14141e dark / #ffffff light, styles-themes-responsive.css:
+                // 1583-1600) — which is exactly `c.glassBg`.
+                color: transparency
+                    ? (c.isLight
+                        ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
+                        : const Color(0xE6141423)) // rgba(20,20,35,0.9)
+                    : c.glassBg,
+                border: Border.all(color: c.glassBorder),
+                borderRadius: NymRadius.rmd,
+                // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); light mode redefines
+                // it to rgba(0,0,0,0.12) (styles-themes-responsive.css:537, and
+                // explicitly on `body.light-mode .emoji-picker` at :1167-1171).
+                boxShadow: [
+                  BoxShadow(
+                    color: c.isLight
+                        ? const Color(0x1F000000)
+                        : const Color(0x80000000),
+                    blurRadius: 32,
+                    offset: const Offset(0, 8),
                   ),
-                ),
-              ],
-            ),
-          );
-        }),
+                ],
+              ),
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                mainAxisSize: MainAxisSize.max,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _header(c),
+                  // `.emoji-modal-header { margin-bottom: 10px }`.
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: CustomScrollView(
+                      // Lazy: each SliverGrid only mounts the cells in (and just
+                      // around) the viewport, so ONLY visible custom-emoji images
+                      // fetch + decode — the PWA's `loading="lazy"`. The old
+                      // SingleChildScrollView + shrinkWrap GridView mounted EVERY
+                      // cell across every pack at once, loading hundreds of images
+                      // simultaneously → out-of-memory crash on open.
+                      slivers: [
+                        for (final s in sections)
+                          ..._sectionSlivers(c, s, columns),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ),
       ),
     );
+  }
+
+  /// `.emoji-modal-header` (styles-components.css:1225-1232): search input +
+  /// close ✕ in a row (gap 10), padding-bottom 10, bottom `--glass-border`
+  /// divider — matching the PWA's composer emoji modal (reactions.js:708-711).
+  Widget _header(NymColors c) {
+    return Container(
+      padding: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
+      ),
+      child: Row(
+        children: [
+          Expanded(child: _search(c)),
+          const SizedBox(width: 10),
+          // `.modal-close.emoji-modal-close` ✕ chip.
+          ModalCloseChip(onTap: _handleClose),
+        ],
+      ),
+    );
+  }
+
+  /// `.emoji-modal-close` tap (`closeEnhancedEmojiModal`). Prefer the host's
+  /// [EmojiPicker.onClose]; dialog/bottom-sheet hosts (settings swipe-react
+  /// picker, call overlay) fall back to popping their modal route. Without
+  /// either there is nothing to dismiss, so do nothing rather than popping the
+  /// hosting screen.
+  void _handleClose() {
+    final onClose = widget.onClose;
+    if (onClose != null) {
+      onClose();
+      return;
+    }
+    if (ModalRoute.of(context) != null) {
+      Navigator.of(context).maybePop();
+    }
   }
 
   /// `.emoji-picker-search-input` (styles-components.css:2121-2135).
@@ -352,7 +419,8 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
           hintStyle: TextStyle(color: c.textDim, fontSize: 12),
           filled: true,
           fillColor: Colors.white.withValues(alpha: 0.05),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
           border: OutlineInputBorder(
             borderRadius: NymRadius.rxs,
             borderSide: BorderSide(color: c.glassBorder),
