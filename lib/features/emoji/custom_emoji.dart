@@ -3,13 +3,11 @@
 // lines 8-24): `nym_custom_emojis` (loose [shortcode,url] pairs, ≤5000) and
 // `nym_custom_emoji_packs` (pack objects, ≤200).
 //
-// The Flutter NostrController is read-only for this feature and does not yet
-// surface live NIP-30 events, so we hydrate from the persisted cache only,
-// exactly as the PWA does at startup. Packs/codes that arrive live over relays
-// are out of scope here.
-//
-// TODO(verify): if/when the NostrController exposes a live customEmojis stream
-// (30030/10030 + message `emoji` tags), wire it in alongside the cache.
+// [loadCustomEmojiState] is the startup hydration only — the live side
+// (kind-30030 packs, the kind-10030 user list, and inbound message/reaction
+// `emoji` tags) is `LiveCustomEmojiNotifier` (app_state.dart), which seeds
+// itself from this loader and persists back to the same keys. Render surfaces
+// read [liveCustomEmojiProvider] (also app_state.dart), not this provider.
 
 import 'dart:convert';
 

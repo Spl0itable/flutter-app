@@ -324,8 +324,15 @@ class _EnhancedEmojiModalState extends ConsumerState<EnhancedEmojiModal> {
   /// `.emoji-search-input` (styles-components.css:1245-1255): white@0.05 fill,
   /// 1px glass border, radius-xs, 12px `--text-bright` (light mode overrides
   /// the color to `--text`, styles-themes-responsive.css:1063-1068), padding
-  /// 7px 10px, placeholder "Search emoji by name...".
+  /// 7px 10px, placeholder "Search emoji by name...". The global
+  /// `body.light-mode input` rule forces a black@0.04 fill and black@0.1
+  /// border (styles-themes-responsive.css:561-568).
   Widget _search(NymColors c) {
+    final Color fill = c.isLight
+        ? Colors.black.withValues(alpha: 0.04)
+        : Colors.white.withValues(alpha: 0.05);
+    final Color borderColor =
+        c.isLight ? Colors.black.withValues(alpha: 0.1) : c.glassBorder;
     return TextField(
       controller: _searchController,
       onChanged: (v) => setState(() => _query = _sanitizeUserText(v).trim()),
@@ -336,21 +343,21 @@ class _EnhancedEmojiModalState extends ConsumerState<EnhancedEmojiModal> {
         hintText: 'Search emoji by name...',
         hintStyle: TextStyle(color: c.textDim, fontSize: 12),
         filled: true,
-        fillColor: Colors.white.withValues(alpha: 0.05),
+        fillColor: fill,
         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         border: OutlineInputBorder(
           borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
+          borderSide: BorderSide(color: borderColor),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
+          borderSide: BorderSide(color: borderColor),
         ),
         // `.emoji-search-input` has no :focus override (unlike the composer's
         // `.emoji-picker-search-input:focus`), so the border stays glass.
         focusedBorder: OutlineInputBorder(
           borderRadius: NymRadius.rxs,
-          borderSide: BorderSide(color: c.glassBorder),
+          borderSide: BorderSide(color: borderColor),
         ),
       ),
     );
@@ -598,9 +605,12 @@ class _EmojiOptionCellState extends State<_EmojiOptionCell> {
           child: Padding(
             padding: const EdgeInsets.all(8),
             child: Center(
+              // `transition: all var(--transition)` = 0.25s
+              // cubic-bezier(0.4,0,0.2,1) (styles-components.css:1333).
               child: AnimatedScale(
                 scale: _hover ? 1.15 : 1.0,
-                duration: const Duration(milliseconds: 120),
+                duration: NymMotion.transition,
+                curve: NymMotion.curve,
                 child: widget.child,
               ),
             ),

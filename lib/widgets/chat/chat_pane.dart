@@ -31,6 +31,7 @@ import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
 import '../context_menu/context_menu_actions.dart' show CtxTarget;
 import '../context_menu/context_menu_panel.dart' show ContextMenuPanel;
+import '../context_menu/profile_badges.dart' show VerifiedBadge;
 import '../context_menu/group_context_menu_panel.dart'
     show GroupContextMenuPanel;
 import '../columns/columns_deck.dart';
@@ -490,7 +491,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
             ),
             if (isDev || isBot) ...[
               const SizedBox(width: 4),
-              const _VerifiedBadge(size: 20),
+              const VerifiedBadge(size: 20),
             ],
             if (isFriend) ...[
               const SizedBox(width: 4),
@@ -1253,8 +1254,11 @@ class _ActionBtnState extends State<_ActionBtn> {
         behavior: HitTestBehavior.opaque,
         child: AnimatedScale(
           scale: (_hover && !widget.disabled) ? 1.1 : 1.0,
-          duration: NymMotion.transition,
-          curve: NymMotion.curve,
+          // `transition: transform 0.2s` on the share/favorite/call buttons
+          // (styles-components.css:1461/1485/1519) — 200ms CSS-default `ease`,
+          // NOT the global `--transition` token.
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.ease,
           child: Padding(
             padding: EdgeInsets.all(pad),
             child: NymSvgIcon(widget.svg, size: 18, color: color),
@@ -1504,35 +1508,6 @@ class _HeaderClickable extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         onTap: onTap,
         child: child,
-      ),
-    );
-  }
-}
-
-/// `.verified-badge` (styles-components.css:1382-1414): a #1DA1F2 circle with a
-/// centered white ✓ (font-weight 700). Sized to the surrounding nym.
-class _VerifiedBadge extends StatelessWidget {
-  const _VerifiedBadge({required this.size});
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      alignment: Alignment.center,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1DA1F2),
-        shape: BoxShape.circle,
-      ),
-      child: Text(
-        '✓',
-        style: TextStyle(
-          color: const Color(0xFFFFFFFF),
-          fontSize: size * 0.6,
-          fontWeight: FontWeight.w700,
-          height: 1,
-        ),
       ),
     );
   }

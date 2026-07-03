@@ -559,8 +559,9 @@ class _GroupUnit extends _RenderUnit {
 /// analogue of the columns deck's `_ScrollBottomButton`, but 40px (vs 36) and —
 /// unlike the columns copy — it carries the light-mode style
 /// (`styles-themes-responsive.css:607-615`): rest fill white@0.85 / border
-/// primary@0.2 / shadow `0 2px 12px black@0.15`. Hover stays primary@0.15 fill /
-/// primary@0.30 border in both modes.
+/// primary@0.2 / shadow `0 2px 12px black@0.15`. Dark hover: primary@0.15 fill,
+/// primary@0.30 border, `0 0 15px primary@0.15` glow; light hover only lifts
+/// the fill to primary@0.10 (the light rest rule outranks the dark `:hover`).
 class _ScrollToBottomButton extends StatefulWidget {
   const _ScrollToBottomButton({required this.onTap});
   final VoidCallback onTap;
@@ -576,26 +577,35 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final light = c.isLight;
-    // Rest fill/border flip in light mode (the columns copy omits this); hover
-    // is primary-tinted in both modes.
+    // Rest fill/border flip in light mode (the columns copy omits this).
+    // Light-mode CASCADE: `body.light-mode .scroll-to-bottom-btn` (0,2,1)
+    // outranks the dark `.scroll-to-bottom-btn:hover` (0,2,0), so on light
+    // hover ONLY the background changes — to primary@0.10 via the (0,3,1)
+    // `body.light-mode .scroll-to-bottom-btn:hover` — while the border stays
+    // primary@0.2 and the shadow stays `0 2px 12px black@0.15`
+    // (styles-themes-responsive.css:607-615). Dark hover takes the full
+    // `:hover` set: primary@0.15 fill, primary@0.3 border, and the shadow
+    // swaps to a `0 0 15px primary@0.15` glow (styles-chat.css:34-39).
     final fill = _hover
-        ? c.primaryA(0.15)
+        ? (light ? c.primaryA(0.10) : c.primaryA(0.15))
         : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
-    final border = _hover
-        ? c.primaryA(0.30)
-        : (light ? c.primaryA(0.20) : c.glassBorder);
-    // shadow-md (dark) vs light `0 2px 12px black@0.15`.
+    final border = light
+        ? c.primaryA(0.20)
+        : (_hover ? c.primaryA(0.30) : c.glassBorder);
+    // shadow-md (dark rest) → hover glow (dark); light `0 2px 12px black@0.15`.
     final shadow = light
         ? const BoxShadow(
             color: Color(0x26000000), // black @ 0.15
             offset: Offset(0, 2),
             blurRadius: 12,
           )
-        : const BoxShadow(
-            color: Color(0x66000000), // black @ 0.4
-            offset: Offset(0, 4),
-            blurRadius: 16,
-          );
+        : _hover
+            ? BoxShadow(color: c.primaryA(0.15), blurRadius: 15)
+            : const BoxShadow(
+                color: Color(0x66000000), // black @ 0.4
+                offset: Offset(0, 4),
+                blurRadius: 16,
+              );
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),

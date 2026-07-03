@@ -49,37 +49,45 @@ class VerifiedBadge extends StatelessWidget {
 }
 
 /// The friend badge (`.friend-badge`, styles-features.css:1483-1495): a
-/// people-with-check glyph in #4fc3f7, appended after the nym for friends
-/// (ui-context.js:412-414). Drawn to match the PWA's inline SVG
-/// (16×16 viewBox: head circle + shoulders arc + a small plus to the right).
+/// people-with-check glyph in #4fc3f7 (light mode darkens it to #0288d1,
+/// `body.light-mode .friend-badge`, styles-themes-responsive.css:1300-1307),
+/// appended after the nym for friends (ui-context.js:412-414). Drawn to match
+/// the PWA's inline SVG (16×16 viewBox: head circle + shoulders arc + a small
+/// plus to the right).
 class FriendBadge extends StatelessWidget {
   const FriendBadge({super.key, this.size = 20});
-
-  static const Color color = Color(0xFF4FC3F7);
 
   final double size;
 
   @override
   Widget build(BuildContext context) {
+    // `body.light-mode .friend-badge svg { fill: #0288d1; stroke: #0288d1 }`.
+    final color = context.nym.isLight
+        ? const Color(0xFF0288D1)
+        : const Color(0xFF4FC3F7);
     return SizedBox(
       width: size,
       height: size,
-      child: CustomPaint(painter: _FriendBadgePainter()),
+      child: CustomPaint(painter: _FriendBadgePainter(color)),
     );
   }
 }
 
 class _FriendBadgePainter extends CustomPainter {
+  const _FriendBadgePainter(this.color);
+
+  final Color color;
+
   @override
   void paint(Canvas canvas, Size size) {
     // The PWA SVG is authored in a 16×16 box; scale uniformly to [size].
     final s = size.width / 16.0;
     final fill = Paint()
-      ..color = FriendBadge.color
+      ..color = color
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
     final stroke = Paint()
-      ..color = FriendBadge.color
+      ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5 * s
       ..strokeCap = StrokeCap.round
@@ -103,5 +111,6 @@ class _FriendBadgePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _FriendBadgePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _FriendBadgePainter oldDelegate) =>
+      oldDelegate.color != color;
 }

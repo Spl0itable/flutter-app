@@ -22,7 +22,7 @@ enum CommandContext {
   /// Runs anywhere (channel, PM, or group).
   all,
 
-  /// Public-channel only (`/who`, `/share`). Rejected in PM/group.
+  /// Public-channel only (`/who`). Rejected in PM/group.
   channel,
 
   /// Channel-only AND never in a PM (`/poll`). Same as [channel] for gating
@@ -271,7 +271,9 @@ const List<CommandSpec> kCommandSpecs = [
     name: '/share',
     desc: 'Share #channel URL',
     category: CommandCategory.channels,
-    context: CommandContext.channel,
+    // No context gate: `cmdShare` → `shareChannel()` (channels.js:411-427)
+    // runs even in PM mode — the URL falls back to
+    // `currentChannel || 'nymchat'`.
   ),
   // --- pms ----------------------------------------------------------------
   CommandSpec(

@@ -199,6 +199,7 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
                             _RelayListSection(
                               relayStatus: relayStatus,
                               stats: stats,
+                              shardInfo: stats?.shardInfo ?? const [],
                               expandedRow: _expandedRow,
                               onToggleRow: _toggleRow,
                             ),
@@ -543,6 +544,7 @@ class _RelayListSection extends StatelessWidget {
   const _RelayListSection({
     required this.relayStatus,
     required this.stats,
+    required this.shardInfo,
     required this.expandedRow,
     required this.onToggleRow,
   });
@@ -552,6 +554,11 @@ class _RelayListSection extends StatelessWidget {
 
   /// Live counters for the per-relay events/latency columns; null before boot.
   final RelayStats? stats;
+
+  /// Proxy-mode shard fan-in summary (`s.shardInfo`, app.js:7409). Non-empty →
+  /// the `#rsShardLine` div renders above the relay-list rows; empty (direct
+  /// mode / pre-boot) → hidden (`display: none`, app.js:7415).
+  final List<ShardInfo> shardInfo;
 
   /// Currently-expanded row key (`__api__` or a relay url), or null.
   final String? expandedRow;
@@ -586,14 +593,12 @@ class _RelayListSection extends StatelessWidget {
     final hasApiData = stats?.hasApiData ?? false;
 
     // Compose the list rows: "App data" + its api row, then "Relay data" + its
-    // relay rows (`renderRelayList`'s `ordered` assembly, app.js:7606). The
-    // proxy shard fan-in line is intentionally NOT shown (parity: the PWA build
-    // doesn't surface shard data in this modal).
+    // relay rows (`renderRelayList`'s `ordered` assembly, app.js:7606).
     final rows = <Widget>[];
     final contentEmpty = entries.isEmpty && !hasApiData;
     if (contentEmpty) {
       // .nm-app-5 empty state ("No relays connected", app.js:7601) — shown
-      // below the shard line if one exists.
+      // inside the list box, below the shard line if one exists.
       rows.add(Padding(
         padding: const EdgeInsets.all(12),
         child: Text(
@@ -627,6 +632,10 @@ class _RelayListSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const _SectionTitle('Data transferred'),
+        // #rsShardLine — inserted as a sibling ABOVE #rsRelayList
+        // (`listEl.parentNode.insertBefore(shardLine, listEl)`, app.js:7405),
+        // visible only when shardInfo is non-empty (app.js:7410-7415).
+        if (shardInfo.isNotEmpty) _ShardLine(shardInfo: shardInfo),
         Container(
           constraints: const BoxConstraints(maxHeight: 240),
           decoration: BoxDecoration(
@@ -648,6 +657,47 @@ class _RelayListSection extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The `#rsShardLine` proxy-mode shard fan-in summary (`.rs-shard-line`,
+/// styles-features.css:3929-3936): padding 6/12, mono 10, textDim, bottom
+/// border white/0.06 (no light-mode override), word-break. Text
+/// (app.js:7412-7413): `N shard(s) · M relays connected · a/b(status)  c/d…`
+/// — the per-shard `(status)` suffix only when status is truthy and not
+/// `'connected'`, entries joined by two spaces.
+class _ShardLine extends StatelessWidget {
+  const _ShardLine({required this.shardInfo});
+  final List<ShardInfo> shardInfo;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    // totalConn = si.reduce((a, sh) => a + (sh[2] || 0), 0) (app.js:7411).
+    var totalConn = 0;
+    for (final sh in shardInfo) {
+      totalConn += sh.connected;
+    }
+    final perShard = shardInfo
+        .map((sh) => '${sh.connected}/${sh.total}'
+            '${sh.status.isNotEmpty && sh.status != 'connected' ? '(${sh.status})' : ''}')
+        .join('  ');
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+        ),
+      ),
+      child: Text(
+        '${shardInfo.length} shard(s) · $totalConn relays connected · $perShard',
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 10,
+          color: c.textDim,
+        ),
+      ),
     );
   }
 }

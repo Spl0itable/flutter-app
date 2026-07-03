@@ -356,9 +356,14 @@ class HomeShellState extends ConsumerState<HomeShell>
             ),
           ),
 
-        // Off-canvas drawer: translateX(-100%) → 0 over 150ms linear.
+        // Off-canvas drawer: translateX(-100%) → 0 over 150ms linear. Under
+        // OS reduce-motion the PWA's global kill-switch forces the transition
+        // to 0.01ms (`@media (prefers-reduced-motion: reduce)`,
+        // styles-themes-responsive.css:1846-1856) — snap instantly.
         AnimatedSlide(
-          duration: NymMotion.slide,
+          duration: MediaQuery.of(context).disableAnimations
+              ? Duration.zero
+              : NymMotion.slide,
           curve: Curves.linear,
           offset: _drawerOpen ? Offset.zero : const Offset(-1, 0),
           child: SizedBox(

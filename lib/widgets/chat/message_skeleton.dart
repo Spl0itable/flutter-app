@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../core/theme/nym_colors.dart';
@@ -22,14 +24,16 @@ import '../../core/theme/nym_colors.dart';
 /// narrow band crossing the whole column, which lit shapes one region at a time).
 /// There are distinct bubble vs IRC variants matching the two chat layouts.
 class MessageSkeleton extends StatefulWidget {
-  const MessageSkeleton({super.key, required this.useBubbles, this.rowCount = 8});
+  const MessageSkeleton({super.key, required this.useBubbles, this.rowCount});
 
   /// Bubble layout when true (`body.chat-bubbles`), IRC layout otherwise.
   final bool useBubbles;
 
-  /// Number of placeholder rows to render. The PWA sizes this to the viewport;
-  /// a fixed 8 (its floor) fills a typical pane and keeps the widget cheap.
-  final int rowCount;
+  /// Number of placeholder rows to render. Null (the default) sizes to the
+  /// window like the PWA: `min(50, max(8, ceil(vh / (bubble ? 56 : 40)) + 3))`
+  /// (`_buildMessageSkeleton`, messages.js:2953-2957) — so the shimmer fills
+  /// the pane on any viewport height.
+  final int? rowCount;
 
   @override
   State<MessageSkeleton> createState() => _MessageSkeletonState();
@@ -54,9 +58,20 @@ class _MessageSkeletonState extends State<MessageSkeleton>
     super.dispose();
   }
 
+  /// The PWA's viewport-sized row count (`window.innerHeight`-driven), with
+  /// an explicit [MessageSkeleton.rowCount] taking precedence.
+  int _rowCount(BuildContext context) {
+    final explicit = widget.rowCount;
+    if (explicit != null) return explicit;
+    final vh = MediaQuery.sizeOf(context).height;
+    final rowH = widget.useBubbles ? 56 : 40;
+    return math.min(50, math.max(8, (vh / rowH).ceil() + 3));
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    final rowCount = _rowCount(context);
 
     // The PWA runs the sweep PER SHAPE: every `.sk-bar/.sk-line/.sk-avatar` has
     // its own `::after` (a full-WIDTH `linear-gradient(90deg, transparent,
@@ -71,12 +86,20 @@ class _MessageSkeletonState extends State<MessageSkeleton>
         animation: _t,
         builder: (context, _) {
           // `.msg-skeleton { justify-content: flex-end }` — rows settle at the
-          // bottom, newest-style at the foot, like the reversed live list.
-          final rows = widget.useBubbles ? _bubbleRows(c) : _ircRows(c);
-          return Column(
-            mainAxisAlignment: MainAxisAlignment.end,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: rows,
+          // bottom, newest-style at the foot, like the reversed live list. The
+          // viewport-sized count deliberately overfills the pane (+3 rows), so
+          // the column is hosted in an inert reversed scrollable: bottom-
+          // anchored, top overflow clipped, no layout overflow.
+          final rows =
+              widget.useBubbles ? _bubbleRows(c, rowCount) : _ircRows(c, rowCount);
+          return SingleChildScrollView(
+            reverse: true,
+            physics: const NeverScrollableScrollPhysics(),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: rows,
+            ),
           );
         },
       ),
@@ -127,7 +150,7 @@ class _MessageSkeletonState extends State<MessageSkeleton>
   // Bar widths/line patterns mirror the PWA `_ircSkeletonHtml` arrays
   // (`messages.js:2965-2981`): `ska-{1,2,3}` author widths, `skl-{1..4}` line
   // widths (as % of the content column), repeated over `rowCount`.
-  List<Widget> _ircRows(NymColors c) {
+  List<Widget> _ircRows(NymColors c, int rowCount) {
     // [authorWidthClass, [lineWidthClasses…]] — verbatim from the PWA pattern.
     const pattern = <List<Object>>[
       [2, ['skl-3']],
@@ -146,7 +169,7 @@ class _MessageSkeletonState extends State<MessageSkeleton>
       [1, ['skl-4']],
     ];
     return [
-      for (var i = 0; i < widget.rowCount; i++)
+      for (var i = 0; i < rowCount; i++)
         _ircRow(
           c,
           authorWidth: _skAuthorWidth(pattern[i % pattern.length][0] as int),
@@ -210,7 +233,7 @@ class _MessageSkeletonState extends State<MessageSkeleton>
   // bubbles alternating other/self, a 32px avatar for others' groups, each
   // bubble holding `skb-{1..4}` lines (110/160/210/260 wide) that step DOWN per
   // line (`base - j`), exactly like the real grouped bubble layout.
-  List<Widget> _bubbleRows(NymColors c) {
+  List<Widget> _bubbleRows(NymColors c, int rowCount) {
     // {self, bubbles:[[baseWidthClass, lineCount], …]} — verbatim from the PWA.
     const pattern = <_BubbleGroup>[
       _BubbleGroup(false, [[3, 3], [1, 1]]),
@@ -224,7 +247,7 @@ class _MessageSkeletonState extends State<MessageSkeleton>
       _BubbleGroup(false, [[2, 1]]),
     ];
     return [
-      for (var i = 0; i < widget.rowCount; i++)
+      for (var i = 0; i < rowCount; i++)
         _bubbleGroup(c, pattern[i % pattern.length]),
     ];
   }

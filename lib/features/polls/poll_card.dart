@@ -924,14 +924,20 @@ class _PollOptionState extends State<_PollOption> {
                           ),
                       ],
                     ),
-                    if (voters.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
+                    // `.poll-voters` is always emitted (polls.js:266), so every
+                    // option reserves the 20px min-height strip 6px below the
+                    // text even when nobody voted.
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Container(
+                        constraints: const BoxConstraints(minHeight: 20),
+                        alignment: Alignment.centerLeft,
                         child: _VoterStack(
                           voters: voters.map((e) => e.key).toList(),
                           avatarFor: widget.avatarFor,
                         ),
                       ),
+                    ),
                   ],
                 ),
               ),

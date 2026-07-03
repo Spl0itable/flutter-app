@@ -52,10 +52,13 @@ class _UserListItemState extends ConsumerState<UserListItem> {
     final c = context.nym;
     final user = widget.user;
     final textSize = widget.textSize;
-    final status = user.effectiveStatus();
     final controller = ref.read(nostrControllerProvider);
     final isDev = controller.isVerifiedDeveloper(user.pubkey);
     final isBot = controller.isVerifiedBot(user.pubkey);
+    // Verified bots always show the green online dot (`getEffectiveUserStatus`
+    // returns 'online' for `verifiedBotPubkeys`, users.js:1112, feeding
+    // `.user-status-dot status-${effectiveStatus}`, users.js:1540).
+    final status = user.effectiveStatus(isVerifiedBot: isBot);
     final isFriend = ref.watch(appStateProvider).isFriend(user.pubkey);
 
     // `_fillUserLabel`: the base nym is hard-truncated to 20 chars + '...'

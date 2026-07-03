@@ -320,7 +320,7 @@ class _Top extends ConsumerWidget {
             child: Text(name,
                 style: TextStyle(
                     color: c.textBright,
-                    fontSize: 16,
+                    fontSize: 16.8, // `.call-title` 1.05rem
                     fontWeight: FontWeight.w600),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis),
@@ -343,8 +343,9 @@ class _Top extends ConsumerWidget {
               pubkey: call.peerPubkey!,
               nym: call.peerNym,
               baseColor: c.textBright,
+              // `.call-title` 1.05rem = 16.8px.
               baseStyle:
-                  const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  const TextStyle(fontSize: 16.8, fontWeight: FontWeight.w600),
             ),
           ),
         ],
@@ -352,27 +353,33 @@ class _Top extends ConsumerWidget {
     } else {
       id = Text(call.peerNym ?? 'Call',
           style: TextStyle(
-              color: c.textBright, fontSize: 16, fontWeight: FontWeight.w600));
+              color: c.textBright,
+              fontSize: 16.8, // `.call-title` 1.05rem
+              fontWeight: FontWeight.w600));
     }
 
+    // `.call-overlay-top { padding: 18px 16px 6px }` (styles-features.css:
+    // 4606-4608).
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 6),
       child: Column(
         children: [
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // `.call-title-kind`: dim, weight 500.
+              // `.call-title-kind`: dim, weight 500, at the 1.05rem title size.
               Text('$kindLabel · ',
                   style: TextStyle(
                       color: c.textDim,
-                      fontSize: 16,
+                      fontSize: 16.8,
                       fontWeight: FontWeight.w500)),
               Flexible(child: id),
             ],
           ),
           const SizedBox(height: 2),
-          Text(call.statusText, style: TextStyle(color: c.textDim, fontSize: 13)),
+          // `.call-status` 0.85rem = 13.6px.
+          Text(call.statusText,
+              style: TextStyle(color: c.textDim, fontSize: 13.6)),
         ],
       ),
     );
@@ -419,18 +426,20 @@ class _Grid extends StatelessWidget {
 
     // PWA mapping: narrow → 1/2:1col, 3/4:2col, 5-9:3col; wide → 2col base
     // (1/2 centred max 1100). Tiles have min-height 160 (no forced aspect).
-    // The `[data-count]` selectors only exist for 2-9 (styles-features.css:
-    // 4708-4716), so 10+ tiles fall back to the 1-column `.call-grid` base on
-    // narrow screens.
+    // The `[data-count="5"…"9"]` selectors (specificity 0,2,0) BEAT the
+    // wide-media `.call-grid` override (0,1,0, styles-features.css:4718), so
+    // 5-9 tiles render 3 columns at ANY width. The `[data-count]` selectors
+    // only exist for 2-9 (styles-features.css:4708-4716), so 10+ tiles fall
+    // back to the `.call-grid` base: 1 column narrow, 2 columns wide.
     final int columns;
-    if (wide) {
+    if (count >= 5 && count <= 9) {
+      columns = 3;
+    } else if (wide) {
       columns = 2;
     } else if (count <= 2) {
       columns = 1;
     } else if (count <= 4) {
       columns = 2;
-    } else if (count <= 9) {
-      columns = 3;
     } else {
       columns = 1;
     }
@@ -539,35 +548,42 @@ class _Tile extends StatelessWidget {
                 right: 8,
                 child: _Badge(text: 'Presenting', color: c.primary, fg: c.bg),
               ),
-            // `.call-tile-name`: bottom-left, black@0.55, radius 8, decorated.
+            // `.call-tile-name`: bottom-left, black@0.55, radius 8, decorated,
+            // `max-width: calc(100% - 16px)` (styles-features.css:4756-4769) —
+            // pinning left AND right 8 caps it at tile width − 16; the Align
+            // shrink-wraps the pill back to its content, left-aligned.
             Positioned(
               left: 8,
+              right: 8,
               bottom: 8,
-              child: Container(
-                constraints: const BoxConstraints(maxWidth: 220),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.55),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: self || pubkey.isEmpty
-                    ? const Text('You',
-                        style: TextStyle(color: Colors.white, fontSize: 12))
-                    // Tile name → shared user context menu (PWA
-                    // `callNickMenu` / `showCallUserMenu`, calls.js:1566).
-                    : GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () =>
-                            showCallUserMenu(context, pubkey, nym: label),
-                        child: CallNym(
-                          pubkey: pubkey,
-                          nym: label,
-                          baseColor: Colors.white,
-                          baseStyle: const TextStyle(fontSize: 12),
-                          badgeSize: 12,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                heightFactor: 1,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: self || pubkey.isEmpty
+                      ? const Text('You',
+                          style: TextStyle(color: Colors.white, fontSize: 12))
+                      // Tile name → shared user context menu (PWA
+                      // `callNickMenu` / `showCallUserMenu`, calls.js:1566).
+                      : GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () =>
+                              showCallUserMenu(context, pubkey, nym: label),
+                          child: CallNym(
+                            pubkey: pubkey,
+                            nym: label,
+                            baseColor: Colors.white,
+                            baseStyle: const TextStyle(fontSize: 12),
+                            badgeSize: 12,
+                          ),
                         ),
-                      ),
+                ),
               ),
             ),
           ],
@@ -777,38 +793,76 @@ class _ReactionsBar extends StatelessWidget {
           runSpacing: 4,
           children: [
             for (final e in emojis)
-              InkWell(
+              _ReactBarBtn(
                 onTap: () => onPick(e),
-                borderRadius: BorderRadius.circular(8),
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  // Known custom `:shortcode:` recents render as their image
-                  // (PWA `renderReactionEmoji`, calls.js:1130 — whole-string
-                  // only) at `.call-react-btn .custom-emoji { width/height:
-                  // 1.9rem; vertical-align: middle }` = 30.4px
-                  // (styles-features.css:5183, margin 0); unicode falls
-                  // through `InlineEmojiText`'s fast path to a plain Text at
-                  // the 1.75rem = 28px button font.
-                  child: InlineEmojiText(
-                      text: e,
-                      style: const TextStyle(fontSize: 28),
-                      emojiSize: 30.4,
-                      wholeStringOnly: true,
-                      emojiMargin: EdgeInsets.zero,
-                      emojiAlignment: PlaceholderAlignment.middle),
-                ),
+                // Known custom `:shortcode:` recents render as their image
+                // (PWA `renderReactionEmoji`, calls.js:1130 — whole-string
+                // only) at `.call-react-btn .custom-emoji { width/height:
+                // 1.9rem; vertical-align: middle }` = 30.4px
+                // (styles-features.css:5183, margin 0); unicode falls
+                // through `InlineEmojiText`'s fast path to a plain Text at
+                // the 1.75rem = 28px button font.
+                child: InlineEmojiText(
+                    text: e,
+                    style: const TextStyle(fontSize: 28),
+                    emojiSize: 30.4,
+                    wholeStringOnly: true,
+                    emojiMargin: EdgeInsets.zero,
+                    emojiAlignment: PlaceholderAlignment.middle),
               ),
-            // `.call-react-more`: dim "+" opens the full picker.
-            InkWell(
+            // `.call-react-more`: dim "+" (also a `.call-react-btn`,
+            // calls.js:1134) opens the full picker.
+            _ReactBarBtn(
               onTap: onMore,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Text('＋',
-                    style: TextStyle(fontSize: 24, color: c.textDim)),
-              ),
+              child: Text('＋',
+                  style: TextStyle(fontSize: 24, color: c.textDim)),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One `.call-react-btn`: padding 4, radius 8, transparent until hover.
+/// `:hover { transform: scale(1.25); background: var(--bg-hover,
+/// rgba(255,255,255,0.08)) }` with `transition: transform 0.12s, background
+/// 0.12s` (styles-features.css:5173-5182). `--bg-hover` is never defined in
+/// the PWA CSS, so the white@0.08 fallback applies in both themes.
+class _ReactBarBtn extends StatefulWidget {
+  const _ReactBarBtn({required this.onTap, required this.child});
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  State<_ReactBarBtn> createState() => _ReactBarBtnState();
+}
+
+class _ReactBarBtnState extends State<_ReactBarBtn> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedScale(
+        scale: _hover ? 1.25 : 1,
+        duration: const Duration(milliseconds: 120),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          decoration: BoxDecoration(
+            color: _hover ? const Color(0x14FFFFFF) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: InkWell(
+            onTap: widget.onTap,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(4),
+              child: widget.child,
+            ),
+          ),
         ),
       ),
     );
@@ -948,7 +1002,9 @@ class _ChatRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
-    var base = TextStyle(color: c.textBright, fontSize: 14, height: 1.3);
+    // `.call-chat-msg { font-size: 0.85rem }` = 13.6px (styles-features.css:
+    // 4866-4870); `.call-chat-text` inherits it.
+    var base = TextStyle(color: c.textBright, fontSize: 13.6, height: 1.3);
 
     // Carry the sender's purchased message flair (style / supporter / aura)
     // onto the call-chat row, mirroring `_appendCallChat` (calls.js:1407-1414)
@@ -1073,12 +1129,13 @@ class _ChatRow extends ConsumerWidget {
         child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // `.call-chat-from`: decorated nym (non-self primary, self dim "You").
+          // `.call-chat-from`: decorated nym (non-self primary, self dim
+          // "You"), `font-size: 0.75rem` = 12px (styles-features.css:4874-4877).
           if (msg.isSelf)
             Text('You',
                 style: TextStyle(
                     color: c.textDim,
-                    fontSize: 11,
+                    fontSize: 12,
                     fontWeight: FontWeight.w600))
           else
             // Chat-from nym → shared user context menu (PWA `callNickMenu` →
@@ -1090,7 +1147,7 @@ class _ChatRow extends ConsumerWidget {
                 pubkey: msg.pubkey,
                 baseColor: c.primary,
                 baseStyle:
-                    const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
                 badgeSize: 11,
               ),
             ),
@@ -1355,8 +1412,10 @@ class _TypingLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // `.call-chat-typing { font-size: 0.72rem }` = 11.5px
+    // (styles-features.css:5006-5009).
     final style = TextStyle(
-        color: c.textDim, fontSize: 12, fontStyle: FontStyle.italic);
+        color: c.textDim, fontSize: 11.5, fontStyle: FontStyle.italic);
     // Bound each decorated nym so its internal Flexible has finite width inside
     // the unbounded Wrap.
     Widget nym(String pk) => ConstrainedBox(
@@ -1474,15 +1533,22 @@ class _InputRowState extends ConsumerState<_InputRow> {
     final blocked = ref.read(appStateProvider).blockedUsers;
     final selfPk = ref.read(appStateProvider).selfPubkey;
     final users = ref.read(usersProvider);
+    // `_showCallMentionAutocomplete` (calls.js:1880-1886) filters AND sorts on
+    // the lowercased `base#suffix` searchable string — not the raw pubkey —
+    // then slices the first 8, so both the row order and (with >8 candidates)
+    // which 8 appear are driven by the display nyms.
+    final searchable = <String, String>{};
     final matches = widget.call.participants
         .map((p) => p.pubkey)
         .where((pk) => pk != selfPk && !blocked.contains(pk))
         .where((pk) {
       final base = stripPubkeySuffix(users[pk]?.nym ?? pk);
       final sfx = getPubkeySuffix(pk);
-      return '$base#$sfx'.toLowerCase().contains(s);
+      final key = '$base#$sfx'.toLowerCase();
+      searchable[pk] = key;
+      return key.contains(s);
     }).toList()
-      ..sort();
+      ..sort((a, b) => searchable[a]!.compareTo(searchable[b]!));
     setState(() {
       _mentionMatches = matches.take(8).toList();
       // `_showCallMentionAutocomplete` re-selects the first item on every
@@ -1520,7 +1586,12 @@ class _InputRowState extends ConsumerState<_InputRow> {
     return Stack(
       clipBehavior: Clip.none,
       children: [
-        Padding(
+        Container(
+          // `.call-chat-input-row { border-top: 1px solid var(--border) }`
+          // (styles-features.css:5035-5042) — the separator above the input.
+          decoration: BoxDecoration(
+            border: Border(top: BorderSide(color: c.border)),
+          ),
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
           child: Row(
             children: [
@@ -1930,7 +2001,7 @@ class _PresenterAction extends StatelessWidget {
 // Switch-camera button (#callSwitchCamBtn)
 // =============================================================================
 
-class _SwitchCamButton extends StatelessWidget {
+class _SwitchCamButton extends StatefulWidget {
   const _SwitchCamButton({
     required this.disabled,
     required this.facingMode,
@@ -1941,27 +2012,47 @@ class _SwitchCamButton extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_SwitchCamButton> createState() => _SwitchCamButtonState();
+}
+
+class _SwitchCamButtonState extends State<_SwitchCamButton> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
     return Tooltip(
-      message: facingMode == 'environment'
+      message: widget.facingMode == 'environment'
           ? 'Switch to front camera'
           : 'Switch to rear camera',
-      child: Opacity(
-        opacity: disabled ? 0.5 : 1,
-        child: Material(
-          color: Colors.black.withValues(alpha: 0.6),
-          // `.call-switch-cam-btn` border = `var(--border)` (primary@0.20).
-          shape: CircleBorder(side: BorderSide(color: c.border)),
-          child: InkWell(
-            customBorder: const CircleBorder(),
-            onTap: disabled ? null : onTap,
-            child: SizedBox(
-              width: 42,
-              height: 42,
-              child: Center(
-                child: NymSvgIcon(NymIcons.callSwitchCam,
-                    color: c.textBright, size: 20),
+      // `.call-switch-cam-btn:hover { transform: scale(1.08) }` with
+      // `transition: transform 0.15s` (styles-features.css:4626-4629);
+      // `:disabled { transform: none }` (4630) suppresses the scale.
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedScale(
+          scale: _hover && !widget.disabled ? 1.08 : 1,
+          duration: const Duration(milliseconds: 150),
+          child: Opacity(
+            opacity: widget.disabled ? 0.5 : 1,
+            child: Material(
+              // `.call-switch-cam-btn { background: rgba(15,15,22,0.6) }`
+              // (styles-features.css:4620) — #0F0F16 @ 0.6, not pure black.
+              color: const Color(0x990F0F16),
+              // `.call-switch-cam-btn` border = `var(--border)` (primary@0.20).
+              shape: CircleBorder(side: BorderSide(color: c.border)),
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: widget.disabled ? null : widget.onTap,
+                child: SizedBox(
+                  width: 42,
+                  height: 42,
+                  child: Center(
+                    child: NymSvgIcon(NymIcons.callSwitchCam,
+                        color: c.textBright, size: 20),
+                  ),
+                ),
               ),
             ),
           ),
@@ -2007,9 +2098,11 @@ class _Controls extends StatelessWidget {
     final c = context.nym;
     final isVideo = call.kind == CallKind.video;
     // `.call-controls`: no background (transparent over the overlay backdrop),
-    // gap 20.
+    // gap 20, `padding: 16px; padding-bottom: calc(16px +
+    // env(safe-area-inset-bottom))` (styles-features.css:4771-4777) — the
+    // overlay's SafeArea already consumes the bottom inset.
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+      padding: const EdgeInsets.all(16),
       child: Wrap(
         alignment: WrapAlignment.center,
         spacing: 20,
@@ -2079,7 +2172,7 @@ class _Controls extends StatelessWidget {
   }
 }
 
-class _CtrlBtn extends StatelessWidget {
+class _CtrlBtn extends StatefulWidget {
   const _CtrlBtn({
     required this.svg,
     required this.tooltip,
@@ -2107,56 +2200,77 @@ class _CtrlBtn extends StatelessWidget {
   final double rotation;
 
   @override
+  State<_CtrlBtn> createState() => _CtrlBtnState();
+}
+
+class _CtrlBtnState extends State<_CtrlBtn> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final bg = background ?? (active ? c.danger : c.bgTertiary);
-    final fg = foreground ?? (active ? Colors.white : c.textBright);
+    final bg = widget.background ?? (widget.active ? c.danger : c.bgTertiary);
+    final fg =
+        widget.foreground ?? (widget.active ? Colors.white : c.textBright);
     // `.call-control-btn` border = `var(--border)` (primary@0.20); request-mode
     // gets the solid primary outline.
-    final borderColor = requestMode ? c.primary : c.border;
-    final iconColor = requestMode ? c.primary : fg;
+    final borderColor = widget.requestMode ? c.primary : c.border;
+    final iconColor = widget.requestMode ? c.primary : fg;
     return Tooltip(
-      message: tooltip,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Material(
-            color: bg,
-            shape: CircleBorder(side: BorderSide(color: borderColor)),
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              onTap: onTap,
-              child: SizedBox(
-                width: 54,
-                height: 54,
-                child: Center(
-                  child: rotation == 0
-                      ? NymSvgIcon(svg, color: iconColor, size: 22)
-                      : Transform.rotate(
-                          angle: rotation * 2 * math.pi,
-                          child: NymSvgIcon(svg, color: iconColor, size: 22),
-                        ),
+      message: widget.tooltip,
+      // `.call-control-btn:hover { transform: scale(1.08) }` with `transition:
+      // transform 0.15s` (styles-features.css:4779-4794). The badge is a child
+      // of the button in the PWA, so the whole stack scales.
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: AnimatedScale(
+          scale: _hover ? 1.08 : 1,
+          duration: const Duration(milliseconds: 150),
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Material(
+                color: bg,
+                shape: CircleBorder(side: BorderSide(color: borderColor)),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: widget.onTap,
+                  child: SizedBox(
+                    width: 54,
+                    height: 54,
+                    child: Center(
+                      child: widget.rotation == 0
+                          ? NymSvgIcon(widget.svg, color: iconColor, size: 22)
+                          : Transform.rotate(
+                              angle: widget.rotation * 2 * math.pi,
+                              child: NymSvgIcon(widget.svg,
+                                  color: iconColor, size: 22),
+                            ),
+                    ),
+                  ),
                 ),
               ),
-            ),
+              if (widget.badge > 0)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration:
+                        BoxDecoration(color: c.danger, shape: BoxShape.circle),
+                    constraints:
+                        const BoxConstraints(minWidth: 18, minHeight: 18),
+                    child: Text(
+                      widget.badge > 9 ? '9+' : '${widget.badge}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white, fontSize: 10),
+                    ),
+                  ),
+                ),
+            ],
           ),
-          if (badge > 0)
-            Positioned(
-              right: -2,
-              top: -2,
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration:
-                    BoxDecoration(color: c.danger, shape: BoxShape.circle),
-                constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                child: Text(
-                  badge > 9 ? '9+' : '$badge',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 10),
-                ),
-              ),
-            ),
-        ],
+        ),
       ),
     );
   }

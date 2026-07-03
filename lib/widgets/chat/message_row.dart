@@ -658,23 +658,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return _ScrollFlashOverlay(active: flashing, child: row);
   }
 
-  /// A centered `.system-message` (or `.action-message`) pill injected into the
-  /// conversation flow (`styles-chat.css:1334-1360`). Text-dim, rounded-20,
-  /// `white@0.03` bg, glass border, `textSize-3`; the action variant is
-  /// purple-italic. When the row carries a [Message.systemAction] (e.g. the spam
+  /// A centered `.system-message` pill injected into the conversation flow
+  /// (`styles-chat.css:1334-1349`). Text-dim, rounded-20, `white@0.03` bg,
+  /// glass border, `textSize-3`. The `.action-message` variant is a bare
+  /// left-aligned purple-italic line — no pill, no centering
+  /// (`styles-chat.css:1357-1360`). When the row carries a
+  /// [Message.systemAction] (e.g. the spam
   /// false-positive notice) an inline action button is rendered under the text.
   Widget _buildSystemMessage(BuildContext context) {
     final c = context.nym;
     final isAction = message.kind == MessageKind.action;
     final size = settings.textSize.toDouble() - 3;
-    // `.action-message` is BARE purple-italic text — no pill bg/border/radius
-    // (`styles-chat.css:1357-1360`), distinct from `.system-message`.
+    // `.action-message` is BARE purple-italic text — no pill bg/border/radius,
+    // no centering and no `margin: 10px auto` (`styles-chat.css:1357-1360`):
+    // `displaySystemMessage(msg,'action')` REPLACES the className, dropping
+    // the `.system-message` base, so an action row is a plain full-width
+    // left-aligned block (messages.js:1515).
     final text = Text(
       message.content,
-      textAlign: TextAlign.center,
+      textAlign: isAction ? TextAlign.start : TextAlign.center,
       style: TextStyle(
         color: isAction ? c.purple : c.textDim,
-        fontSize: size,
+        // `.action-message` sets no font-size, so it inherits the container's
+        // fixed 14px (`.messages-container`, styles-shell.css:943); only
+        // `.system-message` scales with the user text size.
+        fontSize: isAction ? 14 : size,
         fontStyle: isAction ? FontStyle.italic : FontStyle.normal,
         // `.system-message { font-weight: 450 }` (w500 is the nearest weight).
         fontWeight: isAction ? FontWeight.w400 : FontWeight.w500,
@@ -704,20 +712,23 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   ),
                 ],
               );
+    // `.action-message` has no padding/margin of its own — a bare block div
+    // in the message flow, left-aligned at full width.
+    if (isAction) {
+      return Align(alignment: Alignment.centerLeft, child: text);
+    }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
       child: Center(
-        child: isAction
-            ? text
-            : Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.03),
-                  border: Border.all(color: c.glassBorder),
-                  borderRadius: const BorderRadius.all(Radius.circular(20)),
-                ),
-                child: pillChild,
-              ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            border: Border.all(color: c.glassBorder),
+            borderRadius: const BorderRadius.all(Radius.circular(20)),
+          ),
+          child: pillChild,
+        ),
       ),
     );
   }
@@ -1101,12 +1112,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           )
         : null;
     final authorItem = ConstrainedBox(
-      // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
-      // the author flows inline and the line wraps. We keep a generous cap
-      // so the fixed badges (a ~116px supporter pill + flair/verified/friend)
-      // always fit and the nym ellipsizes within the remainder; the message
-      // body wraps to the next run when the author is wide.
-      constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
+      // `.message-author { min-width: 120px }` and NO max-width — the author
+      // flex item grows to its natural width and the wrapping `.message` row
+      // reflows the content around it (styles-chat.css:691-698). The Wrap
+      // bounds it at the row width, matching the flex container.
+      constraints: const BoxConstraints(minWidth: 120),
       child: GestureDetector(
         onTap: () => _openContextMenu(context),
         child: Row(
@@ -1183,8 +1193,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     } else {
       messageRow = Wrap(
         crossAxisAlignment: WrapCrossAlignment.start,
+        // `.message { gap: 10px }` — the single-value CSS gap applies to BOTH
+        // axes, so wrapped runs are also 10px apart.
         spacing: 10,
-        runSpacing: 4,
+        runSpacing: 10,
         children: [
           if (timeItem != null) timeItem,
           authorItem,
@@ -1766,12 +1778,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       (message.isGroup || _isChannelMessage) &&
       message.readers.isNotEmpty;
 
-  /// A channel message: not a PM, not a group, with a 64-hex geohash (the PWA
-  /// gate `message.geohash && /^[0-9a-f]{64}$/`).
+  /// A channel message: not a PM, not a group, with a geohash set and a
+  /// canonical 64-hex EVENT id (the PWA gate `message.geohash && message.id &&
+  /// /^[0-9a-f]{64}$/i.test(message.id)`, messages.js:826-828).
   bool get _isChannelMessage {
     if (message.isPM || message.isGroup) return false;
-    final g = message.geohash ?? '';
-    return RegExp(r'^[0-9a-f]{64}$').hasMatch(g);
+    if ((message.geohash ?? '').isEmpty) return false;
+    return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false)
+        .hasMatch(message.id);
   }
 
   /// A right-aligned row of up to 3 overlapping 14px reader avatars + a `+N`
@@ -2451,9 +2465,14 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
           onTapCancel: () => setState(() => _pressed = false),
           child: AnimatedScale(
             // `:active scale(0.95)` beats `:hover scale(1.05)` (later in sheet).
+            // `.reaction-badge { transition: all 0.2s }` — 200ms CSS-default
+            // `ease`, and the bg/border animate too (AnimatedContainer below).
             scale: _pressed ? 0.95 : (_hover ? 1.05 : 1.0),
-            duration: const Duration(milliseconds: 120),
-            child: Container(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.ease,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.ease,
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 // `.user-reacted` (439-443) sits AFTER `:hover` (429-433) at

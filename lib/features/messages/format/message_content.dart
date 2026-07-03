@@ -196,6 +196,13 @@ class MessageContent extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // The CSS `margin: 10px 0` renders even when the block is the FIRST/
+        // LAST child of `.message-content` (no collapse through the padded
+        // bubble), so a leading/trailing media/code/quote/heading block keeps
+        // 10px of air against the content edges — e.g. an image-only message
+        // has 10px above and below the image inside the bubble.
+        if (blocks.isNotEmpty && _blockEdgeMargin(blocks.first) > 0)
+          SizedBox(height: _blockEdgeMargin(blocks.first)),
         for (var i = 0; i < blocks.length; i++) ...[
           if (i > 0) SizedBox(height: _blockGap(blocks[i - 1], blocks[i])),
           _block(context, c, blocks[i], color, size,
@@ -203,6 +210,8 @@ class MessageContent extends ConsumerWidget {
               onChannelRef: onChannelRef,
               onMentionTap: onMentionTap),
         ],
+        if (blocks.isNotEmpty && _blockEdgeMargin(blocks.last) > 0)
+          SizedBox(height: _blockEdgeMargin(blocks.last)),
       ],
     );
 
@@ -335,6 +344,15 @@ double _blockGap(FormatBlock a, FormatBlock b) {
   final mb = _blockMargin(b);
   return ma > mb ? ma : mb;
 }
+
+/// The margin a block renders against the START/END edge of the message body.
+/// Only blocks with a real CSS `margin: 10px 0` (media/code/quote/heading)
+/// carry it; a paragraph's 4px is a line gap between siblings, not a margin,
+/// so text sits flush at the edges exactly like the PWA.
+double _blockEdgeMargin(FormatBlock block) => switch (block) {
+      MediaBlock() || CodeBlock() || QuoteBlock() || HeadingBlock() => 10,
+      ParagraphBlock() => 0,
+    };
 
 /// One emoji "unit" (the PWA's `_EMOJI_UNIT`, `messages.js:8`): a flag pair, a
 /// keycap, or a presentation/pictographic glyph with optional VS / skin-tone /
@@ -1230,23 +1248,56 @@ class _CodeBox extends StatelessWidget {
         Positioned(
           top: 6,
           right: 6,
-          child: GestureDetector(
-            onTap: () => Clipboard.setData(ClipboardData(text: code)),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: c.primaryA(0.15),
-                borderRadius: NymRadius.rxs,
-                border: Border.all(color: c.primaryA(0.3)),
-              ),
-              child: Text(
-                'Copy',
-                style: TextStyle(color: c.primary, fontSize: size * 0.75),
-              ),
-            ),
-          ),
+          child: _CodeCopyButton(code: code, size: size),
         ),
       ],
+    );
+  }
+}
+
+/// The `.code-copy-btn` pill. Tapping writes [code] to the clipboard and flips
+/// the label to "Copied!" for 1500ms before reverting to "Copy"
+/// (`codeBlockCopy`, inline-bindings.js:456-466).
+class _CodeCopyButton extends StatefulWidget {
+  const _CodeCopyButton({required this.code, required this.size});
+  final String code;
+  final double size;
+
+  @override
+  State<_CodeCopyButton> createState() => _CodeCopyButtonState();
+}
+
+class _CodeCopyButtonState extends State<_CodeCopyButton> {
+  bool _copied = false;
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.code));
+    setState(() => _copied = true);
+    // The PWA stacks bare setTimeouts (no clearTimeout), so a re-tap's earlier
+    // timer still reverts the label at ITS 1500ms mark — mirror that by not
+    // cancelling; the `mounted` guard covers disposal.
+    Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return GestureDetector(
+      onTap: _copy,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        decoration: BoxDecoration(
+          color: c.primaryA(0.15),
+          borderRadius: NymRadius.rxs,
+          border: Border.all(color: c.primaryA(0.3)),
+        ),
+        child: Text(
+          _copied ? 'Copied!' : 'Copy',
+          style: TextStyle(color: c.primary, fontSize: widget.size * 0.75),
+        ),
+      ),
     );
   }
 }

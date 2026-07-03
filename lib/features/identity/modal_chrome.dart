@@ -100,7 +100,10 @@ class ModalChrome {
 
   /// The `.send-btn` translucent primary pill. [danger] swaps to the
   /// `.send-btn.danger` palette (danger/0.1 fill, danger/0.35 border, danger
-  /// text). [enabled] false → opacity 0.35.
+  /// text). [enabled] false → opacity 0.35. Hover (`:hover:not(:disabled)`,
+  /// styles-chat.css:1936-1938) lifts the fill to primary/0.18 + a `0 0 15px
+  /// primary/0.1` glow (danger: 0.18 / 0.15, styles-components.css:2386-2389;
+  /// light mode uses the same palette, styles-themes-responsive.css:617-625).
   static Widget sendButton(
     NymColors c,
     String label,
@@ -109,61 +112,24 @@ class ModalChrome {
     bool fullWidth = false,
     Widget? child,
   }) {
-    final fill = danger ? c.danger.withValues(alpha: 0.1) : c.primaryA(0.1);
-    final border = danger ? c.danger.withValues(alpha: 0.35) : c.primaryA(0.3);
-    final fg = danger ? c.danger : c.primary;
-    final enabled = onTap != null;
-    final btn = Opacity(
-      opacity: enabled ? 1 : 0.35,
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          height: 42,
-          padding: const EdgeInsets.symmetric(horizontal: 22),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: fill,
-            borderRadius: NymRadius.rsm,
-            border: Border.all(color: border),
-          ),
-          child: child ??
-              Text(
-                label.toUpperCase(),
-                style: TextStyle(
-                  color: fg,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 1.5,
-                ),
-              ),
-        ),
-      ),
+    final btn = _SendButton(
+      c: c,
+      label: label,
+      onTap: onTap,
+      danger: danger,
+      child: child,
     );
     return fullWidth ? SizedBox(width: double.infinity, child: btn) : btn;
   }
 
-  /// The `.icon-btn`: bordered translucent uppercase pill.
+  /// The `.icon-btn`: bordered translucent uppercase pill. Light mode flips to
+  /// bg black/0.03, border black/0.1 and a `--primary` label
+  /// (styles-themes-responsive.css:595-599); hover is primary/0.12 fill +
+  /// primary/0.3 border + primary label + glow in dark
+  /// (styles-shell.css:930-935), black/0.06 fill + solid primary border in
+  /// light (styles-themes-responsive.css:601-605).
   static Widget iconButton(NymColors c, String label, VoidCallback? onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.05),
-          borderRadius: NymRadius.rxs,
-          border: Border.all(color: c.glassBorder),
-        ),
-        child: Text(
-          label.toUpperCase(),
-          style: TextStyle(
-            color: c.text,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.8,
-          ),
-        ),
-      ),
-    );
+    return _IconButton(c: c, label: label, onTap: onTap);
   }
 
   /// The `.form-label`: 11px textDim UPPERCASE ls1.2 w600.
@@ -283,6 +249,162 @@ class _FocusRingState extends State<_FocusRing> {
               : null,
         ),
         child: widget.child,
+      ),
+    );
+  }
+}
+
+/// `.send-btn` host with the desktop hover treatment
+/// (`transition: all var(--transition)`, styles-chat.css:1920-1943).
+class _SendButton extends StatefulWidget {
+  const _SendButton({
+    required this.c,
+    required this.label,
+    required this.onTap,
+    required this.danger,
+    this.child,
+  });
+
+  final NymColors c;
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+  final Widget? child;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    final danger = widget.danger;
+    final enabled = widget.onTap != null;
+    // `:hover:not(:disabled)` — 0.1 → 0.18 fill; border stays put.
+    final hovered = _hover && enabled;
+    final fill = danger
+        ? c.danger.withValues(alpha: hovered ? 0.18 : 0.1)
+        : c.primaryA(hovered ? 0.18 : 0.1);
+    final border = danger ? c.danger.withValues(alpha: 0.35) : c.primaryA(0.3);
+    final fg = danger ? c.danger : c.primary;
+    return Opacity(
+      opacity: enabled ? 1 : 0.35,
+      child: MouseRegion(
+        // `.send-btn:disabled { cursor: not-allowed }`.
+        cursor: enabled
+            ? SystemMouseCursors.click
+            : SystemMouseCursors.forbidden,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: NymMotion.transition,
+            curve: NymMotion.curve,
+            height: 42,
+            padding: const EdgeInsets.symmetric(horizontal: 22),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: fill,
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: border),
+              // `0 0 15px primary/0.1` (danger: danger/0.15).
+              boxShadow: hovered
+                  ? [
+                      BoxShadow(
+                        color: danger
+                            ? c.danger.withValues(alpha: 0.15)
+                            : c.primaryA(0.1),
+                        blurRadius: 15,
+                      ),
+                    ]
+                  : null,
+            ),
+            child: widget.child ??
+                Text(
+                  widget.label.toUpperCase(),
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.icon-btn` host — dark/light rest + hover palettes
+/// (styles-shell.css:911-935, styles-themes-responsive.css:595-605).
+class _IconButton extends StatefulWidget {
+  const _IconButton(
+      {required this.c, required this.label, required this.onTap});
+
+  final NymColors c;
+  final String label;
+  final VoidCallback? onTap;
+
+  @override
+  State<_IconButton> createState() => _IconButtonState();
+}
+
+class _IconButtonState extends State<_IconButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    // Rest: white/0.05 fill + glass border + `--text` label in dark;
+    // black/0.03 fill + black/0.1 border + `--primary` label in light.
+    // Hover: primary/0.12 fill + primary/0.3 border in dark; black/0.06 fill
+    // + solid primary border in light — label is primary either way, and the
+    // base `.icon-btn:hover` glow (`0 0 15px primary/0.1`) applies in both.
+    final Color fill;
+    final Color border;
+    final Color fg;
+    if (_hover) {
+      fill = c.isLight ? const Color(0x0F000000) : c.primaryA(0.12);
+      border = c.isLight ? c.primary : c.primaryA(0.3);
+      fg = c.primary;
+    } else {
+      fill = c.subtleFill;
+      border = c.isLight ? const Color(0x1A000000) : c.glassBorder;
+      fg = c.isLight ? c.primary : c.text;
+    }
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: NymRadius.rxs,
+            border: Border.all(color: border),
+            boxShadow: _hover
+                ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 15)]
+                : null,
+          ),
+          child: Text(
+            widget.label.toUpperCase(),
+            style: TextStyle(
+              color: fg,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.8,
+            ),
+          ),
+        ),
       ),
     );
   }

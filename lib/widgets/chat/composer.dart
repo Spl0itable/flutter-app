@@ -1445,15 +1445,24 @@ class _ComposerState extends ConsumerState<Composer> {
         ? 'Uploading $_uploadIndex of $_uploadTotal...'
         : 'Uploading $kind...';
     final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
+    // In solid-ui the panel is repainted with --glass-bg (#14141e dark /
+    // opaque #ffffff light — styles-themes-responsive.css:1593-1627, sourced
+    // AFTER the light white@0.92 rule so it wins in both themes).
+    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
     return Container(
-      // `.upload-progress`: bg var(--bg-tertiary) (rgba(20,20,35,0.9) dark /
-      // #1c1c2c solid-ui); `body.light-mode .upload-progress` → white@0.92
-      // (styles-themes-responsive.css:1179). border 1px glass, radius-sm top
-      // corners, padding 12, margin-bottom 8.
+      // `.upload-progress`: bg literal rgba(20,20,35,0.9) dark
+      // (styles-components.css:1142-1153); `body.light-mode .upload-progress`
+      // → white@0.92 (styles-themes-responsive.css:1179). border 1px glass
+      // (light: black@0.08 = glassBorder), radius-sm top corners, padding 12,
+      // margin-bottom 8.
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: c.isLight ? Colors.white.withValues(alpha: 0.92) : c.bgTertiary,
+        color: solidUi
+            ? c.glassBg
+            : (c.isLight
+                ? Colors.white.withValues(alpha: 0.92)
+                : const Color(0xE6141423)),
         border: Border.all(color: c.glassBorder),
         borderRadius:
             const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
@@ -2285,24 +2294,34 @@ class _IconBtnState extends State<_IconBtn> {
     // overriding only height/padding/radius (styles-chat.css:1946-1953) — so it
     // carries the SAME fill/border/hover the header pills do (B1/B2). Mirrors
     // `_iconBtnStyle` (chat_pane.dart:1172):
-    //  - Dark base : fill white@0.05, border `--glass-border`, glyph `--text`.
-    //  - Dark hover: fill primary@0.12, border primary@0.3, glyph `--primary`.
-    //  - Light base: fill black@0.03, border black@0.1, glyph `--primary`.
-    //  - Light hover: fill black@0.06, border `--primary`, glyph `--primary`.
+    //  - Dark base : fill white@0.05, border `--glass-border`.
+    //  - Dark hover: fill primary@0.12, border primary@0.3.
+    //  - Light base: fill black@0.03, border black@0.1.
+    //  - Light hover: fill black@0.06, border `--primary`.
+    // Glyph colors split by markup:
+    //  - SVG strokes: the explicit `.icon-btn.input-btn svg { stroke:
+    //    var(--text) }` resolves directly, so the light-mode `color:
+    //    var(--primary)` on `.icon-btn` does NOT recolor them — `--text` at
+    //    rest in BOTH themes, `--primary` only on hover
+    //    (styles-chat.css:1955-1961).
+    //  - The GIF `<text fill="currentColor">` follows `color:` — `--text`/
+    //    hover-primary in dark, always `--primary` in light
+    //    (styles-themes-responsive.css:595-605).
     final Color fill;
     final Color borderColor;
-    final Color glyphColor;
+    final Color labelColor;
     if (c.isLight) {
       fill = hovered
           ? Colors.black.withValues(alpha: 0.06)
           : Colors.black.withValues(alpha: 0.03);
       borderColor = hovered ? c.primary : Colors.black.withValues(alpha: 0.1);
-      glyphColor = c.primary;
+      labelColor = c.primary;
     } else {
       fill = hovered ? c.primaryA(0.12) : Colors.white.withValues(alpha: 0.05);
       borderColor = hovered ? c.primaryA(0.30) : c.glassBorder;
-      glyphColor = hovered ? c.primary : c.text;
+      labelColor = hovered ? c.primary : c.text;
     }
+    final glyphColor = hovered ? c.primary : c.text;
     // `.icon-btn.input-btn`: 42 tall, 0 12 padding, radius sm. Hover adds the
     // `0 0 15px primary@0.1` glow (`.icon-btn:hover box-shadow`).
     final btn = Tooltip(
@@ -2341,7 +2360,7 @@ class _IconBtnState extends State<_IconBtn> {
                           fontSize: 12,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 0.5,
-                          color: glyphColor,
+                          color: labelColor,
                         ),
                       )
                     : NymSvgIcon(

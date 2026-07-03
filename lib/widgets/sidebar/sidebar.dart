@@ -3,7 +3,6 @@ import 'dart:convert';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -332,9 +331,21 @@ class _SidebarState extends ConsumerState<Sidebar> {
       widget.onItemSelected?.call();
     }
 
-    // Online nyms exclude self and offline-hidden.
+    // PM/group-only mode restricts the Nyms list to PM-conversation peers +
+    // group members (`pmOnlyPubkeys`, users.js:1353-1360); everyone else is
+    // skipped at :1374.
+    final Set<String>? pmOnlyPubkeys = settings.groupChatPMOnlyMode
+        ? {
+            for (final pm in pms) pm.pubkey,
+            for (final g in groups) ...g.members,
+          }
+        : null;
+    // NO self exclusion: `_doUpdateUserList` iterates `this.users` with no
+    // self check (self is seeded into the map, nostr-core.js:2813), so your
+    // own nym renders as a normal row and counts toward `activeCount`.
     final onlineUsers = users.values
-        .where((u) => u.pubkey != app.selfPubkey)
+        .where(
+            (u) => pmOnlyPubkeys == null || pmOnlyPubkeys.contains(u.pubkey))
         .toList()
       ..sort((a, b) {
         int rank(User u) {
@@ -352,21 +363,30 @@ class _SidebarState extends ConsumerState<Sidebar> {
         }
 
         final r = rank(a) - rank(b);
-        return r != 0 ? r : a.nym.compareTo(b.nym);
+        if (r != 0) return r;
+        // Status ties break on the suffix-stripped, lowercased base nym
+        // (`sortKey = parseNymFromDisplay(user.nym).toLowerCase()`,
+        // users.js:1391,1395-1400).
+        return stripPubkeySuffix(a.nym)
+            .toLowerCase()
+            .compareTo(stripPubkeySuffix(b.nym).toLowerCase());
       });
 
     // Dynamic "Nyms (N online)" title (`activeCount`, users.js:1383): non-hidden
     // nyms that are online/away (recent), plus verified bots regardless of
     // recency.
     final controller = ref.read(nostrControllerProvider);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nymActiveCount = onlineUsers.where((u) {
       // CC-2: verified bots count as online regardless of recency
       // (`getEffectiveUserStatus`, users.js:1112) — fold the override into the
       // status read so the count matches the PWA's `activeCount`.
-      final st = u.effectiveStatus(
-          isVerifiedBot: kVerifiedBotPubkeys.contains(u.pubkey));
-      if (st == UserStatus.hidden) return false;
-      return st == UserStatus.online || st == UserStatus.away;
+      final isBot = kVerifiedBotPubkeys.contains(u.pubkey);
+      final st = u.effectiveStatus(isVerifiedBot: isBot);
+      if (st == UserStatus.hidden || st == UserStatus.offline) return false;
+      // `(isRecent || verifiedBotSet.has(pubkey))` (users.js:1383): a stale
+      // away user doesn't count as active.
+      return nowMs - u.lastSeen < kActiveThresholdMs || isBot;
     }).length;
 
     // Apply the live search term + the collapse-to-20 cap, returning the capped
@@ -584,10 +604,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
           // Nyms list capping (users.js:1411-1424): searching shows every match;
           // collapsed caps at 20; expanded renders `min(total, cap)` where the
           // cap grows by `EXPANDED_STEP` (500) per "Show N more…" click.
+          // The search matches the `sortKey` — the suffix-stripped, lowercased
+          // base nym (users.js:1405-1409) — NOT the raw `base#suffix` string.
           final filtered = term.isEmpty
               ? onlineUsers
               : onlineUsers
-                  .where((u) => u.nym.toLowerCase().contains(term))
+                  .where((u) =>
+                      stripPubkeySuffix(u.nym).toLowerCase().contains(term))
                   .toList(growable: false);
           final total = filtered.length;
           final int renderCap;
@@ -707,7 +730,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 _header(context, app.selfNym),
                 if (widget.compact)
                   _SidebarActions(onItemSelected: widget.onItemSelected),
-                for (final s in _order) sectionFor(s),
+                // PM/group-only mode hides the whole PUBLIC CHANNELS section
+                // (`applyGroupChatPMOnlyMode` sets `display:none` on the
+                // `#channelList` `.nav-section`, pms.js:3862-3866).
+                for (final s in _order)
+                  if (!(settings.groupChatPMOnlyMode &&
+                      s == _SectionId.channels))
+                    sectionFor(s),
                 const SizedBox(height: 12),
               ],
             ),
@@ -909,12 +938,11 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
       const Duration(milliseconds: _PanicHoldDetector.holdMs),
       () {
         _fired = true;
-        // The hold fires the SAME 30ms `nymHapticTap` every other long-press
-        // site uses, right as the timer elapses (`if (window.nymHapticTap)
-        // window.nymHapticTap(); this.panicWipe()`, panic.js:20-25) — mapped
-        // to mediumImpact like the port's other nymHapticTap sites. This is
-        // the ONLY buzz the PWA fires for the wipe.
-        HapticFeedback.mediumImpact();
+        // The PWA fires exactly ONE 30ms `nymHapticTap` as the 2s timer
+        // elapses (`if (window.nymHapticTap) window.nymHapticTap();
+        // this.panicWipe()`, panic.js:20-25). `onHold` shows [PanicOverlay]
+        // synchronously, whose `initState` fires that single mediumImpact —
+        // buzzing here too would double-buzz, which the PWA never does.
         widget.onHold();
       },
     );
@@ -1344,11 +1372,14 @@ class _NavSection extends StatelessWidget {
                       ),
                     ),
                   ),
-                  // `.nav-title` children sit on a 10px flex gap; the icon hit
-                  // boxes carry 5px side padding, so a 4px spacer reads ~10px.
+                  // `.nav-title` lays its children on a 10px flex gap
+                  // (styles-shell.css:127-138) — the gap is between the 20px
+                  // icon hit boxes, padding included (and holds between the
+                  // flex:1 title text and the first icon when it truncates).
+                  const SizedBox(width: 10),
                   if (leadingIcon != null) ...[
                     leadingIcon!,
-                    const SizedBox(width: 4),
+                    const SizedBox(width: 10),
                   ],
                   // `.search-icon svg` stays `--text-dim` even while the
                   // input is open — `--primary` only on :hover
@@ -1358,7 +1389,7 @@ class _NavSection extends StatelessWidget {
                     tooltip: 'Search',
                     onTap: onToggleSearch,
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 10),
                   // `.collapse-icon` chevron — ▾ open (chevronDown) / ▸ collapsed
                   // (the PWA rotates the same glyph -90° → chevronRight).
                   _MiniIcon(
@@ -1541,9 +1572,12 @@ class _ReorderBtnState extends State<_ReorderBtn> {
             height: 18,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              // `.section-reorder-btn` bg white@0.08 → mode-aware so the
-              // reorder buttons stay visible in light mode.
-              color: hovered ? c.primary : c.hoverOverlay,
+              // `.section-reorder-btn` bg is a fixed rgba(255,255,255,0.08)
+              // in BOTH color modes (styles-shell.css:164-176 — the CSS has
+              // no light-theme override for it).
+              color: hovered
+                  ? c.primary
+                  : Colors.white.withValues(alpha: 0.08),
               borderRadius: NymRadius.rxs,
             ),
             // 12px stroke-width-3 chevron (index.html:466-472).
@@ -1559,7 +1593,7 @@ class _ReorderBtnState extends State<_ReorderBtn> {
   }
 }
 
-class _MiniIcon extends StatelessWidget {
+class _MiniIcon extends StatefulWidget {
   const _MiniIcon({
     super.key,
     required this.svg,
@@ -1571,23 +1605,44 @@ class _MiniIcon extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_MiniIcon> createState() => _MiniIconState();
+}
+
+class _MiniIconState extends State<_MiniIcon> {
+  bool _hover = false;
+
+  @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final btn = InkWell(
-      onTap: onTap,
-      borderRadius: const BorderRadius.all(Radius.circular(4)),
-      child: Padding(
-        // `.search-icon/.discover-icon/.collapse-icon`: 20×20 hit (`padding:
-        // 2px 5px`), 14 glyph.
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        child: NymSvgIcon(
-          svg,
-          size: 14,
-          color: c.textDim,
+    // `.search-icon:hover svg` etc. tint the glyph `--text-dim` → `--primary`
+    // over `transition: stroke 0.2s` (styles-shell.css:199-214).
+    final target = _hover ? c.primary : c.textDim;
+    final btn = MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: InkWell(
+        onTap: widget.onTap,
+        borderRadius: const BorderRadius.all(Radius.circular(4)),
+        child: Padding(
+          // `.search-icon/.discover-icon/.collapse-icon`: 20×20 hit (`padding:
+          // 2px 5px`), 14 glyph.
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+          child: TweenAnimationBuilder<Color?>(
+            tween: ColorTween(end: target),
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.ease,
+            builder: (context, color, _) => NymSvgIcon(
+              widget.svg,
+              size: 14,
+              color: color ?? target,
+            ),
+          ),
         ),
       ),
     );
-    return tooltip != null ? Tooltip(message: tooltip!, child: btn) : btn;
+    return widget.tooltip != null
+        ? Tooltip(message: widget.tooltip!, child: btn)
+        : btn;
   }
 }
 

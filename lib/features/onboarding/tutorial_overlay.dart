@@ -537,7 +537,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
             const SizedBox(height: 10),
             Text(
               step.body,
-              style: TextStyle(color: c.text, fontSize: 13, height: 1.5),
+              style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
             ),
             const SizedBox(height: 10),
             Text(
