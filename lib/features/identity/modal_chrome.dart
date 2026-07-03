@@ -131,8 +131,13 @@ class ModalChrome {
   /// primary/0.3 border + primary label + glow in dark
   /// (styles-shell.css:930-935), black/0.06 fill + solid primary border in
   /// light (styles-themes-responsive.css:601-605).
-  static Widget iconButton(NymColors c, String label, VoidCallback? onTap) {
-    return _IconButton(c: c, label: label, onTap: onTap);
+  /// [height] pins the pill to a fixed height with the label centered — the
+  /// `.modal-actions` flex row has no `align-items`, so its default `stretch`
+  /// makes an `.icon-btn` match the 42px `.send-btn` beside it (`.icon-btn` is
+  /// `inline-flex; align-items: center`, so the text stays centered).
+  static Widget iconButton(NymColors c, String label, VoidCallback? onTap,
+      {double? height}) {
+    return _IconButton(c: c, label: label, onTap: onTap, height: height);
   }
 
   /// The `.form-label`: 11px textDim UPPERCASE ls1.2 w600.
@@ -309,7 +314,6 @@ class _SendButtonState extends State<_SendButton> {
             curve: NymMotion.curve,
             height: 42,
             padding: const EdgeInsets.symmetric(horizontal: 22),
-            alignment: Alignment.center,
             decoration: BoxDecoration(
               color: fill,
               borderRadius: NymRadius.rsm,
@@ -326,16 +330,22 @@ class _SendButtonState extends State<_SendButton> {
                     ]
                   : null,
             ),
-            child: widget.child ??
-                Text(
-                  widget.label.toUpperCase(),
-                  style: TextStyle(
-                    color: fg,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.5,
+            // Center + widthFactor centers the label in the 42px pill while
+            // keeping it shrink-wrapped (a bare `alignment:` would expand the
+            // Container to fill any bounded row width — CSS buttons never do).
+            child: Center(
+              widthFactor: 1,
+              child: widget.child ??
+                  Text(
+                    widget.label.toUpperCase(),
+                    style: TextStyle(
+                      color: fg,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.5,
+                    ),
                   ),
-                ),
+            ),
           ),
         ),
       ),
@@ -347,11 +357,12 @@ class _SendButtonState extends State<_SendButton> {
 /// (styles-shell.css:911-935, styles-themes-responsive.css:595-605).
 class _IconButton extends StatefulWidget {
   const _IconButton(
-      {required this.c, required this.label, required this.onTap});
+      {required this.c, required this.label, required this.onTap, this.height});
 
   final NymColors c;
   final String label;
   final VoidCallback? onTap;
+  final double? height;
 
   @override
   State<_IconButton> createState() => _IconButtonState();
@@ -389,6 +400,7 @@ class _IconButtonState extends State<_IconButton> {
         child: AnimatedContainer(
           duration: NymMotion.transition,
           curve: NymMotion.curve,
+          height: widget.height,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
           decoration: BoxDecoration(
             color: fill,
@@ -398,16 +410,25 @@ class _IconButtonState extends State<_IconButton> {
                 ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 15)]
                 : null,
           ),
-          child: Text(
-            widget.label.toUpperCase(),
-            style: TextStyle(
-              color: fg,
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              letterSpacing: 0.8,
-            ),
-          ),
+          // With a pinned [height] the label centers vertically like the CSS
+          // `inline-flex; align-items: center` (Center + widthFactor keeps the
+          // pill shrink-wrapped instead of expanding to the row width).
+          child: widget.height == null
+              ? _label(fg)
+              : Center(widthFactor: 1, child: _label(fg)),
         ),
+      ),
+    );
+  }
+
+  Text _label(Color fg) {
+    return Text(
+      widget.label.toUpperCase(),
+      style: TextStyle(
+        color: fg,
+        fontSize: 12,
+        fontWeight: FontWeight.w500,
+        letterSpacing: 0.8,
       ),
     );
   }
