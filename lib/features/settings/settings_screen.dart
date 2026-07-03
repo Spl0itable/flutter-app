@@ -606,6 +606,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final proximity = await _resolveProximityOnSave(d.sortByProximity);
     if (!mounted) return;
 
+    // Snapshot the pre-save status visibility so a changed value can trigger
+    // the PWA's immediate re-broadcast (app.js:3837-3847).
+    final prevShowStatus = ref.read(settingsProvider).showStatus;
+
     // Fan out every Save-gated dropdown value through its setter (each writes
     // KV + state + queues the cross-device sync). Appearance live-applied
     // controls are included for idempotence.
@@ -624,6 +628,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ctrl.setReadReceiptsScope(d.readReceiptsScope);
     ctrl.setTypingIndicatorsScope(d.typingIndicatorsScope);
     ctrl.setShowStatus(d.showStatus);
+    // Show-Status changed: immediately re-assert presence under the NEW
+    // visibility mode so peers hide/show our status dot right away instead of
+    // waiting for the next organic (≤1/60s throttled) broadcast — the PWA's
+    // `publishStatusVisibility()` on Save (app.js:3842-3847 →
+    // nostr-core.js:2841-2846: `publishPresence(away ? 'away' : 'online',
+    // awayMsg)`). The PM-header/user-list refreshes the PWA pairs with it are
+    // reactive on native. Runs after `setShowStatus` so `publishPresence`
+    // reads the new `_statusMode`.
+    if (prevShowStatus != d.showStatus) {
+      final appState = ref.read(appStateProvider);
+      final awayMsg =
+          appState.users[appState.selfPubkey]?.awayMessage ?? '';
+      unawaited(ref.read(nostrControllerProvider).publishPresence(
+            awayMsg.isNotEmpty ? 'away' : 'online',
+            awayMessage: awayMsg,
+          ));
+    }
     ctrl.setCachePMs(d.cachePMs);
     ctrl.setTranslateLanguage(d.translateLanguage);
     ctrl.setSound(d.sound);
@@ -966,6 +987,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     // Reset the in-memory moderation Sets (pinned/hidden/blocked/keywords).
     final notifier = ref.read(appStateProvider.notifier);
+    // `nym.pinnedChannels = new Set()` + `updateChannelPins()` (app.js:4090,
+    // 4101): un-pin every favorited channel so the stars (and the
+    // hide-non-pinned filter) clear immediately, not on the next relaunch.
+    // `togglePin` notifies per removal; #nymchat is never in the set (it can
+    // neither be pinned nor unpinned).
+    for (final key in ref.read(appStateProvider).pinnedChannels.toList()) {
+      notifier.togglePin(key);
+    }
     for (final pk in ref.read(appStateProvider).blockedUsers.toList()) {
       notifier.removeBlockedUser(pk);
     }
@@ -2166,8 +2195,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               hint: 'Emoji always used when a swipe gesture is set to "Quick '
                   'React". Tap to choose from the full emoji picker.',
               // The preview renders a custom `:code:` emoji as its image
-              // (02-G; PWA `renderEmojiPreview`, app.js:3286-3289). `InlineEmojiText`
-              // falls back to plain text for a unicode emoji.
+              // (02-G; PWA `renderEmojiPreview`, app.js:3284-3292 — an
+              // anchored `^:code:$` match, so [wholeStringOnly]). A unicode
+              // emoji inherits the button's 22px font (`.nm-h-60`,
+              // no-inline.css:78); a custom-emoji image is 33x33 with
+              // `vertical-align: middle` (`#swipeReactEmojiPreview
+              // img.custom-emoji`, styles-chat.css:1650-1656).
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Row(
@@ -2175,8 +2208,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   children: [
                     InlineEmojiText(
                       text: s.swipeReactEmoji,
-                      style: const TextStyle(fontSize: 18, height: 1),
-                      emojiSize: 18,
+                      style: const TextStyle(fontSize: 22, height: 1),
+                      emojiSize: 33,
+                      wholeStringOnly: true,
+                      emojiAlignment: PlaceholderAlignment.middle,
                     ),
                     const SizedBox(width: 12),
                     NymOutlineButton(

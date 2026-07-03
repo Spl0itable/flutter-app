@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../../core/theme/nym_colors.dart';
+
 /// The blue verified checkmark badge (`.verified-badge`, styles-components.css
-/// :1382-1411): a 20×20 #1DA1F2 circle with a white ✓ (12px, w700). Rendered
+/// :1382-1411): a 20×20 #1DA1F2 circle (light mode darkens it to #1a8cd8,
+/// styles-themes-responsive.css:76-78) with a white ✓ (12px, w700). Rendered
 /// after the nym for `isVerifiedDeveloper` / `isVerifiedBot`
 /// (ui-context.js:407-411). `margin-left:4px; margin-right:2px` is applied by
 /// the caller's row gap.
@@ -22,8 +25,11 @@ class VerifiedBadge extends StatelessWidget {
       width: size,
       height: size,
       alignment: Alignment.center,
-      decoration: const BoxDecoration(
-        color: Color(0xFF1DA1F2),
+      decoration: BoxDecoration(
+        // `body.light-mode .verified-badge::before { background: #1a8cd8 }`.
+        color: context.nym.isLight
+            ? const Color(0xFF1A8CD8)
+            : const Color(0xFF1DA1F2),
         shape: BoxShape.circle,
       ),
       child: Text(

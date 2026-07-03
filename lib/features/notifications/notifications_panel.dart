@@ -4,7 +4,7 @@
 // Foundations ships the STORE (`notificationHistoryProvider`); this builds the
 // modal UI that renders its entries (avatar + decorated author wrapped in
 // `<…>` brackets + body + context label + timestamp), highlights unread rows
-// (cyan wash + primary left rule), exposes a "Mark all read" action, and opens
+// (cyan wash + primary left rule), exposes a "Mark all as read" action, and opens
 // the source conversation on tap (notifications.js:559-585). The shell owns the
 // bell + badge and calls [showNotificationsPanel].
 //
@@ -29,7 +29,7 @@ import '../messages/format/message_content.dart';
 ///
 /// The shell clears the unread badge right after this returns (`markAllViewed`,
 /// chat_pane), which mutates the live entries' `viewed` flags. To keep the cyan
-/// unread rule + "Mark all read" visible while the modal is up (the PWA shows
+/// unread rule + "Mark all as read" visible while the modal is up (the PWA shows
 /// what was unread and only deducts the badge as items scroll past), we SNAPSHOT
 /// each entry's unread state HERE — synchronously, before `showDialog` and thus
 /// before the shell's `markAllViewed` runs — and hand the frozen rows to the
@@ -83,7 +83,7 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
       _NotifRow(widget.entries[i], widget.viewedAtOpen[i]),
   ];
 
-  /// Drives the "Mark all read" button + per-row highlight locally so the modal
+  /// Drives the "Mark all as read" button + per-row highlight locally so the modal
   /// reflects the action immediately without a provider round-trip.
   late bool _hasUnread = _rows.any((r) => !r.viewed);
 
@@ -430,7 +430,7 @@ class _ToggleRow extends StatelessWidget {
 }
 
 /// A snapshotted notification row: the live [entry] plus its [viewed] state
-/// frozen at open (then locally toggled by "Mark all read").
+/// frozen at open (then locally toggled by "Mark all as read").
 class _NotifRow {
   _NotifRow(this.entry, this.viewed);
   final NotificationEntry entry;
@@ -465,7 +465,7 @@ class _MarkReadBtnState extends State<_MarkReadBtn> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
           child: Text(
-            'Mark all read',
+            'Mark all as read',
             style: TextStyle(
               color: c.primary,
               fontSize: 12,

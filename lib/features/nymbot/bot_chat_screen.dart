@@ -10,6 +10,7 @@ import '../../models/message.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import '../../widgets/chat/composer.dart' show EmojiSentinelController;
 import '../../widgets/chat/message_row.dart' show MessageGroup, MessageGroupEntry;
 import '../../widgets/chat/typing_indicator.dart';
 import '../../widgets/common/nym_avatar.dart';
@@ -42,7 +43,11 @@ import 'nymbot_providers.dart';
 ///   * `?balance` / `?buy` (shared credits modal),
 ///   * the `?git` connect modal (typed `?git …` subcommands run in-chat).
 class BotChatScreen extends ConsumerStatefulWidget {
-  const BotChatScreen({super.key});
+  const BotChatScreen({super.key, this.onOpenSidebar});
+
+  /// Mobile/tablet: opens the off-canvas sidebar drawer (the chat-header
+  /// hamburger). Null on wide layouts, where the sidebar is always visible.
+  final VoidCallback? onOpenSidebar;
 
   @override
   ConsumerState<BotChatScreen> createState() => _BotChatScreenState();
@@ -102,23 +107,10 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     final c = _colors(context);
     final state = ref.watch(botChatControllerProvider);
 
-    // `?buy` / out-of-credits → open the shared credits modal with the right
-    // tier preselected (PWA `showBotCreditsModal(null, tier)`).
-    ref.listen<BotBuyRequest?>(botBuyRequestProvider, (prev, next) {
-      if (next == null) return;
-      ref.read(botBuyRequestProvider.notifier).consume();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        BotCreditsModal.show(
-          context,
-          colors: _colors(context),
-          initialTier: next.tier,
-        );
-      });
-    });
-    // NOTE: gift requests (`?gift` / context-menu "Gift Nymbot Credits") are
-    // handled by the always-mounted listener in home_shell.dart — no second
-    // listener here, or the modal would open twice.
+    // NOTE: `?buy` / out-of-credits (`botBuyRequestProvider`) AND gift requests
+    // (`?gift` / context-menu "Gift Nymbot Credits") are handled by the
+    // always-mounted listeners in home_shell.dart — no second listener here,
+    // or the modal would open twice.
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -168,6 +160,16 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       foregroundColor: c.textBright,
       titleSpacing: 0,
       toolbarHeight: 68,
+      automaticallyImplyLeading: false,
+      // Compact layouts keep the hamburger so the off-canvas sidebar stays
+      // reachable from the bot PM (the shared `.mobile-menu-toggle`).
+      leading: widget.onOpenSidebar == null
+          ? null
+          : IconButton(
+              tooltip: 'Menu',
+              icon: NymSvgIcon(NymIcons.menu, size: 20, color: c.primary),
+              onPressed: widget.onOpenSidebar,
+            ),
       title: Row(
         children: [
           // `.pm-header-avatar`: 26px avatar with a 7px status dot — the bot is
@@ -339,8 +341,13 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     final app = ref.watch(appStateProvider);
     final settings = ref.watch(settingsProvider);
     final reactions = ref.watch(reactionsProvider);
-    final msgs =
-        app.messages[BotChatController.conversationKey] ?? const <Message>[];
+    // The canonical thread merged with the LOCAL-ONLY info bubbles (welcome,
+    // `?help` guide, command outputs — never in the shared store, never
+    // persisted; PWA `_displayBotInfoMessage`, pms.js:1773-1776).
+    final msgs = _mergeWithInfo(
+      app.messages[BotChatController.conversationKey] ?? const <Message>[],
+      ref.watch(botChatControllerProvider).infoMessages,
+    );
 
     // `.messages-container` bg: black@0.15 dark / white@0.3 light.
     final containerColor = c.isLight
@@ -381,51 +388,15 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
               itemCount: units.length,
               itemBuilder: (context, revIndex) {
                 final unit = units[units.length - 1 - revIndex];
-                final group = MessageGroup(
+                // A reasoning-bearing bot reply renders its collapsed
+                // "💭 Reasoning" section INSIDE the bubble content — the
+                // canonical MessageRow prepends it (messages.js:796-797).
+                return MessageGroup(
                   entries: unit,
                   settings: settings,
                   onReactionPicker: (msg) =>
                       showReactionPicker(context, ref, msg),
                 );
-                final lead = unit.first.message;
-                // Bot replies whose model exposed its chain of thought carry
-                // the collapsed "💭 Reasoning" section (`.bot-think`,
-                // messages.js:796-797 prepends it into the bubble). The
-                // canonical MessageRow doesn't render `Message.thinking` yet
-                // (see handoffs), so the section is drawn directly above the
-                // reply bubble, aligned with the group's stack column.
-                if (lead.isBot &&
-                    (lead.thinking?.trim().isNotEmpty ?? false)) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: settings.useBubbles
-                            // group padding 6 + 32 avatar + 6 gap = 44.
-                            ? const EdgeInsets.fromLTRB(44, 6, 14, 0)
-                            : const EdgeInsets.fromLTRB(14, 6, 14, 0),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth:
-                                  MediaQuery.of(context).size.width * 0.85,
-                            ),
-                            child: _BotThinkSection(
-                              reasoning: lead.thinking!,
-                              colors: c,
-                              // `.bot-think { font-size: 0.88em }` of the user
-                              // text size.
-                              fontSize: settings.textSize.toDouble() * 0.88,
-                            ),
-                          ),
-                        ),
-                      ),
-                      group,
-                    ],
-                  );
-                }
-                return group;
               },
             ),
           ),
@@ -443,16 +414,34 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
 
   /// Whether [cur] bubble-groups onto [prev]: same author within the 5-minute
   /// window, neither a system pill nor a `/me` action (messages.js:1679-1706).
-  /// A reasoning-bearing bot reply starts its own group so its `.bot-think`
-  /// section can render above the bubble.
+  /// A thinking reply groups NORMALLY — its `.bot-think` section renders inside
+  /// the bubble (messages.js:1552-1568 has no thinking exclusion).
   bool _groupsWith(Message prev, Message cur) =>
       !prev.isSystemRow &&
       !cur.isSystemRow &&
       !prev.isMeAction &&
       !cur.isMeAction &&
-      (cur.thinking == null || cur.thinking!.trim().isEmpty) &&
       prev.pubkey == cur.pubkey &&
       (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
+
+  /// Merges the canonical store thread with the controller's transient info
+  /// bubbles, ordered by wall-clock timestamp; at an equal stamp store rows
+  /// sort first (so the empty-thread welcome lands right after the 'Start of
+  /// private message' line, matching the PWA's DOM append order).
+  static List<Message> _mergeWithInfo(List<Message> store, List<Message> info) {
+    if (info.isEmpty) return store;
+    final merged = <({Message m, bool isInfo, int idx})>[
+      for (var i = 0; i < store.length; i++) (m: store[i], isInfo: false, idx: i),
+      for (var i = 0; i < info.length; i++) (m: info[i], isInfo: true, idx: i),
+    ];
+    merged.sort((a, b) {
+      final dt = a.m.timestamp - b.m.timestamp;
+      if (dt != 0) return dt;
+      if (a.isInfo != b.isInfo) return a.isInfo ? 1 : -1;
+      return a.idx - b.idx;
+    });
+    return [for (final e in merged) e.m];
+  }
 
   // ---------------------------------------------------------------------------
   // Modals (premium surfaces kept on top of the canonical chat)
@@ -779,110 +768,6 @@ class _TierSwitch extends StatelessWidget {
 }
 
 // =============================================================================
-// `.bot-think` — the collapsed "💭 Reasoning" section (styles-chat.css:1193-1237)
-// =============================================================================
-
-/// The collapsible reasoning block: secondary@0.08 fill, 1px glass border with a
-/// 3px primary@0.45 left accent, radius-xs (8); the summary row (5px 10px,
-/// text-dim, rotating ▸) grows a 1px glass-border divider while open; the body
-/// is italic dim at 1.5 line-height, capped at 320px with its own scroll. The
-/// whole block renders at 0.88em of the user text size.
-class _BotThinkSection extends StatefulWidget {
-  const _BotThinkSection({
-    required this.reasoning,
-    required this.colors,
-    required this.fontSize,
-  });
-
-  final String reasoning;
-  final NymColors colors;
-
-  /// 0.88 × the user text-size setting (`.bot-think { font-size: 0.88em }`).
-  final double fontSize;
-
-  @override
-  State<_BotThinkSection> createState() => _BotThinkSectionState();
-}
-
-class _BotThinkSectionState extends State<_BotThinkSection> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = widget.colors;
-    final fs = widget.fontSize;
-    final side = BorderSide(color: c.glassBorder);
-    return Container(
-      // `.bot-think { margin: 2px 0 8px }`.
-      margin: const EdgeInsets.only(top: 2, bottom: 8),
-      decoration: BoxDecoration(
-        color: c.secondary.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(8),
-        border: Border(
-          top: side,
-          right: side,
-          bottom: side,
-          left: BorderSide(color: c.primary.withValues(alpha: 0.45), width: 3),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          InkWell(
-            onTap: () => setState(() => _expanded = !_expanded),
-            child: Container(
-              // `[open] summary { border-bottom: 1px solid var(--glass-border) }`.
-              decoration: _expanded
-                  ? BoxDecoration(border: Border(bottom: side))
-                  : null,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // `summary::before` ▸ marker (rotates 90° when open;
-                  // `--transition`: 0.25s cubic-bezier(0.4,0,0.2,1)).
-                  AnimatedRotation(
-                    duration: const Duration(milliseconds: 250),
-                    curve: Curves.fastOutSlowIn,
-                    turns: _expanded ? 0.25 : 0,
-                    child: Text('▸',
-                        style: TextStyle(color: c.textDim, fontSize: fs)),
-                  ),
-                  const SizedBox(width: 6),
-                  // `.bot-think summary` has no font-weight (normal/w400).
-                  Text('💭 Reasoning',
-                      style: TextStyle(
-                          color: c.textDim,
-                          fontSize: fs,
-                          fontWeight: FontWeight.w400)),
-                ],
-              ),
-            ),
-          ),
-          if (_expanded)
-            // `.bot-think-body`: italic dim, capped at 320px with its own scroll.
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 320),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
-                child: Text(
-                  widget.reasoning,
-                  style: TextStyle(
-                      color: c.textDim,
-                      fontSize: fs,
-                      height: 1.5,
-                      fontStyle: FontStyle.italic),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-// =============================================================================
 // Composer — the PWA `.input-container` chrome (styles-chat.css:1384-1965)
 // =============================================================================
 
@@ -902,7 +787,12 @@ class _BotComposer extends ConsumerStatefulWidget {
 }
 
 class _BotComposerState extends ConsumerState<_BotComposer> {
-  final _controller = TextEditingController();
+  /// The shared rich composer controller: known `:code:` collapse to sentinel
+  /// chars painted as 1.4em inline emoji images while composing, and
+  /// [EmojiSentinelController.expand] restores the literal shortcodes at send —
+  /// the PWA's single rich `#messageInput` (`_maybeRenderTypedEmoji`,
+  /// ui-context.js:1968), which bot PMs share.
+  final _controller = EmojiSentinelController();
   final _focus = FocusNode();
 
   /// The currently-filtered `?…` suggestions (empty → palette hidden).
@@ -953,6 +843,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
       _prefs ??= await SharedPreferences.getInstance();
 
   void _onTextChanged() {
+    // Collapse any just-completed known `:code:` into its inline-image
+    // sentinel (mirrors `_maybeRenderTypedEmoji` firing on input). A rewrite
+    // re-notifies; the second pass is a no-op.
+    _controller.resolveInput();
     final text = _controller.text;
     final textChanged = text != _lastText;
     _lastText = text;
@@ -1055,7 +949,9 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   }
 
   void _send() {
-    final typed = _controller.text.trim();
+    // Expand sentinel chars back to literal `:code:` before anything leaves
+    // the composer (wire safety — the sentinel is render-only).
+    final typed = _controller.expand(_controller.text).trim();
     // The PWA allows sending a bare quote: `if (!content && !pendingQuote)`.
     if (typed.isEmpty && _pendingQuote == null) return;
     final content = _composeOutgoing(typed);
@@ -1167,6 +1063,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           appStateProvider.select((s) => s.connectedRelays > 0),
         ) ||
         ref.read(nostrControllerProvider).isLive;
+
+    // Feed the live NIP-30 shortcode→url map into the controller so typed and
+    // picked custom emoji render inline while composing (composer parity).
+    _controller.codeToUrl = ref.watch(liveCustomEmojiProvider).codeToUrl;
 
     // Apply mention/quote requests published by the context menu / swipe /
     // double-tap (one-shot mailbox).

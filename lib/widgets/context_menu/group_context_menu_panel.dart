@@ -752,29 +752,17 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
 
   Future<void> _confirmTransfer(
       String groupId, String pubkey, String base) async {
-    final c = context.nym;
     final controller = ref.read(nostrControllerProvider);
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: c.bgTertiary,
-        content: Text(
-          'Transfer group ownership to $base? You will lose owner privileges.',
-          style: TextStyle(color: c.text, fontSize: 14),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text('Cancel', style: TextStyle(color: c.textDim)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Transfer', style: TextStyle(color: c.danger)),
-          ),
-        ],
-      ),
+    // `.app-dialog` confirm — the PWA member-transfer branch runs
+    // `showAppConfirm(\`Transfer group ownership to ${nym}? You will lose owner
+    // privileges.\`, { danger: true, okLabel: 'Transfer' })` (groups.js:3136).
+    final ok = await showAppConfirm(
+      context,
+      'Transfer group ownership to $base? You will lose owner privileges.',
+      okLabel: 'Transfer',
+      danger: true,
     );
-    if (ok == true) {
+    if (ok) {
       // Close the group menu, then run the transfer with the captured
       // controller (safe even after this panel disposes).
       widget.onClose();

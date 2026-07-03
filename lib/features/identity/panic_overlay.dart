@@ -62,7 +62,10 @@ class _PanicOverlayState extends State<PanicOverlay>
   @override
   void initState() {
     super.initState();
-    HapticFeedback.heavyImpact();
+    // The 2s panic hold fires the same `nymHapticTap` (a single 30ms vibrate,
+    // panic.js:23) as every other haptic site — the codebase-wide mapping for
+    // that pulse is mediumImpact, not a heavier destructive buzz.
+    HapticFeedback.mediumImpact();
     _grid = _randomGrid();
     _scrambleTimer = Timer.periodic(
       const Duration(milliseconds: 60),

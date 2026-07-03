@@ -207,15 +207,25 @@ class _AvatarWithStatus extends StatelessWidget {
           Positioned(
             right: -1,
             bottom: -1,
+            // CSS `box-sizing:content-box` puts the 2px ring OUTSIDE the 8px
+            // dot → 12px border box positioned at bottom/right -1px. The ring
+            // color is hardcoded `#0a0a0f` (NOT `--bg`), with a light-mode
+            // override to `#f5f5f2` (styles-themes-responsive.css:1309-1311).
             child: Container(
-              width: 8,
-              height: 8,
+              width: 12,
+              height: 12,
+              padding: const EdgeInsets.all(2),
               decoration: BoxDecoration(
-                color: statusColor(status),
+                color: c.isLight
+                    ? const Color(0xFFF5F5F2)
+                    : const Color(0xFF0A0A0F),
                 shape: BoxShape.circle,
-                // `.user-status-dot` ring = `--bg` (#0a0a0f dark; light-mode
-                // override `#f5f5f2`). Use the theme bg so it's correct in both.
-                border: Border.all(color: c.bg, width: 2),
+              ),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: statusColor(status),
+                  shape: BoxShape.circle,
+                ),
               ),
             ),
           ),

@@ -447,6 +447,26 @@ class ShopStyleBubblePreview extends StatelessWidget {
             LinearGradient(colors: deco.gradient!).createShader(rect),
         child: Text(text, style: base.copyWith(color: Colors.white)),
       );
+      // The aurora blue glow (`.style-preview-aurora { text-shadow: 0 0 10px
+      // rgba(91,140,255,.3) }`, styles-features.css:630-636; dark mode only —
+      // the light preview resets it). The mask would clip a shadow away, so
+      // paint a shadow-only transparent copy behind the gradient text, exactly
+      // like the chat bubble does.
+      final glow = deco.gradientGlow;
+      if (glow != null) {
+        label = Stack(
+          children: [
+            Text(
+              text,
+              style: base.copyWith(
+                color: const Color(0x00000000),
+                shadows: [glow],
+              ),
+            ),
+            label,
+          ],
+        );
+      }
     } else {
       label = Text(text, style: base);
     }
@@ -894,7 +914,9 @@ class ShopSupplyBadge extends StatelessWidget {
     };
     final fg = context.nym.isLight ? tier.lightFg : tier.fg;
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
+      // `.shop-supply-badge { margin: 6px 0; padding: 2px 10px }`
+      // (styles-features.css:1336-1344).
+      margin: const EdgeInsets.symmetric(vertical: 6),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
       decoration: BoxDecoration(
         color: tier.bg,

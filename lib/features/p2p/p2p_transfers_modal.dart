@@ -175,6 +175,11 @@ class P2PTransfersModal extends ConsumerWidget {
                                         ),
                                       for (final t in transfers)
                                         _TransferRow(
+                                          // PWA keys each row's DOM node by
+                                          // `transfer-${id}` (p2p.js), so the
+                                          // fill's width transition stays with
+                                          // its transfer as rows come and go.
+                                          key: ValueKey(t.transferId),
                                           transfer: t,
                                           onCancel: () => service
                                               .cancelTransfer(t.transferId),
@@ -307,7 +312,8 @@ class _SeedingRow extends StatelessWidget {
 }
 
 class _TransferRow extends StatelessWidget {
-  const _TransferRow({required this.transfer, required this.onCancel});
+  const _TransferRow(
+      {super.key, required this.transfer, required this.onCancel});
   final P2PTransfer transfer;
   final VoidCallback onCancel;
 
@@ -328,7 +334,8 @@ class _TransferRow extends StatelessWidget {
       children: [
         _TransferHeader(name: transfer.offer.name, size: transfer.offer.size),
         // .p2p-transfer-progress: 6px track white/0.05 radius 10; fill gradient
-        // primary→secondary radius 10. margin-bottom 8.
+        // primary→secondary radius 10, `transition: width 0.3s ease`
+        // (styles-features.css:1981-1987). margin-bottom 8.
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: ClipRRect(
@@ -338,7 +345,10 @@ class _TransferRow extends StatelessWidget {
               child: Stack(
                 children: [
                   Container(color: Colors.white.withValues(alpha: 0.05)),
-                  FractionallySizedBox(
+                  AnimatedFractionallySizedBox(
+                    duration: const Duration(milliseconds: 300),
+                    // CSS `ease` = cubic-bezier(0.25, 0.1, 0.25, 1).
+                    curve: Curves.ease,
                     widthFactor: pct,
                     child: Container(
                       decoration: BoxDecoration(

@@ -33,12 +33,21 @@ class VideoMessage extends StatefulWidget {
   const VideoMessage({
     super.key,
     required this.url,
+    this.fallbackUrls = const [],
     this.maxSize = 300,
     this.borderRadius,
     this.bordered = true,
   });
 
   final String url;
+
+  /// NIP-92 imeta Blossom mirror URLs (already proxied, like [url]) to fall
+  /// back to when the primary source fails. Mirrors the PWA's
+  /// `_attachMediaFallbacks` video handler (messages.js:1165-1186), which swaps
+  /// the `<source>` src to the next `data-media-fallbacks` mirror on `error`
+  /// and re-loads.
+  final List<String> fallbackUrls;
+
   final double maxSize;
   final BorderRadius? borderRadius;
   final bool bordered;
@@ -53,8 +62,13 @@ class _VideoMessageState extends State<VideoMessage> {
   /// Lazily initialising the controller after the first tap.
   bool _initializing = false;
 
-  /// Initialisation failed → fall back to tap-to-open.
+  /// Initialisation failed (primary AND every imeta mirror) → tap-to-open.
   bool _failed = false;
+
+  /// The source that actually initialized (or the last one tried), mirroring
+  /// the PWA keeping `.video-expand-btn[data-video-src]` in sync with the
+  /// swapped-in mirror (messages.js:1176-1180).
+  String? _activeUrl;
 
   @override
   void dispose() {
@@ -69,37 +83,42 @@ class _VideoMessageState extends State<VideoMessage> {
 
   Future<void> _start() async {
     if (_initializing || _controller != null) return;
-    final uri = Uri.tryParse(widget.url);
-    if (uri == null) {
-      setState(() => _failed = true);
-      return;
-    }
     setState(() => _initializing = true);
-    final controller = VideoPlayerController.networkUrl(uri);
-    try {
-      await controller.initialize();
-      controller.addListener(_onValue);
-      if (!mounted) {
-        await controller.dispose();
+    // Walk the primary URL then each NIP-92 imeta mirror until one initializes
+    // — the PWA's `_attachMediaFallbacks` `tryNext` (messages.js:1165-1186)
+    // swaps the `<source>` src to the next mirror on `error` and re-loads.
+    for (final candidate in [widget.url, ...widget.fallbackUrls]) {
+      final uri = Uri.tryParse(candidate);
+      if (uri == null) continue;
+      _activeUrl = candidate;
+      final controller = VideoPlayerController.networkUrl(uri);
+      try {
+        await controller.initialize();
+        controller.addListener(_onValue);
+        if (!mounted) {
+          await controller.dispose();
+          return;
+        }
+        setState(() {
+          _controller = controller;
+          _initializing = false;
+        });
+        await controller.play();
         return;
+      } catch (_) {
+        await controller.dispose();
+        if (!mounted) return;
       }
-      setState(() {
-        _controller = controller;
-        _initializing = false;
-      });
-      await controller.play();
-    } catch (_) {
-      await controller.dispose();
-      if (!mounted) return;
-      setState(() {
-        _initializing = false;
-        _failed = true;
-      });
     }
+    if (!mounted) return;
+    setState(() {
+      _initializing = false;
+      _failed = true;
+    });
   }
 
   Future<void> _openExternally() async {
-    final uri = Uri.tryParse(widget.url);
+    final uri = Uri.tryParse(_activeUrl ?? widget.url);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
@@ -159,7 +178,10 @@ class _VideoMessageState extends State<VideoMessage> {
         // A 16:9 poster footprint before we know the real aspect ratio.
         width: widget.maxSize,
         height: widget.maxSize * 9 / 16,
-        color: Colors.black.withValues(alpha: 0.4),
+        // `video.message-video { background: var(--bg-tertiary) }`
+        // (styles-chat.css:1029-1040) — rgba(20,20,35,0.9) dark /
+        // rgba(240,240,237,0.9) light.
+        color: c.bgTertiary,
         alignment: Alignment.center,
         child: _initializing
             ? SizedBox(
@@ -237,7 +259,7 @@ class _VideoMessageState extends State<VideoMessage> {
     );
   }
 
-  /// Init-failed fallback: a dark tile that opens the URL externally on tap
+  /// Init-failed fallback: a tile that opens the URL externally on tap
   /// (`url_launcher`), never a dead end.
   Widget _fallbackTile(NymColors c) {
     return GestureDetector(
@@ -246,7 +268,9 @@ class _VideoMessageState extends State<VideoMessage> {
         constraints: _constraints,
         width: widget.maxSize,
         height: widget.maxSize * 9 / 16,
-        color: Colors.black.withValues(alpha: 0.4),
+        // `video.message-video { background: var(--bg-tertiary) }` — the same
+        // fill the unplayed <video> element sits on in both themes.
+        color: c.bgTertiary,
         alignment: Alignment.center,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -292,7 +316,9 @@ class _ExpandButton extends StatelessWidget {
         height: 30,
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.6),
-          borderRadius: const BorderRadius.all(Radius.circular(8)),
+          // `.video-expand-btn { border-radius: var(--radius-sm) }` (=12,
+          // styles-chat.css:1048-1057).
+          borderRadius: const BorderRadius.all(Radius.circular(_kVideoRadius)),
           border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
         ),
         child: const Icon(Icons.fullscreen, size: 18, color: Colors.white),

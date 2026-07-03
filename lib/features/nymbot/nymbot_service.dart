@@ -4,11 +4,11 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
 import '../../services/api/api_client.dart';
+import '../../services/api/api_config.dart';
 import 'nymbot_models.dart';
 
 /// Thin client for the Nymbot worker (`POST /api/bot`), ported from the call
-/// sites in the PWA and the contract in `docs/specs/04-features.md` §11 +
-/// `functions/api/bot.js`.
+/// sites in the PWA and the contract in `functions/api/bot.js`.
 ///
 /// Two surfaces share the one endpoint:
 ///   * Public `?` commands  → body `{command, args, …}` → `{event}` (a signed
@@ -17,10 +17,6 @@ import 'nymbot_models.dart';
 ///
 /// Network is **lazy**: nothing is fetched at construction; every method makes
 /// exactly one request when called.
-///
-/// TODO(verify): the project ships a shared `lib/services/api/api_client.dart`
-/// (being built in parallel). When present, replace [_post] / [_base] / the
-/// User-Agent with the shared ApiClient so base URL + UA stay centralised.
 class NymbotService {
   NymbotService({
     http.Client? client,
@@ -28,18 +24,20 @@ class NymbotService {
     String? userAgent,
   })  : _client = client ?? http.Client(),
         _base = baseUrl ?? _defaultBase,
-        _userAgent = userAgent ?? _defaultUserAgent;
+        _userAgent = userAgent ?? ApiConfig.userAgent;
 
   final http.Client _client;
   final String _base;
   final String _userAgent;
 
-  // TODO(verify): the PWA hits a same-origin `/api/bot`; the live host is
-  // `web.nymchat.app`. Confirm the production base + that the app shell does not
-  // route this through a proxy. Mirrors `NymchatApp/<ver>` UA token used by the
-  // WebView shell (`lib/screens/webview_screen.dart`).
-  static const String _defaultBase = 'https://web.nymchat.app/api/bot';
-  static const String _defaultUserAgent = 'NymchatApp/1.0';
+  /// `https://<host>/api/bot` — the PWA hits a same-origin `/api/bot`
+  /// (`_getApiHost()`); natively the host is the fixed [ApiConfig.apiHost],
+  /// exactly like `ApiClient.botUrl`.
+  static final String _defaultBase = 'https://${ApiConfig.apiHost}/api/bot';
+
+  /// The `/api/bot` URL requests go to — also the `['u', url]` a NIP-98 auth
+  /// event must bind to (`_signBotAuth`, pms.js:1651-1652).
+  String get baseUrl => _base;
 
   // ===========================================================================
   // Public `?` commands
@@ -81,20 +79,27 @@ class NymbotService {
   // Private paid chat
   // ===========================================================================
 
-  /// Sends a private 1:1 chat message to Nymbot (`action: pm`).
+  /// Sends a private 1:1 chat turn to Nymbot (`action: pm`).
   ///
-  /// [auth] is the per-request auth blob `{id, sig, url}` the worker expects
-  /// (spec §11.2). [proModel] pins a Pro frontier model (null → standard
-  /// auto-routing). [git] enables repo mode. Returns a [BotReply] with the
-  /// reasoning already split out of `<think>…</think>`.
+  /// The worker's `pm` action **never accepts plaintext** (bot.js:1428-1583):
+  /// the client first gift-wraps the user's message (kind 1059 to the bot),
+  /// publishes it, then sends only the published wrap's [eventId] (400
+  /// `"Missing message event id"` without it). [fresh] mirrors the PWA's
+  /// `!`-prefixed one-off flag; [proModel] pins a Pro frontier model; [git]
+  /// enables repo mode (only on Pro replies, pms.js:2455-2466).
+  ///
+  /// Returns the decoded response map: `{event, selfEvent, balance, cost,
+  /// taskType, pro, proModel, git, modelCalls, lowBalance}` where
+  /// `event`/`selfEvent` are **gift-wrapped kind-1059 replies** the caller must
+  /// publish to relays and NIP-44-unwrap to display (pms.js:2489-2497). There
+  /// is no plaintext `reply` field.
   ///
   /// On insufficient credits the worker returns `{noCredits, pro, balance,
   /// required, error}` — surfaced as a [NymbotInsufficientCredits] exception.
-  Future<BotReply> sendBotMessage(
-    String text, {
+  Future<Map<String, dynamic>> sendBotMessage({
     required String pubkey,
+    required String eventId,
     Map<String, dynamic>? auth,
-    String? eventId,
     String? proModel,
     bool fresh = false,
     GitConfig? git,
@@ -102,11 +107,10 @@ class NymbotService {
     final body = <String, dynamic>{
       'action': 'pm',
       'pubkey': pubkey,
-      'text': text,
       if (auth != null) 'auth': auth,
-      if (eventId != null) 'eventId': eventId,
+      'eventId': eventId,
+      'fresh': fresh,
       if (proModel != null) 'proModel': proModel,
-      if (fresh) 'fresh': true,
       if (git != null) 'git': git.toWire(),
     };
     final json = await _post(body);
@@ -122,22 +126,7 @@ class NymbotService {
     // A 2xx body carrying `error` is a failure too — the PWA treats
     // `status >= 400 || !data || data.error` identically (pms.js:2484-2487).
     _throwOnErrorField(json);
-
-    // The reply text lives in `reply` (spec §11.2) or, on some paths, inside a
-    // returned event's `content` — accept either for robustness.
-    final raw = (json['reply'] ?? _maybeEventContent(json) ?? '').toString();
-    return splitReasoning(
-      raw,
-      taskType: json['taskType']?.toString(),
-      modelCalls: _asNullableInt(json['modelCalls']),
-      outputTokens: _asNullableInt(json['outputTokens']),
-      cost: _asNullableInt(json['cost']),
-      balance: _asNullableInt(json['balance']),
-      pro: json['pro'] == true,
-      proModel: json['proModel']?.toString(),
-      git: json['git'] == true,
-      lowBalance: json['lowBalance'] == true,
-    );
+    return json;
   }
 
   /// Fetches the user's standard + Pro credit balances (`action: balance`).
@@ -200,11 +189,14 @@ class NymbotService {
       });
 
   /// Claims credits once an invoice is paid (`action: claim-credits`).
+  /// [gifterNym] is `<nym>#<suffix>` so a gifted recipient's DM names the
+  /// sender (`_claimBotCredits`, zaps.js:752-756).
   Future<Map<String, dynamic>> claimCredits({
     required String invoiceId,
     required String pubkey,
     Map<String, dynamic>? auth,
     Map<String, dynamic>? receipt,
+    String? gifterNym,
   }) =>
       _post({
         'action': 'claim-credits',
@@ -212,6 +204,7 @@ class NymbotService {
         'pubkey': pubkey,
         if (auth != null) 'auth': auth,
         if (receipt != null) 'receipt': receipt,
+        if (gifterNym != null && gifterNym.isNotEmpty) 'gifterNym': gifterNym,
       });
 
   /// Selects/changes the pinned Pro model for the chat. This is a pure local

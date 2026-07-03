@@ -18,6 +18,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
+import '../../state/settings_provider.dart';
 import '../../widgets/nym_icons.dart';
 import '../messages/format/message_content.dart' show proxiedMedia;
 import '../messages/inline_network_image.dart';
@@ -151,6 +152,8 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
     // a strict superset of the old static `customEmojiStateProvider` and updates
     // live as packs arrive over relays.
     final custom = ref.watch(liveCustomEmojiProvider);
+    final transparency =
+        ref.watch(settingsProvider.select((s) => s.transparencyEnabled));
     final width = MediaQuery.sizeOf(context).width;
     final columns = width <= _kFiveColMaxWidth ? 5 : 6;
 
@@ -221,9 +224,12 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       ];
       if (cells.isEmpty) continue;
       final star = (isOwn(pack) || isSubscribed(pack)) ? ' ★' : '';
+      // `pack.title || 'Emoji pack'` (emoji.js:507) — an empty/missing cached
+      // title still gets a section header.
+      final packTitle = pack.title.isEmpty ? 'Emoji pack' : pack.title;
       sections.add(_section(
         c,
-        title: '${pack.title}$star',
+        title: '$packTitle$star',
         children: cells,
         isFavorite: packFavSet.contains(pack.key),
         onToggleFavorite:
@@ -264,12 +270,31 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
           return Container(
             height: height,
             decoration: BoxDecoration(
-              color: c.glassBg,
+              // `.emoji-picker` bg: with Transparency ON (no `solid-ui` body
+              // class) the PWA hardcodes rgba(20,20,35,0.9) dark
+              // (styles-components.css:2094) / rgba(255,255,255,0.92) light
+              // (styles-themes-responsive.css:1167-1171); with Transparency OFF
+              // (`solid-ui`, the default) it's the opaque `var(--glass-bg)`
+              // (#14141e dark / #ffffff light, styles-themes-responsive.css:
+              // 1583-1600) — which is exactly `c.glassBg`.
+              color: transparency
+                  ? (c.isLight
+                      ? const Color(0xEBFFFFFF) // rgba(255,255,255,0.92)
+                      : const Color(0xE6141423)) // rgba(20,20,35,0.9)
+                  : c.glassBg,
               border: Border.all(color: c.glassBorder),
               borderRadius: NymRadius.rmd,
-              // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
-              boxShadow: const [
-                BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+              // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); light mode redefines
+              // it to rgba(0,0,0,0.12) (styles-themes-responsive.css:537, and
+              // explicitly on `body.light-mode .emoji-picker` at :1167-1171).
+              boxShadow: [
+                BoxShadow(
+                  color: c.isLight
+                      ? const Color(0x1F000000)
+                      : const Color(0x80000000),
+                  blurRadius: 32,
+                  offset: const Offset(0, 8),
+                ),
               ],
             ),
             padding: const EdgeInsets.all(12),
@@ -311,7 +336,15 @@ class _EmojiPickerState extends ConsumerState<EmojiPicker> {
       child: TextField(
         controller: _searchController,
         onChanged: (v) => setState(() => _query = _sanitizeUserText(v).trim()),
-        style: TextStyle(color: c.textBright, fontSize: 12),
+        // `color: var(--text-bright)`; light mode forces this input to #000
+        // via `body.light-mode input { color: #000000 !important }`
+        // (styles-themes-responsive.css:585-592). Unlike `.emoji-search-input`
+        // / `.gif-search-input`, `.emoji-picker-search-input` is NOT in the
+        // more specific `color: var(--text) !important` list (:1063-1068), so
+        // the generic #000 rule wins here.
+        style: TextStyle(
+            color: c.isLight ? const Color(0xFF000000) : c.textBright,
+            fontSize: 12),
         cursorColor: c.isLight ? Colors.black : Colors.white,
         decoration: InputDecoration(
           isDense: true,

@@ -1673,6 +1673,9 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    // Close any pending NIP-57 receipt REQ (shop.js `_clearShopReceiptWait`,
+    // fired whenever the zap modal goes away).
+    ref.read(nostrControllerProvider).clearShopReceiptWait();
     // Release the invoice back to the reconciliation path (a payment settled
     // after this dialog dies is claimed on the next foreground/shop open).
     ref.read(shopControllerProvider.notifier).activeInvoiceId = null;
@@ -1733,10 +1736,9 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   ///     (`checkShopPayment`),
   ///   * `serverVerify` → poll `shop-check` every 2s × 180
   ///     (`checkShopPaymentViaServer`),
-  ///   * neither → the PWA waits for the NIP-57 kind-9735 receipt on relays
-  ///     (`_listenForShopReceipt`, 180s). The relay REQ needs the nostr layer
-  ///     (see handoff); until wired, only the 180s timeout + "I've paid"
-  ///     manual re-check cover this mode.
+  ///   * neither → wait for the NIP-57 kind-9735 receipt on relays, matched by
+  ///     bolt11 (`_listenForShopReceipt`, shop.js:1483-1511 + zaps.js:1181-1189;
+  ///     180s timeout).
   void _startPolling(ShopInvoice inv, ShopIdentity identity) {
     final verify = inv.verify;
     if (verify != null && verify.isNotEmpty) {
@@ -1786,16 +1788,26 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
       });
       return;
     }
-    // Receipt mode (no verify, no serverVerify): 180s window, then the PWA's
-    // receipt-timeout copy (shop.js:1499-1510).
-    _pollTimer = Timer(const Duration(seconds: 180), () {
+    // Receipt mode (no verify, no serverVerify): subscribe to the bot's zap
+    // receipts and auto-claim when one matches this invoice's bolt11
+    // (shop.js `_listenForShopReceipt` → zaps.js:1181-1189 →
+    // `handleShopPaymentSuccess`); false = the 180s timeout fired, then the
+    // PWA's receipt-timeout copy (shop.js:1499-1510).
+    unawaited(() async {
+      final detected = await ref
+          .read(nostrControllerProvider)
+          .listenForShopReceipt(inv.pr);
       if (!mounted || _settling) return;
-      setState(() {
-        _phase = _BuyPhase.error;
-        _status =
-            'Payment not detected yet — if you paid, reopen the shop shortly.';
-      });
-    });
+      if (detected) {
+        await _claim(inv, identity);
+      } else {
+        setState(() {
+          _phase = _BuyPhase.error;
+          _status =
+              'Payment not detected yet — if you paid, reopen the shop shortly.';
+        });
+      }
+    }());
   }
 
   /// True once a claim is under way / settled — late poll ticks must not
@@ -1805,8 +1817,10 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
 
   Future<void> _claim(ShopInvoice inv, ShopIdentity identity) async {
     // Stop any detection loop still running (e.g. the manual "I've paid" path
-    // confirms while the periodic poll is live).
+    // confirms while the periodic poll is live), and close a pending receipt
+    // REQ (shop.js `handleShopPaymentSuccess` → `_clearShopReceiptWait()`).
     _pollTimer?.cancel();
+    ref.read(nostrControllerProvider).clearShopReceiptWait();
     setState(() {
       _phase = _BuyPhase.claiming;
       _status = 'Confirming purchase...';

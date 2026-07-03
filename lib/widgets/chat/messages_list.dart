@@ -94,14 +94,17 @@ class _MessagesListState extends ConsumerState<MessagesList> {
 
   /// Reports the currently-visible render-index range so the scroll-to-bottom
   /// FAB can mirror the PWA's `distanceFromBottom > 150` gate (`app.js:7120`).
-  /// In the `reverse:true` list, index 0 is the newest message at the bottom;
-  /// the FAB shows once the bottom-most visible unit is a couple of rows up.
+  /// In the `reverse:true` list, index 0 is the newest message at the bottom.
   final ItemPositionsListener _positionsListener =
       ItemPositionsListener.create();
 
   /// Whether the jump-to-latest FAB is currently shown (the user has scrolled
   /// up away from the newest message).
   bool _showScrollButton = false;
+
+  /// The messages viewport height in px, captured at build — converts the
+  /// normalized [ItemPosition] edges into the PWA's pixel scroll distance.
+  double _viewportHeight = 0;
 
   @override
   void initState() {
@@ -115,20 +118,32 @@ class _MessagesListState extends ConsumerState<MessagesList> {
     super.dispose();
   }
 
-  /// Recomputes [_showScrollButton] from the visible item positions. Analogue
-  /// of the PWA's `distanceFromBottom > 150` (`app.js:7120-7124`): in the
-  /// reversed list the bottom edge is index 0, so we show the FAB once the
-  /// smallest visible index is at least 2 render units off the bottom.
+  /// Recomputes [_showScrollButton] from the visible item positions — the
+  /// PWA's fixed-pixel `distanceFromBottom > 150` gate (`app.js:7120-7124`).
+  /// In the `reverse:true` list, scroll offset 0 rests index 0's leading
+  /// (bottom) edge 16px inside the viewport (the list's bottom padding), so
+  /// the pixel distance scrolled away from the bottom is
+  /// `16 − itemLeadingEdge × viewportHeight`. When index 0 isn't laid out at
+  /// all the user is far beyond 150px, so the FAB always shows.
   void _onPositionsChanged() {
     final positions = _positionsListener.itemPositions.value;
     if (positions.isEmpty) return;
-    // The visually-bottom-most item is the one with the smallest index whose
-    // trailing edge is still within the viewport.
-    final minIndex = positions
-        .where((p) => p.itemTrailingEdge > 0)
-        .map((p) => p.index)
-        .fold<int>(1 << 30, (a, b) => a < b ? a : b);
-    final shouldShow = minIndex >= 2;
+    ItemPosition? newest;
+    for (final p in positions) {
+      if (p.index == 0) {
+        newest = p;
+        break;
+      }
+    }
+    final bool shouldShow;
+    if (newest == null) {
+      shouldShow = true;
+    } else if (_viewportHeight <= 0) {
+      shouldShow = false;
+    } else {
+      final distanceFromBottom = 16 - newest.itemLeadingEdge * _viewportHeight;
+      shouldShow = distanceFromBottom > 150;
+    }
     if (shouldShow != _showScrollButton) {
       setState(() => _showScrollButton = shouldShow);
     }
@@ -263,7 +278,12 @@ class _MessagesListState extends ConsumerState<MessagesList> {
             // A Stack so the scroll-to-bottom FAB (`.scroll-to-bottom-btn`) can
             // float over the conversation, mirroring the PWA's always-present
             // single-view jump-to-latest control (`styles-chat.css:9-43`).
-            child: Stack(
+            // The LayoutBuilder captures the viewport height that
+            // [_onPositionsChanged] needs to turn the normalized item edges
+            // into the PWA's 150px distance-from-bottom gate.
+            child: LayoutBuilder(builder: (context, constraints) {
+              _viewportHeight = constraints.maxHeight;
+              return Stack(
               children: [
                 Positioned.fill(
                   child: ScrollablePositionedList.builder(
@@ -329,7 +349,8 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                     child: _ScrollToBottomButton(onTap: _scrollToBottom),
                   ),
               ],
-            ),
+              );
+            }),
           ),
           const TypingIndicatorRow(),
         ],

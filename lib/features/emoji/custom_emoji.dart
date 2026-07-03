@@ -132,7 +132,11 @@ CustomEmojiState loadCustomEmojiState(SharedPreferences prefs) {
           packs.add(CustomEmojiPack(
             pubkey: pubkey,
             identifier: identifier,
-            title: (p['title'] as String?) ?? identifier,
+            // The PWA loader keeps the cached title verbatim (`_storeEmojiPack`
+            // applies no fallback); a missing/empty title falls back to
+            // 'Emoji pack' at RENDER time (`pack.title || 'Emoji pack'`,
+            // emoji.js:507) — the pickers mirror that.
+            title: (p['title'] as String?) ?? '',
             createdAt: (p['created_at'] as num?)?.toInt() ?? 0,
             emojis: emojis,
           ));

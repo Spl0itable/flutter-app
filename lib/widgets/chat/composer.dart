@@ -87,6 +87,73 @@ class _ComposerState extends ConsumerState<Composer> {
   ({String author, String text})? _pendingQuote;
   PendingEdit? _pendingEdit;
 
+  // --- Per-conversation unsent drafts ---------------------------------------
+  // `_inputDrafts` + `_activeDraftKey` (channels.js:1075-1105): every
+  // conversation switch — a sidebar/channel switch OR a columns-deck focus
+  // change (`_cvFocusColumn`, columns.js:549-564) — stashes the current input
+  // under the OUTGOING conversation's key, clears the quote chip, cancels a
+  // pending edit, then restores the INCOMING conversation's saved draft.
+  final Map<String, String> _inputDrafts = {};
+  String? _activeDraftKey;
+
+  /// `_getInputContextKey` (channels.js:1075-1079): `'g:'+group` / `'p:'+pm` /
+  /// `'c:'+(geohash||channel)` — the [ChatView] id carries exactly those.
+  static String _draftKeyFor(ChatView view) {
+    switch (view.kind) {
+      case ViewKind.group:
+        return 'g:${view.id}';
+      case ViewKind.pm:
+        return 'p:${view.id}';
+      case ViewKind.channel:
+        return 'c:${view.id}';
+    }
+  }
+
+  /// `_saveCurrentDraft` (channels.js:1082-1089): stash the input under the
+  /// active key — a blank/whitespace draft DELETES the stored entry. Stored in
+  /// EXPANDED form (`:code:` text, via [EmojiSentinelController.expand]) so a
+  /// draft never carries sentinel chars whose allocations are dropped when the
+  /// input empties (02-F-02-E); [_restoreDraftForContext]'s `_onInputChanged`
+  /// re-collapses them on restore.
+  void _saveCurrentDraft() {
+    final key = _activeDraftKey;
+    if (key == null) return;
+    final v = _controller.expand(_controller.text);
+    if (v.trim().isNotEmpty) {
+      _inputDrafts[key] = v;
+    } else {
+      _inputDrafts.remove(key);
+    }
+  }
+
+  /// `_restoreDraftForContext` (channels.js:1092-1105): point the active key at
+  /// [view] and load its saved draft (empty when none). No-ops when the input
+  /// already holds that exact text.
+  void _restoreDraftForContext(ChatView view) {
+    final key = _draftKeyFor(view);
+    _activeDraftKey = key;
+    final draft = _inputDrafts[key] ?? '';
+    if (_controller.text == draft) return;
+    _controller.text = draft;
+    _controller.selection =
+        TextSelection.collapsed(offset: _controller.text.length);
+    // `autoResizeTextarea` + `handleInputChange` — recompute the popout /
+    // autocomplete state for the restored text.
+    _onInputChanged();
+  }
+
+  /// Runs the PWA's conversation-switch composer sequence (columns.js:549-564,
+  /// mirrored by switchChannel/openPM/openGroup): save the outgoing draft,
+  /// clear any quote chip, cancel a pending edit (which empties the input),
+  /// then restore the incoming conversation's draft.
+  void _onViewSwitched(ChatView view) {
+    if (!mounted) return;
+    _saveCurrentDraft();
+    _clearQuote();
+    if (_pendingEdit != null) _cancelEdit();
+    _restoreDraftForContext(view);
+  }
+
   // --- In-composer translate (F7) ------------------------------------------
   // A 26×26 translate button overlaid bottom-right of the input opens a 230px
   // language dropdown; choosing a language translates the typed draft in place
@@ -264,6 +331,10 @@ class _ComposerState extends ConsumerState<Composer> {
   @override
   void initState() {
     super.initState();
+    // Seed the draft key with the conversation already in view so the FIRST
+    // switch away saves its unsent input (the PWA sets `_activeDraftKey` in
+    // `_restoreDraftForContext`, which the boot path runs too).
+    _activeDraftKey = _draftKeyFor(ref.read(currentViewProvider));
     // `.message-input:focus` lifts the fill + paints a 3px focus ring, so
     // rebuild on focus change to swap those in/out.
     _focus.addListener(_onFocusChanged);
@@ -1248,6 +1319,15 @@ class _ComposerState extends ConsumerState<Composer> {
       _applyEdit(edit);
       ref.read(pendingEditProvider.notifier).consume();
     });
+    // Conversation switches — sidebar selections AND columns-deck focus changes
+    // (the deck re-points the current view, `_cvFocusColumn`) — run the PWA's
+    // composer sequence: save the outgoing conversation's draft, clear any
+    // quote-reply chip, cancel a pending edit, restore the incoming draft
+    // (columns.js:549-564, channels.js:1216/1267-1268/1373).
+    ref.listen(currentViewProvider, (prev, next) {
+      if (prev == next) return;
+      _onViewSwitched(next);
+    });
 
     // The quote/edit chip no longer sits in-flow — it floats above the input
     // via [_chipOverlay] (`bottom:100%`), so the input IS the composer body.
@@ -1698,7 +1778,7 @@ class _ComposerState extends ConsumerState<Composer> {
       ),
     );
 
-    final stack = Stack(
+    Widget stack = Stack(
       children: [
         field,
         // `#translateInputBtn` starts `.nm-hidden` and `display:flex` ONLY when
@@ -1712,6 +1792,16 @@ class _ComposerState extends ConsumerState<Composer> {
           ),
       ],
     );
+    // `div.message-input.input-disabled { opacity: 0.55; cursor: not-allowed }`
+    // (styles-chat.css:1692-1695), toggled by the contenteditable `disabled`
+    // setter (ui-context.js:1953) — pre-connect the whole field dims and the
+    // pointer reads not-allowed.
+    if (!inputEnabled) {
+      stack = MouseRegion(
+        cursor: SystemMouseCursors.forbidden,
+        child: Opacity(opacity: 0.55, child: stack),
+      );
+    }
 
     if (!_popout) {
       // `.message-input:focus`: a 3px primary@0.06 focus ring (spread, no blur)
@@ -2058,6 +2148,9 @@ class _ComposerState extends ConsumerState<Composer> {
         overlayChildBuilder: (context) => _popover(
           link: _gifAnchor,
           onDismiss: _gifPortal.hide,
+          // `.gif-picker` ≤768: `width: 90%; max-width: 350px`
+          // (styles-themes-responsive.css:89-97, ui-context.js:2017-2031).
+          phoneWidthFactor: 0.9,
           child: GifPicker(
             favoritesStore: FavoriteGifsStore(_prefs!),
             onSelect: _onGifSelected,
@@ -2077,16 +2170,22 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Positions a picker above its anchor button (bottom-anchored, like the
   /// PWA's `bottom: 100%` inline popup) with a barrier to dismiss on tap-out.
+  ///
+  /// [phoneWidthFactor] pins the picker to that fraction of the viewport width
+  /// on phones — the GIF picker's ≤768 rule is `width: 90%; max-width: 350px`
+  /// (styles-themes-responsive.css:89-97) where the emoji picker only caps
+  /// (`max-width: 90%`, :407-419).
   Widget _popover({
     required LayerLink link,
     required VoidCallback onDismiss,
     required Widget child,
+    double? phoneWidthFactor,
   }) {
     final media = MediaQuery.of(context);
     // `.emoji-picker`/`.gif-picker` @media (max-width:768): `position: fixed;
-    // left: 50%; transform: translateX(-50%); bottom: 60px; max-width: 90%` —
-    // centered above the input bar on phones (vs anchored above the button on
-    // desktop, base `bottom: 100%`).
+    // left: 50%; transform: translateX(-50%); bottom: 60px` — centered above
+    // the input bar on phones (vs anchored above the button on desktop, base
+    // `bottom: 100%`).
     final isPhone = media.size.width <= NymDimens.mobileBreakpoint;
     final picker = Material(type: MaterialType.transparency, child: child);
     return Stack(
@@ -2099,16 +2198,28 @@ class _ComposerState extends ConsumerState<Composer> {
         ),
         if (isPhone)
           Positioned(
-            left: 8,
-            right: 8,
+            left: 0,
+            right: 0,
             // 60px above the bar, lifted above the keyboard when it's open.
             bottom: 60 + media.viewInsets.bottom,
             child: Align(
               alignment: Alignment.bottomCenter,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: picker,
-              ),
+              child: phoneWidthFactor != null
+                  // `width: 90%` of the viewport; the picker's own max-width
+                  // (350 for the GIF picker) still caps it, so this renders
+                  // exactly `min(90vw, 350)` like the PWA.
+                  ? ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width * phoneWidthFactor),
+                      child: picker,
+                    )
+                  : ConstrainedBox(
+                      constraints: BoxConstraints(
+                          maxWidth: media.size.width - 16 < 360
+                              ? media.size.width - 16
+                              : 360),
+                      child: picker,
+                    ),
             ),
           )
         else
@@ -2316,8 +2427,9 @@ class _SendButtonState extends State<_SendButton> {
       _suppressClickUntil =
           DateTime.now().add(const Duration(milliseconds: 800));
       // `nymHapticTap` = the same 30ms vibrate every long-press site uses
-      // (ui-context.js:1217, inline-bindings.js:106-115).
-      HapticFeedback.lightImpact();
+      // (ui-context.js:1217, inline-bindings.js:106-115) — a solid motor
+      // pulse, so mediumImpact rather than the faint lightImpact.
+      HapticFeedback.mediumImpact();
       setState(() => _preGlow = true);
       widget.onAnon!.call();
       // Revert label + glow after 1s.

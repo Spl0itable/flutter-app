@@ -235,8 +235,11 @@ class _EnhancedEmojiModalState extends ConsumerState<EnhancedEmojiModal> {
       ];
       if (cells.isEmpty) continue;
       final star = (isOwn(pack) || isSubscribed(pack)) ? ' ★' : '';
+      // `pack.title || 'Emoji pack'` (emoji.js:507) — an empty/missing cached
+      // title still gets a section header.
+      final packTitle = pack.title.isEmpty ? 'Emoji pack' : pack.title;
       sections.add(_Section(
-        title: '${pack.title}$star',
+        title: '$packTitle$star',
         cells: cells,
         isFavorite: packFavSet.contains(pack.key),
         onToggleFavorite:

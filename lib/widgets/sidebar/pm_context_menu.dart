@@ -41,8 +41,9 @@ Future<void> showSidebarQuickMenu(
   List<SidebarQuickMenuItem> items,
 ) async {
   if (items.isEmpty) return;
-  // `nymHapticTap` = a 30ms vibrate (sidebar-sections.js:258).
-  HapticFeedback.lightImpact();
+  // `nymHapticTap` = a 30ms vibrate (sidebar-sections.js:258) — a solid motor
+  // pulse, so mediumImpact rather than the faint lightImpact.
+  HapticFeedback.mediumImpact();
 
   final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
   if (overlay == null) return;
@@ -55,8 +56,11 @@ Future<void> showSidebarQuickMenu(
   selected?.onSelected();
 }
 
-/// A transparent, barrier-dismissible route that positions the animated
-/// `.quick-context-menu` near the press point and clamps it on-screen.
+/// A transparent route that positions the animated `.quick-context-menu`
+/// near the press point and clamps it on-screen. Outside presses dismiss it
+/// instantly (no exit animation) after a 400ms opening grace period,
+/// mirroring the PWA's `_showSidebarActionMenu` close handling
+/// (sidebar-sections.js:137-146).
 class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
   _QuickMenuRoute({
     required this.anchor,
@@ -68,17 +72,30 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
   final Size overlaySize;
   final List<SidebarQuickMenuItem> items;
 
+  /// Wall-clock open time: outside presses within 400ms of opening are
+  /// ignored (`if (Date.now() - openedAt < 400) return`,
+  /// sidebar-sections.js:142-146), so the tap that follows the long-press
+  /// can't immediately dismiss the menu.
+  final DateTime _openedAt = DateTime.now();
+
   @override
   Color? get barrierColor => null;
 
+  // Outside-press dismissal is handled by the Listener in [buildPage] (with
+  // the PWA's 400ms grace period), not the stock barrier.
   @override
-  bool get barrierDismissible => true;
+  bool get barrierDismissible => false;
 
   @override
   String? get barrierLabel => 'Dismiss';
 
   @override
   Duration get transitionDuration => const Duration(milliseconds: 150);
+
+  // The PWA's `close()` is a plain `menu.remove()` (sidebar-sections.js:138)
+  // — the menu vanishes instantly, no exit transition.
+  @override
+  Duration get reverseTransitionDuration => Duration.zero;
 
   @override
   Widget buildPage(
@@ -105,6 +122,22 @@ class _QuickMenuRoute extends PopupRoute<SidebarQuickMenuItem> {
 
     return Stack(
       children: [
+        // Outside presses dismiss on pointer-DOWN (the PWA listens on
+        // `mousedown`/`touchstart`), but presses within 400ms of opening are
+        // ignored (sidebar-sections.js:142-146).
+        Positioned.fill(
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) {
+              if (DateTime.now().difference(_openedAt) <
+                  const Duration(milliseconds: 400)) {
+                return;
+              }
+              Navigator.of(context).pop();
+            },
+            child: const SizedBox.expand(),
+          ),
+        ),
         Positioned(
           left: left,
           top: top,
@@ -215,6 +248,7 @@ class _QuickMenuRow extends StatefulWidget {
 
 class _QuickMenuRowState extends State<_QuickMenuRow> {
   bool _hover = false;
+  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
@@ -222,21 +256,46 @@ class _QuickMenuRowState extends State<_QuickMenuRow> {
     final a = widget.item;
     final fg = a.danger ? c.danger : c.text;
     final iconColor = a.danger ? c.danger : c.textDim;
-    // hover bg rgba(255,255,255,0.08) → mode-aware (black@0.06 light); danger
-    // hover rgba(255,68,68,0.12) in both modes.
-    final hoverBg = a.danger ? c.dangerHoverOverlay : c.hoverOverlay;
+    // Background per the CSS cascade (styles-features.css:2819-2846 + light
+    // overrides styles-themes-responsive.css:1346-1352):
+    //  - dark: `.quick-context-item.danger:hover` (0,3,0) red@0.12 outranks
+    //    the equal-specificity `:hover` white@0.08 and `:active` white@0.12
+    //    (0,2,0 each, `:active` declared last so it wins over `:hover`);
+    //  - light: `body.light-mode .quick-context-item:hover/:active` (0,3,1)
+    //    black@0.06 / black@0.1 outrank `.danger:hover`, so danger rows get
+    //    the SAME neutral fills as regular rows.
+    final Color bg;
+    if (c.isLight) {
+      bg = _pressed
+          ? Colors.black.withValues(alpha: 0.1)
+          : _hover
+              ? Colors.black.withValues(alpha: 0.06)
+              : Colors.transparent;
+    } else if (a.danger && _hover) {
+      bg = c.dangerHoverOverlay; // rgba(255,68,68,0.12)
+    } else if (_pressed) {
+      bg = Colors.white.withValues(alpha: 0.12);
+    } else if (_hover) {
+      bg = Colors.white.withValues(alpha: 0.08);
+    } else {
+      bg = Colors.transparent;
+    }
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: () => Navigator.of(context).pop(a),
+        // `:active` pressed feedback while the pointer is down.
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) => setState(() => _pressed = false),
+        onTapCancel: () => setState(() => _pressed = false),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
           // `.quick-context-item`: padding 8/12, gap 10, radius 8, font 14.
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: _hover ? hoverBg : Colors.transparent,
+            color: bg,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(

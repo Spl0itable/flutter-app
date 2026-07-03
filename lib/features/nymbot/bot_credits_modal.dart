@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../features/identity/modal_chrome.dart';
+import '../../state/nostr_controller.dart';
 import 'nymbot_models.dart';
 import 'nymbot_providers.dart';
 
@@ -451,6 +452,19 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
         ? 'Nymbot ${isPro ? 'Pro ' : ''}credits gift for @$giftNym — $creditWord'
         : 'Nymbot ${isPro ? 'Pro ' : ''}credits — $creditWord';
 
+    // Signed NIP-57 zap request riding the create-invoice body so the worker's
+    // `canNip57` receipt-verify fallback stays available (zaps.js:601-604) —
+    // best-effort, exactly like the PWA's try/catch (a signer failure omits it).
+    Map<String, dynamic>? zapRequest;
+    try {
+      final zr = await ref.read(nostrControllerProvider).buildZapRequest(
+            recipientPubkey: NostrController.nymbotPubkey,
+            amountSats: sats,
+            comment: comment,
+          );
+      zapRequest = zr?.toJson();
+    } catch (_) {}
+
     BotInvoice? inv;
     String? err;
     try {
@@ -459,6 +473,7 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
             _tier,
             recipientPubkey: widget.giftRecipientPubkey,
             comment: comment,
+            zapRequest: zapRequest,
           );
       // A null result means the chat isn't bound to an identity yet — the worker
       // can't issue an invoice without a pubkey (PWA gates on `this.pubkey`).

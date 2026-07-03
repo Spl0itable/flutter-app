@@ -579,9 +579,11 @@ MessageStyleDecoration? messageStyleDecoration(String? styleId,
     // Only aurora keeps a multi-stop gradient in light mode; every other gradient
     // style falls back to a solid [_styleLightColor].
     gradient: isLight ? _styleLightGradient[styleId] : v.gradient,
-    // The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`),
-    // kept in both modes; light only swaps the gradient stops.
-    gradientGlow: (v.gradient != null) ? _styleGradientGlow[styleId] : null,
+    // The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`)
+    // — dark mode only: the light rule swaps the gradient stops AND resets
+    // `text-shadow: none` (styles-themes-responsive.css:884-897).
+    gradientGlow:
+        (!isLight && v.gradient != null) ? _styleGradientGlow[styleId] : null,
     contentBackground:
         (isLight ? _styleLightContentBackground[styleId] : null) ??
             _styleContentBackground[styleId],
@@ -671,7 +673,8 @@ const Map<String, List<Shadow>> _styleGlowShadows = {
 };
 
 /// The aurora gradient's blue glow (`text-shadow 0 0 10px rgba(91,140,255,.3)`,
-/// styles-features.css:644), kept behind the gradient-clipped text in both modes.
+/// styles-features.css:644), kept behind the gradient-clipped text — DARK mode
+/// only (light resets `text-shadow: none`, styles-themes-responsive.css:889).
 const Map<String, Shadow> _styleGradientGlow = {
   'style-aurora': Shadow(color: Color(0x4D5B8CFF), blurRadius: 10),
 };
@@ -747,9 +750,13 @@ const Map<String, Color> _styleLightContentBackground = {
 
 /// Light-mode BUBBLE content-background overrides (`body.light-mode.chat-bubbles
 /// .message.style-satoshi .message-content { background: rgba(247,147,26,.12)
-/// !important }`, styles-themes-responsive.css:1417-1419).
+/// !important }`, styles-themes-responsive.css:1417-1419; fire/ice share a
+/// dedicated `rgba(0,0,0,.08)` fill instead of the generic black@.10 bubble,
+/// :1412-1414).
 const Map<String, Color> _styleLightBubbleContentBackground = {
   'style-satoshi': Color(0x1FF7931A),
+  'style-fire': Color(0x14000000), // rgba(0,0,0,0.08)
+  'style-ice': Color(0x14000000), // rgba(0,0,0,0.08)
 };
 
 /// Explicit glyph shadows for styles whose CSS `text-shadow` is not a single
@@ -1388,8 +1395,8 @@ class _GlyphTilePainter extends CustomPainter {
 }
 
 /// Repeats a small inline SVG [tile] across the available box. Uses
-/// [SvgPicture.string] inside an `OverflowBox`-free wrap-grid so it tiles
-/// cheaply without rasterisation plumbing.
+/// [SvgPicture.string] cells absolutely positioned in a Stack so it tiles
+/// cheaply without rasterisation plumbing (and without RenderFlex overflow).
 class _TiledSvg extends StatelessWidget {
   const _TiledSvg({required this.svg, required this.tile});
   final String svg;
@@ -1401,27 +1408,30 @@ class _TiledSvg extends StatelessWidget {
       builder: (context, constraints) {
         final w = constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
         final h = constraints.maxHeight.isFinite ? constraints.maxHeight : 120.0;
-        final cols = (w / tile.width).ceil() + 1;
-        final rows = (h / tile.height).ceil() + 1;
-        // A fresh SvgPicture per cell (a widget can't appear twice in the tree).
-        SizedBox cell() => SizedBox(
-              width: tile.width,
-              height: tile.height,
-              child: SvgPicture.string(
-                svg,
-                width: tile.width,
-                height: tile.height,
-                fit: BoxFit.fill,
-              ),
-            );
-        return Column(
-          mainAxisSize: MainAxisSize.min,
+        final cols = (w / tile.width).ceil();
+        final rows = (h / tile.height).ceil();
+        // Positioned tiles from the top-left (CSS `background-repeat` origin
+        // 0 0); the partial last row/column is clipped by the wrapping ClipRect.
+        // A Stack never reports RenderFlex overflow, unlike a Row/Column grid.
+        return Stack(
+          clipBehavior: Clip.none,
           children: [
             for (var r = 0; r < rows; r++)
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [for (var col = 0; col < cols; col++) cell()],
-              ),
+              for (var col = 0; col < cols; col++)
+                Positioned(
+                  left: col * tile.width,
+                  top: r * tile.height,
+                  width: tile.width,
+                  height: tile.height,
+                  // A fresh SvgPicture per cell (a widget can't appear twice
+                  // in the tree).
+                  child: SvgPicture.string(
+                    svg,
+                    width: tile.width,
+                    height: tile.height,
+                    fit: BoxFit.fill,
+                  ),
+                ),
           ],
         );
       },
@@ -1446,8 +1456,19 @@ class _EdgeTiledSvg extends StatelessWidget {
         final h = constraints.maxHeight.isFinite ? constraints.maxHeight : 120.0;
         final cols = (w / tile.width).ceil() + 1;
         final rows = (h / tile.height).ceil() + 1;
+        // Inner vertical strips skip the top/bottom row so the corners aren't
+        // double-stacked (the horizontal strips already cover them).
+        final innerRows = rows - 2 > 0 ? rows - 2 : 0;
+        // `center top/bottom` → the horizontal strips centre on the box;
+        // `left/right center` → the vertical strips centre vertically. Cells are
+        // absolutely positioned (a Stack never reports RenderFlex overflow —
+        // the overhang is clipped by the wrapping ClipRect).
+        final x0 = (w - cols * tile.width) / 2;
+        final y0 = (h - innerRows * tile.height) / 2;
         // A fresh SvgPicture per cell (a widget can't appear twice in the tree).
-        Widget cell() => SizedBox(
+        Widget cellAt(double left, double top) => Positioned(
+              left: left,
+              top: top,
               width: tile.width,
               height: tile.height,
               child: SvgPicture.string(
@@ -1457,22 +1478,17 @@ class _EdgeTiledSvg extends StatelessWidget {
                 fit: BoxFit.fill,
               ),
             );
-        Widget hStrip() => Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [for (var col = 0; col < cols; col++) cell()],
-            );
-        // Inner vertical strips skip the top/bottom row so the corners aren't
-        // double-stacked (the horizontal strips already cover them).
-        Widget vStrip() => Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [for (var r = 0; r < rows - 2; r++) cell()],
-            );
         return Stack(
+          clipBehavior: Clip.none,
           children: [
-            Align(alignment: Alignment.topCenter, child: hStrip()),
-            Align(alignment: Alignment.bottomCenter, child: hStrip()),
-            Align(alignment: Alignment.centerLeft, child: vStrip()),
-            Align(alignment: Alignment.centerRight, child: vStrip()),
+            for (var col = 0; col < cols; col++)
+              cellAt(x0 + col * tile.width, 0),
+            for (var col = 0; col < cols; col++)
+              cellAt(x0 + col * tile.width, h - tile.height),
+            for (var r = 0; r < innerRows; r++)
+              cellAt(0, y0 + r * tile.height),
+            for (var r = 0; r < innerRows; r++)
+              cellAt(w - tile.width, y0 + r * tile.height),
           ],
         );
       },
@@ -1558,7 +1574,10 @@ class CosmeticOverlayPainter extends CustomPainter {
     // Hologram fill + sheen are background-image layers the PWA drops when a
     // message style is active (`:not([class*="style-"])`); the ring stays.
     if (aura.hologram && !styleActive) {
-      // 135deg multi-colour gradient + a 115deg white sheen (screen blend).
+      // 135deg multi-colour gradient + a 115deg white sheen. CSS
+      // `background-blend-mode: screen, normal` (styles-features.css:1209):
+      // only the white sheen screen-blends — the colour gradient composites
+      // normally over the bubble fill.
       final base = Paint()
         ..shader = const LinearGradient(
           begin: Alignment.topLeft,
@@ -1570,8 +1589,7 @@ class CosmeticOverlayPainter extends CustomPainter {
             Color(0x66FFE100),
             Color(0x66FF00C8),
           ],
-        ).createShader(rect)
-        ..blendMode = BlendMode.screen;
+        ).createShader(rect);
       canvas.drawRRect(rrect, base);
       final sheen = Paint()
         ..shader = const LinearGradient(

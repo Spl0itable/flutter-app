@@ -90,9 +90,25 @@ class ReactorsModal extends ConsumerWidget {
           color: c.bgSecondary,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rmd,
-          boxShadow: const [
-            BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
-          ],
+          // dark (styles-chat.css:495): shadow-lg + shadow-glow + a 1px
+          // white@0.05 ring; light (styles-themes-responsive.css:1196-1199):
+          // `0 8px 32px rgba(0,0,0,0.12)` only.
+          boxShadow: c.isLight
+              ? const [
+                  BoxShadow(
+                      color: Color(0x1F000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                ]
+              : [
+                  const BoxShadow(
+                      color: Color(0x80000000),
+                      offset: Offset(0, 8),
+                      blurRadius: 32),
+                  BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                  const BoxShadow(
+                      color: Color(0x0DFFFFFF), spreadRadius: 1),
+                ],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,

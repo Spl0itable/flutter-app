@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import 'translate_language_prompt.dart';
 import 'translate_languages.dart';
@@ -64,7 +65,19 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
 
   void _start(String target) {
     final plain = TranslateService.stripQuotes(widget.content);
-    _future = _service.translate(plain, target);
+    final future = _service.translate(plain, target);
+    // On failure the PWA shows the inline `.translation-error` AND posts a
+    // system chat message with the error detail
+    // (translate.js:269 `displaySystemMessage('Translation failed: ' + ...)`).
+    // Capture the notifier now so the message still lands even if this widget
+    // is disposed before the request settles, like the PWA's detached async.
+    final notifier = ref.read(appStateProvider.notifier);
+    future.then<void>((_) {}, onError: (Object err) {
+      final msg = err is TranslateException ? err.message : err.toString();
+      notifier.addSystemMessage(
+          'Translation failed: ${msg.isEmpty ? 'Unknown error' : msg}');
+    });
+    _future = future;
   }
 
   Future<void> _promptThenTranslate() async {

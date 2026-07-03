@@ -89,16 +89,29 @@ class _ReportModalState extends State<ReportModal> {
           color: c.bgSecondary,
           border: Border.all(color: c.glassBorder),
           borderRadius: NymRadius.rxl,
-          // `.modal-content` shadow stack: shadow-lg + shadow-glow + 1px ring.
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.5),
-              blurRadius: 32,
-              offset: const Offset(0, 8),
-            ),
-            BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
-            BoxShadow(color: Colors.white.withValues(alpha: 0.05), spreadRadius: 1),
-          ],
+          // Dark: `.modal-content` shadow stack shadow-lg + shadow-glow + 1px
+          // ring. Light: `body.light-mode .modal-content { box-shadow: 0 8px
+          // 40px rgba(0,0,0,0.12) }` — one soft shadow, no glow/white ring
+          // (styles-themes-responsive.css:1050-1052).
+          boxShadow: c.isLight
+              ? const [
+                  BoxShadow(
+                    color: Color(0x1F000000), // black @ 0.12
+                    blurRadius: 40,
+                    offset: Offset(0, 8),
+                  ),
+                ]
+              : [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.5),
+                    blurRadius: 32,
+                    offset: const Offset(0, 8),
+                  ),
+                  BoxShadow(color: c.primaryA(0.1), blurRadius: 20),
+                  BoxShadow(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      spreadRadius: 1),
+                ],
         ),
         // `showDialog` does not insert a Material, so the bare `Text` widgets
         // here would paint Flutter's debug double yellow underline and the

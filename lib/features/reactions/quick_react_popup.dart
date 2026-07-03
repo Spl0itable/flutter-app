@@ -311,6 +311,7 @@ void showQuickReactPopup(
   @Deprecated('The PWA pill has no ⋮ menu button; this is ignored. '
       'Remove the onMenu: argument from the message_row call site.')
   VoidCallback? onMenu,
+  Rect? spotlightRect,
   List<QuickContextItem> contextItems = const [],
 }) {
   final overlay = Overlay.of(context, rootOverlay: true);
@@ -322,6 +323,7 @@ void showQuickReactPopup(
   entry = OverlayEntry(
     builder: (ctx) => _QuickReactOverlay(
       anchorRect: anchorRect,
+      spotlightRect: spotlightRect,
       emojis: emojis,
       onReact: (e) {
         close();
@@ -360,9 +362,18 @@ class _QuickReactOverlay extends StatefulWidget {
     required this.onMore,
     required this.contextItems,
     required this.onDismiss,
+    this.spotlightRect,
   });
 
   final Rect anchorRect;
+
+  /// The pressed MESSAGE's global bounds — the dim-scrim spotlight cutout (the
+  /// PWA's `.long-press-highlight` row stays bright while the scroller dims,
+  /// styles-features.css:2848-2863). Distinct from [anchorRect], which is a
+  /// zero-size press-point rect the pill positions against (`left = clientX −
+  /// w/2, top = clientY − 55`, ui-context.js:1330-1347). Null → the whole
+  /// screen dims uniformly.
+  final Rect? spotlightRect;
   final List<String> emojis;
   final ValueChanged<String> onReact;
   final VoidCallback onMore;
@@ -410,7 +421,10 @@ class _QuickReactOverlayState extends State<_QuickReactOverlay>
               opacity: _c,
               child: CustomPaint(
                 size: Size.infinite,
-                painter: _SpotlightPainter(hole: r),
+                // The cutout is the pressed MESSAGE's rect (F9), not the
+                // zero-size press-point anchor the pill lays out against.
+                painter: _SpotlightPainter(
+                    hole: widget.spotlightRect ?? Rect.zero),
               ),
             ),
           ),

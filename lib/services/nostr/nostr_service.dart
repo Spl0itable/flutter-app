@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart';
 
 import '../../core/constants/event_kinds.dart';
@@ -11,6 +12,7 @@ import '../../core/crypto/crypto_worker.dart';
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
 import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
+import '../../core/crypto/nip44.dart' as nip44;
 import '../../core/crypto/pow.dart';
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../features/messages/trust_graph.dart';
@@ -976,9 +978,12 @@ class NostrService {
   }
 
   /// Publishes a public channel reaction (kind 7) per docs/specs/03 §5.1.
-  /// Tags: `['e',messageId], ['p',targetPubkey], ['k',originalKind]` plus a
-  /// `['g',geohash]` (geohash channel) or `['d',channel]` (named channel) tag,
-  /// and `['action','remove']` when [remove] is set. Returns the signed event.
+  /// Tags: `['e',messageId], ['p',targetPubkey], ['k',originalKind]` plus the
+  /// NIP-30 [emojiTags] for a custom `:shortcode:` reaction (reactions.js
+  /// :990-995/:1111-1117 spread `...customEmojiTagsForContent(emoji)` into
+  /// both the add and remove tag lists), a `['g',geohash]` (geohash channel)
+  /// or `['d',channel]` (named channel) tag, and `['action','remove']` when
+  /// [remove] is set. Returns the signed event.
   Future<NostrEvent?> publishReaction({
     required String messageId,
     required String targetPubkey,
@@ -987,6 +992,7 @@ class NostrService {
     String? geohash,
     String? channel,
     bool remove = false,
+    List<List<String>> emojiTags = const [],
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -996,6 +1002,9 @@ class NostrService {
       ['p', targetPubkey],
       ['k', originalKind],
       if (remove) ['action', 'remove'],
+      // NIP-30: declare the custom emoji so other clients can render the
+      // :shortcode: (emoji.js `customEmojiTagsForContent`).
+      ...emojiTags,
     ];
     // Carry the channel id so the relay/D1 archive can key the reaction
     // (reactions.js: geohash → ['g',gh]; else named → ['d',channel]).
@@ -1508,6 +1517,92 @@ class NostrService {
     return any;
   }
 
+  /// Publishes one settings category as a self-addressed NIP-59 `nym-sync`
+  /// gift wrap (`_publishWrappedNostrEvent`, settings.js:599-663): an unsigned
+  /// kind-30078 rumor tagged `['d', dTag]` whose content is the payload JSON,
+  /// sealed (kind 13) to self through the active signer (so a NIP-46 remote
+  /// signer works, mirroring the PWA's extension/NIP-46 branch), then wrapped
+  /// (kind 1059) by a fresh ephemeral key with the outer tags
+  /// `['p', self], ['d', sha256('<pubkey>:<dTag>')], ['k','nym-sync']` — relays
+  /// only ever see the opaque per-account digest (`_syncOuterDTag`,
+  /// settings.js:177-184).
+  ///
+  /// Size guards match the PWA byte-for-byte: a rumor or seal whose JSON
+  /// exceeds the 65535-byte NIP-44 plaintext limit, or a final `["EVENT",…]`
+  /// frame over 65000 chars (`_sendWrappedIfFits`, settings.js:590-596), skips
+  /// the publish. The wrap goes out via the DM path (`sendDMToRelays`).
+  /// Returns the wrap event, or null when skipped / unsignable.
+  Future<NostrEvent?> publishNymSyncWrap({
+    required Map<String, dynamic> payload,
+    required String dTag,
+    int? createdAt,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    final self = identity.pubkey;
+    final now = createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    // Inner rumor: kind 30078, real created_at, id computed, no sig
+    // (settings.js:604-611).
+    final rumorTags = [
+      ['d', dTag],
+    ];
+    final content = jsonEncode(payload);
+    final rumorMap = <String, dynamic>{
+      'id': NostrEvent(
+        pubkey: self,
+        createdAt: now,
+        kind: EventKind.appData,
+        tags: rumorTags,
+        content: content,
+      ).computeId(),
+      'pubkey': self,
+      'created_at': now,
+      'kind': EventKind.appData,
+      'tags': rumorTags,
+      'content': content,
+    };
+    final rumorJson = jsonEncode(rumorMap);
+    if (utf8.encode(rumorJson).length > 65535) return null;
+
+    // Seal (kind 13) encrypted + signed by the active signer, backdated
+    // created_at like every NIP-59 seal (`randomNow`).
+    final sealContent = await sig.nip44Encrypt(self, rumorJson);
+    final seal = await sig.sign(
+      UnsignedEvent(
+        pubkey: self,
+        createdAt: giftwrap.randomNow(),
+        kind: 13,
+        tags: const [],
+        content: sealContent,
+      ),
+    );
+    final sealJson = jsonEncode(seal.toJson());
+    if (utf8.encode(sealJson).length > 65535) return null;
+
+    // Wrap (kind 1059) by a fresh ephemeral key with the nym-sync outer tags.
+    final ephSk = keys.generatePrivateKey();
+    final ckWrap = nip44.getConversationKey(ephSk, self);
+    final outerD = sha256.convert(utf8.encode('$self:$dTag')).toString();
+    final wrapped = schnorr.finalizeEvent(
+      UnsignedEvent(
+        pubkey: keys.getPublicKeyHex(ephSk),
+        createdAt: giftwrap.randomNow(),
+        kind: EventKind.giftWrap,
+        tags: [
+          ['p', self],
+          ['d', outerD],
+          ['k', 'nym-sync'],
+        ],
+        content: nip44.encrypt(sealJson, ckWrap),
+      ),
+      ephSk,
+    );
+    if (jsonEncode(['EVENT', wrapped.toJson()]).length > 65000) return null;
+    await pool.publishDm(wrapped);
+    return wrapped;
+  }
+
   // ---------------------------------------------------------------------------
   // Geo relays (spec §4.7 / relays.js fetchGeoRelays + getClosestRelaysForGeohash)
   // ---------------------------------------------------------------------------
@@ -1530,8 +1625,31 @@ class NostrService {
   /// [currentGeoRelays] for entered channels (geo relays load on demand);
   /// otherwise every geo relay is sharded onto the pool up front. Mirrors
   /// `settings.lowDataMode` (relays.js:1907/1978). Set by the controller from
-  /// the live setting; defaults to false (the PWA default).
+  /// the live setting via [setLowDataMode]; defaults to false (the PWA default).
   bool lowDataMode = false;
+
+  /// Applies a Low Data Mode change (`applyLowDataMode`, relays.js:350-399;
+  /// invoked by the PWA on every settings save / toggle flip, app.js:3989 and
+  /// :7268). Enabling collapses the relay set to the 5 defaults + DM relays +
+  /// the entered channels' on-demand geo relays (in pool mode
+  /// `_poolSendRelayConfig` respects lowDataMode — here [applyGeoRelays] does,
+  /// via [_geoRelayUrlsForPool]); disabling fetches the full geo-relay list if
+  /// needed and re-shards everything back on. Call once at boot with the
+  /// persisted setting (before/after [start] both work) and again on every
+  /// flip. No-op when the mode is unchanged.
+  Future<void> setLowDataMode(bool enabled) async {
+    if (lowDataMode == enabled) return;
+    lowDataMode = enabled;
+    if (enabled) {
+      // Keep only the current channels' geo relays sharded
+      // (relays.js:352-368).
+      applyGeoRelays();
+    } else {
+      // Reconnect the full broadcast + geo relay coverage
+      // (relays.js:371-399).
+      await loadAndApplyGeoRelays();
+    }
+  }
 
   /// Fetches the geo relay list via the API proxy (`action=geo-relays`),
   /// falling back to a direct CSV fetch+parse. Caches into [geoRelays].

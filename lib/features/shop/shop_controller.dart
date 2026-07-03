@@ -218,15 +218,25 @@ class ShopController extends StateNotifier<ShopState> {
   // Activation (apply/persist nym_active_style / nym_active_flair)
   // ---------------------------------------------------------------------------
 
+  /// Emits the PWA's `Activated <name>` / `Deactivated <name>` system chat line
+  /// after a toggle (shop.js `activateCosmetic`/`activateMessageStyle`/
+  /// `activateFlair`, :588-628 — every branch calls `displaySystemMessage`).
+  void _announceToggle(String itemId, {required bool deactivated}) {
+    final name = ShopCatalog.byId(itemId)?.name ?? itemId;
+    onSystemMessage?.call(deactivated ? 'Deactivated $name' : 'Activated $name');
+  }
+
   /// Toggle a message style. Only one is active at a time (`activateMessageStyle`).
   Future<void> toggleStyle(String styleId) async {
     if (!state.owns(styleId)) return;
     final active = state.active;
-    final next = active.style == styleId
+    final deactivated = active.style == styleId;
+    final next = deactivated
         ? active.copyWith(clearStyle: true)
         : active.copyWith(style: styleId);
     state = state.copyWith(active: next);
     await _persist();
+    _announceToggle(styleId, deactivated: deactivated);
   }
 
   /// Toggle a nickname flair. Only one is active at a time (`activateFlair`).
@@ -238,6 +248,7 @@ class ShopController extends StateNotifier<ShopState> {
       active: active.copyWith(flair: isActive ? const [] : [flairId]),
     );
     await _persist();
+    _announceToggle(flairId, deactivated: isActive);
   }
 
   /// Toggle a cosmetic. Multiple cosmetics may be active (`activateCosmetic`).
@@ -245,22 +256,29 @@ class ShopController extends StateNotifier<ShopState> {
     if (!state.owns(cosmeticId)) return;
     final active = state.active;
     final list = List<String>.from(active.cosmetics);
-    if (list.contains(cosmeticId)) {
+    final deactivated = list.contains(cosmeticId);
+    if (deactivated) {
       list.remove(cosmeticId);
     } else {
       list.add(cosmeticId);
     }
     state = state.copyWith(active: active.copyWith(cosmetics: list));
     await _persist();
+    _announceToggle(cosmeticId, deactivated: deactivated);
   }
 
   /// Toggle the supporter badge (`activateSupporter`).
   Future<void> toggleSupporter() async {
     if (!state.owns('supporter-badge')) return;
+    final deactivated = state.active.supporter;
     state = state.copyWith(
       active: state.active.copyWith(supporter: !state.active.supporter),
     );
     await _persist();
+    // shop.js:639/642 — the supporter line names the badge in full.
+    onSystemMessage?.call(deactivated
+        ? 'Deactivated Nymchat Supporter badge'
+        : 'Activated Nymchat Supporter badge');
   }
 
   // ---------------------------------------------------------------------------
@@ -388,7 +406,7 @@ class ShopController extends StateNotifier<ShopState> {
       }
     }
     data ??= const {};
-    _applyShopClaim(data);
+    await _applyShopClaim(data, identity);
     removePendingPurchase(invoiceId);
     return data;
   }
@@ -396,8 +414,12 @@ class ShopController extends StateNotifier<ShopState> {
   /// Applies a `shop-claim` result locally (shop.js `_applyShopClaim`): a gift
   /// publishes the server's pre-signed `giftEvent` DM so the recipient is
   /// notified (nothing is granted to us); a self-purchase reconciles
-  /// `{owned, active}`.
-  void _applyShopClaim(Map<String, dynamic> data) {
+  /// `{owned, active}`. A purchased COSMETIC additionally activates on the spot
+  /// and pushes the new active set (shop.js:1356-1360).
+  Future<void> _applyShopClaim(
+    Map<String, dynamic> data,
+    ShopIdentity identity,
+  ) async {
     if (data['gift'] == true) {
       // gift → recipient gets it, not us; broadcast the notification DM
       // (shop.js:1349 `sendDMToRelays(['EVENT', data.giftEvent])`).
@@ -410,18 +432,34 @@ class ShopController extends StateNotifier<ShopState> {
       return;
     }
     if (data['owned'] is Map && data['active'] is Map) {
-      applyOwnRecord(data);
+      await applyOwnRecord(data);
     } else {
       // Older/edge response without the full record — grant from the fields.
       final itemId = data['itemId']?.toString();
-      if (itemId == null) return;
-      final edition = data['edition'];
-      grant(
-        itemId,
-        code: data['code']?.toString(),
-        edition: edition is Map ? (edition['n'] as num?)?.toInt() : null,
-        editionMax: edition is Map ? (edition['max'] as num?)?.toInt() : null,
-      );
+      if (itemId != null) {
+        final edition = data['edition'];
+        await grant(
+          itemId,
+          code: data['code']?.toString(),
+          edition: edition is Map ? (edition['n'] as num?)?.toInt() : null,
+          editionMax: edition is Map ? (edition['max'] as num?)?.toInt() : null,
+        );
+      }
+    }
+    // A bought cosmetic turns on immediately: `activeCosmetics.add(itemId);
+    // publishActiveShopItems(); applyShopStylesToOwnMessages()` (shop.js:
+    // 1356-1360) — here the state change re-renders, and the push mirrors
+    // publishActiveShopItems (D1 shop-set-active + the shop-update presence).
+    final itemId = data['itemId']?.toString();
+    if (itemId != null && ShopCatalog.byId(itemId)?.type == 'cosmetic') {
+      final active = state.active;
+      if (!active.cosmetics.contains(itemId)) {
+        state = state.copyWith(
+          active: active.copyWith(cosmetics: [...active.cosmetics, itemId]),
+        );
+        await _persist();
+      }
+      await publishActiveItems(identity);
     }
   }
 

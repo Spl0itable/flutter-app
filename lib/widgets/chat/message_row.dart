@@ -212,6 +212,7 @@ class MessageRow extends ConsumerStatefulWidget {
     this.showAvatar = true,
     this.showName = true,
     this.inGroup = false,
+    this.columnsMode = false,
     this.onReactionPicker,
     this.bubbleAnchorKey,
     this.swipeAvatarDx,
@@ -221,6 +222,15 @@ class MessageRow extends ConsumerStatefulWidget {
   final Settings settings;
   final List<MessageReaction> reactions;
   final bool mentioned;
+
+  /// This row renders inside a columns-deck `.cv-list` (`body.columns-mode`,
+  /// styles-columns.css). IRC rows stack vertically (`.cv-list .message
+  /// { flex-direction: column; gap: 5px }` — flex children are blockified, so
+  /// time / author / content each take their own line, the content full-width
+  /// with an extra 5px `margin-top`, :27-49), and the desktop hover-button
+  /// pair stacks vertically (`.msg-hover-buttons { flex-direction: column }`,
+  /// :80-82). The single-chat view never sets this.
+  final bool columnsMode;
 
   /// Bubble layout: when set (the LAST message of a [MessageGroup]), keys the
   /// rounded bubble container so the group's gliding avatar can bottom-align to
@@ -274,6 +284,18 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// `_ensureBubbleRelativeTimer` / `_refreshBubbleRelativeTimes`
   /// (`messages.js:1051,3347`).
   Timer? _relativeTimer;
+
+  /// Whether this row plays the `bubble-snap-in` entrance when it mounts. The
+  /// PWA adds `.bubble-snap` to a LIVE-appended message that bubble-groups onto
+  /// the previous one — never while bulk-appending or for historical restores
+  /// (`messages.js:1043-1048`). Flutter list rows also mount when old history
+  /// scrolls into view, so "live append" is approximated as a message created
+  /// within the last few seconds. Latched on the FIRST build so later rebuilds
+  /// (or the 30s relative-time tick) can't replay it.
+  late final bool _snapIn = widget.grouped &&
+      widget.settings.useBubbles &&
+      !widget.message.isHistorical &&
+      DateTime.now().difference(widget.message.dateTime).inMilliseconds < 5000;
 
   @override
   void dispose() {
@@ -375,6 +397,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// (the PWA swaps gold — and a derived tone for the rest — in `light-mode`).
   List<CosmeticAura> _resolveAuras(BuildContext context) =>
       resolveCosmeticAuras(_cosmetics, isLight: context.nym.isLight);
+
+  /// True when the message element carries a `style-…` class — the PWA adds the
+  /// RAW active style id as a class (`messageEl.classList.add(activeStyle)`), so
+  /// any active `style-…` item trips the `:not([class*="style-"])` cosmetic
+  /// gates (hologram fill/sheen, frost fill, cosmic bubble starfield, gold
+  /// bubble wash — styles-features.css:1163/1192/1203/3699). `supporter-style`
+  /// does NOT match `[class*="style-"]` (no trailing hyphen).
+  bool get _styleClassActive =>
+      _cosmetics.styleId?.startsWith('style-') ?? false;
 
   /// The flair + supporter badges that follow the author nym.
   Widget _nymBadges(BuildContext context, {double flairSize = 16}) {
@@ -517,13 +548,40 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // cosmetic-redacted (`shop.js:498-512`): the REAL text shows for 10s, then a
     // `.cosmetic-redacted-message` translucent bar replaces it (bg white@0.15,
     // radius-xs, min-width 120, min-height 1.2em, content hidden).
+    final Widget body;
     if (_cosmetics.isRedacted) {
-      return _RedactedReveal(
+      body = _RedactedReveal(
         fontSize: fontSize,
         child: _content(context, color, fontSize, deco: deco, bubble: bubble),
       );
+    } else {
+      body = _content(context, color, fontSize, deco: deco, bubble: bubble);
     }
-    return _content(context, color, fontSize, deco: deco, bubble: bubble);
+    // A bot reply whose model exposed its chain of thought PREPENDS the
+    // collapsed `.bot-think` "💭 Reasoning" section INSIDE `.message-content`,
+    // before the formatted body (`formattedContent =
+    // _renderBotThinkingHtml(message.thinking) + formattedContent`,
+    // messages.js:796-797) — gated on `message.isBot ||
+    // isVerifiedBot(message.pubkey)`.
+    final thinking = message.thinking;
+    if (thinking != null &&
+        thinking.trim().isNotEmpty &&
+        (message.isBot ||
+            ref.read(nostrControllerProvider).isVerifiedBot(message.pubkey))) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _BotThinkSection(
+            reasoning: thinking,
+            // `.bot-think { font-size: 0.88em }` of the user text size.
+            fontSize: settings.textSize.toDouble() * 0.88,
+          ),
+          body,
+        ],
+      );
+    }
+    return body;
   }
 
   @override
@@ -568,6 +626,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                         : () => widget.onReactionPicker!.call(message),
                     onTranslate: () =>
                         setState(() => _showTranslation = true),
+                    // `body.columns-mode .msg-hover-buttons { flex-direction:
+                    // column }` (styles-columns.css:80-82) — the pair stacks
+                    // vertically to fit the 360px column.
+                    vertical: widget.columnsMode,
                   ),
                 ),
               ),
@@ -922,6 +984,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
     Color? bg;
     Color? barColor;
+    // The accent bar's glow (`::before` box-shadow) — secondary@0.4 for a
+    // mention, magenta for the PM-hover bar below.
+    Color? barGlow = widget.mentioned ? c.secondaryA(0.4) : null;
     if (self) {
       bg = c.secondaryA(0.05);
       // `.message.self::before` accent bar: white@0.3 dark; light-mode →
@@ -947,6 +1012,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           : (message.isPM
               ? const Color(0x0AFF00FF) // rgba(255,0,255,0.04)
               : Colors.white.withValues(alpha: 0.03));
+      // `.message.pm:hover::before` (styles-chat.css:111-122): a 3px × 60%
+      // rounded `--purple` accent bar with a `0 0 8px rgba(255,0,255,0.3)`
+      // glow. Its specificity beats `.self`/`.mentioned`'s ::before bars, and
+      // no light-mode rule overrides the pseudo-element, so it applies in both
+      // themes (only the hover BACKGROUND flips to black@0.03 in light mode).
+      if (message.isPM) {
+        barColor = c.purple;
+        barGlow = const Color(0x4DFF00FF); // rgba(255,0,255,0.3)
+      }
     }
     // A 135deg gradient painted on the IRC row (supporter's gold wash + the
     // gold/neon/phoenix/cosmic aura gradients). Takes precedence over the flat
@@ -959,7 +1033,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       // Supporter paints a gold linear-gradient on the IRC row (not a flat fill);
       // a plain style background (none today in IRC) would use contentBackground.
       bgGradient = deco.backgroundGradient ?? bgGradient;
-      if (deco.backgroundGradient == null) bg = deco.contentBackground ?? bg;
+      if (deco.backgroundGradient == null) {
+        bg = deco.contentBackgroundFor(bubble: false) ?? bg;
+      }
     }
     // Special cosmetic auras also paint a left bar + background tint on the row.
     // The PWA paints `background: linear-gradient(135deg,…)` on the IRC row for
@@ -972,7 +1048,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
     if (strongestAura?.gradient != null) {
       bgGradient = strongestAura!.gradient;
-    } else if (strongestAura?.background != null) {
+    } else if (strongestAura?.background != null && !_styleClassActive) {
+      // The frost icy wash paints ONLY when no message style is active
+      // (`.message:not([class*="style-"]).cosmetic-frost .message-content`,
+      // styles-features.css:1163-1166); the IRC row gradients above carry no
+      // such gate.
       bg = strongestAura!.background;
     }
     // The aura whose overlay (prism ring / hologram sheen) must paint on the IRC
@@ -992,23 +1072,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final watermark = styleWatermark ?? auraWatermark?.watermark;
     final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
 
-    // The `.message` flex-wrap row: `.message-time` (FIRST), then
-    // `.message-author`, then `.message-content` — mirroring the PWA HTML order
-    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
-    // own lines (`.message-translation` width:100%, `.group-readers`/
-    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
-    // into the outer Column below so they span the whole message, right-aligned,
-    // rather than being clamped to the content's width.
-    final messageRow = Wrap(
-      crossAxisAlignment: WrapCrossAlignment.start,
-      spacing: 10,
-      runSpacing: 4,
-      children: [
-        // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
-        // the FIRST element, the left column, BEFORE the author. The clock
-        // reserves a 50px column so author/content left-edges line up.
-        if (settings.showTimestamps)
-          ConstrainedBox(
+    // The three `.message` flex items, in PWA HTML order (messages.js:936-938):
+    // `.message-time` (FIRST), `.message-author`, `.message-content`.
+    // `.message-time { color:--text-dim; font-size:12px; min-width:50px }` —
+    // the clock reserves a 50px column so author/content left-edges line up.
+    final Widget? timeItem = settings.showTimestamps
+        ? ConstrainedBox(
             constraints: const BoxConstraints(minWidth: 50),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1029,63 +1098,105 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   CryptoVerifiedBadge(state: _cryptoState!),
               ],
             ),
-          ),
-        ConstrainedBox(
-          // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
-          // the author flows inline and the line wraps. We keep a generous cap
-          // so the fixed badges (a ~116px supporter pill + flair/verified/friend)
-          // always fit and the nym ellipsizes within the remainder; the message
-          // body wraps to the next run when the author is wide.
-          constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
-          child: GestureDetector(
-            onTap: () => _openContextMenu(context),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // IRC author leads with an 18px inline avatar (`.avatar-message`,
-                // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
-                NymAvatar(
-                    seed: message.pubkey, size: 18, imageUrl: _authorPicture),
-                const SizedBox(width: 4),
-                Flexible(
-                  child: _authorLine(
-                    c,
-                    self: self,
-                    size: fontSize,
-                    // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
-                    flairSize: 20,
-                    brackets: true,
-                  ),
-                ),
-              ],
+          )
+        : null;
+    final authorItem = ConstrainedBox(
+      // `.message` is `display:flex; flex-wrap:wrap` with no author cap —
+      // the author flows inline and the line wraps. We keep a generous cap
+      // so the fixed badges (a ~116px supporter pill + flair/verified/friend)
+      // always fit and the nym ellipsizes within the remainder; the message
+      // body wraps to the next run when the author is wide.
+      constraints: const BoxConstraints(minWidth: 120, maxWidth: 320),
+      child: GestureDetector(
+        onTap: () => _openContextMenu(context),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // IRC author leads with an 18px inline avatar (`.avatar-message`,
+            // hidden in bubble mode). 4px gap, then `<nym#suffix flair…>`.
+            NymAvatar(
+                seed: message.pubkey, size: 18, imageUrl: _authorPicture),
+            const SizedBox(width: 4),
+            Flexible(
+              child: _authorLine(
+                c,
+                self: self,
+                size: fontSize,
+                // `.flair-badge { font-size: 20px }` — in-chat flair is 20px.
+                flairSize: 20,
+                brackets: true,
+              ),
             ),
-          ),
+          ],
         ),
-        ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width - 220,
+      ),
+    );
+    final contentColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
+            deco: deco),
+        // Reactions row renders only when reactions OR zaps exist (the PWA
+        // `updateMessageReactions` early-returns on an empty reaction set,
+        // removing the row entirely unless zaps remain). The zap badge sits
+        // at its front; the `.add-reaction-btn` (smiley-plus) is appended at
+        // the end but ONLY on rows that already carry reactions — the first
+        // react on a bare message is still via long-press quick-react.
+        if (reactions.isNotEmpty || _hasZaps)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: _reactionsRow(context),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _bodyContent(context, _bitchatColor(c) ?? c.text, fontSize,
-                  deco: deco),
-              // Reactions row renders only when reactions OR zaps exist (the PWA
-              // `updateMessageReactions` early-returns on an empty reaction set,
-              // removing the row entirely unless zaps remain). The zap badge sits
-              // at its front; the `.add-reaction-btn` (smiley-plus) is appended at
-              // the end but ONLY on rows that already carry reactions — the first
-              // react on a bare message is still via long-press quick-react.
-              if (reactions.isNotEmpty || _hasZaps)
-                Padding(
-                  padding: const EdgeInsets.only(top: 5),
-                  child: _reactionsRow(context),
-                ),
-            ],
-          ),
-        ),
       ],
     );
+
+    // The `.message` flex-wrap row: time, author, content flow inline
+    // (messages.js:936-938). Full-width siblings that the PWA wraps onto their
+    // own lines (`.message-translation` width:100%, `.group-readers`/
+    // `.channel-readers` flex-basis:100%) are hoisted OUT of the content column
+    // into the outer Column below so they span the whole message, right-aligned,
+    // rather than being clamped to the content's width.
+    //
+    // COLUMNS MODE (`body.columns-mode:not(.chat-bubbles) .cv-list .message
+    // { flex-direction: column; gap: 5px }`, styles-columns.css:27-49): the
+    // flex children are blockified (`display:inline` on time/author computes
+    // to block for a flex item), so the row STACKS — time, then author 5px
+    // below, then the content 10px below the author (the 5px column gap plus
+    // `.message-content { margin-top: 5px }`) at `width: 100%` of the column.
+    final Widget messageRow;
+    if (widget.columnsMode) {
+      messageRow = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (timeItem != null) ...[
+            timeItem,
+            const SizedBox(height: 5), // `gap: 5px`
+          ],
+          authorItem,
+          // `gap: 5px` + `.message-content { margin-top: 5px }`.
+          const SizedBox(height: 10),
+          // `.message-content { width: 100% }` — full column width.
+          SizedBox(width: double.infinity, child: contentColumn),
+        ],
+      );
+    } else {
+      messageRow = Wrap(
+        crossAxisAlignment: WrapCrossAlignment.start,
+        spacing: 10,
+        runSpacing: 4,
+        children: [
+          if (timeItem != null) timeItem,
+          authorItem,
+          ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width - 220,
+            ),
+            child: contentColumn,
+          ),
+        ],
+      );
+    }
 
     // The message body + the full-width siblings the PWA wraps below it. The
     // `.message-translation` (`width:100%`) and `.group-readers`/
@@ -1210,8 +1321,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                             topRight: Radius.circular(3),
                             bottomRight: Radius.circular(3),
                           ),
-                          boxShadow: widget.mentioned
-                              ? [BoxShadow(color: c.secondaryA(0.4), blurRadius: 8)]
+                          boxShadow: barGlow != null
+                              ? [BoxShadow(color: barGlow, blurRadius: 8)]
                               : null,
                         ),
                       ),
@@ -1240,6 +1351,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                         aura: overlayAura,
                         radius: NymRadius.rsm,
                         bubble: false,
+                        // Drops the hologram iridescent fill + sheen when a
+                        // `style-…` class is active (`:not([class*="style-"])
+                        // .cosmetic-bubble-hologram`, styles-features.css:
+                        // 1203-1211) — the ring/glow stay.
+                        styleActive: _styleClassActive,
                       ),
                     ),
                   ),
@@ -1275,17 +1391,28 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // The aura gradient is painted as the bubble FILL only for auras whose PWA
     // bubble actually has a background (gold). neon/phoenix/cosmic are
     // box-shadow-only in the bubble (their gradient is the IRC row's only), so
-    // they must NOT over-paint a fill here. (P1#4.)
-    final bubbleGradient = (lastAura != null && lastAura.bubblePaintsGradient)
+    // they must NOT over-paint a fill here (P1#4) — and even gold's wash is
+    // gated on NO active message style (`body.chat-bubbles .message:not(
+    // [class*="style-"]).cosmetic-aura-gold .message-content`,
+    // styles-features.css:3699-3701): a styled bubble keeps only the ring/glow.
+    final bubbleGradient = (lastAura != null &&
+            lastAura.bubblePaintsGradient &&
+            !_styleClassActive)
         ? lastAura.bubbleFillGradient
         : null;
     // `.message-content` bubble fill. Dark mode: self primary@0.25, others
     // white@0.14. Light mode (`body.light-mode.chat-bubbles`): self primary@0.20,
     // others/PM black@0.10 — a translucent *white* over a light surface is
-    // invisible, so the PWA flips others to a dark wash. A style/aura background
-    // still takes precedence.
-    final bubbleColor = deco?.contentBackground ??
-        lastAura?.background ??
+    // invisible, so the PWA flips others to a dark wash. The style background
+    // takes precedence via its BUBBLE-layout resolution (`contentBackgroundFor`):
+    // light satoshi's rgba(247,147,26,.12) bubble override
+    // (styles-themes-responsive.css:1417-1419) and aurora's fully TRANSPARENT
+    // replacement fill (styles-features.css:3675-3686, the gradient clips to the
+    // text over a `linear-gradient(transparent, transparent)` border-box layer).
+    // The frost flat wash applies only when no message style is active
+    // (`.message:not([class*="style-"]).cosmetic-frost`, :1163-1166).
+    final bubbleColor = deco?.contentBackgroundFor(bubble: true) ??
+        (_styleClassActive ? null : lastAura?.background) ??
         (self
             ? c.primaryA(c.isLight ? 0.20 : 0.25)
             : (c.isLight
@@ -1462,6 +1589,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       child: stack,
     );
 
+    // `bubble-snap-in` (styles-features.css:3453-3471): a newly-appended
+    // consecutive bubble enters with a 240ms cubic-bezier(0.34,1.56,0.64,1)
+    // overshoot — translateY(-6px)/scale(0.94)/opacity 0 → an over-shot
+    // +2px/1.02 at 55% → settle. Transform-origin bottom-left, bottom-right for
+    // self; disabled under `prefers-reduced-motion: reduce`.
+    Widget rowBody = swiped;
+    if (_snapIn && !MediaQuery.of(context).disableAnimations) {
+      rowBody = _BubbleSnapIn(self: self, child: rowBody);
+    }
+
     // Per-message vertical rhythm. The PWA tightly stacks a group's bubbles and
     // separates groups by ~6px: `.message { margin-bottom: 6px }` for a group
     // lead, while a `.bubble-grouped` member uses `margin-top: -4px` (the first
@@ -1476,7 +1613,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // and the single gliding [_StickyGroupAvatar], laying every bubble of the
     // run in one `.message-group-stack` column beside it.
     if (widget.inGroup) {
-      return Padding(padding: vPad, child: swiped);
+      return Padding(padding: vPad, child: rowBody);
     }
 
     // Legacy standalone path (direct [MessageRow] use, not via [MessageGroup]):
@@ -1504,7 +1641,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           ),
           const SizedBox(width: 6),
         ],
-        Flexible(child: swiped),
+        Flexible(child: rowBody),
       ],
     );
     return Padding(
@@ -1549,12 +1686,19 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             : null;
 
     // Watermark from the active style or a frost/cosmic aura — and whether that
-    // watermark tiles edge-only (frost) rather than across the whole box.
+    // watermark tiles edge-only (frost) rather than across the whole box. The
+    // cosmic BUBBLE starfield only tiles when no message style is active
+    // (`body.chat-bubbles .message:not([class*="style-"]).cosmetic-aura-cosmic
+    // .message-content`, styles-features.css:1192-1195); frost's edge snowflakes
+    // (`.cosmetic-frost .message-content::after`, :1149-1161) carry no such gate.
     final styleWatermark = _styleDecoration(context)?.watermark;
     final CosmeticAura? auraWatermark = styleWatermark != null
         ? null
-        : auras.where((a) => a.watermark != null).fold<CosmeticAura?>(
-            null, (prev, a) => prev ?? a);
+        : auras
+            .where((a) =>
+                a.watermark != null &&
+                (a.edgeWatermark || !_styleClassActive))
+            .fold<CosmeticAura?>(null, (prev, a) => prev ?? a);
     final watermark = styleWatermark ?? auraWatermark?.watermark;
     final edgeWatermark = auraWatermark?.edgeWatermark ?? false;
 
@@ -1598,6 +1742,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                     painter: CosmeticOverlayPainter(
                       aura: overlayAura,
                       radius: radius,
+                      // Drops the hologram iridescent fill + sheen when a
+                      // `style-…` class is active (`:not([class*="style-"])
+                      // .cosmetic-bubble-hologram`, styles-features.css:
+                      // 1203-1211) — only the ring/glow remain.
+                      styleActive: _styleClassActive,
                     ),
                   ),
                 ),
@@ -1702,6 +1851,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       anchorRect: _globalRectOfContext(context) ?? Rect.zero,
       emoji: '👁',
       reactors: reactors,
+      // "Click user row to open their context menu" (`_showReadersModalFromMap`,
+      // groups.js:2861-2869): close the modal, then
+      // `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`.
+      onTapReactor: (r) => _openReactorContextMenu(context, r),
     );
   }
 
@@ -1799,6 +1952,26 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       anchorRect: rect,
       emoji: r.emoji,
       reactors: reactors,
+      // "Click user row to open their context menu" (`showReactorsModal`,
+      // reactions.js:656-663): the modal closes itself, then the PWA calls
+      // `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`.
+      onTapReactor: (entry) => _openReactorContextMenu(context, entry),
+    );
+  }
+
+  /// Opens a reactor/reader row's user context menu — the PWA's
+  /// `showContextMenu(e, `${baseNym}#${suffix}`, pubkey, null, null, false)`
+  /// (reactions.js:656-663, groups.js:2861-2869): no message/content attached
+  /// and NOT profile-only.
+  void _openReactorContextMenu(BuildContext context, ReactorEntry r) {
+    final app = ref.read(appStateProvider);
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: r.pubkey,
+        nym: r.nym,
+        isSelf: r.pubkey == app.selfPubkey,
+      ),
     );
   }
 
@@ -1817,6 +1990,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     showQuickReactPopup(
       context,
       anchorRect: rect,
+      // The dim-scrim spotlight cutout is the PRESSED MESSAGE's bounds (the
+      // `.long-press-highlight` row stays bright while the scroller dims,
+      // styles-features.css:2848-2863) — distinct from the press-point anchor
+      // the pill positions against.
+      spotlightRect: _globalRectOfContext(context),
       emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
@@ -1926,18 +2104,31 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
   }
 
-  /// Opens the zap modal for this message's author (the swipe `zap` action and a
-  /// 1:1 mirror of `quick_context_items._zap`): resolves the author's lightning
-  /// address from `usersProvider`, or emits a system message when none is set.
+  /// Opens the zap modal for this message's author (the swipe `zap` action,
+  /// messages.js:2086-2106): posts the PWA's "Checking if @X can receive
+  /// zaps..." system note, does a FRESH lightning-address resolve
+  /// (`fetchLightningAddressForUser` — cache first, then a kind-0 profile
+  /// fetch awaited up to 4s) rather than trusting the local cache, then either
+  /// opens the modal, reports "cannot receive zaps", or — on a resolve error —
+  /// "Failed to check if @X can receive zaps".
   Future<void> _zapMessage(BuildContext context, String baseNym) async {
-    final lnAddr =
-        ref.read(usersProvider)[message.pubkey]?.profile?.lightningAddress;
+    final notifier = ref.read(appStateProvider.notifier);
+    notifier.addSystemMessage('Checking if @$baseNym can receive zaps...');
+    final String? lnAddr;
+    try {
+      lnAddr = await ref
+          .read(nostrControllerProvider)
+          .resolveLightningAddressForZap(message.pubkey);
+    } catch (_) {
+      notifier.addSystemMessage('Failed to check if @$baseNym can receive zaps');
+      return;
+    }
     if (lnAddr == null || lnAddr.isEmpty) {
-      ref.read(appStateProvider.notifier).addSystemMessage(
+      notifier.addSystemMessage(
           '@$baseNym cannot receive zaps (no lightning address set)');
       return;
     }
-    if (!context.mounted) return;
+    if (!context.mounted || !mounted) return;
     await ZapModal.show(
       context,
       recipientPubkey: message.pubkey,
@@ -2196,7 +2387,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 /// A single `.reaction-badge` pill. Tappable (toggle) with a long-press to show
 /// the reactor list; reports its global bounds to the callbacks for anchoring.
 /// User-reacted badges get a soft glow halo (`box-shadow 0 0 10px primary@0.1`)
-/// and the pill presses/pops on tap (`active scale(0.95)`).
+/// and the pill presses/pops on tap (`active scale(0.95)`). Desktop hover lifts
+/// it (`.reaction-badge:hover`, styles-chat.css:429-433: primary@0.08 bg,
+/// primary@0.3 border, scale 1.05); the later-in-sheet `.user-reacted` rule
+/// keeps its own bg/border on hover, so only the lift applies then. No hover
+/// tooltip: the `[title]:hover::after` reactor-names rule is dead CSS — the PWA
+/// never sets a `title` on badges ("No tooltip — long-press shows reactors
+/// modal instead", reactions.js:512).
 class _ReactionBadge extends StatefulWidget {
   const _ReactionBadge({
     required this.reaction,
@@ -2213,6 +2410,7 @@ class _ReactionBadge extends StatefulWidget {
 
 class _ReactionBadgeState extends State<_ReactionBadge> {
   bool _pressed = false;
+  bool _hover = false;
 
   Rect _rect(BuildContext context) {
     final box = context.findRenderObject() as RenderBox?;
@@ -2242,66 +2440,78 @@ class _ReactionBadgeState extends State<_ReactionBadge> {
             ..onLongPressStart = (_) => widget.onLongPress(_rect(context)),
         ),
       },
-      child: GestureDetector(
-        onTap: () => widget.onTap(_rect(context)),
-        onTapDown: (_) => setState(() => _pressed = true),
-        onTapUp: (_) => setState(() => _pressed = false),
-        onTapCancel: () => setState(() => _pressed = false),
-        child: AnimatedScale(
-          scale: _pressed ? 0.95 : 1.0,
-          duration: const Duration(milliseconds: 120),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: r.userReacted
-                  ? c.primaryA(0.12)
-                  : Colors.white.withValues(alpha: 0.05),
-              borderRadius: const BorderRadius.all(Radius.circular(20)),
-              border: Border.all(
-                color: r.userReacted ? c.primaryA(0.35) : c.glassBorder,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: () => widget.onTap(_rect(context)),
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) => setState(() => _pressed = false),
+          onTapCancel: () => setState(() => _pressed = false),
+          child: AnimatedScale(
+            // `:active scale(0.95)` beats `:hover scale(1.05)` (later in sheet).
+            scale: _pressed ? 0.95 : (_hover ? 1.05 : 1.0),
+            duration: const Duration(milliseconds: 120),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                // `.user-reacted` (439-443) sits AFTER `:hover` (429-433) at
+                // equal specificity, so its bg/border win while hovered.
+                color: r.userReacted
+                    ? c.primaryA(0.12)
+                    : (_hover
+                        ? c.primaryA(0.08)
+                        : Colors.white.withValues(alpha: 0.05)),
+                borderRadius: const BorderRadius.all(Radius.circular(20)),
+                border: Border.all(
+                  color: r.userReacted
+                      ? c.primaryA(0.35)
+                      : (_hover ? c.primaryA(0.3) : c.glassBorder),
+                ),
+                boxShadow: r.userReacted
+                    ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
+                    : null,
               ),
-              boxShadow: r.userReacted
-                  ? [BoxShadow(color: c.primaryA(0.1), blurRadius: 10)]
-                  : null,
+              // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
+              // stays `--text` even when user-reacted (only bg/border/glow change —
+              // `styles-chat.css:439-443`). The emoji goes through the PWA's
+              // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
+              // `:shortcode:` reaction can render as its custom-emoji image, at the
+              // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
+              // (styles-chat.css:854-859, margin 0). The pill lays out as
+              // `display:flex; align-items:center; gap:3px` — with an image the
+              // count is a separate flex item 3px away; with plain text the PWA's
+              // text nodes merge into one `"emoji count"` run, so render that as a
+              // single Text.
+              child: _rxWholeToken.hasMatch(r.emoji)
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InlineEmojiText(
+                          text: r.emoji,
+                          style: TextStyle(color: c.text, fontSize: 12),
+                          wholeStringOnly: true,
+                          emojiSize: 12 * 1.45,
+                          emojiMargin: EdgeInsets.zero,
+                          // The badge pill is `display: flex; align-items: center`
+                          // (styles-chat.css:414-426), so the img is a flex-
+                          // centered item — `.custom-emoji-reaction`'s
+                          // `vertical-align` is inert here.
+                          emojiAlignment: PlaceholderAlignment.middle,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          abbreviateNumber(r.count),
+                          style: TextStyle(color: c.text, fontSize: 12),
+                        ),
+                      ],
+                    )
+                  : Text(
+                      '${r.emoji} ${abbreviateNumber(r.count)}',
+                      style: TextStyle(color: c.text, fontSize: 12),
+                    ),
             ),
-            // Count abbreviated (`abbreviateNumber`, e.g. `1.2k`). The badge label
-            // stays `--text` even when user-reacted (only bg/border/glow change —
-            // `styles-chat.css:439-443`). The emoji goes through the PWA's
-            // `renderReactionEmoji` semantics (emoji.js:342-351): ONLY an exact
-            // `:shortcode:` reaction can render as its custom-emoji image, at the
-            // `.custom-emoji-reaction` size of 1.45em of the 12px badge font
-            // (styles-chat.css:854-859, margin 0). The pill lays out as
-            // `display:flex; align-items:center; gap:3px` — with an image the
-            // count is a separate flex item 3px away; with plain text the PWA's
-            // text nodes merge into one `"emoji count"` run, so render that as a
-            // single Text.
-            child: _rxWholeToken.hasMatch(r.emoji)
-                ? Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      InlineEmojiText(
-                        text: r.emoji,
-                        style: TextStyle(color: c.text, fontSize: 12),
-                        wholeStringOnly: true,
-                        emojiSize: 12 * 1.45,
-                        emojiMargin: EdgeInsets.zero,
-                        // The badge pill is `display: flex; align-items: center`
-                        // (styles-chat.css:414-426), so the img is a flex-
-                        // centered item — `.custom-emoji-reaction`'s
-                        // `vertical-align` is inert here.
-                        emojiAlignment: PlaceholderAlignment.middle,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        abbreviateNumber(r.count),
-                        style: TextStyle(color: c.text, fontSize: 12),
-                      ),
-                    ],
-                  )
-                : Text(
-                    '${r.emoji} ${abbreviateNumber(r.count)}',
-                    style: TextStyle(color: c.text, fontSize: 12),
-                  ),
           ),
         ),
       ),
@@ -2471,6 +2681,107 @@ class _RedactedRevealState extends State<_RedactedReveal> {
   }
 }
 
+/// The collapsed "💭 Reasoning" details block a bot reply prepends inside its
+/// bubble/content (`.bot-think`, styles-chat.css:1193-1237 + messages.js
+/// :796-797, 1415-1418): margin 2px 0 8px, bg secondary@0.08, a 1px glass
+/// border with a 3px primary@0.45 left accent, radius-xs (8); the summary row
+/// (5px 10px, text-dim, a ▸ that rotates 90° while open over `--transition`)
+/// grows a 1px glass-border bottom divider while open; the body is 8px 10px
+/// italic text-dim at line-height 1.5, capped at 320px with its own scroll.
+/// The whole block renders at 0.88em of the user text size.
+class _BotThinkSection extends StatefulWidget {
+  const _BotThinkSection({
+    required this.reasoning,
+    required this.fontSize,
+  });
+
+  final String reasoning;
+
+  /// 0.88 × the user text-size setting (`.bot-think { font-size: 0.88em }`).
+  final double fontSize;
+
+  @override
+  State<_BotThinkSection> createState() => _BotThinkSectionState();
+}
+
+class _BotThinkSectionState extends State<_BotThinkSection> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final fs = widget.fontSize;
+    final side = BorderSide(color: c.glassBorder);
+    return Container(
+      // `.bot-think { margin: 2px 0 8px }`.
+      margin: const EdgeInsets.only(top: 2, bottom: 8),
+      decoration: BoxDecoration(
+        color: c.secondaryA(0.08),
+        borderRadius: NymRadius.rxs,
+        border: Border(
+          top: side,
+          right: side,
+          bottom: side,
+          left: BorderSide(color: c.primaryA(0.45), width: 3),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Container(
+              // `[open] summary { border-bottom: 1px solid var(--glass-border) }`.
+              decoration: _expanded
+                  ? BoxDecoration(border: Border(bottom: side))
+                  : null,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // `summary::before` ▸ marker (rotates 90° when open;
+                  // `--transition`: 0.25s cubic-bezier(0.4,0,0.2,1)).
+                  AnimatedRotation(
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.fastOutSlowIn,
+                    turns: _expanded ? 0.25 : 0,
+                    child: Text('▸',
+                        style: TextStyle(color: c.textDim, fontSize: fs)),
+                  ),
+                  const SizedBox(width: 6),
+                  // `.bot-think summary` has no font-weight (normal/w400).
+                  Text('💭 Reasoning',
+                      style: TextStyle(
+                          color: c.textDim,
+                          fontSize: fs,
+                          fontWeight: FontWeight.w400)),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded)
+            // `.bot-think-body`: italic dim, capped at 320px with its own scroll.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                child: Text(
+                  widget.reasoning,
+                  style: TextStyle(
+                      color: c.textDim,
+                      fontSize: fs,
+                      height: 1.5,
+                      fontStyle: FontStyle.italic),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// The `.message-scroll-flash` highlight pulse (`styles-chat.css:1285-1306`): a
 /// non-interactive primary-tinted overlay (`::after`, primary@0.18 fill + 1px
 /// primary@0.5 border, radius-sm) that fades in then out over the
@@ -2562,30 +2873,43 @@ class _ScrollFlashOverlayState extends State<_ScrollFlashOverlay>
 /// (`reactionShowPicker`) and a translate button (`translateHoverMessage`),
 /// 4px apart. The host fades the pair with the row hover.
 class _MsgHoverButtons extends StatelessWidget {
-  const _MsgHoverButtons({required this.onReact, required this.onTranslate});
+  const _MsgHoverButtons({
+    required this.onReact,
+    required this.onTranslate,
+    this.vertical = false,
+  });
 
   /// Opens the full reaction picker; null (no picker host) leaves the button
   /// rendered but inert, like a PWA row whose picker action can't resolve.
   final VoidCallback? onReact;
   final VoidCallback onTranslate;
 
+  /// Columns mode stacks the pair vertically (`body.columns-mode
+  /// .msg-hover-buttons { flex-direction: column }`, styles-columns.css:80-82).
+  final bool vertical;
+
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // `.reaction-btn` — the 20×20 smiley-plus glyph (same path as the
-        // add-reaction pill's icon).
-        _HoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
-        const SizedBox(width: 4), // `.msg-hover-buttons { gap: 4px }`
-        // `.translate-msg-btn` (`title="Translate"`).
-        _HoverActionButton(
-          svg: NymIcons.translate,
-          onTap: onTranslate,
-          tooltip: 'Translate',
-        ),
-      ],
-    );
+    final children = [
+      // `.reaction-btn` — the 20×20 smiley-plus glyph (same path as the
+      // add-reaction pill's icon).
+      _HoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
+      // `.msg-hover-buttons { gap: 4px }`.
+      SizedBox(width: vertical ? 0 : 4, height: vertical ? 4 : 0),
+      // `.translate-msg-btn` (`title="Translate"`).
+      _HoverActionButton(
+        svg: NymIcons.translate,
+        onTap: onTranslate,
+        tooltip: 'Translate',
+      ),
+    ];
+    return vertical
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: children,
+          )
+        : Row(mainAxisSize: MainAxisSize.min, children: children);
   }
 }
 
@@ -3393,11 +3717,20 @@ class MessageGroup extends ConsumerStatefulWidget {
     super.key,
     required this.entries,
     required this.settings,
+    this.columnsMode = false,
     this.onReactionPicker,
   });
 
   final List<MessageGroupEntry> entries;
   final Settings settings;
+
+  /// This group renders inside a columns-deck `.cv-list` (`body.columns-mode`).
+  /// Forwarded to every [MessageRow] (IRC rows stack vertically, hover buttons
+  /// stack) and — on desktop (>768px) — drops the self group's 14px right
+  /// padding so own bubbles sit flush with the column scroller's 10px padding
+  /// (`@media (min-width: 769px) body.columns-mode.chat-bubbles .message-group.
+  /// group-self { padding-right: 0 }`, styles-columns.css:58-62).
+  final bool columnsMode;
   final ValueChanged<Message>? onReactionPicker;
 
   @override
@@ -3442,6 +3775,7 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
               settings: settings,
               reactions: entries[i].reactions,
               mentioned: entries[i].mentioned,
+              columnsMode: widget.columnsMode,
               grouped: useBubbles && i > 0,
               showName: !(useBubbles && i > 0),
               showAvatar: false,
@@ -3482,10 +3816,15 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
     );
 
     // Self group: `group-self` is `padding: 0 14px`, row-reversed, no avatar —
-    // each row already right-aligns its own content.
+    // each row already right-aligns its own content. Desktop columns mode drops
+    // the RIGHT padding so own bubbles sit flush with the column scroller's
+    // 10px padding (`@media (min-width: 769px) body.columns-mode.chat-bubbles
+    // .message-group.group-self { padding-right: 0 }`, styles-columns.css:58-62).
     if (self) {
+      final flushRight = widget.columnsMode &&
+          MediaQuery.of(context).size.width > NymDimens.mobileBreakpoint;
       return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14),
+        padding: EdgeInsets.only(left: 14, right: flushRight ? 0 : 14),
         child: stack,
       );
     }
@@ -3707,6 +4046,105 @@ class _StickyGroupAvatarState extends State<_StickyGroupAvatar> {
           child: avatar,
         );
       },
+    );
+  }
+}
+
+/// The `bubble-snap-in` entrance a live consecutive bubble plays as it lands
+/// (`body.chat-bubbles .message.bubble-snap { animation: bubble-snap-in 240ms
+/// cubic-bezier(0.34, 1.56, 0.64, 1) both; transform-origin: bottom left }`,
+/// self → `bottom right`; styles-features.css:3453-3471). Keyframes:
+///   0%   translateY(-6px) scale(0.94) opacity 0
+///   55%  translateY(2px)  scale(1.02) opacity 1
+///   80%  translateY(-1px) scale(0.995)
+///   100% identity
+/// CSS eases each keyframe segment with the animation's timing function, so
+/// every tween below chains the same overshoot cubic.
+class _BubbleSnapIn extends StatefulWidget {
+  const _BubbleSnapIn({required this.self, required this.child});
+
+  /// Self bubbles snap from the bottom-RIGHT corner (`.bubble-snap.self`).
+  final bool self;
+  final Widget child;
+
+  @override
+  State<_BubbleSnapIn> createState() => _BubbleSnapInState();
+}
+
+class _BubbleSnapInState extends State<_BubbleSnapIn>
+    with SingleTickerProviderStateMixin {
+  /// `cubic-bezier(0.34, 1.56, 0.64, 1)` — the overshoot ease.
+  static const Cubic _overshoot = Cubic(0.34, 1.56, 0.64, 1);
+
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 240),
+  )..forward();
+
+  late final Animation<double> _dy = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: -6.0, end: 2.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 2.0, end: -1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 25, // 55% → 80%
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: -1.0, end: 0.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20, // 80% → 100%
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _scale = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.94, end: 1.02).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(
+      tween:
+          Tween(begin: 1.02, end: 0.995).chain(CurveTween(curve: _overshoot)),
+      weight: 25,
+    ),
+    TweenSequenceItem(
+      tween: Tween(begin: 0.995, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 20,
+    ),
+  ]).animate(_c);
+
+  late final Animation<double> _opacity = TweenSequence<double>([
+    TweenSequenceItem(
+      tween: Tween(begin: 0.0, end: 1.0).chain(CurveTween(curve: _overshoot)),
+      weight: 55,
+    ),
+    TweenSequenceItem(tween: ConstantTween(1.0), weight: 45),
+  ]).animate(_c);
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, child) => Opacity(
+        // The overshoot cubic exceeds 1.0 mid-segment; opacity must clamp.
+        opacity: _opacity.value.clamp(0.0, 1.0),
+        child: Transform.translate(
+          offset: Offset(0, _dy.value),
+          child: Transform.scale(
+            scale: _scale.value,
+            alignment: widget.self
+                ? Alignment.bottomRight // `.bubble-snap.self`
+                : Alignment.bottomLeft,
+            child: child,
+          ),
+        ),
+      ),
+      child: widget.child,
     );
   }
 }

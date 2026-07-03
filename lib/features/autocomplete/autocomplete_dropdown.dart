@@ -442,6 +442,10 @@ class _AutocompleteDropdownState extends State<AutocompleteDropdown> {
   }
 
   Widget _emojiRow(NymColors c, EmojiResult e, bool selected) {
+    // `.emoji-item-emoji .custom-emoji { width/height: 25px }` (styles-chat.css
+    // :869-874) — the custom-emoji image is 25px, while a unicode glyph is the
+    // 23px `.emoji-item-emoji` font (styles-components.css:813-817).
+    final side = e.isCustom ? 25.0 : 23.0;
     final glyph = e.isCustom
         // SVG-safe + IP-safe: route through the media proxy and the SVG-aware
         // renderer (raw `Image.network` can't decode SVG — a large share of
@@ -449,11 +453,14 @@ class _AutocompleteDropdownState extends State<AutocompleteDropdown> {
         // the emoji host). Mirrors the picker grid (emoji_picker.dart:402-413).
         ? InlineNetworkImage(
             url: proxiedMedia(e.customUrl!, emoji: true),
-            width: 23,
-            height: 23,
+            width: 25,
+            height: 25,
             memoryOnly: true,
-            placeholder: const SizedBox(width: 23, height: 23),
-            errorChild: const SizedBox(width: 23, height: 23),
+            // An `img.custom-emoji` in the PWA, so the global load-retry
+            // handler applies (inline-bindings.js:167-181).
+            retryOnError: true,
+            placeholder: const SizedBox(width: 25, height: 25),
+            errorChild: const SizedBox(width: 25, height: 25),
           )
         : Text(e.emoji, style: const TextStyle(fontSize: 23));
     // `name` may already be a `:shortcode:` token (custom-emoji recents) — strip
@@ -467,7 +474,7 @@ class _AutocompleteDropdownState extends State<AutocompleteDropdown> {
       onTap: () => widget.onSelectEmoji(e),
       child: Row(
         children: [
-          SizedBox(width: 23, height: 23, child: Center(child: glyph)),
+          SizedBox(width: side, height: side, child: Center(child: glyph)),
           const SizedBox(width: 10),
           Flexible(
             // `.emoji-item` is dim; `.selected/:hover` brightens to `--text`

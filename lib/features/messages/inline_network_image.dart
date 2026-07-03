@@ -62,6 +62,7 @@ class InlineNetworkImage extends StatefulWidget {
   const InlineNetworkImage({
     super.key,
     required this.url,
+    this.fallbackUrls = const [],
     this.width,
     this.height,
     this.fit = BoxFit.contain,
@@ -73,6 +74,14 @@ class InlineNetworkImage extends StatefulWidget {
 
   /// Already-proxied image URL.
   final String url;
+
+  /// NIP-92 imeta Blossom mirror URLs (already proxied, like [url]). When the
+  /// current source fails to load, the next mirror is swapped in before any
+  /// [errorChild]/retry — the PWA's `data-media-fallbacks` img handler
+  /// (`_attachMediaFallbacks`, messages.js:1154-1163), which sets `img.src`
+  /// to the next mirror on each `error` event.
+  final List<String> fallbackUrls;
+
   final double? width;
   final double? height;
   final BoxFit fit;
@@ -200,6 +209,11 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
   int _attempt = 0;
   Timer? _retryTimer;
 
+  /// 0 = [InlineNetworkImage.url]; k = `fallbackUrls[k-1]` — the NIP-92 imeta
+  /// mirror the load has fallen through to (messages.js:1154-1163).
+  int _srcIndex = 0;
+  bool _advancePending = false;
+
   @override
   void didUpdateWidget(InlineNetworkImage old) {
     super.didUpdateWidget(old);
@@ -207,6 +221,8 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
       _retryTimer?.cancel();
       _retryTimer = null;
       _attempt = 0;
+      _srcIndex = 0;
+      _advancePending = false;
     }
   }
 
@@ -216,12 +232,37 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
     super.dispose();
   }
 
+  /// The source for the current mirror step: the caller's URL, or the imeta
+  /// fallback mirror the failed loads have advanced to.
+  String get _baseUrl => _srcIndex == 0
+      ? widget.url
+      : widget.fallbackUrls[_srcIndex - 1];
+
   /// The URL for the current attempt: the base URL, or (on retry) the base URL
   /// with a cache-busting `_r=N` param appended (inline-bindings.js:176-180).
   String get _effectiveUrl {
-    if (_attempt == 0) return widget.url;
-    final sep = widget.url.contains('?') ? '&' : '?';
-    return '${widget.url}$sep' '_r=$_attempt';
+    final base = _baseUrl;
+    if (_attempt == 0) return base;
+    final sep = base.contains('?') ? '&' : '?';
+    return '$base$sep' '_r=$_attempt';
+  }
+
+  /// Swap in the next imeta mirror after a failed load — the PWA's img `error`
+  /// handler does `img.src = list[idx++]` (messages.js:1158-1162). Deferred a
+  /// frame because the failure surfaces inside build.
+  void _advanceFallback() {
+    if (_advancePending) return;
+    _advancePending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _advancePending = false;
+        _srcIndex++;
+        _attempt = 0;
+        _retryTimer?.cancel();
+        _retryTimer = null;
+      });
+    });
   }
 
   /// After a failed load, schedule the next attempt at `800ms * (tries + 1)`
@@ -239,6 +280,14 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
   }
 
   Widget _fallback(BuildContext context) {
+    // Un-exhausted imeta mirrors take priority over the broken-image state:
+    // the PWA never shows the broken img while `data-media-fallbacks` URLs
+    // remain — it swaps the src and lets the mirror load.
+    if (_srcIndex < widget.fallbackUrls.length) {
+      _advanceFallback();
+      return widget.placeholder ??
+          SizedBox(width: widget.width, height: widget.height);
+    }
     _scheduleRetry();
     if (widget.errorChild != null) return widget.errorChild!;
     return SizedBox(

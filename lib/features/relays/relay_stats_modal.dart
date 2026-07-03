@@ -38,6 +38,11 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_switch.dart';
 
+/// Width breakpoint at or below which the modal applies its phone layout:
+/// 3-column stat cards, hidden per-relay latency column, and 18/14 content
+/// padding (styles-themes-responsive.css:1496-1507 `@media max-width: 480px`).
+const double _kMobileMaxWidth = 480;
+
 class RelayStatsModal extends ConsumerStatefulWidget {
   const RelayStatsModal({super.key});
 
@@ -153,7 +158,11 @@ class _RelayStatsModalState extends ConsumerState<RelayStatsModal> {
           child: Stack(
             children: [
               Padding(
-                padding: const EdgeInsets.all(24),
+                // .relay-stats-content padding 24 → 18px 14px at ≤480px
+                // (styles-themes-responsive.css:1501-1503).
+                padding: MediaQuery.sizeOf(context).width <= _kMobileMaxWidth
+                    ? const EdgeInsets.symmetric(vertical: 18, horizontal: 14)
+                    : const EdgeInsets.all(24),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -250,10 +259,13 @@ class _Cards extends StatelessWidget {
     final dataIn = stats != null ? formatBytes(stats!.bytesReceived) : '0 B';
     final dataOut = stats != null ? formatBytes(stats!.bytesSent) : '0 B';
 
-    // 5-up grid (.relay-stats-cards: grid 5, gap 6).
+    // 5-up grid (.relay-stats-cards: grid 5, gap 6); 3 columns at ≤480px
+    // (styles-themes-responsive.css:1497-1499).
+    final columns =
+        MediaQuery.sizeOf(context).width <= _kMobileMaxWidth ? 3 : 5;
     return LayoutBuilder(builder: (context, cons) {
       const gap = 6.0;
-      final cardW = (cons.maxWidth - gap * 4) / 5;
+      final cardW = (cons.maxWidth - gap * (columns - 1)) / columns;
       return Wrap(
         spacing: gap,
         runSpacing: gap,
@@ -767,20 +779,25 @@ class _StatsRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
                 // .relay-stats-latency: mono 11, textDim, right. `<ms>ms`/`--`.
-                SizedBox(
-                  width: 45,
-                  child: Text(
-                    latency != null ? '${latency}ms' : '--',
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 11,
-                      color: c.textDim,
+                // Hidden at ≤480px (`display: none`,
+                // styles-themes-responsive.css:1505-1507) — the gap before it
+                // collapses too (CSS flex gap).
+                if (MediaQuery.sizeOf(context).width > _kMobileMaxWidth) ...[
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 45,
+                    child: Text(
+                      latency != null ? '${latency}ms' : '--',
+                      textAlign: TextAlign.right,
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: c.textDim,
+                      ),
                     ),
                   ),
-                ),
+                ],
                 const SizedBox(width: 10),
                 // .relay-stats-events: mono 11, right. `<n> evt` or `<bytes> ↓`.
                 SizedBox(

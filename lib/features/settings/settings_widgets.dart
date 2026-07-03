@@ -364,11 +364,17 @@ class _FormInputState extends State<FormInput> {
     final borderColor = c.isLight ? const Color(0x1A000000) : c.glassBorder;
     return DecoratedBox(
       // `.form-input:focus { box-shadow: 0 0 0 3px primary@.06 }` — a
-      // hard-edged ring (no blur), applied in both modes.
+      // hard-edged ring (no blur); light mode's `:focus` override lifts it to
+      // primary@.1 `!important` (styles-themes-responsive.css:1087-1093).
       decoration: BoxDecoration(
         borderRadius: NymRadius.rsm,
         boxShadow: _focused
-            ? [BoxShadow(color: c.primaryA(0.06), spreadRadius: 3)]
+            ? [
+                BoxShadow(
+                  color: c.primaryA(c.isLight ? 0.1 : 0.06),
+                  spreadRadius: 3,
+                ),
+              ]
             : null,
       ),
       child: TextField(
@@ -423,13 +429,13 @@ class _FormInputState extends State<FormInput> {
             borderRadius: NymRadius.rsm,
             borderSide: BorderSide(color: borderColor),
           ),
-          // Light mode's `border-color: rgba(0,0,0,.1) !important` beats the
-          // `:focus` primary@.3 rule; dark focuses to primary@.3.
+          // `:focus` border is primary@.3 in both modes — light mode's own
+          // `:focus` rule re-asserts it `!important` and, being more specific,
+          // beats the base light `border-color: rgba(0,0,0,.1) !important`
+          // (styles-themes-responsive.css:1087-1093 over :564-569).
           focusedBorder: OutlineInputBorder(
             borderRadius: NymRadius.rsm,
-            borderSide: BorderSide(
-              color: c.isLight ? const Color(0x1A000000) : c.primaryA(0.3),
-            ),
+            borderSide: BorderSide(color: c.primaryA(0.3)),
           ),
         ),
       ),

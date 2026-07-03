@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/identity/modal_chrome.dart';
 import '../../models/channel.dart';
+import '../../state/settings_provider.dart';
 
 /// The canonical web host for the PWA (`https://web.nymchat.app`). The PWA's
 /// `shareChannel()` uses `window.location.origin + pathname` (channels.js:413),
@@ -38,9 +40,20 @@ class ShareChannelModal extends StatefulWidget {
   final String channelKey;
 
   static Future<void> open(BuildContext context, String channelKey) {
+    // `.modal` barrier: glass `rgba(0,0,0,0.7)` (styles-chat.css:1974);
+    // `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
+    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
+    // (styles-themes-responsive.css:1630-1636).
+    final solidUi =
+        ProviderScope.containerOf(context).read(settingsProvider).solidUi;
+    final isLight = context.nym.isLight;
     return showDialog<void>(
       context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
+      barrierColor: !solidUi
+          ? Colors.black.withValues(alpha: 0.7)
+          : isLight
+              ? const Color(0x73000000) // black @ 0.45
+              : const Color(0xBF000000), // black @ 0.75
       builder: (_) => ShareChannelModal(channelKey: channelKey),
     );
   }

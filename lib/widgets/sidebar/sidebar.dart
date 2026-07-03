@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -426,7 +427,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
               tooltip: 'Explore geohash channels',
               onTap: _openDiscover,
             ),
-            searchHint: 'Search channels…',
+            searchHint: 'Search channels...',
             children: [
               for (final ch in r.rows)
                 ChannelListItem(
@@ -482,12 +483,25 @@ class _SidebarState extends ConsumerState<Sidebar> {
           );
         case _SectionId.pms:
           final term = _pmTerm.toLowerCase();
+          // `filterPMs` (pms.js:3129-3134) matches the WHOLE `.pm-name`
+          // textContent — for a PM row that's `{base}#{suffix}` (pms.js:2759),
+          // for a group row `{name} · {memberCount}` (groups.js:2551) — so a
+          // pubkey-suffix search like `#a3f2` (or member-count digits) hits.
           final r = capped<_PmEntry>(
             pmEntries,
             term,
-            (e) => (e.group != null ? e.group!.name : e.pm!.nym)
-                .toLowerCase()
-                .contains(term),
+            (e) {
+              final String rendered;
+              if (e.group != null) {
+                final g = e.group!;
+                final name = g.name.isEmpty ? 'Group' : g.name;
+                rendered = '$name · ${_abbreviateNumber(g.members.length)}';
+              } else {
+                rendered = '${stripPubkeySuffix(e.pm!.nym)}'
+                    '#${getPubkeySuffix(e.pm!.pubkey)}';
+              }
+              return rendered.toLowerCase().contains(term);
+            },
             _pmExpanded,
           );
           return _NavSection(
@@ -517,7 +531,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 NewPmModal.open(context);
               },
             ),
-            searchHint: 'Search PMs…',
+            searchHint: 'Search PMs...',
             children: [
               // NO fixed Nymbot row: the PWA's `#pmList` only ever contains
               // real conversations inserted by `addPMConversation`
@@ -608,7 +622,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             }),
             onSearchChanged: (v) => setState(() => _nymTerm = v),
             onLongPressTitle: _toggleReorderMode,
-            searchHint: 'Search nyms…',
+            searchHint: 'Search nyms...',
             children: [
               // `.ssk-nym` ×5 (index.html:577-582; widths w3/w1/w4/w2/w3).
               if (!_skelTimedOut && onlineUsers.isEmpty)
@@ -898,8 +912,9 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
         // The hold fires the SAME 30ms `nymHapticTap` every other long-press
         // site uses, right as the timer elapses (`if (window.nymHapticTap)
         // window.nymHapticTap(); this.panicWipe()`, panic.js:20-25) — mapped
-        // to lightImpact like the port's other nymHapticTap sites.
-        HapticFeedback.lightImpact();
+        // to mediumImpact like the port's other nymHapticTap sites. This is
+        // the ONLY buzz the PWA fires for the wipe.
+        HapticFeedback.mediumImpact();
         widget.onHold();
       },
     );
@@ -1299,11 +1314,10 @@ class _NavSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // `.nav-title`: long-press toggles reorder mode; the title text does
-          // NOT toggle collapse (the chevron does).
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onLongPress: onLongPressTitle,
+          // `.nav-title`: a 500ms press-and-hold toggles reorder mode; the
+          // title text does NOT toggle collapse (the chevron does).
+          _NavTitleHold(
+            onHold: onLongPressTitle,
             child: Padding(
               // `.nav-title` padding-left 8, margin-bottom 10.
               padding: const EdgeInsets.fromLTRB(8, 0, 0, 10),
@@ -1336,9 +1350,11 @@ class _NavSection extends StatelessWidget {
                     leadingIcon!,
                     const SizedBox(width: 4),
                   ],
+                  // `.search-icon svg` stays `--text-dim` even while the
+                  // input is open — `--primary` only on :hover
+                  // (styles-shell.css:189-214; no active-state rule).
                   _MiniIcon(
                     svg: NymIcons.search,
-                    active: searching,
                     tooltip: 'Search',
                     onTap: onToggleSearch,
                   ),
@@ -1357,9 +1373,11 @@ class _NavSection extends StatelessWidget {
           // `.section-collapsed > *:not(.nav-title) { display:none !important }`
           // (styles-shell.css:221-224): collapsing hides EVERYTHING but the
           // title row — including an open search input.
+          // `.search-input-wrapper { margin-bottom: 10px }`
+          // (styles-shell.css:230-234).
           if (open && searching)
             Padding(
-              padding: const EdgeInsets.fromLTRB(0, 0, 0, 6),
+              padding: const EdgeInsets.fromLTRB(0, 0, 0, 10),
               child: _SearchField(
                 hint: searchHint,
                 onChanged: onSearchChanged,
@@ -1377,6 +1395,81 @@ class _NavSection extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The section-title reorder-mode hold (`sidebar-sections.js:320-366`): a
+/// 500ms press — primary mouse button or touch — with the PWA's explicit
+/// `MOVE_THRESHOLD = 10` cancel (drift past 10px on EITHER axis kills the
+/// pending timer), NOT the framework long-press recognizer's ~18px kTouchSlop.
+/// The hold is SILENT — the PWA's section hold fires no `nymHapticTap`.
+/// A [Listener] doesn't enter the gesture arena, so a scroll-drag that starts
+/// on the title still scrolls the sidebar (and the >10px drift cancels the
+/// hold), matching the PWA's passive touch handlers.
+class _NavTitleHold extends StatefulWidget {
+  const _NavTitleHold({required this.onHold, required this.child});
+
+  final VoidCallback onHold;
+  final Widget child;
+
+  /// The `pressTimer` delay (sidebar-sections.js:335).
+  static const Duration holdDuration = Duration(milliseconds: 500);
+
+  /// `MOVE_THRESHOLD` (sidebar-sections.js:322).
+  static const double moveThreshold = 10;
+
+  @override
+  State<_NavTitleHold> createState() => _NavTitleHoldState();
+}
+
+class _NavTitleHoldState extends State<_NavTitleHold> {
+  Timer? _pressTimer;
+  Offset _start = Offset.zero;
+
+  void _onPointerDown(PointerDownEvent e) {
+    // Mouse presses count only for the primary button
+    // (`if (e.button !== 0) return`, sidebar-sections.js:341).
+    if (e.kind == PointerDeviceKind.mouse && e.buttons != kPrimaryMouseButton) {
+      return;
+    }
+    _start = e.position;
+    _cancel();
+    _pressTimer = Timer(_NavTitleHold.holdDuration, () {
+      _pressTimer = null;
+      if (!mounted) return;
+      widget.onHold();
+    });
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    if (_pressTimer == null) return;
+    if ((e.position.dx - _start.dx).abs() > _NavTitleHold.moveThreshold ||
+        (e.position.dy - _start.dy).abs() > _NavTitleHold.moveThreshold) {
+      _cancel();
+    }
+  }
+
+  void _cancel([PointerEvent? _]) {
+    _pressTimer?.cancel();
+    _pressTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _pressTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: _cancel,
+      onPointerCancel: _cancel,
+      child: widget.child,
     );
   }
 }
@@ -1470,12 +1563,10 @@ class _MiniIcon extends StatelessWidget {
   const _MiniIcon({
     super.key,
     required this.svg,
-    this.active = false,
     this.tooltip,
     required this.onTap,
   });
   final String svg;
-  final bool active;
   final String? tooltip;
   final VoidCallback onTap;
 
@@ -1492,7 +1583,7 @@ class _MiniIcon extends StatelessWidget {
         child: NymSvgIcon(
           svg,
           size: 14,
-          color: active ? c.primary : c.textDim,
+          color: c.textDim,
         ),
       ),
     );
@@ -1880,9 +1971,11 @@ class _ViewMoreButtonState extends State<_ViewMoreButton> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // PWA labels use three ASCII periods, not U+2026 ('View N more...' /
+    // 'Show N more...', users.js:1707/1715).
     final label = widget.more > 0
         ? '${widget.stepMore ? 'SHOW' : 'VIEW'} '
-            '${_abbreviateNumber(widget.more)} MORE…'
+            '${_abbreviateNumber(widget.more)} MORE...'
         : 'SHOW LESS';
     return Padding(
       // `margin: 6px 10px`.

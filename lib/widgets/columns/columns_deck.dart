@@ -331,25 +331,46 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     }
     // `cvAddColumn` → `_cvSubscribeChannel` for every seeded channel column
     // (columns.js:188/200 seed with `cvAddColumn`, which subscribes at :224).
+    // The first column is the one `_cvEnable` focuses (columns.js:77-78), so it
+    // gets the full relay-side activation; the rest are registry-only until the
+    // controller grows a no-view-switch subscribe API (see handoff).
     for (final d in _columns) {
-      _subscribeChannel(d);
+      _subscribeChannel(d, activate: identical(d, _columns.first));
     }
   }
 
-  /// The registry/join side of `_cvSubscribeChannel` (columns.js:520-540):
-  /// registers the channel (`addChannel`) and persists the joined-channel list,
-  /// so channel columns restored from a saved layout exist in the sidebar and
-  /// survive a restart. Runs post-frame because seeding happens during build.
-  /// The relay-side effects (geo-relay connect + keep-alive, D1 restore,
-  /// `loadChannelFromRelays`, per-channel typing sub) need controller APIs that
-  /// don't exist yet — see the handoff on `lib/state/nostr_controller.dart`.
-  void _subscribeChannel(_ColumnDesc desc) {
+  /// `_cvSubscribeChannel` (columns.js:520-540). Always registers the channel
+  /// (`addChannel`) and persists the joined-channel list, so channel columns
+  /// restored from a saved layout exist in the sidebar and survive a restart.
+  /// Runs post-frame because seeding happens during build.
+  ///
+  /// With [activate] (a column that is — or is about to become — the focused
+  /// one: picker adds, nav-sink adds/repurposes, the seeded first column) it
+  /// instead routes through the controller's `switchChannel`, which bundles the
+  /// PWA's relay-side effects: geo-relay connect for a geohash channel
+  /// (`connectToGeoRelays`, columns.js:529), the active-channel typing sub
+  /// (`_ensureChannelTypingSub`, columns.js:536-538) and — via `switchView` →
+  /// `onViewOpened` — the per-open D1 archive restore (`channelRestoreFromD1`,
+  /// columns.js:527). Guarded like [_syncFocusedView] so the deck-driven view
+  /// switch doesn't recurse into the nav-sink. NON-focused columns still miss
+  /// the geo-relay/typing/restore work (plus `startGeoRelayKeepAlive`, which
+  /// has no native counterpart) — that needs a controller API that subscribes
+  /// without switching the view; see the handoff on
+  /// `lib/state/nostr_controller.dart`.
+  void _subscribeChannel(_ColumnDesc desc, {bool activate = false}) {
     if (desc.kind != _ColumnKind.channel) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      ref
-          .read(nostrControllerProvider)
-          .addChannel(desc.channel, geohash: desc.geohash);
+      final controller = ref.read(nostrControllerProvider);
+      if (activate) {
+        _syncingFromDeck = true;
+        controller.switchChannel(desc.channel, geohash: desc.geohash);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _syncingFromDeck = false;
+        });
+      } else {
+        controller.addChannel(desc.channel, geohash: desc.geohash);
+      }
     });
   }
 
@@ -436,12 +457,17 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   }
 
   /// Desktop "click a column to focus it" (`columns.js:175-179` →
-  /// `_cvOpenConversation`/`_cvFocusColumn`): clicking a non-focused column
-  /// marks it focused so its header shows the primary border + `--shadow-glow`,
-  /// and re-points the shared chat header + composer at it.
+  /// `_cvOpenConversation`/`_cvFocusColumn` + `_cvScrollToCol`): clicking a
+  /// non-focused column marks it focused so its header shows the primary border
+  /// + `--shadow-glow`, re-points the shared chat header + composer at it, and
+  /// reveals it — the strip scrolls a partly off-screen column fully into view
+  /// (`_cvScrollToIndex`, columns.js:969-977). Clicks on the already-focused
+  /// column do nothing (the strip delegate gates on `colId !== _cvFocusedId`).
   void _focusColumn(int index) {
     if (index < 0 || index >= _columns.length) return;
-    if (_focused != index) setState(() => _focused = index);
+    if (_focused == index) return;
+    setState(() => _focused = index);
+    _revealColumn(index);
     _syncFocusedView();
   }
 
@@ -465,15 +491,26 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   void _syncFocusedView() {
     if (_columns.isEmpty) return;
     final idx = _focused.clamp(0, _columns.length - 1);
-    final view = _viewForDesc(_columns[idx]);
+    final desc = _columns[idx];
+    final view = _viewForDesc(desc);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final notifier = ref.read(appStateProvider.notifier);
       if (ref.read(appStateProvider).view == view) return;
       // Flag the deck-driven switch so the `ref.listen(view)` nav-sink
       // (`_onExternalView`) doesn't treat it as outside navigation and recurse.
       _syncingFromDeck = true;
-      notifier.switchView(view);
+      if (desc.kind == _ColumnKind.channel) {
+        // Channel focus routes through the controller's `switchChannel` (not
+        // bare `switchView`) so the focused geohash channel's geo relays
+        // (`connectGeoRelaysForGeohash`) and typing sub follow focus — the
+        // controller keeps ONE active channel typing sub, unlike the PWA's
+        // accumulating per-channel `_ensureChannelTypingSub`.
+        ref
+            .read(nostrControllerProvider)
+            .switchChannel(desc.channel, geohash: desc.geohash);
+      } else {
+        ref.read(appStateProvider.notifier).switchView(view);
+      }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _syncingFromDeck = false;
       });
@@ -519,6 +556,12 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     // Ignore our own `_syncFocusedView`-driven switches, and anything before the
     // deck has seeded its initial columns.
     if (_syncingFromDeck || !_seeded) return;
+    // `opts.forceNew` (columns.js:282): the globe's geohash opens pass
+    // `{forceNew: true}` (geohash-globe.js:1200) so they NEVER repurpose the
+    // primary column — an existing column still wins, but otherwise a NEW
+    // column is added. One-shot hint set by `switchView(forceNewColumn:)`.
+    final forceNew =
+        ref.read(appStateProvider.notifier).consumeForceNewColumnHint();
     final desc = _descForView(v);
 
     // (1) Existing column → focus + scroll (handles the back/forward + re-tap
@@ -532,8 +575,9 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
 
     // (2) Channel view + the tracked primary column is alive and still a
     // channel → navigate it in place (`_cvNavigateColumn`). Once the primary is
-    // closed (`_cvPrimaryId = null`), channels ADD new columns instead.
-    if (v.kind == ViewKind.channel && _primaryKey != null) {
+    // closed (`_cvPrimaryId = null`), channels ADD new columns instead. Skipped
+    // entirely when the open carried `forceNew` (globe geohash opens).
+    if (!forceNew && v.kind == ViewKind.channel && _primaryKey != null) {
       final primary = _columns.indexWhere(
           (d) => d.key == _primaryKey && d.kind == _ColumnKind.channel);
       if (primary >= 0) {
@@ -543,7 +587,9 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         });
         // The repurposed column stays the primary under its new key.
         _primaryKey = desc.key;
-        _subscribeChannel(desc); // `_cvNavigateColumn` → `_cvSubscribeChannel`.
+        // `_cvNavigateColumn` → `_cvSubscribeChannel` (geo relays + typing sub
+        // + D1 restore; the view already points here, so no visible re-switch).
+        _subscribeChannel(desc, activate: true);
         _saveLayout();
         _scrollToIndex(primary);
         return;
@@ -555,7 +601,9 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       _columns.add(desc);
       _focused = _columns.length - 1;
     });
-    _subscribeChannel(desc); // `cvAddColumn` → `_cvSubscribeChannel`.
+    // `cvAddColumn` → `_cvSubscribeChannel` (relay-side work included — the
+    // added column is the focused one).
+    _subscribeChannel(desc, activate: true);
     _saveLayout();
     _scrollToIndex(_columns.length - 1);
   }
@@ -917,75 +965,29 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     }
   }
 
-  /// `_cvOpenAddColumn` (columns.js:731-772). Desktop: an in-strip column-shaped
-  /// `.cv-picker` panel before the (hidden) add button, with the strip
-  /// smooth-scrolled to the end. Mobile: a bottom sheet carrying the same
-  /// header/search/rows (the PWA panel occupies a full snap page there).
-  Future<void> _openAddColumn(
-    List<ChannelEntry> channels,
-    List<PMConversation> pms,
-    List<Group> groups,
-    bool pmOnly,
-  ) async {
-    if (!_isMobile) {
-      if (_pickerOpen) return; // `if (strip.querySelector('.cv-picker')) return`
-      setState(() => _pickerOpen = true);
-      _scrollStripToEnd();
-      return;
-    }
-
-    final rows = _availableRows(context, channels, pms, groups, pmOnly);
-    final picked = await showModalBottomSheet<_ColumnDesc>(
-      context: context,
-      backgroundColor: context.nym.bgSecondary,
-      isScrollControlled: true,
-      builder: (ctx) {
-        final c = ctx.nym;
-        return SafeArea(
-          top: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // `.cv-column-header` → `.cv-col-title` ("Add a column", 14/600/
-              // secondary) + `.cv-picker-close`.
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: c.glassBg,
-                  border: Border(bottom: BorderSide(color: c.glassBorder)),
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text('Add a column',
-                          style: TextStyle(
-                              color: c.secondary,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600)),
-                    ),
-                    _HoverCloseButton(
-                      tooltip: 'Cancel',
-                      size: 16,
-                      hoverColor: c.danger,
-                      onTap: () => Navigator.of(ctx).pop(),
-                    ),
-                  ],
-                ),
-              ),
-              Flexible(
-                child: _PickerBody(
-                  rows: rows,
-                  fillHeight: false,
-                  onPick: (d) => Navigator.of(ctx).pop(d),
-                ),
-              ),
-            ],
-          ),
+  /// `_cvOpenAddColumn` (columns.js:731-772): the picker is a column-shaped
+  /// `.cv-picker` panel inserted into the strip before the (hidden) add button.
+  /// Desktop: the strip smooth-scrolls to the end so the panel is in view.
+  /// Mobile: every `.cv-column` — the picker included — is a full snap page
+  /// (`flex:0 0 100%`, styles-columns.css:508-517), so the picker occupies the
+  /// carousel's trailing page and the strip scrolls to it (`_cvScrollToEnd`).
+  void _openAddColumn() {
+    if (_pickerOpen) return; // `if (strip.querySelector('.cv-picker')) return`
+    setState(() => _pickerOpen = true);
+    if (_isMobile) {
+      // `_cvScrollToEnd()`: the picker page replaces the (hidden) add-column
+      // page at the end of the carousel.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_pageController.hasClients) return;
+        _pageController.animateToPage(
+          _columns.length,
+          duration: NymMotion.transition,
+          curve: NymMotion.curve,
         );
-      },
-    );
-    if (picked != null && mounted) _addPickedColumn(picked);
+      });
+    } else {
+      _scrollStripToEnd();
+    }
   }
 
   /// A picker row was chosen: `cvAddColumn(desc, { focus:true })` + close +
@@ -1002,7 +1004,9 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       }
     });
     if (existing < 0) {
-      _subscribeChannel(desc); // `cvAddColumn` → `_cvSubscribeChannel`.
+      // `cvAddColumn` → `_cvSubscribeChannel`; the picked column gets focus, so
+      // the relay-side work (geo relays, typing sub, D1 restore) rides along.
+      _subscribeChannel(desc, activate: true);
       _saveLayout();
     }
     _scrollToIndex(_focused);
@@ -1014,12 +1018,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
   /// (gap F5). Reorders and removals commit IMMEDIATELY (the PWA saves on every
   /// drag `end()` and keeps the sheet open across removals), so dismissing the
   /// sheet never discards anything. Metrics from `styles-columns.css:623-772`.
-  Future<void> _openTabsView(
-    List<ChannelEntry> channels,
-    List<PMConversation> pms,
-    List<Group> groups,
-    bool pmOnly,
-  ) async {
+  Future<void> _openTabsView() async {
     final result = await showModalBottomSheet<_TabsResult>(
       context: context,
       // `.cv-tabs-overlay` background rgba(0,0,0,0.5).
@@ -1055,7 +1054,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         final i = _columns.indexOf(result.desc!);
         if (i >= 0) _scrollToIndex(i);
       case _TabsAction.add:
-        await _openAddColumn(channels, pms, groups, pmOnly);
+        _openAddColumn();
     }
   }
 
@@ -1257,15 +1256,17 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           _Pager(
             count: _columns.length,
             active: _focused,
-            onTap: () => _openTabsView(channels, pms, groups, pmOnly),
+            onTap: _openTabsView,
           ),
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: _CvDimens.padding),
-            // `.cv-strip::-webkit-scrollbar`: 6px, transparent track, thumb
-            // rgba(255,255,255,0.12) → 0.2 on hover, radius 10 (both themes —
-            // styles-columns.css loads after the light-mode global scrollbar
-            // override, so the white thumb wins in light mode too).
+            // `.cv-strip::-webkit-scrollbar`: 6px, transparent track, radius 10.
+            // Thumb rgba(255,255,255,0.12) → 0.2 on hover (styles-columns.css:
+            // 110-117) — but `body.light-mode ::-webkit-scrollbar-thumb`
+            // (styles-themes-responsive.css:1095-1106) is MORE SPECIFIC
+            // (0-1-2 vs 0-1-1), so in light mode the strip thumb is
+            // rgba(0,0,0,0.12) → 0.2 on hover.
             child: ScrollbarTheme(
               data: ScrollbarThemeData(
                 thickness: const WidgetStatePropertyAll(6),
@@ -1274,9 +1275,11 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                 trackBorderColor:
                     const WidgetStatePropertyAll(Colors.transparent),
                 thumbColor: WidgetStateProperty.resolveWith(
-                  (states) => states.contains(WidgetState.hovered)
-                      ? Colors.white.withValues(alpha: 0.2)
-                      : Colors.white.withValues(alpha: 0.12),
+                  (states) => (c.isLight ? Colors.black : Colors.white)
+                      .withValues(
+                          alpha: states.contains(WidgetState.hovered)
+                              ? 0.2
+                              : 0.12),
                 ),
               ),
               child: Scrollbar(
@@ -1325,8 +1328,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
                         _AddColumnButton(
                           c: c,
                           width: _CvDimens.addColumn,
-                          onTap: () =>
-                              _openAddColumn(channels, pms, groups, pmOnly),
+                          onTap: _openAddColumn,
                         ),
                     ],
                   ),
@@ -1372,13 +1374,25 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
       },
       itemBuilder: (context, i) {
         if (i >= _columns.length) {
+          // `_cvOpenAddColumn` inserts the `.cv-picker` — itself a `.cv-column`
+          // — before the (display:none) add button, so on mobile the picker IS
+          // the trailing full snap page (`flex:0 0 100%`, with the column
+          // border/radius/shadow dropped — styles-columns.css:508-517).
+          if (_pickerOpen) {
+            return _PickerColumn(
+              mobile: true,
+              rows: _availableRows(context, channels, pms, groups, pmOnly),
+              onPick: _addPickedColumn,
+              onClose: () => setState(() => _pickerOpen = false),
+            );
+          }
           // Full-bleed dashed add-column page: the mobile strip has NO padding
           // (`.cv-strip { padding:0; gap:0 }`, styles-columns.css:501-506) and
           // the tile spans the whole screen (`.cv-add-column flex:0 0 100%`).
           return _AddColumnButton(
             c: c,
             width: double.infinity,
-            onTap: () => _openAddColumn(channels, pms, groups, pmOnly),
+            onTap: _openAddColumn,
           );
         }
         final desc = _columns[i];
@@ -1390,7 +1404,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
           onClose: () => _removeColumn(desc),
           onPrev: () => _stepFocused(-1),
           onNext: () => _stepFocused(1),
-          onOpenTabs: () => _openTabsView(channels, pms, groups, pmOnly),
+          onOpenTabs: _openTabsView,
         );
       },
     );
@@ -1448,6 +1462,13 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
   /// grab offset + exact column size).
   final GlobalKey _boundaryKey = GlobalKey();
 
+  /// True while the current pointer-down started on the close button. The PWA
+  /// close click `e.stopPropagation()`s before the strip's click-to-focus
+  /// delegate runs (columns.js:168-171), so closing an UNFOCUSED column never
+  /// focuses it first (which would re-point the shared header/composer and
+  /// clear its unread).
+  bool _closePressed = false;
+
   @override
   Widget build(BuildContext context) {
     final column = _DeckColumn(
@@ -1460,6 +1481,9 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
       index: widget.index,
       total: widget.total,
       onClose: widget.onClose,
+      // The close button's pointer-down lands here (deepest Listener) BEFORE
+      // the slot's focus Listener below, flagging the event as "consumed".
+      onCloseDown: () => _closePressed = true,
       onHeaderDown: (e) {
         final ctx = _boundaryKey.currentContext;
         if (ctx != null) widget.onDragDown(e, ctx);
@@ -1468,10 +1492,17 @@ class _DesktopColumnSlotState extends State<_DesktopColumnSlot> {
       onHeaderUp: widget.onDragEnd,
     );
 
-    // Any click inside the column focuses it (`columns.js:175-179`).
+    // Any click inside the column focuses it (`columns.js:175-179`) — EXCEPT
+    // one on the close button, whose handler stops propagation in the PWA.
     return Listener(
       behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => widget.onFocus(),
+      onPointerDown: (_) {
+        if (_closePressed) {
+          _closePressed = false;
+          return;
+        }
+        widget.onFocus();
+      },
       child: AnimatedOpacity(
         // `.cv-column { transition: ... opacity var(--transition) }` — the
         // cv-dragging dim fades over 250ms cubic-bezier(0.4,0,0.2,1).
@@ -1541,6 +1572,7 @@ class _DeckColumn extends ConsumerStatefulWidget {
     required this.index,
     required this.total,
     required this.onClose,
+    this.onCloseDown,
     this.onPrev,
     this.onNext,
     this.onOpenTabs,
@@ -1561,6 +1593,11 @@ class _DeckColumn extends ConsumerStatefulWidget {
   final int index;
   final int total;
   final VoidCallback onClose;
+
+  /// Desktop: pointer-down on the close button, fired before the slot's
+  /// click-to-focus Listener sees the event (the PWA close handler
+  /// `stopPropagation()`s, columns.js:168-171).
+  final VoidCallback? onCloseDown;
 
   /// Mobile prev/next carousel step (`_cvStepFocused`).
   final VoidCallback? onPrev;
@@ -1584,6 +1621,10 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   final ScrollController _scroll = ScrollController();
   bool _atBottom = true;
   bool _showScrollButton = false;
+
+  /// Message count last seen by [build] — detects appended messages, standing
+  /// in for `_cvAttachAutoScroll`'s childList MutationObserver.
+  int _lastMessageCount = 0;
 
   @override
   void initState() {
@@ -1634,6 +1675,25 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final reactions = ref.watch(reactionsProvider);
     final messages = [...(app.messages[widget.desc.storageKey] ?? const <Message>[])];
     messages.sort(compareMessages);
+
+    // `_cvAttachAutoScroll` (columns.js:442-456): when new messages arrive
+    // while the user is at the bottom (<120px, `_atBottom`), pin the column
+    // back to the newest message (`scrollerEl.scrollTop = 0` in a rAF) —
+    // UNLESS `settings.autoscroll === false`, in which case the observer bails
+    // and the user's small scroll drift is preserved. (At offset exactly 0 the
+    // reversed list tracks the newest edge inherently, like the PWA's
+    // column-reverse scroller does at scrollTop 0 in both modes.)
+    if (messages.length != _lastMessageCount) {
+      final added = messages.length > _lastMessageCount;
+      _lastMessageCount = messages.length;
+      if (added && settings.autoscroll && _atBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _scroll.hasClients && _atBottom && _scroll.offset != 0) {
+            _scroll.jumpTo(0);
+          }
+        });
+      }
+    }
 
     // `.cv-column.focused` (desktop): primary border + `--shadow-glow`
     // (`0 0 20px primary@0.1`). Mobile resets focused styling to none.
@@ -1800,6 +1860,9 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
           ),
         ),
       ));
+      // `.cv-column-header { gap: 8px }` separates every visible control:
+      // dots | prev | next | close (styles-columns.css:184-194).
+      children.add(const SizedBox(width: 8));
       // `.cv-col-move` prev arrow (columns.js:397 — feather chevron-left).
       children.add(_HeaderIconButton(
         svg: NymIcons.chevronLeft,
@@ -1807,6 +1870,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
         enabled: widget.index > 0,
         onTap: widget.onPrev,
       ));
+      children.add(const SizedBox(width: 8));
       // `.cv-col-move` next arrow (columns.js:398 — feather chevron-right).
       children.add(_HeaderIconButton(
         svg: NymIcons.chevronRight,
@@ -1866,12 +1930,19 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
   /// on hover over `var(--transition)` (styles-columns.css:268-270); no hover
   /// circle/fill in the PWA.
   Widget _buildCloseButton(NymColors c) {
-    return _HoverCloseButton(
+    Widget btn = _HoverCloseButton(
       tooltip: 'Remove column',
       size: 16,
       hoverColor: c.danger,
       onTap: widget.onClose,
     );
+    final down = widget.onCloseDown;
+    if (down != null) {
+      // Deeper Listeners see the pointer first, so this fires before the
+      // desktop slot's click-to-focus Listener (`stopPropagation()` analogue).
+      btn = Listener(onPointerDown: (_) => down(), child: btn);
+    }
+    return btn;
   }
 
   /// The `.cv-column-header` chrome (padding 10/12, glass bg, bottom border).
@@ -2266,41 +2337,48 @@ class _HoverCloseButtonState extends State<_HoverCloseButton> {
 
 // --- Add-column picker (`.cv-picker`) ----------------------------------------
 
-/// The desktop in-strip add-column panel (`_cvOpenAddColumn`, columns.js:731-772
+/// The in-strip add-column panel (`_cvOpenAddColumn`, columns.js:731-772
 /// + styles-columns.css:322-390): a column-shaped `.cv-column.cv-picker` frame
 /// inserted before the (hidden) add button, with an "Add a column" header
 /// (`.cv-col-title`: 14/600/--secondary) + cancel X, a search input, and the
-/// filtered conversation rows.
+/// filtered conversation rows. With [mobile] the panel is a full carousel page
+/// and the mobile `.cv-column` rules drop the border/radius/shadow
+/// (styles-columns.css:508-517).
 class _PickerColumn extends StatelessWidget {
   const _PickerColumn({
     required this.rows,
     required this.onPick,
     required this.onClose,
+    this.mobile = false,
   });
 
   final List<_PickerEntry> rows;
   final ValueChanged<_ColumnDesc> onPick;
   final VoidCallback onClose;
+  final bool mobile;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     return Container(
-      width: _CvDimens.column,
+      width: mobile ? null : _CvDimens.column,
       clipBehavior: Clip.antiAlias,
-      // `.cv-column` chrome (the picker reuses the column frame).
-      decoration: BoxDecoration(
-        color: c.bgSecondary,
-        borderRadius: NymRadius.rmd,
-        border: Border.all(color: c.glassBorder),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: c.isLight ? 0.1 : 0.4),
-            offset: const Offset(0, 4),
-            blurRadius: 16,
-          ),
-        ],
-      ),
+      // `.cv-column` chrome (the picker reuses the column frame); mobile keeps
+      // only the bg-secondary fill.
+      decoration: mobile
+          ? BoxDecoration(color: c.bgSecondary)
+          : BoxDecoration(
+              color: c.bgSecondary,
+              borderRadius: NymRadius.rmd,
+              border: Border.all(color: c.glassBorder),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: c.isLight ? 0.1 : 0.4),
+                  offset: const Offset(0, 4),
+                  blurRadius: 16,
+                ),
+              ],
+            ),
       child: Column(
         children: [
           // `.cv-column-header` with only the title + `.cv-picker-close`.
@@ -2332,7 +2410,7 @@ class _PickerColumn extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: _PickerBody(rows: rows, fillHeight: true, onPick: onPick),
+            child: _PickerBody(rows: rows, onPick: onPick),
           ),
         ],
       ),
@@ -2341,22 +2419,17 @@ class _PickerColumn extends StatelessWidget {
 }
 
 /// The picker's search field + filtered rows (`.cv-picker-search` /
-/// `.cv-picker-list`), shared by the desktop in-strip panel and the mobile
-/// sheet. The input grabs focus 30ms after opening (`setTimeout(() =>
-/// input.focus(), 30)`).
+/// `.cv-picker-list`, the latter `flex:1`), shared by the desktop in-strip
+/// panel and the mobile full-page picker. The input grabs focus 30ms after
+/// opening (`setTimeout(() => input.focus(), 30)`).
 class _PickerBody extends StatefulWidget {
   const _PickerBody({
     required this.rows,
     required this.onPick,
-    required this.fillHeight,
   });
 
   final List<_PickerEntry> rows;
   final ValueChanged<_ColumnDesc> onPick;
-
-  /// True inside the fixed-height desktop panel (`.cv-picker-list { flex:1 }`);
-  /// false in the shrink-wrapping mobile sheet.
-  final bool fillHeight;
 
   @override
   State<_PickerBody> createState() => _PickerBodyState();
@@ -2446,7 +2519,6 @@ class _PickerBodyState extends State<_PickerBody> {
         : ListView(
             // `.cv-picker-list { padding: 6px }`.
             padding: const EdgeInsets.all(6),
-            shrinkWrap: !widget.fillHeight,
             children: [
               for (final r in shown)
                 _PickerRow(
@@ -2457,13 +2529,7 @@ class _PickerBodyState extends State<_PickerBody> {
             ],
           );
 
-    if (widget.fillHeight) {
-      return Column(children: [search, Expanded(child: list)]);
-    }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [search, Flexible(child: list)],
-    );
+    return Column(children: [search, Expanded(child: list)]);
   }
 }
 
@@ -2830,16 +2896,21 @@ class _TabRow extends StatelessWidget {
     return Padding(
       // `.cv-tab` margin-bottom 6.
       padding: const EdgeInsets.only(bottom: 6),
-      child: Material(
-        color: Colors.white.withValues(alpha: 0.03),
-        shape: RoundedRectangleBorder(
-          borderRadius: NymRadius.rsm,
-          side: BorderSide(color: borderColor),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
+      // `.cv-tab` has `cursor: pointer` but NO hover state (styles-columns.css:
+      // 690-700) — a plain container, no Material ink tint or ripple.
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
           onTap: onTap,
-          child: inner,
+          behavior: HitTestBehavior.opaque,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.03),
+              borderRadius: NymRadius.rsm,
+              border: Border.all(color: borderColor),
+            ),
+            child: inner,
+          ),
         ),
       ),
     );
