@@ -421,7 +421,7 @@ class NymbotService {
           headers: headers);
       Object? data;
       try {
-        data = jsonDecode(res.body);
+        data = jsonDecode(utf8.decode(res.bodyBytes));
       } catch (_) {
         data = null;
       }
@@ -517,10 +517,10 @@ class NymbotService {
       throw NymbotException(
         'Nymbot request failed (${res.statusCode})',
         statusCode: res.statusCode,
-        body: res.body,
+        body: utf8.decode(res.bodyBytes),
       );
     }
-    final decoded = jsonDecode(res.body);
+    final decoded = jsonDecode(utf8.decode(res.bodyBytes));
     if (decoded is! Map<String, dynamic>) {
       throw const NymbotException('Unexpected Nymbot response shape');
     }
@@ -546,7 +546,7 @@ class NymbotService {
         .timeout(timeout);
     Map<String, dynamic> data;
     try {
-      final decoded = jsonDecode(res.body);
+      final decoded = jsonDecode(utf8.decode(res.bodyBytes));
       data = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
     } catch (_) {
       data = <String, dynamic>{};

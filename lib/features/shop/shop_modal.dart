@@ -1748,7 +1748,7 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
         var paid = false;
         try {
           final res = await _api.proxiedJsonFetch(verify);
-          final data = jsonDecode(res.body);
+          final data = jsonDecode(utf8.decode(res.bodyBytes));
           paid = data is Map && (data['settled'] == true || data['paid'] == true);
         } catch (_) {
           // keep polling (shop.js:1280)

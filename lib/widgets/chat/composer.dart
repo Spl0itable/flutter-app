@@ -2165,6 +2165,7 @@ class _ComposerState extends ConsumerState<Composer> {
           child: EmojiPicker(
             recents: _recents,
             onSelect: _onEmojiSelected,
+            onClose: _emojiPortal.hide,
           ),
         ),
         child: _IconBtn(
