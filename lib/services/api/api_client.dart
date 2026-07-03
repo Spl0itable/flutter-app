@@ -360,9 +360,16 @@ class ApiSocket {
         final sent = _send(['AUTH', authEvent]);
         onTraffic?.call('auth', sent: sent);
       } else {
-        // No discrete open event in web_socket_channel; an unauthenticated
-        // socket is usable as soon as we've attached the listener.
-        markReady();
+        // Mirror `ws.onopen` (shop.js:58): an unauthenticated socket is ready
+        // only once the underlying connection is actually up — not merely once
+        // the listener is attached — so requests are never framed into (and
+        // left pending on) a socket that never opened. The `_channel == ch`
+        // guard skips a stale ready/error racing a timeout-driven teardown.
+        unawaited(ch.ready.then((_) {
+          if (_channel == ch) markReady();
+        }, onError: (Object e) {
+          if (_channel == ch) fail(e);
+        }));
       }
       await completer.future;
     } finally {
@@ -418,6 +425,16 @@ class ApiSocket {
       final data = (msg.length > 3 && msg[3] is Map)
           ? (msg[3] as Map).cast<String, dynamic>()
           : <String, dynamic>{};
+      // A stream request answered by an error RES (the worker rejects before
+      // any ITEM/END) must REJECT — the PWA's non-raw `_apiSocketSend` rejects
+      // on `status >= 400 || data.error` (shop.js:88-95), which the caller's
+      // catch turns into an HTTP retry — never resolve as an empty item list.
+      // Non-stream error RES keeps resolving; [_trySocket] gates its status.
+      if (p.stream && (status >= 400 || data['error'] != null)) {
+        p.completeError(ApiException(p.action, status,
+            data['error']?.toString() ?? 'Request failed ($status)'));
+        return;
+      }
       p.complete(ApiSocketResult(
           status: status, data: data, items: const [], hasMore: false));
     } else if (t == 'ITEM') {
@@ -478,7 +495,14 @@ class ApiSocket {
     _pending.clear();
   }
 
+  /// Tears down the current channel, failing every in-flight request FIRST —
+  /// the PWA's `onclose` → `fail` rejects all `sock.pending` (shop.js:38-46,
+  /// 105) — so a request orphaned by a reconnect (e.g. the unauth→auth upgrade)
+  /// falls back to HTTP immediately instead of waiting out the 45s request
+  /// timeout. Must run before [_teardown] cancels the stream listener, which
+  /// suppresses the onDone that would otherwise report the close.
   void _resetChannel() {
+    _failAllPending(StateError('api socket reconnecting'));
     _teardown();
   }
 
@@ -643,12 +667,19 @@ class ApiClient {
     if (authed && authBuilder == null) return null;
     try {
       final socket = _ensureSocketObject();
-      // Only sign the api-ws AUTH event when the socket isn't already
-      // authenticated (the PWA signs it once per connection, shop.js:30).
+      // Authenticate the socket whenever a signable identity exists — the PWA's
+      // `needAuth = !!this.pubkey` (shop.js:14) — even when THIS request is a
+      // public read. Otherwise a boot-time public read (profile-get/channel-get)
+      // opens an unauthenticated socket that the first signed request then tears
+      // down and re-opens with AUTH, orphaning every read pending on it. Sign
+      // only when the socket isn't already authenticated (the PWA signs once
+      // per connection, shop.js:30).
       Map<String, dynamic>? authEvent;
-      if (authed && !socket.isAuthenticated) {
-        authEvent = await authBuilder!();
-        // An authed request with no signable identity can't use the socket.
+      if (authBuilder != null && !socket.isAuthenticated) {
+        authEvent = await authBuilder();
+        // Signing failed (remote signer unreachable/declined): the PWA's
+        // `_signBotAuth` rejection lands in the callers' catch → HTTP retry,
+        // so skip the socket for this request too.
         if (authEvent == null) return null;
       }
       // Don't stall a request for seconds on the socket handshake — at boot the
@@ -679,8 +710,9 @@ class ApiClient {
       // shop.js:182-185/216-219). So we return null here to make the caller fall
       // back to HTTP rather than surfacing the socket's error — HTTP always gets
       // a turn, and its (re-signed) response is the authoritative one the caller
-      // sees. Streaming reads don't carry an error status (status is always 200
-      // on END), so this only gates single-response actions.
+      // sees. A streaming read's error arrives as an error RES that [_onFrame]
+      // rejects (the throw lands in the catch below → null → HTTP fallback), so
+      // this status gate only sees single-response actions.
       if (!stream &&
           (result.status < 200 ||
               result.status >= 300 ||
