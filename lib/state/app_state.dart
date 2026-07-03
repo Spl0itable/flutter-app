@@ -49,6 +49,31 @@ const String kNymbotPubkey =
 /// single Nymbot; kept as a set to match the PWA shape and `_isPubkeyGated`.
 const Set<String> kVerifiedBotPubkeys = {kNymbotPubkey};
 
+/// The seeded verified-bot [User]. The PWA's `getEffectiveUserStatus` is ONE
+/// central function whose bot override (`verifiedBotPubkeys.has(pubkey) →
+/// 'online'`, users.js:1112) every status render inherits automatically; the
+/// Flutter port spread the check across call sites via
+/// `effectiveStatus(isVerifiedBot:)`, and any site that forgot the flag showed
+/// the bot offline once its seeded `lastSeen` aged past the 5-minute recency
+/// window. This subclass restores the PWA's at-the-source semantics: the seeded
+/// bot user forces the override itself, so EVERY `effectiveStatus()` read
+/// (sidebar rows, chat-header dot, profile popover status row, autocomplete
+/// ordering) reports `online` — while delegating to [User.effectiveStatus]
+/// keeps the `hidden` short-circuit ordering identical to users.js:1111-1112.
+class VerifiedBotUser extends User {
+  VerifiedBotUser({
+    required super.pubkey,
+    super.nym,
+    super.lastSeen,
+    super.status,
+    super.profile,
+  });
+
+  @override
+  UserStatus effectiveStatus({int? nowMs, bool isVerifiedBot = false}) =>
+      super.effectiveStatus(nowMs: nowMs, isVerifiedBot: true);
+}
+
 /// The web-of-trust roots seeded into `nymchatPubkeys` on go-live
 /// (app.js:1100-1101): the verified developer + Nymbot. Every transitive vouch
 /// chain is anchored here.
@@ -85,6 +110,10 @@ bool appSpamFilterAggressive = true;
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
 /// `inPMMode` state (docs/specs/03 §3.5).
 enum ViewKind { channel, pm, group }
+
+/// Case-insensitive 64-hex pubkey check (used to canonicalize PM view ids —
+/// see [AppStateNotifier.switchView]).
+final RegExp _hex64AnyCaseRe = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// The active conversation selector. [storageKey] matches the keying used by
 /// the in-memory [AppState.messages] map (channel = `#<key>`, PM = `pm-<pubkey>`,
@@ -1219,7 +1248,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // channel bubble, premium PM bubble, header/welcome) — without this seed
     // `users[kNymbotPubkey]` is null and each surface falls back to a different
     // generated identicon / emoji (F10-1). One seed repairs them all at once.
-    state.users[kNymbotPubkey] = User(
+    // [VerifiedBotUser] forces the always-online override at the source
+    // (users.js:1112) so no render site can show the bot offline once the
+    // seeded `lastSeen` ages out of the 5-minute recency window.
+    state.users[kNymbotPubkey] = VerifiedBotUser(
       pubkey: kNymbotPubkey,
       nym: 'Nymbot',
       status: UserStatus.online,
@@ -1534,12 +1566,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
     } else {
+      // Missing-name fallback is 'nym' (the PWA never renders 'anon' — its
+      // `getNymFromPubkey` default is `nym#xxxx`, users.js:1085).
       state.users[e.pubkey] = User(
         pubkey: e.pubkey,
-        nym: getNymFromPubkey(p.name ?? 'anon', e.pubkey),
+        nym: getNymFromPubkey(p.name ?? 'nym', e.pubkey),
         profile: p,
       );
       changed = true;
+    }
+    // Sync the PM sidebar row's displayed nym with the kind-0 name — the PWA's
+    // `updatePMNicknameFromProfile(event.pubkey, profileName)` run on every
+    // stored kind-0 (nostr-core.js:2308-2329, name capped at 20 chars). Without
+    // it a conversation created before the profile arrived keeps its fallback
+    // name forever.
+    if (e.pubkey != state.selfPubkey && (p.name ?? '').isNotEmpty) {
+      if (_syncPmConversationNym(e.pubkey)) changed = true;
     }
     // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
     // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
@@ -1655,7 +1697,31 @@ class AppStateNotifier extends StateNotifier<AppState> {
   String _nymForPubkey(String pubkey) {
     final u = state.users[pubkey];
     if (u != null && u.nym.isNotEmpty) return u.nym;
-    return getNymFromPubkey('anon', pubkey);
+    // Unknown-user fallback is 'nym' (`getNymFromPubkey` → `nym#xxxx`,
+    // users.js:1085 — the PWA never shows 'anon').
+    return getNymFromPubkey('nym', pubkey);
+  }
+
+  /// Refreshes a PM conversation row's nym from the users map — the PWA's
+  /// `updatePMNicknameFromProfile` (pms.js:2618-2625, name capped at 20 chars)
+  /// + the exists-branch sync in `addPMConversation` (pms.js:2806-2812).
+  /// Returns true when the stored nym changed. Does NOT emit state — callers
+  /// own the repaint.
+  bool _syncPmConversationNym(String pubkey) {
+    final known = state.users[pubkey]?.nym;
+    if (known == null || known.isEmpty) return false;
+    final base = stripPubkeySuffix(known);
+    final clean = base.length > 20 ? base.substring(0, 20) : base;
+    if (clean.isEmpty) return false;
+    for (final c in state.pmConversations) {
+      if (c.pubkey == pubkey) {
+        final next = getNymFromPubkey(clean, pubkey);
+        if (c.nym == next) return false;
+        c.nym = next;
+        return true;
+      }
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
@@ -1817,7 +1883,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     list.add(m);
     list.sort(compareMessages);
 
-    // Maintain the conversation meta entry.
+    // Maintain the conversation meta entry. The PWA's `addPMConversation`
+    // prefers the users-map nym over the message author on EVERY message
+    // (pms.js:2716-2718, plus the exists-branch re-sync at :2806-2812), so a
+    // kind-0 that landed after the thread was created still corrects the row.
     final convo = state.pmConversations.firstWhere(
       (c) => c.pubkey == peer,
       orElse: () {
@@ -1826,7 +1895,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         return c;
       },
     );
-    if (!m.isOwn && convo.nym.isEmpty) convo.nym = m.author;
+    if (!_syncPmConversationNym(peer)) {
+      if (!m.isOwn && convo.nym.isEmpty) convo.nym = m.author;
+    }
     if (m.timestamp > convo.lastMessageTime) {
       convo.lastMessageTime = m.timestamp;
     }
@@ -1861,13 +1932,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Inserts a decrypted group message [m] into the `group-<id>` store.
-  void ingestGroupMessage(Message m) {
+  /// Returns true when the message landed (false on dedup / left group), so
+  /// the controller can skip the per-message metadata merge for replayed
+  /// copies exactly like the PWA's dup-check `return` runs before
+  /// `addGroupConversation` (groups.js:1230-1292).
+  bool ingestGroupMessage(Message m) {
     final gid = m.groupId;
-    if (gid == null) return;
-    if (_leftGroups.contains(gid)) return;
-    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return;
+    if (gid == null) return false;
+    if (_leftGroups.contains(gid)) return false;
+    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return false;
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
-      return;
+      return false;
     }
     m.seq = _nextIngestSeq();
 
@@ -1907,6 +1982,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     state = state.copyWith();
     onPmMessageIngested?.call(key);
+    return true;
   }
 
   /// Registers/updates a [Group] in the store (on create or on receiving a
@@ -1920,6 +1996,52 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.groups.add(group);
     }
     state = state.copyWith();
+  }
+
+  /// Merges an inbound group MESSAGE's carried metadata into the group entry —
+  /// the PWA's `addGroupConversation(groupId, groupName, memberPubkeys, ts)`
+  /// call on every group message (groups.js:1292 → :2454). Existing group:
+  /// merge the members, adopt the message's `subject` as the name
+  /// (`name: name || existing.name`, :2506) and raise `lastMessageTime`.
+  /// Unknown group: create the entry (unless left, :2460) so a rename carried
+  /// on regular traffic reaches members who missed the `group-metadata`
+  /// control event — this is how the PWA keeps sidebar/header titles current
+  /// even when the owner's rename broadcast never arrived.
+  void mergeGroupFromMessage({
+    required String groupId,
+    required String name,
+    required List<String> memberPubkeys,
+    required int timestampMs,
+  }) {
+    final existing = groupById(groupId);
+    if (existing == null) {
+      if (_leftGroups.contains(groupId)) return;
+      state.groups.add(Group(
+        id: groupId,
+        name: name,
+        members: memberPubkeys.toSet().toList(),
+        lastMessageTime: timestampMs,
+      ));
+      state = state.copyWith();
+      return;
+    }
+    var changed = false;
+    // Merge members (new invitees may arrive with an updated list).
+    for (final pk in memberPubkeys) {
+      if (!existing.members.contains(pk)) {
+        existing.members.add(pk);
+        changed = true;
+      }
+    }
+    if (name.isNotEmpty && name != existing.name) {
+      existing.name = name;
+      changed = true;
+    }
+    if (timestampMs > existing.lastMessageTime) {
+      existing.lastMessageTime = timestampMs;
+      changed = true;
+    }
+    if (changed) state = state.copyWith();
   }
 
   /// Looks up a group by id (null if unknown).
@@ -2086,7 +2208,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }) {
     final u = state.users.putIfAbsent(
       pubkey,
-      () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('anon', pubkey)),
+      () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('nym', pubkey)),
     );
     u.status = status;
     if (nym != null && nym.isNotEmpty) u.nym = getNymFromPubkey(nym, pubkey);
@@ -2151,12 +2273,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (wasClosed) onClosedPmsChanged?.call();
     final exists = state.pmConversations.any((c) => c.pubkey == peerPubkey);
     if (!exists) {
+      // Nym resolution mirrors `addPMConversation` (pms.js:2716-2718): prefer
+      // the users-map nym, then the caller-supplied one, then the PWA's
+      // `getNymFromPubkey` default `nym#xxxx` (users.js:1085) — never 'anon'.
+      final known = state.users[peerPubkey]?.nym;
       state.pmConversations.add(PMConversation(
         pubkey: peerPubkey,
-        nym: nym ?? getNymFromPubkey('anon', peerPubkey),
+        nym: (known != null && known.isNotEmpty)
+            ? known
+            : (nym ?? getNymFromPubkey('nym', peerPubkey)),
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
       state = state.copyWith();
+    } else {
+      // Existing thread → re-sync the row nym from the users map (the PWA's
+      // exists-branch, pms.js:2806-2812).
+      if (_syncPmConversationNym(peerPubkey)) state = state.copyWith();
     }
   }
 
@@ -2189,6 +2321,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   void switchView(ChatView view, {bool forceNewColumn = false}) {
+    // Canonicalize a PM peer id to lowercase hex at the single choke point
+    // every entry path funnels through (sidebar tap, startPM, new-PM modal,
+    // notification tap, columns focus). Every downstream comparison is an
+    // exact string match against lowercase-hex constants/keys — the
+    // Nymbot-routing check (`view.id == kNymbotPubkey`, chat_pane), the
+    // `pm-<pubkey>` storage key, unread/read watermarks — so an uppercase-hex
+    // id from any source would silently open a parallel "generic" thread.
+    if (view.kind == ViewKind.pm &&
+        _hex64AnyCaseRe.hasMatch(view.id) &&
+        view.id != view.id.toLowerCase()) {
+      view = ChatView.pm(view.id.toLowerCase());
+    }
     _forceNewColumnHint = forceNewColumn;
     // Clear unread for the target on entry (mirrors marking-as-read), and stamp
     // the read watermark to NOW so a later D1 backfill of this conversation's
@@ -2561,6 +2705,42 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (key.isEmpty || msgs.isEmpty) return;
       if (_hydrateMessagesInto(key, msgs)) changed = true;
     });
+    // Rebuild the PM sidebar rows from the hydrated threads — the PWA's
+    // `_populateSidebarFromHydration` (persistence.js:533-549): every cached
+    // 1:1 thread gets its conversation entry back at boot, named from the
+    // (already-hydrated) users map with the `nym` fallback. Without this the
+    // rows only reappear if the D1 replay delivers a NOT-yet-cached message
+    // (the cached copies dedup out before `ingestPMMessage` touches
+    // `pmConversations`). Groups are skipped like the PWA (their entries come
+    // from the group metadata store); closed PMs stay closed (the PWA's cache
+    // has no thread for a deleted PM — `deletePM` purges it — so hydration
+    // never resurrects one there either).
+    for (final entry in state.messages.entries) {
+      final msgs = entry.value;
+      if (!entry.key.startsWith('pm-') || msgs.isEmpty) continue;
+      if (msgs.any((m) => m.isGroup)) continue;
+      String? peer;
+      for (final m in msgs) {
+        final p = m.conversationPubkey;
+        if (p != null && p.isNotEmpty) {
+          peer = p;
+          break;
+        }
+      }
+      if (peer == null || _closedPMs.contains(peer)) continue;
+      if (state.pmConversations.any((c) => c.pubkey == peer)) continue;
+      final ts = msgs.last.timestamp;
+      final known = state.users[peer]?.nym;
+      state.pmConversations.add(PMConversation(
+        pubkey: peer,
+        nym: (known != null && known.isNotEmpty)
+            ? known
+            : getNymFromPubkey('nym', peer),
+        lastMessageTime:
+            ts > 0 ? ts : DateTime.now().millisecondsSinceEpoch,
+      ));
+      changed = true;
+    }
     if (changed) state = state.copyWith();
   }
 
@@ -2602,9 +2782,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
           }
         }
       } else {
+        // Missing-name fallback is 'nym' (`getNymFromPubkey` → `nym#xxxx`,
+        // users.js:1085 — the PWA never shows 'anon').
         state.users[pubkey] = User(
           pubkey: pubkey,
-          nym: getNymFromPubkey(p.name ?? 'anon', pubkey),
+          nym: getNymFromPubkey(p.name ?? 'nym', pubkey),
           profile: p,
         );
       }

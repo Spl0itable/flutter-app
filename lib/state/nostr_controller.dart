@@ -47,6 +47,7 @@ import '../models/poll.dart';
 import '../models/settings.dart';
 import '../models/user.dart';
 import '../features/identity/nip46_service.dart';
+import '../features/identity/panic_wipe.dart';
 import '../services/nostr/event_mapper.dart';
 import '../services/nostr/event_signer.dart';
 import '../services/nostr/identity_service.dart';
@@ -823,11 +824,29 @@ class NostrController {
       _ref.read(liveCustomEmojiProvider.notifier).clearAll();
     } catch (_) {}
 
+    // Final sweep (panic.js:136: `localStorage.clear()` right before the
+    // reload): drop anything a straggling writer — including the notifier
+    // resets above, which persist their now-empty state — re-created between
+    // the wipe and here, so the remount really is first-run-pristine.
+    try {
+      await _ref.read(keyValueStoreProvider).clear();
+    } catch (_) {}
+
+    // Re-enable persistence for the NEXT session (the PWA's page reload resets
+    // its `_cacheDisabled`); everything the old session could have written is
+    // gone by now.
+    PanicWipe.inProgress = false;
+
     // Drive the UI back to a pristine first-run gate (the PWA reloads the page).
     _ref.read(bootEpochProvider.notifier).state++;
   }
 
   Future<void> signOut() async {
+    // Capture before teardown nulls the identity — `cmdQuit` removes the
+    // pubkey-scoped lightning address (`nym_lightning_address_${this.pubkey}`,
+    // commands.js:1402-1404).
+    final pubkey = _identity?.pubkey;
+
     // 1) Tear down the live session (timers, subs, cache flush+close, relay
     //    service, in-memory identity/signer/handles, unbind callbacks).
     await _teardownLiveSession();
@@ -856,6 +875,11 @@ class NostrController {
       StorageKeys.customNick,
     ]) {
       await kv.remove(k);
+    }
+    // `cmdQuit` (the PWA sign-out's disconnect half) also drops the signed-out
+    // identity's pubkey-scoped lightning address.
+    if (pubkey != null && pubkey.isNotEmpty) {
+      await kv.remove(StorageKeys.lightningAddressFor(pubkey));
     }
     // Identity secrets live in the platform keystore (the PWA's `nymSecretRemove`
     // → vault). Clear the session/dev/login keys; leave the NIP-46 client secret
@@ -2052,7 +2076,43 @@ class NostrController {
       if (!u.senderVerified) return;
       final m = _mapGroupMessage(rumor, u, self, groupId);
       if (m == null) return;
-      appState.ingestGroupMessage(m);
+      final landed = appState.ingestGroupMessage(m);
+      if (landed) {
+        // Every group message re-asserts the group's current name (`subject`
+        // tag) + member roster — `addGroupConversation(groupId, groupName,
+        // memberPubkeys, tsSec * 1000)` runs on EVERY inbound group message
+        // (groups.js:1292, `groupName = subjectTag ? subjectTag[1] : 'Group'`
+        // at :714), which is how a rename reaches members who missed the
+        // owner's `group-metadata` control event. Without this the Flutter
+        // sidebar/header/columns titles stayed on the old name forever. A
+        // deduped replay skips the merge, like the PWA's dup-check `return`
+        // before :1292.
+        appState.mergeGroupFromMessage(
+          groupId: groupId,
+          name: _tagValue(tags, 'subject') ?? 'Group',
+          memberPubkeys: [
+            for (final t in tags)
+              if (t.length > 1 && t[0] == 'p') t[1],
+          ],
+          timestampMs: m.createdAt * 1000,
+        );
+        // `meta_ts` piggyback (groups.js:1293-1296): the owner's recent
+        // metadata change rides regular messages for a window
+        // (`_attachGroupMetaTags`), so members who missed the control event
+        // still converge on the new name/avatar/banner/description + invite
+        // policy. Same owner-only + monotonic-ts guards as the control path.
+        final metaTs = int.tryParse(_tagValue(tags, 'meta_ts') ?? '');
+        if (metaTs != null && metaTs > 0) {
+          appState.applyGroupControl(
+            groupId: groupId,
+            type: GroupControlType.metadata,
+            tags: tags,
+            senderPubkey: senderPubkey,
+            ts: metaTs,
+            eventId: u.wrapId,
+          );
+        }
+      }
       _maybeNotifyMessage(m, isGroup: true);
       // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
       _maybeBackfillProfiles(m.pubkey);
@@ -2077,6 +2137,18 @@ class NostrController {
       senderVerified: u.senderVerified,
     );
     if (m == null) return;
+    // Resolve the display author against the users map — the PWA's
+    // `author: isOwn ? this.nym : this.getNymFromPubkey(senderPubkey)`
+    // (pms.js:1258 via the `peerName` resolution at :1321). `mapPmRumor` is
+    // pure (no store access), so its fallback `nym#xxxx` only stands when the
+    // sender is genuinely unknown; a known kind-0/presence nym must win so
+    // the PM row/bubbles never show the bare fallback for a known contact.
+    if (m.isOwn) {
+      final selfNym = _ref.read(appStateProvider).selfNym;
+      if (selfNym.isNotEmpty) m.author = selfNym;
+    } else {
+      m.author = _nymDisplayFor(m.pubkey);
+    }
     // "Who can PM you" enforcement (pms.js:1247-1250): `disabled` drops every
     // incoming PM; `friends` drops PMs from non-friends. Our own self-copy is
     // always kept. Previously inert (F02) — the setting persisted/synced but no
@@ -3459,9 +3531,19 @@ class NostrController {
   }
 
   /// `/quit` — disconnect (cmdQuit). Stops the service; full reload is the
-  /// shell's job.
+  /// shell's job. Clears the saved dev nsec + the pubkey-scoped lightning
+  /// address (commands.js:1395-1404 — the other cmdQuit keys,
+  /// `nym_connection_mode`/`nym_relay_url`/`nym_nsec`, are never written by
+  /// the port).
   void cmdQuit() {
     _emitSystemMessage('Disconnecting from Nymchat...');
+    final pubkey = _identity?.pubkey;
+    if (pubkey != null && pubkey.isNotEmpty) {
+      unawaited(_ref
+          .read(keyValueStoreProvider)
+          .remove(StorageKeys.lightningAddressFor(pubkey)));
+    }
+    unawaited(SecureStore().remove(SecretKeys.devNsec));
     unawaited(_service?.stop());
   }
 
@@ -3546,15 +3628,34 @@ class NostrController {
       isValidGeohash(key) && key != 'nymchat';
 
   /// Opens (or creates) a PM thread with [peerPubkey] and switches to it.
+  ///
+  /// [peerPubkey] is canonicalized to lowercase 64-hex first (an `npub1…` is
+  /// decoded) so every entry point — profile "Message", author tap, new-PM
+  /// modal, notification tap, deep link — lands on the SAME `pm-<pubkey>`
+  /// thread and the exact-match routing checks downstream (the Nymbot
+  /// `view.id == kNymbotPubkey` screen swap, unread keys, receipts) can never
+  /// miss on a differently-encoded id.
   void startPM(String peerPubkey, {String? nym}) {
+    var peer = peerPubkey.trim();
+    if (RegExp(r'^npub1', caseSensitive: false).hasMatch(peer)) {
+      try {
+        peer = bech32.decodeNpub(peer.toLowerCase());
+      } catch (_) {
+        return; // malformed npub — nothing to open
+      }
+    }
+    if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(peer)) {
+      peer = peer.toLowerCase();
+    }
+    if (peer.isEmpty) return;
     final appState = _ref.read(appStateProvider.notifier);
-    appState.ensurePMConversation(peerPubkey, nym: nym);
-    appState.switchView(ChatView.pm(peerPubkey));
+    appState.ensurePMConversation(peer, nym: nym);
+    appState.switchView(ChatView.pm(peer));
     // Resolve the peer's kind-0 so a brand-new PM (no prior events from them, e.g.
     // started from the new-PM picker or a profile tap) still shows their real
     // avatar/nym instead of an identicon (PWA `openUserPM` → `fetchProfileDirect`,
     // pms.js:3115). Self-/picture-guarded inside `_maybeBackfillProfiles`.
-    ensureProfiles([peerPubkey]);
+    ensureProfiles([peer]);
   }
 
   /// Creates a group with [memberPubkeys], registers it locally, and switches.
@@ -4518,8 +4619,10 @@ class NostrController {
   }
 
   String _nymDisplayFor(String pubkey) {
+    // Unknown-user fallback is 'nym' (PWA `getNymFromPubkey` → `nym#xxxx`,
+    // users.js:1085 — the PWA never renders 'anon').
     final u = _ref.read(appStateProvider).users[pubkey];
-    final base = stripPubkeySuffix(u?.nym ?? 'anon');
+    final base = stripPubkeySuffix(u?.nym ?? 'nym');
     return '$base#${getPubkeySuffix(pubkey)}';
   }
 
@@ -4883,8 +4986,9 @@ class NostrController {
     // user nym, decorated with the pubkey suffix (PWA `stripPubkeySuffix(rawNym
     // || getNymFromPubkey(pubkey))`).
     final rawNym = event.tagValue('n');
+    // Fallback 'nym', matching `getNymFromPubkey`'s default (users.js:1085).
     final base = stripPubkeySuffix(
-        rawNym ?? appState.users[event.pubkey]?.nym ?? 'anon');
+        rawNym ?? appState.users[event.pubkey]?.nym ?? 'nym');
     final readerNym = '$base#${getPubkeySuffix(event.pubkey)}';
 
     _ref.read(appStateProvider.notifier).applyChannelReader(
@@ -5641,6 +5745,10 @@ class NostrController {
   }
 
   void _scheduleFlush() {
+    // Never re-arm persistence while a panic wipe is destroying the stores
+    // (panic.js sets `_cacheDisabled = true` + clears the persist timers first
+    // so nothing re-writes data mid-wipe).
+    if (PanicWipe.inProgress) return;
     if (_flushScheduled) return;
     _flushScheduled = true;
     _flushTimer?.cancel();
@@ -5651,6 +5759,9 @@ class NostrController {
   }
 
   Future<void> _flush() async {
+    // A flush scheduled before the panic fired must not re-persist the live
+    // AppState into the just-shredded cache DB (panic.js `_cacheDisabled`).
+    if (PanicWipe.inProgress) return;
     final cache = _cache;
     if (cache == null) return;
     final state = _ref.read(appStateProvider);
@@ -6729,9 +6840,10 @@ class NostrController {
   }
 
   static String getNymFor(String pubkey) {
-    // Lightweight fallback display name when no profile is known.
+    // Lightweight fallback display name when no profile is known — `nym#xxxx`,
+    // the PWA's `getNymFromPubkey` default (users.js:1085), never 'anon'.
     final suffix = pubkey.length >= 4 ? pubkey.substring(pubkey.length - 4) : '????';
-    return 'anon#$suffix';
+    return 'nym#$suffix';
   }
 
   List<List<String>> _tags(Map<String, dynamic> rumor) {

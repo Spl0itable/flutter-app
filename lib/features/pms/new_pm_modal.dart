@@ -182,7 +182,8 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
     final users = ref.read(usersProvider);
     final pk = resolveRecipientPubkey(_recipientController.text, users);
     if (pk == null) return;
-    final nym = users[pk]?.nym ?? getNymFromPubkey('anon', pk);
+    // Unknown-pubkey fallback is `nym#xxxx` (users.js:1085), never 'anon'.
+    final nym = users[pk]?.nym ?? getNymFromPubkey('nym', pk);
     _addRecipient(pk, nym);
   }
 
@@ -706,7 +707,8 @@ class _NewPmModalState extends ConsumerState<NewPmModal> {
     final directPk = _directPubkey;
     if (directPk != null) {
       final user = ref.read(usersProvider)[directPk];
-      final nym = user?.nym ?? getNymFromPubkey('anon', directPk);
+      // Unknown-pubkey fallback is `nym#xxxx` (users.js:1085), never 'anon'.
+      final nym = user?.nym ?? getNymFromPubkey('nym', directPk);
       return _suggestionsBox(c, [
         _suggestionItem(
           c,
