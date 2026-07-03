@@ -800,6 +800,15 @@ class _ShopItemCard extends StatelessWidget {
   bool get _blockedByAvailability =>
       availability != null && !availability!.isAvailable;
 
+  /// Whether the limited-tab supply badge row renders (F5).
+  bool get _showsSupplyBadge =>
+      availability != null && availability!.label.isNotEmpty;
+
+  /// Whether the preview region starts with the `.shop-item-preview` box
+  /// (flair / supporter nym rows) rather than a bare `.shop-msg-demo`.
+  bool get _boxedPreview =>
+      item.type == 'nickname-flair' || item.type == 'supporter';
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -847,7 +856,8 @@ class _ShopItemCard extends StatelessWidget {
             size: 32,
             color: c.text,
           ),
-          const SizedBox(height: 8),
+          // `.shop-item-icon { margin-bottom: 10px }`.
+          const SizedBox(height: 10),
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -877,7 +887,8 @@ class _ShopItemCard extends StatelessWidget {
           // EVERY card type (styles/flair/special/limited/bundle/inventory;
           // shop.js:737,757,800,877,908,1022). `.shop-item-description` has NO
           // text-align rule → left-aligned (only icon/name centre).
-          const SizedBox(height: 4),
+          // `.shop-item-name { margin-bottom: 5px }`.
+          const SizedBox(height: 5),
           Text(
             item.description,
             style: TextStyle(color: c.textDim, fontSize: 12),
@@ -890,37 +901,36 @@ class _ShopItemCard extends StatelessWidget {
               style: TextStyle(color: c.textDim, fontSize: 10),
             ),
           ],
-          const SizedBox(height: 8),
-          // Limited-tab supply badge (F5).
-          if (availability != null && availability!.label.isNotEmpty) ...[
-            Center(child: ShopSupplyBadge(availability: availability!)),
-            const SizedBox(height: 8),
-          ],
-          // Preview region: bundle chips (F6) or the standard item preview (F4).
-          // Inventory cards render NO preview box (renderInventoryTab shows only
-          // icon/name/description/acquired/button/code/transfer) EXCEPT the
-          // supporter card's badge preview row (shop.js:1048).
-          if (!inventory || item.type == 'supporter')
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-              alignment: Alignment.center,
-              // `.shop-item-preview { min-height: 50px }` (styles-features.css:181-193).
-              constraints: const BoxConstraints(minHeight: 50),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.03),
-                border: Border.all(color: c.glassBorder),
-                borderRadius: NymRadius.rsm,
-              ),
-              child: _isBundle
-                  ? ShopBundlePreview(item: item)
-                  : (sampleEdition != null && item.type == 'nickname-flair'
-                      ? _flairSamplePreview(c)
-                      // The inventory supporter card shows a single supporter-badge
-                      // preview row (shop.js:1048), not the full special preview.
-                      : (inventory && item.type == 'supporter'
-                          ? const SupporterBadge()
-                          : ShopItemPreview(item: item, bubble: bubble))),
+          // Limited-tab supply badge (F5): an inline-block div in the card's
+          // LEFT-aligned flow (`.shop-supply-badge`, styles-features.css:1332),
+          // not centered. Its CSS `margin: 6px 0` collapses with the
+          // description's 10px bottom margin → a 10px gap above.
+          if (_showsSupplyBadge) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: ShopSupplyBadge(availability: availability!),
             ),
+          ],
+          // Preview region: bundle chips (F6) or the standard item preview
+          // (F4). Only the flair / supporter nym rows sit in the
+          // `.shop-item-preview` box — style/cosmetic demos and bundle chips
+          // render BARE in the card (shop.js `_shopStyleDemo` /
+          // `_shopCosmeticDemo` / `_renderBundleCard`). Inventory cards render
+          // NO preview (renderInventoryTab shows only icon/name/description/
+          // acquired/button/code/transfer) EXCEPT the supporter card's badge
+          // row (shop.js:1048), which follows the acquired line with no gap
+          // (`.nm-shop-4` has no bottom margin, the box no top margin).
+          if (!inventory || item.type == 'supporter') ...[
+            // Collapsed CSS gaps above the preview: description mb 10 vs demo
+            // mt 10 / box mt 0 → 10; after a supply badge (mb 6): 10 to a
+            // bare demo, 6 to a `.shop-item-preview` box.
+            if (_showsSupplyBadge)
+              SizedBox(height: _boxedPreview ? 6 : 10)
+            else if (!inventory)
+              const SizedBox(height: 10),
+            _previewRegion(c),
+          ],
           if (inventory) ...[
             // Inventory has NO price footer (shop.js:1008-1067): a full-width
             // ACTIVATE (`.shop-buy-btn nm-shop-5` — the orange buy pill at
@@ -1035,13 +1045,31 @@ class _ShopItemCard extends StatelessWidget {
     ];
   }
 
+  /// The card's preview region, mirroring the PWA's box-vs-bare markup.
+  Widget _previewRegion(NymColors c) {
+    // Bundle chips render bare (`.shop-bundle-contents` — no box).
+    if (_isBundle) return ShopBundlePreview(item: item);
+    // Limited-tab flair with a stamped sample edition (Genesis #69): the boxed
+    // `.shop-item-preview` nym row (`_renderLimitedCard`, shop.js:864).
+    if (sampleEdition != null && item.type == 'nickname-flair') {
+      return ShopPreviewBox(child: _flairSamplePreview(c));
+    }
+    // The inventory supporter card shows a single boxed supporter-badge row
+    // (shop.js:1048), not the full special preview.
+    if (inventory && item.type == 'supporter') {
+      return const ShopPreviewBox(child: SupporterBadge());
+    }
+    return ShopItemPreview(item: item, bubble: bubble);
+  }
+
   /// The flair preview with a stamped sample edition (Genesis #69), used in the
-  /// limited tab (`_renderLimitedCard`).
+  /// limited tab (`_renderLimitedCard`, shop.js:864): `<strong>Your_Nick</strong>`
+  /// (bold, unlike the flair tab's regular-weight nym) + the badge.
   Widget _flairSamplePreview(NymColors c) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Text('Your_Nick', style: TextStyle(fontWeight: FontWeight.w600)),
+        const Text('Your_Nick ', style: TextStyle(fontWeight: FontWeight.bold)),
         FlairBadge(flairId: item.id, edition: sampleEdition),
       ],
     );
@@ -1328,7 +1356,11 @@ class _SupporterContentLine extends StatelessWidget {
       ),
     );
     if (!bubble) {
+      // IRC: the wash + 3px gold bar sit on the BLOCK `.message` row
+      // (`body:not(.chat-bubbles) .message.supporter-style`), spanning the
+      // preview panel's width; the text stays left-aligned.
       return Container(
+        width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
           gradient: LinearGradient(
