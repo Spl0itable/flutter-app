@@ -207,10 +207,20 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     if (avatar != null) await kv.setString(StorageKeys.avatarUrl, avatar);
     if (banner != null) await kv.setString(StorageKeys.bannerUrl, banner);
 
-    // The ephemeral keypair was already booted in main(); publish the chosen
-    // profile so the nym + avatar/banner/bio land on relays (saveToNostrProfile).
-    // avatar/banner are the hosted URLs returned by `uploadImage`; if no image
-    // was picked they're null, so nothing new is published for them.
+    // Ensure the controller is booted. At COLD boot main() already booted the
+    // ephemeral identity behind this modal (init() is then a no-op via its
+    // _started guard), but after a panic-wipe remount NOTHING has re-booted
+    // it — the PWA reloads the page, which re-runs its whole boot chain.
+    // Without this the shell mounts with no identity (empty pubkey → '????'
+    // suffix) and no relay service, so nothing ever loads. Runs AFTER the
+    // autoEphemeral/nick persists (the boot adopts the chosen nick) and
+    // BEFORE saveProfile (the publish needs a live identity + signer).
+    await controller.init();
+
+    // Publish the chosen profile so the nym + avatar/banner/bio land on
+    // relays (saveToNostrProfile). avatar/banner are the hosted URLs returned
+    // by `uploadImage`; if no image was picked they're null, so nothing new
+    // is published for them.
     await controller.saveProfile(
       name: nym.isEmpty ? null : nym,
       about: bio.isEmpty ? null : bio,
@@ -232,7 +242,16 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     //    idempotent with that remount.
     //  * NIP-46 — `finishNostrConnect` persisted the session; `onComplete()`
     //    advances the gate so the shell shows (restored fully on next boot).
-    if (result != null) widget.onComplete();
+    if (result != null) {
+      // NIP-46 persists the session but does not itself boot the controller
+      // (nsec re-boots inside loginWithNsec, where this is a no-op). At cold
+      // boot the background ephemeral session covers until relaunch; after a
+      // panic-wipe remount there is NO running session, so boot now —
+      // init() restores the just-persisted login (idempotent via _started).
+      await ref.read(nostrControllerProvider).init();
+      if (!mounted) return;
+      widget.onComplete();
+    }
   }
 
   @override

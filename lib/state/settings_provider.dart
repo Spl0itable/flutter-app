@@ -309,9 +309,18 @@ class SettingsController extends StateNotifier<Settings> {
 
   // --- Channels -------------------------------------------------------------
 
+  /// Hook fired after [setGroupChatPMOnlyMode] persists a CHANGED value, so
+  /// the [NostrController] can flip the critical REQ's channelMode gate
+  /// (relays.js:2488 `!this.settings.groupChatPMOnlyMode`; the PWA re-applies
+  /// via `applyGroupChatPMOnlyMode` only when the value changed, app.js:3978).
+  /// Registered by the controller at boot.
+  void Function(bool enabled)? onGroupChatPMOnlyModeChanged;
+
   void setGroupChatPMOnlyMode(bool v) {
+    final changed = state.groupChatPMOnlyMode != v;
     _kv.setBool(StorageKeys.groupchatPmOnlyMode, v);
     state = state.copyWith(groupChatPMOnlyMode: v);
+    if (changed) onGroupChatPMOnlyModeChanged?.call(v);
     _syncedChanged();
   }
 
@@ -426,7 +435,17 @@ class SettingsController extends StateNotifier<Settings> {
   /// values, not a user edit, so it must not trigger a cross-device publish (the
   /// PWA guards the same re-read with `_applyingRemoteSettings`).
   void reloadFromStore() {
+    final prev = state;
     state = Settings.fromStore(_kv);
+    // A remote/out-of-band change to these must still reach the relay layer —
+    // the PWA's remote-settings apply calls applyLowDataMode /
+    // applyGroupChatPMOnlyMode when the value CHANGED (app.js:6329-6346).
+    if (prev.lowDataMode != state.lowDataMode) {
+      onLowDataModeChanged?.call(state.lowDataMode);
+    }
+    if (prev.groupChatPMOnlyMode != state.groupChatPMOnlyMode) {
+      onGroupChatPMOnlyModeChanged?.call(state.groupChatPMOnlyMode);
+    }
   }
 }
 

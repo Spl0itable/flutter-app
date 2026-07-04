@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../widgets/common/css_focus_ring.dart';
 import '../../models/message.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -817,6 +818,50 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// (`hideCommandPalette`; the next input event re-shows it,
   /// ui-context.js:1003-1005).
   bool _suppressPalette = false;
+
+  /// Anchors the floating `#commandPalette` overlay to the input wrapper
+  /// (the PWA's `position:absolute; bottom:100%` — the palette pops out OVER
+  /// the conversation above the input container, never growing it).
+  final _acAnchor = LayerLink();
+  final _acPortal = OverlayPortalController();
+  final _inputKey = GlobalKey();
+
+  /// Aligns the portal's visibility with the palette state. Deferred to a
+  /// post-frame callback because it's invoked from build (show()/hide() mark
+  /// the overlay dirty, which is illegal mid-build).
+  void _syncPalettePortal() {
+    final want = _suggestions.isNotEmpty && !_suppressPalette;
+    if (want == _acPortal.isShowing) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final show = _suggestions.isNotEmpty && !_suppressPalette;
+      if (show && !_acPortal.isShowing) _acPortal.show();
+      if (!show && _acPortal.isShowing) _acPortal.hide();
+    });
+  }
+
+  /// The palette overlay: same width as the input wrapper, bottom edge flush
+  /// with the input's top (the `_palette` Container's own `margin-bottom: 8`
+  /// provides the PWA's 8px gap).
+  Widget _paletteOverlay(BuildContext context) {
+    final box = _inputKey.currentContext?.findRenderObject() as RenderBox?;
+    final width = (box != null && box.hasSize)
+        ? box.size.width
+        : MediaQuery.sizeOf(context).width;
+    return CompositedTransformFollower(
+      link: _acAnchor,
+      targetAnchor: Alignment.topLeft,
+      followerAnchor: Alignment.bottomLeft,
+      showWhenUnlinked: false,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: Material(
+          type: MaterialType.transparency,
+          child: SizedBox(width: width, child: _palette(widget.colors)),
+        ),
+      ),
+    );
+  }
 
   /// Last seen input text, so selection-only controller notifications don't
   /// count as input events (the PWA palette reacts to `input` only).
@@ -1659,6 +1704,22 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
       ],
     );
 
+    // `#commandPalette` is `position:absolute; bottom:100%` of the input
+    // wrapper (styles-components.css:849-863): it POPS OUT over the messages
+    // above the input container instead of growing it. Hosted in an
+    // OverlayPortal anchored to the input (same pattern as the main
+    // composer's autocomplete portal).
+    final inputWithPalette = CompositedTransformTarget(
+      key: _inputKey,
+      link: _acAnchor,
+      child: OverlayPortal(
+        controller: _acPortal,
+        overlayChildBuilder: _paletteOverlay,
+        child: input,
+      ),
+    );
+    _syncPalettePortal();
+
     final toolbar = _toolbar(context, sendEnabled, compact, phone);
 
     return Container(
@@ -1679,14 +1740,11 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
             // `#uploadProgress` floats above the input while a Blossom upload
             // runs (users.js:988-1008).
             if (_uploadProgress != null) _uploadBar(context),
-            // `#commandPalette` for the bot-PM `?` commands, above the input
-            // (hidden by Escape until the input changes again).
-            if (_suggestions.isNotEmpty && !_suppressPalette) _palette(c),
             compact
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      input,
+                      inputWithPalette,
                       const SizedBox(height: 10),
                       toolbar,
                     ],
@@ -1694,7 +1752,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                 : Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      Expanded(child: input),
+                      Expanded(child: inputWithPalette),
                       const SizedBox(width: 10),
                       toolbar,
                     ],
@@ -1766,20 +1824,13 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           ),
       ],
     );
-    // `.message-input:focus`: a 3px primary@0.06 ring (spread, no blur).
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        boxShadow: focused
-            ? [
-                BoxShadow(
-                  color: c.primaryA(0.06),
-                  spreadRadius: 3,
-                  blurRadius: 0,
-                ),
-              ]
-            : const [],
-      ),
+    // `.message-input:focus`: a 3px primary@0.06 ring painted OUTSIDE the
+    // field only (CSS box-shadow semantics — a spread BoxShadow also fills
+    // behind the translucent fill and highlights the whole input).
+    return CssFocusRing(
+      show: focused,
+      color: c.primaryA(0.06),
+      radius: radius,
       child: stack,
     );
   }
@@ -2033,9 +2084,9 @@ class _QuotePreviewChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final hashIdx = author.indexOf('#');
-    final base = hashIdx >= 0 ? author.substring(0, hashIdx) : author;
-    final suffix = hashIdx >= 0 ? author.substring(hashIdx) : '';
+    final split = splitNymSuffix(author);
+    final base = split.base;
+    final suffix = split.suffix;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(

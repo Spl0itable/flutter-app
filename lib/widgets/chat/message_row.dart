@@ -2496,10 +2496,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return r?.center;
   }
 
-  String _baseNym(String nym) {
-    final hash = nym.indexOf('#');
-    return hash > 0 ? nym.substring(0, hash) : nym;
-  }
+  // Trailing-`#xxxx`-only strip (users.js:1093-1098): a `#` inside the name
+  // (e.g. `player#1`) belongs to the name.
+  String _baseNym(String nym) => splitNymSuffix(nym).base;
 
   BorderRadius _bubbleRadius(bool self) {
     const r = Radius.circular(16);

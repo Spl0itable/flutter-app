@@ -1687,9 +1687,9 @@ class _QuoteBox extends ConsumerWidget {
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
   /// the base nym (secondary 600) from a dimmed `.nym-suffix` (`#xxxx`).
   Widget _quoteAuthor(NymColors c, String author) {
-    final hash = author.indexOf('#');
-    final base = hash > 0 ? author.substring(0, hash) : author;
-    final suffix = hash > 0 ? author.substring(hash) : null;
+    final split = splitNymSuffix(author);
+    final base = split.base;
+    final suffix = split.suffix.isEmpty ? null : split.suffix;
     return Text.rich(
       TextSpan(
         children: [
