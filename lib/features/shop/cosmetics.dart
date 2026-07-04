@@ -302,11 +302,14 @@ class MessageStyleDecoration {
   /// default.
   final EdgeInsets? contentPadding;
 
-  /// True when the bubble layout REPLACES the default translucent bubble fill
-  /// with a fully transparent one — aurora (`body.chat-bubbles .message.
-  /// style-aurora .message-content` clips its gradient to the text over a
-  /// `linear-gradient(transparent, transparent)` border-box layer `!important`,
-  /// styles-features.css:3675-3686), so the bubble shape disappears.
+  /// True for aurora's bubble-mode rule (`body.chat-bubbles .message.
+  /// style-aurora .message-content`, styles-features.css:3675-3686). NOTE: the
+  /// rule overrides only `background-IMAGE` (the text-clipped gradient over a
+  /// `linear-gradient(transparent, transparent)` border-box layer) — the
+  /// bubble's `background-COLOR` (white@.14 / black@.10) comes from the
+  /// shorthand `background:` of the base chat-bubbles rule and SURVIVES, so
+  /// the bubble shape stays visible. [contentBackgroundFor] therefore returns
+  /// null (→ the layout's default plate), never transparent.
   final bool transparentBubble;
 
   /// A 135deg background gradient painted on the IRC row (`body:not(.chat-bubbles)
@@ -364,7 +367,8 @@ class MessageStyleDecoration {
   /// (aurora returns fully transparent); null = keep the default fill.
   Color? contentBackgroundFor({required bool bubble}) {
     if (bubble) {
-      if (transparentBubble) return const Color(0x00000000);
+      // Aurora keeps the DEFAULT bubble plate (see [transparentBubble]).
+      if (transparentBubble) return null;
       return bubbleContentBackground ?? contentBackground;
     }
     return bubbleOnlyContentBackground ? null : contentBackground;

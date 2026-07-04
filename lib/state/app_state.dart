@@ -1916,14 +1916,66 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
     if (m.id.isNotEmpty && !_seenIds.add(m.id)) return;
+
+    final key = _canonicalPmStorageKey(
+        m.conversationKey ?? PmLogic.pmStorageKey(peer));
+    final list = state.messages.putIfAbsent(key, () => <Message>[]);
+
+    // Dual-wrap merge (pms.js:1184-1233): nymchat sends BOTH a bitchat-format
+    // and a nymchat-format wrap to unknown peers, so the recipient may decrypt
+    // both copies of one logical message. Correlate first on sender + the
+    // shared `x`-tag nymMessageId (set on both wraps; content equality would
+    // miss older senders' >255-byte bitchat truncation), falling back to
+    // sender + identical content + <5s timestamps for legacy events without
+    // the tag. On a match the EXISTING row is upgraded in place — adopt the
+    // nymMessageId, prefer the longer content (bitchat truncation), and flip
+    // `senderVerified` so the padlock upgrades when the verified nymchat copy
+    // lands after the unverified bitchat one — never a second row.
+    final nymId = m.nymMessageId;
+    Message? dup;
+    if (nymId != null && nymId.isNotEmpty) {
+      for (final e in list) {
+        if (e.pubkey == m.pubkey && e.nymMessageId == nymId) {
+          dup = e;
+          break;
+        }
+      }
+    }
+    if (dup == null) {
+      for (final e in list) {
+        if (e.pubkey == m.pubkey &&
+            e.content == m.content &&
+            (e.createdAt - m.createdAt).abs() < 5) {
+          dup = e;
+          break;
+        }
+      }
+    }
+    if (dup != null) {
+      var changed = false;
+      if ((dup.nymMessageId == null || dup.nymMessageId!.isEmpty) &&
+          nymId != null &&
+          nymId.isNotEmpty) {
+        dup.nymMessageId = nymId;
+        _seenNymMessageIds.add(nymId);
+        changed = true;
+      }
+      if (m.content.length > dup.content.length) {
+        dup.content = m.content;
+        changed = true;
+      }
+      if (m.senderVerified == true && dup.senderVerified != true) {
+        dup.senderVerified = true;
+        changed = true;
+      }
+      if (changed) state = state.copyWith();
+      return;
+    }
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
       return;
     }
     m.seq = _nextIngestSeq();
 
-    final key = _canonicalPmStorageKey(
-        m.conversationKey ?? PmLogic.pmStorageKey(peer));
-    final list = state.messages.putIfAbsent(key, () => <Message>[]);
     list.add(m);
     list.sort(compareMessages);
 

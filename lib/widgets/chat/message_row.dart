@@ -2340,11 +2340,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       kind: inferOriginalKind(message, view: view),
     ));
     // Buzz + burst with the optimistic local add, BEFORE any signing/publish
-    // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977).
+    // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977). Anchored at
+    // the emoji's reaction badge once the optimistic add lays it out
+    // (post-frame), message-centre fallback — like the badge-tap toggle path.
     if (!already && _selfReactedLocally(emoji)) {
       HapticFeedback.mediumImpact();
-      final center = _globalCenterOfContext(context);
-      if (center != null) ReactionBurst.play(context, center, emoji);
+      ReactionBurst.playAtBadge(context, message.id, emoji,
+          fallbackCenter: _globalCenterOfContext(context));
     }
   }
 
