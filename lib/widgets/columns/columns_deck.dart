@@ -2050,10 +2050,7 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
 
   /// Strips the `#suffix` off a nym for the `@name` mention token (mirrors
   /// messages_list `_baseNym`).
-  String _baseNym(String nym) {
-    final hash = nym.indexOf('#');
-    return hash > 0 ? nym.substring(0, hash) : nym;
-  }
+  String _baseNym(String nym) => splitNymSuffix(nym).base;
 
   /// The `.cv-column-header` (padding 10/12, bottom border, gap 8). On desktop:
   /// 6-dot grip + icon + title (all draggable to reorder, `cursor:grab`) + a

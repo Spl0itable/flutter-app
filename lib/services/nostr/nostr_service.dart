@@ -385,88 +385,30 @@ class NostrService {
   Timer? _statusTimer;
   NostrHandlers? _handlers;
 
-  /// Connects to relays and subscribes to the core message kinds plus the
-  /// gift-wrap (kind 1059, `#p:[self]`) and presence (kind 30078) feeds.
-  Future<void> start(NostrHandlers handlers) async {
+  /// Connects to relays and issues the main "critical" REQ — the PWA's
+  /// `_buildCriticalFilters` set (see [_buildCriticalFilters] for the full
+  /// proxy/D1 vs direct split).
+  ///
+  /// [channelMode] mirrors `!settings.groupChatPMOnlyMode` (relays.js:2488):
+  /// when false, every public-channel filter (channels, channel reactions/zaps/
+  /// deletions, polls) is omitted. [vouchAuthors] / [profileAuthors] feed the
+  /// DIRECT-mode-only author'd filters (peer `nym-vouches` lists / PM-contact
+  /// kind-0 watches); they're ignored while the proxy+D1 path is active. All
+  /// three can be updated later via [updateCriticalInputs].
+  Future<void> start(
+    NostrHandlers handlers, {
+    bool channelMode = true,
+    Iterable<String> vouchAuthors = const [],
+    Iterable<String> profileAuthors = const [],
+  }) async {
     _handlers = handlers;
+    _channelMode = channelMode;
+    _vouchAuthors = _sanitizeVouchAuthors(vouchAuthors);
+    _profileAuthors = List<String>.unmodifiable(profileAuthors);
     _wireProxyFallback();
     pool.connectAll();
 
-    // REQ windows mirror the PWA's `_buildCriticalFilters` (relays.js:2485-2570).
-    // When the D1 archive is reachable (the API host is configured — always true
-    // in production), the relay-pool proxy has ALREADY archived history to D1, so
-    // we ask relays for ONLY new live events (`since = now`) and collapse history
-    // to `limit: 1`; the full backlog is restored from D1 by the controller's
-    // `backfillFromD1OnReconnect`. Without D1 we fall back to a 24h relay window.
-    // (This is the fix for "data should be pulled from D1, not re-REQ'd 1h from
-    // relays on every connect".)
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final d1Available = ApiConfig.apiHost.isNotEmpty;
-    final liveSince = d1Available ? nowSec : nowSec - 86400;
-    int lim(int n) => d1Available ? 1 : n;
-    final self = identity.pubkey;
-    final filters = [
-      // Channels (20000/23333): real-time `since` only, no limit
-      // (relays.js:2497-2498).
-      NostrFilter(
-          kinds: [EventKind.geoChannel, EventKind.namedChannel],
-          since: liveSince),
-      // Channel reactions (kind 7, `#k:[20000,23333]`) (relays.js:2506).
-      NostrFilter(
-        kinds: [EventKind.reaction],
-        since: liveSince,
-        limit: lim(100),
-        tags: {
-          'k': ['${EventKind.geoChannel}', '${EventKind.namedChannel}'],
-        },
-      ),
-      // Public NIP-57 zap receipts addressed to us (kind 9735, `#p:[self]`): the
-      // recipient is always p-tagged, so this catches receipts for OUR authored
-      // channel/profile messages — both the LNURL provider's (verified) receipt
-      // and a peer's own-published kind-9735 (zaps.js `_publishOwnMessageZapEvent`).
-      // Collapses to since=now/limit:1 under D1 (relays.js:2517); history from D1.
-      NostrFilter(
-        kinds: [EventKind.zapReceipt],
-        since: liveSince,
-        limit: lim(200),
-        tags: {
-          'p': [self],
-        },
-      ),
-      // Gift wraps addressed to us (PMs, group messages, receipts, typing).
-      // NIP-59 backdates created_at, so NO `since`; cap at limit:1 under D1
-      // (relays.js:2494) — the PM/group backlog is restored from D1.
-      NostrFilter(
-        kinds: [EventKind.giftWrap],
-        limit: d1Available ? 1 : 500,
-        tags: {
-          'p': [self],
-        },
-      ),
-      // Presence (nym-presence): real-time only under D1 (relays.js:2528).
-      NostrFilter(
-        kinds: [EventKind.appData],
-        since: d1Available ? nowSec : null,
-        limit: lim(100),
-        tags: {
-          't': [AppDataTopic.presence],
-        },
-      ),
-      // NIP-30 custom emoji packs (kind 30030): real-time + limit:1 under D1
-      // (history via the D1 emoji restore); else discover up to 300
-      // (relays.js:2546). Plus the user's own emoji-pack list (kind 10030).
-      NostrFilter(
-          kinds: [EventKind.emojiPack],
-          since: d1Available ? nowSec : null,
-          limit: d1Available ? 1 : 300),
-      NostrFilter(
-        kinds: [EventKind.userEmojiList],
-        authors: [self],
-        limit: 1,
-      ),
-    ];
-
-    _mainSub = pool.subscribe(filters);
+    _mainSub = pool.subscribe(_buildCriticalFilters());
     _eventSub = _mainSub!.events.listen(_routeInbound);
 
     _statusTimer = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -482,6 +424,304 @@ class NostrService {
     // until the next channel entry retries. Mirrors the PWA's `_geoRelaysReady`
     // → `_poolSendRelayConfig` once the list arrives.
     unawaited(loadAndApplyGeoRelays().catchError((_) {}));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Critical REQ filter set (PWA `_buildCriticalFilters`, relays.js:2485-2570).
+  // ---------------------------------------------------------------------------
+
+  /// `!settings.groupChatPMOnlyMode` (relays.js:2488) — gates every
+  /// public-channel filter out of the critical set.
+  bool _channelMode = true;
+
+  /// DIRECT-mode vouch REQ authors: the current trust graph's pubkeys
+  /// (`this.nymchatPubkeys`, relays.js:2538-2542), hex64-filtered and capped
+  /// at [_vouchAuthorCap]. Unused while the proxy+D1 path supplies vouches.
+  List<String> _vouchAuthors = const [];
+
+  /// DIRECT-mode kind-0 REQ authors: every PM conversation's pubkey
+  /// (`this.pmConversations.keys()`, relays.js:2559-2563); self is appended at
+  /// build time. Unused while D1 `profile-get` supplies peer profiles.
+  List<String> _profileAuthors = const [];
+
+  /// Whether the D1 archive backs this transport's history. The PWA gates on
+  /// `_getApiHost()` alone (relays.js:2489) because the page host IS the worker
+  /// host; natively the equivalent signal is the relay-pool PROXY being the
+  /// active transport — it runs on the same worker that archives to D1, so a
+  /// proxy fallback to direct sockets means D1 can't be assumed and the full
+  /// 24h-window REQ set must pull history straight from the relays.
+  bool get _d1Available => ApiConfig.apiHost.isNotEmpty && isProxyMode;
+
+  /// Builds the main REQ filter list — a 1:1 port of the PWA's
+  /// `_buildCriticalFilters(since24h, channelSince)` (relays.js:2485-2570),
+  /// preserving filter order. Two shapes, selected by [_d1Available]:
+  ///
+  ///  - PROXY/D1: the relay-pool proxy has already archived history to D1 and
+  ///    the controller restores it from there, so relays are asked for ONLY
+  ///    live events — `since: now` windows and `limit: 1` on nearly every
+  ///    filter (`lim`/`chSince` collapse, relays.js:2490-2492).
+  ///  - DIRECT: full 24h windows + real limits pull history from the relays,
+  ///    and the author'd vouch/profile filters replace their D1 equivalents.
+  List<NostrFilter> _buildCriticalFilters() {
+    final filters = <NostrFilter>[];
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final since24h = nowSec - 86400;
+    final channelMode = _channelMode;
+    final d1Available = _d1Available;
+    final chSince = d1Available ? nowSec : since24h;
+    int lim(int n) => d1Available ? 1 : n;
+    final self = identity.pubkey;
+    const channelKindTags = ['20000', '23333'];
+
+    // Gift wraps addressed to us (PMs, group messages, receipts, typing).
+    // NIP-59 backdates created_at, so NO `since`; cap at limit:1 under D1 —
+    // the PM/group backlog is restored from D1 (relays.js:2494).
+    filters.add(NostrFilter(
+      kinds: [EventKind.giftWrap],
+      limit: d1Available ? 1 : 500,
+      tags: {
+        'p': [self],
+      },
+    ));
+    // Channels: real-time `since` only, no limit — TWO separate filters,
+    // exactly like the PWA (relays.js:2497-2498).
+    if (channelMode) {
+      filters.add(NostrFilter(kinds: [EventKind.geoChannel], since: chSince));
+      filters
+          .add(NostrFilter(kinds: [EventKind.namedChannel], since: chSince));
+    }
+    // Reactions on OUR channel messages (`#p:[self]` + `#k` channel kinds,
+    // relays.js:2501-2504). The `#k` gate is what keeps foreign kind-7 traffic
+    // (reactions to non-Nymchat notes that merely p-tag us) out of the app.
+    filters.add(NostrFilter(
+      kinds: [EventKind.reaction],
+      since: d1Available ? nowSec : null,
+      limit: lim(100),
+      tags: {
+        'p': [self],
+        'k': channelKindTags,
+      },
+    ));
+    // All channel reactions — badge counts on everyone's messages
+    // (relays.js:2506).
+    if (channelMode) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.reaction],
+        since: chSince,
+        limit: lim(100),
+        tags: {
+          'k': channelKindTags,
+        },
+      ));
+    }
+    // Public reactions to gift-wrapped (PM/group) messages (relays.js:2509-2512).
+    filters.add(NostrFilter(
+      kinds: [EventKind.reaction],
+      since: d1Available ? nowSec : null,
+      limit: lim(100),
+      tags: {
+        'k': ['1059'],
+      },
+    ));
+    // NIP-09 deletions of channel messages / gift wraps (relays.js:2514).
+    if (channelMode) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.deletion],
+        since: d1Available ? nowSec : since24h,
+        limit: lim(100),
+        tags: {
+          'k': ['20000', '23333', '1059'],
+        },
+      ));
+    }
+    // NIP-57 zap receipts addressed to us — channel, PM, and profile zaps
+    // (`#k:[20000,23333,1059,0]`, relays.js:2517).
+    filters.add(NostrFilter(
+      kinds: [EventKind.zapReceipt],
+      since: chSince,
+      limit: lim(200),
+      tags: {
+        'p': [self],
+        'k': ['20000', '23333', '1059', '0'],
+      },
+    ));
+    // Zap receipts on everyone's channel messages — badges (relays.js:2520).
+    if (channelMode) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.zapReceipt],
+        since: chSince,
+        limit: lim(100),
+        tags: {
+          'k': channelKindTags,
+        },
+      ));
+    }
+    // Zap receipts on gift-wrapped (PM/group) messages (relays.js:2522).
+    filters.add(NostrFilter(
+      kinds: [EventKind.zapReceipt],
+      since: chSince,
+      limit: lim(100),
+      tags: {
+        'k': ['1059'],
+      },
+    ));
+    // P2P file-transfer signaling addressed to us — 2-minute window
+    // (relays.js:2525).
+    filters.add(NostrFilter(
+      kinds: [EventKind.p2pSignaling],
+      since: nowSec - 120,
+      limit: lim(50),
+      tags: {
+        'p': [self],
+      },
+    ));
+    // Presence (nym-presence): real-time only under D1 (relays.js:2528-2531).
+    filters.add(NostrFilter(
+      kinds: [EventKind.appData],
+      since: d1Available ? nowSec : null,
+      limit: lim(100),
+      tags: {
+        't': [AppDataTopic.presence],
+      },
+    ));
+    // Channel polls + votes (relays.js:2533-2535).
+    if (channelMode) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.appData],
+        since: chSince,
+        limit: lim(100),
+        tags: {
+          't': [AppDataTopic.poll, AppDataTopic.pollVote],
+        },
+      ));
+    }
+    // Web of trust: live-only under D1 (history rebuilt from the D1
+    // `nym-vouches` pseudo-channel by the controller); direct mode REQs the
+    // trusted authors' lists outright (relays.js:2536-2543).
+    if (d1Available) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.appData],
+        since: nowSec,
+        limit: 1,
+        tags: {
+          't': [AppDataTopic.vouches],
+        },
+      ));
+    } else if (_vouchAuthors.isNotEmpty) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.appData],
+        authors: _vouchAuthors,
+        limit: _vouchAuthors.length,
+        tags: {
+          't': [AppDataTopic.vouches],
+        },
+      ));
+    }
+    // NIP-30 custom emoji packs: real-time + limit:1 under D1 (history via the
+    // D1 emoji restore); else discover up to 300 (relays.js:2546-2548).
+    filters.add(NostrFilter(
+      kinds: [EventKind.emojiPack],
+      since: d1Available ? nowSec : null,
+      limit: d1Available ? 1 : 300,
+    ));
+    // P2P file seeding status (global — deliberately NO `#p`, matching the
+    // PWA) + our own kind-10030 emoji-pack list (relays.js:2551-2552).
+    filters.add(NostrFilter(
+      kinds: [EventKind.p2pFileStatus],
+      since: d1Available ? nowSec : since24h,
+      limit: lim(100),
+    ));
+    filters.add(NostrFilter(
+      kinds: [EventKind.userEmojiList],
+      authors: [self],
+      limit: 1,
+    ));
+    // Kind-0 profiles: live self-updates only under D1 (peer profiles come
+    // from `profile-get`); direct mode watches every PM contact + self, NO
+    // limit (relays.js:2554-2568).
+    if (d1Available) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.profile],
+        authors: [self],
+        since: nowSec,
+        limit: 1,
+      ));
+    } else {
+      final authors = <String>[
+        ..._profileAuthors.where((pk) => pk.length == 64 && pk != self),
+        self,
+      ];
+      filters.add(NostrFilter(kinds: [EventKind.profile], authors: authors));
+    }
+    return filters;
+  }
+
+  /// Updates the critical-REQ inputs and, when anything actually changed,
+  /// schedules a debounced [resubscribeMain]. Mirrors the PWA's
+  /// `_scheduleCriticalResubscribe` triggers: a new PM contact (pms.js:2803),
+  /// a vouch-graph hop (nostr-core.js:2685-2693), or a channel-mode flip.
+  void updateCriticalInputs({
+    bool? channelMode,
+    Iterable<String>? vouchAuthors,
+    Iterable<String>? profileAuthors,
+  }) {
+    var changed = false;
+    if (channelMode != null && channelMode != _channelMode) {
+      _channelMode = channelMode;
+      changed = true;
+    }
+    if (vouchAuthors != null) {
+      final next = _sanitizeVouchAuthors(vouchAuthors);
+      if (!listEquals(next, _vouchAuthors)) {
+        _vouchAuthors = next;
+        changed = true;
+      }
+    }
+    if (profileAuthors != null) {
+      final next = List<String>.unmodifiable(profileAuthors);
+      if (!listEquals(next, _profileAuthors)) {
+        _profileAuthors = next;
+        changed = true;
+      }
+    }
+    if (changed) scheduleCriticalResubscribe();
+  }
+
+  /// Author cap on the direct-mode vouch filter (relays.js:2539
+  /// `.slice(0, 500)`).
+  static const int _vouchAuthorCap = 500;
+
+  List<String> _sanitizeVouchAuthors(Iterable<String> authors) =>
+      List<String>.unmodifiable(
+          authors.where(TrustGraph.isHex64).take(_vouchAuthorCap));
+
+  /// Debounce for [resubscribeMain] (the PWA's `_scheduleCriticalResubscribe`,
+  /// relays.js:1286 — 750ms against burst churn, e.g. hydration adding many
+  /// PM contacts in quick succession).
+  Timer? _criticalResubTimer;
+
+  void scheduleCriticalResubscribe() {
+    _criticalResubTimer?.cancel();
+    _criticalResubTimer = Timer(const Duration(milliseconds: 750), () {
+      _criticalResubTimer = null;
+      resubscribeMain();
+    });
+  }
+
+  /// Closes and re-issues the main critical REQ with freshly-built filters —
+  /// the PWA's `resubscribeAllRelays` → `_poolSubscribe` (which CLOSEs
+  /// `_lastPoolSubId` and REQs a new set, relays.js:2603-2622). No-op before
+  /// [start].
+  void resubscribeMain() {
+    if (_handlers == null) return;
+    final old = _mainSub;
+    unawaited(_eventSub?.cancel());
+    // `close()` CLOSEs on the transport that created the sub and releases its
+    // stream — after a pool swap that's the detached old pool (harmless), and
+    // the sub was never replayed onto the new one.
+    unawaited(old?.close());
+    _mainSub = pool.subscribe(_buildCriticalFilters());
+    _eventSub = _mainSub!.events.listen(_routeInbound);
   }
 
   // ---------------------------------------------------------------------------
@@ -544,12 +784,19 @@ class NostrService {
       await _detachSockets(old);
 
       // Bring up the direct pool and replay every live subscription on it (same
-      // objects → same streams; the sub's dedup makes replay idempotent).
+      // objects → same streams; the sub's dedup makes replay idempotent). The
+      // MAIN critical REQ is rebuilt instead of replayed: its filter set is
+      // mode-shaped (proxy+D1 → since:now/limit:1 collapse; direct → full 24h
+      // windows + author'd vouch/profile filters), so a verbatim replay would
+      // leave the direct relays serving the D1-collapsed live-only set with no
+      // D1 behind it to fill the history.
       _pool = direct;
       direct.connectAll();
       for (final entry in live.values) {
+        if (identical(entry.sub, _mainSub)) continue;
         direct.replaySubscription(entry.sub, entry.filters);
       }
+      resubscribeMain();
 
       // Re-establish geo-relay coverage on the new transport (direct mode opens
       // a direct socket per geo url) so geohash channels keep working across the
@@ -665,8 +912,12 @@ class NostrService {
       _pool = restored;
       restored.onProxyUnreachable = _onProxyUnreachable; // future blips
       for (final entry in live.values) {
+        if (identical(entry.sub, _mainSub)) continue;
         restored.replaySubscription(entry.sub, entry.filters);
       }
+      // Back on the proxy: rebuild the main REQ into its D1-collapsed shape
+      // (see _swapToDirect for the rationale).
+      resubscribeMain();
       _poolFallbackActive = false;
       _stopBgRestore();
       // Re-shard the geo relays onto the restored proxy so geohash channels
@@ -1095,40 +1346,6 @@ class NostrService {
     await pool.publish(signed);
     return signed;
   }
-
-  /// (Re)subscribes to peers' kind-30078 `nym-vouches` lists, authored by the
-  /// pubkeys currently in our trust graph ([nymchatPubkeys]). Mirrors the PWA's
-  /// REQ (relays.js:2538-2542): `{ kinds:[30078], "#t":["nym-vouches"], authors:
-  /// trusted-pubkeys-intersect-hex64-capped-500, limit: authors.length }`.
-  /// Ingesting a trusted peer's vouches grows the graph one hop; the controller
-  /// calls this again (debounced) when new authors appear, so the web of trust
-  /// expands and then goes quiet. Returns null when there are no valid authors.
-  Subscription? subscribeVouches(Iterable<String> nymchatPubkeys) {
-    final authors = nymchatPubkeys
-        .where(TrustGraph.isHex64)
-        .take(_vouchAuthorCap)
-        .toList();
-    if (authors.isEmpty) return null;
-    _vouchSub?.close();
-    final sub = pool.subscribe([
-      NostrFilter(
-        kinds: [EventKind.appData],
-        authors: authors,
-        tags: {
-          't': [AppDataTopic.vouches],
-        },
-        limit: authors.length,
-      ),
-    ]);
-    _vouchSub = sub;
-    sub.events.listen(_routeInbound);
-    return sub;
-  }
-
-  /// Author cap on the vouch REQ (relays.js:2539 `.slice(0, 500)`).
-  static const int _vouchAuthorCap = 500;
-
-  Subscription? _vouchSub;
 
   /// created_at of the newest self kind-0 we've published OR received
   /// (nostr-core.js `_lastKind0Ts`, advanced at 148 on publish and 625-627 on
@@ -1830,6 +2047,8 @@ class NostrService {
 
   Future<void> stop() async {
     _statusTimer?.cancel();
+    _criticalResubTimer?.cancel();
+    _criticalResubTimer = null;
     _stopBgRestore();
     _poolFallbackActive = false;
     // Detach our api-stats sink if it's still the active one (avoid a stale
@@ -1839,7 +2058,6 @@ class NostrService {
     }
     await _eventSub?.cancel();
     await _channelTypingSub?.close();
-    await _vouchSub?.close();
     await _mainSub?.close();
     await pool.disconnectAll();
   }

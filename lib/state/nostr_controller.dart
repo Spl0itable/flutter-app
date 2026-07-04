@@ -390,6 +390,13 @@ class NostrController {
       settings.onLowDataModeChanged =
           (enabled) => unawaited(_service?.setLowDataMode(enabled));
 
+      // Flip the critical REQ's channelMode gate when Group Chat & PM Only
+      // mode changes (relays.js:2488; the PWA applies the changed setting via
+      // `applyGroupChatPMOnlyMode`, app.js:3978 — the filter shape follows on
+      // the next resubscribe, which updateCriticalInputs debounces here).
+      settings.onGroupChatPMOnlyModeChanged =
+          (enabled) => _service?.updateCriticalInputs(channelMode: !enabled);
+
       // Touch the live custom-emoji store so it hydrates the persisted NIP-30
       // cache (`nym_custom_emojis` / `nym_custom_emoji_packs`) at boot, mirroring
       // the PWA's `_loadCustomEmojiCache`; live 30030/10030 events then top it up.
@@ -427,11 +434,24 @@ class NostrController {
       if (_ref.read(settingsProvider).lowDataMode) {
         unawaited(service.setLowDataMode(true));
       }
-      await service.start(NostrHandlers(
-        onEvent: _onEvent,
-        onConnectionChanged: _onConnectionChanged,
-        onGiftWrap: _onGiftWrap,
-      ));
+      // The critical REQ's inputs (relays.js:2485-2570): channelMode mirrors
+      // `!settings.groupChatPMOnlyMode`; the vouch/profile author lists feed
+      // the DIRECT-mode filters (trust-graph vouch lists, PM-contact kind-0
+      // watches) from the hydrated caches. Kept fresh afterwards via
+      // updateCriticalInputs (vouch hops, new PM contacts, mode flips).
+      final bootState = _ref.read(appStateProvider);
+      await service.start(
+        NostrHandlers(
+          onEvent: _onEvent,
+          onConnectionChanged: _onConnectionChanged,
+          onGiftWrap: _onGiftWrap,
+        ),
+        channelMode: !_ref.read(settingsProvider).groupChatPMOnlyMode,
+        vouchAuthors: bootState.nymchatPubkeys,
+        profileAuthors: [
+          for (final c in bootState.pmConversations) c.pubkey,
+        ],
+      );
 
       // Live gift-wrap REQ over the restored ephemeral pubkeys (the PWA's
       // `_refreshEphemeralSubscriptions()` in the main subscribe chain,
@@ -452,10 +472,24 @@ class NostrController {
       // `discoverChannels`, called on connect from relays.js).
       discoverChannels();
 
-      // Subscribe to peers' `nym-vouches` lists (web of trust). On boot the only
-      // trusted authors are the seeded dev/bot roots; the graph then expands one
-      // hop at a time as their vouches arrive (relays.js:2536-2542).
+      // Web of trust: on boot the only trusted authors are the seeded dev/bot
+      // roots (plus the persisted graph); the graph then expands one hop at a
+      // time as vouches arrive (relays.js:2536-2542). A no-op resubscribe here
+      // (start already carried the same authors); kept for the expansion hops.
       _subscribeVouches();
+
+      // A NEW PM contact must join the critical REQ's direct-mode kind-0
+      // filter (the PWA's `addPMConversation` new-branch →
+      // `_scheduleCriticalResubscribe`, pms.js:2795-2805). Recompute the full
+      // author list; the service's 750ms debounce coalesces hydration bursts,
+      // and in proxy/D1 mode the rebuilt set is unchanged so it's harmless.
+      _ref.read(appStateProvider.notifier).onPMConversationAdded = (_) {
+        final svc = _service;
+        if (svc == null) return;
+        svc.updateCriticalInputs(profileAuthors: [
+          for (final c in _ref.read(appStateProvider).pmConversations) c.pubkey,
+        ]);
+      };
 
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
@@ -626,6 +660,51 @@ class NostrController {
         'profile',
         (receipt) => _onPublicZapReceipt(receipt, appState),
       ));
+    }
+    // Web of trust: rebuild from the D1 `nym-vouches` pseudo-channel instead
+    // of REQ-ing every trusted peer's vouch list from relays (relays.js:
+    // 2824-2827) — under D1 the critical REQ carries only the live-tail
+    // vouches filter, so this IS the history path.
+    unawaited(_fetchVouchesFromD1(sync));
+  }
+
+  /// Rebuilds the web of trust from D1 (vouch lists are archived under the
+  /// `nym-vouches` pseudo-channel) — nostr-core.js `_fetchVouchesFromD1`
+  /// (line 2700). Signatures are verified (archived rows bypass the relay
+  /// pipeline's verification, and the trust graph must not grow from forged
+  /// rows) and the graph is expanded ITERATIVELY so a vouch from a
+  /// newly-trusted author is applied once they're rooted. Best-effort.
+  Future<void> _fetchVouchesFromD1(StorageSync sync) async {
+    List<Map<String, dynamic>> rows;
+    try {
+      // force: the PWA's call has no freshness gate (it streams directly);
+      // channelGet's 60s window must not silently skip the restore.
+      rows = await sync.channelGet([AppDataTopic.vouches], force: true);
+    } catch (_) {
+      return;
+    }
+    final valid = <NostrEvent>[];
+    for (final raw in rows) {
+      try {
+        final ev = NostrEvent.fromJson(raw);
+        if (ev.kind != EventKind.appData) continue;
+        if (schnorr.verifyEvent(ev)) valid.add(ev);
+      } catch (_) {
+        // Skip a malformed archived row.
+      }
+    }
+    if (valid.isEmpty) return;
+    var changed = true;
+    var guard = 0;
+    while (changed && guard++ < 20) {
+      final before = _ref.read(appStateProvider).nymchatPubkeys.length;
+      for (final ev in valid) {
+        try {
+          _ingestVouch(ev);
+        } catch (_) {}
+      }
+      changed =
+          _ref.read(appStateProvider).nymchatPubkeys.length != before;
     }
   }
 
@@ -890,6 +969,9 @@ class NostrController {
     _trustPersistTimer?.cancel();
     _trustPersistTimer = null;
     _lastVouchPublishAt = 0;
+    _deletedIdsPersistTimer?.cancel();
+    _deletedIdsPersistTimer = null;
+    _ref.read(appStateProvider.notifier).onDeletedIdsChanged = null;
     _dmRetryTimer?.cancel();
     _dmRetryTimer = null;
     _pendingDms.clear();
@@ -951,9 +1033,11 @@ class NostrController {
     settings.activePubkey = null;
     settings.onKeypairModeChanged = null;
     settings.onLowDataModeChanged = null;
+    settings.onGroupChatPMOnlyModeChanged = null;
     // Stop backfilling on view-open (the binding captured the old storage sync).
     _ref.read(appStateProvider.notifier).onViewOpened = null;
     _ref.read(appStateProvider.notifier).onPmMessageIngested = null;
+    _ref.read(appStateProvider.notifier).onPMConversationAdded = null;
     _ref.read(appStateProvider.notifier).onGroupStoreChanged = null;
     _ref.read(appStateProvider.notifier).onChannelReadMarked = null;
     // Close the ephemeral-key gift-wrap REQ (it captured the old service).
@@ -1176,6 +1260,11 @@ class NostrController {
       final topic = event.tagValue('t');
       if (topic == AppDataTopic.vouches) {
         _ingestVouch(event);
+      } else if (topic == AppDataTopic.poll || topic == AppDataTopic.pollVote) {
+        // Live polls/votes from the critical REQ's poll filter (relays.js:
+        // 2533-2535) route through the same store ingest the D1 archive
+        // replay uses (`handlePollEvent`/`handlePollVoteEvent`).
+        appState.ingestEvent(event);
       } else {
         _ingestPresence(event);
       }
@@ -1245,13 +1334,28 @@ class NostrController {
       }
       final removed =
           event.tagsNamed('action').any((t) => t.length > 1 && t[1] == 'remove');
-      // Resolve the REACTOR's D1 profile so the reactors sheet (and any future
-      // surface) shows their custom avatar, not the identicon — the PWA resolves
-      // list/reaction author avatars too (`ensureListProfiles`, reactions.js:631).
-      // Guarded + debounced inside; a no-op once we know their picture.
-      if (!removed) _maybeBackfillProfiles(event.pubkey);
-      if (!removed) {
-        final target = event.tagValue('e');
+      // The PWA's `handleReaction` supported-kind gates (reactions.js:216-242):
+      // a `k` tag outside 20000/23333/1059/14 is another Nostr app's reaction,
+      // and a MISSING `k` tag is only honored when the target is a message we
+      // actually hold — without these, any kind-7 that p-tags us (a reaction
+      // to a non-Nymchat note) raises a foreign notification.
+      final kTag = event.tagValue('k');
+      final foreignKind = kTag != null &&
+          kTag != '20000' &&
+          kTag != '23333' &&
+          kTag != '1059' &&
+          kTag != '14';
+      final target = event.tagValue('e');
+      final knownTarget = kTag != null ||
+          (target != null &&
+              _ref.read(appStateProvider.notifier).isKnownMessageId(target));
+      if (!removed && !foreignKind && knownTarget) {
+        // Resolve the REACTOR's D1 profile so the reactors sheet (and any
+        // future surface) shows their custom avatar, not the identicon — the
+        // PWA resolves list/reaction author avatars too (`ensureListProfiles`,
+        // reactions.js:631). Guarded + debounced inside; a no-op once we know
+        // their picture.
+        _maybeBackfillProfiles(event.pubkey);
         final author = event.tagValue('p');
         if (target != null && author != null) {
           _maybeNotifyReaction(
@@ -2039,13 +2143,16 @@ class NostrController {
     });
   }
 
-  /// (Re)subscribes to peers' `nym-vouches` lists authored by our current trust
-  /// graph (relays.js:2538-2542). Called on connect and on each expansion hop.
+  /// Feeds the current trust graph into the critical REQ's DIRECT-mode vouch
+  /// filter (relays.js:2538-2542) — a changed author set triggers the debounced
+  /// critical resubscribe (nostr-core.js:2685-2693 → `resubscribeAllRelays`).
+  /// Called on connect and on each expansion hop; a no-op when the set is
+  /// unchanged (e.g. right after boot passed the same list to `start`).
   void _subscribeVouches() {
     final service = _service;
     if (service == null) return;
     final authors = _ref.read(appStateProvider).nymchatPubkeys;
-    service.subscribeVouches(authors);
+    service.updateCriticalInputs(vouchAuthors: authors);
   }
 
   void _onGiftWrap(GiftWrapUnwrapped u) {
@@ -6361,11 +6468,34 @@ class NostrController {
         cache.loadMetaSet(CacheStore.metaNymchatPubkeys),
         cache.loadMetaSet(CacheStore.metaNymchatVouches),
         cache.loadMetaSet(CacheStore.metaTrustedPubkeys),
+        cache.loadMetaSet(CacheStore.metaDeletedEventIds),
       ]);
       appState.hydrateTrustSets(trust[0], trust[1], trust[2]);
+      // NIP-09 deleted ids survive a relaunch (the PWA's `persistDedupSets`)
+      // so relay backlog / D1 replay can't resurrect a deleted message.
+      appState.hydrateDeletedIds(trust[3]);
+      appState.onDeletedIdsChanged = _schedulePersistDeletedIds;
     } catch (e) {
       debugPrint('hydrateFromCache failed: $e');
     }
+  }
+
+  /// Debounced (5s) persist of the NIP-09 deleted-id set (the PWA's
+  /// `persistDedupSets`, called from `_applyVerifiedDeletion` /
+  /// `_consumePendingDeletion`). Best-effort.
+  Timer? _deletedIdsPersistTimer;
+  void _schedulePersistDeletedIds() {
+    if (_deletedIdsPersistTimer != null) return;
+    if (PanicWipe.inProgress) return;
+    _deletedIdsPersistTimer = Timer(const Duration(seconds: 5), () {
+      _deletedIdsPersistTimer = null;
+      final cache = _cache;
+      if (cache == null || !cache.isOpen) return;
+      unawaited(cache
+          .saveMetaSet(CacheStore.metaDeletedEventIds,
+              _ref.read(appStateProvider.notifier).deletedEventIds)
+          .catchError((_) {}));
+    });
   }
 
   /// Marks [storageKey] dirty and schedules a debounced flush to the cache.

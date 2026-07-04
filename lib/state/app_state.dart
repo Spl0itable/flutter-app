@@ -981,6 +981,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// tests.
   void Function(String storageKey)? onPmMessageIngested;
 
+  /// Fired when a NEW PM conversation row is created (any path: inbound/own
+  /// message, UI thread-start, or hydration). The controller wires this to the
+  /// debounced critical resubscribe so the main REQ's direct-mode kind-0
+  /// filter starts watching the new contact's profile (the PWA's
+  /// `addPMConversation` new-branch → `_scheduleCriticalResubscribe`,
+  /// pms.js:2795-2805). Best-effort; may be null in pure state tests.
+  void Function(String peerPubkey)? onPMConversationAdded;
+
   /// Fired whenever the closed-PM set ([_closedPMs] / [_closedPMTimes]) mutates
   /// (close, re-open, or a strictly-newer inbound that re-opens a thread). The
   /// controller wires this to KV persistence (`nym_closed_pms` /
@@ -1158,6 +1166,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void clearSessionDedup() {
     _seenIds.clear();
     _seenNymMessageIds.clear();
+    _deletedEventIds.clear();
+    _pendingDeletions.clear();
   }
 
   int _localSeq = 1000000;
@@ -1255,6 +1265,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _channelMessageReaders.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
+    _pendingDeletions.clear();
     state = AppState.live(pubkey, nym);
     // Seed the web-of-trust roots (app.js:1100-1101): the verified developer +
     // Nymbot anchor every transitive vouch chain.
@@ -1297,6 +1308,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _channelMessageReaders.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
+    _pendingDeletions.clear();
+    // NIP-09 memory goes too: the on-disk copy was wiped (panic) or belongs
+    // to the departing identity's cache (sign-out re-hydrates on next boot).
+    _deletedEventIds.clear();
     state = AppState.empty();
   }
 
@@ -1458,6 +1473,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
         _ingestReaction(e);
       case EventKind.zapReceipt:
         ingestZapReceipt(e);
+      case EventKind.deletion:
+        ingestDeletionEvent(e);
       case EventKind.appData:
         if (PollLogic.isPollEvent(e)) {
           ingestPoll(e);
@@ -1482,6 +1499,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
+    // NIP-09: drop messages already deleted (or matched by a parked
+    // out-of-order deletion from the same author) — messages.js:437-443.
+    if (suppressDeletedMessage(m)) return;
     final key = EventMapper.channelKeyOf(e);
     if (key == null) return;
     m.seq = _ingestSeq++;
@@ -1664,6 +1684,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final r = EventMapper.reaction(e);
     if (r == null || r.emoji.isEmpty) return;
 
+    // When no `k` tag is present, only accept the reaction if it targets a
+    // KNOWN message (reactions.js:226-242) — otherwise it's a reaction from
+    // another Nostr app to a non-Nymchat note that merely shares an id space.
+    if (kTag == null && !isKnownMessageId(r.messageId)) return;
+
     // Latest-by-timestamp wins on out-of-order delivery (reactions.js).
     final actionKey = '${r.messageId}:${r.emoji}:${r.reactor}';
     final last = _reactionLastAction[actionKey];
@@ -1683,6 +1708,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
       removed: r.removed,
       reactorNym: _nymForPubkey(r.reactor),
     );
+  }
+
+  /// True when [messageId] identifies a message already in ANY conversation
+  /// (channels, PMs, groups), matched by event id or the PM/group
+  /// `nymMessageId` — the PWA's no-`k`-tag reaction guard (reactions.js:
+  /// 226-242), which keeps reactions from other Nostr apps to non-Nymchat
+  /// notes out of the store and out of notifications.
+  bool isKnownMessageId(String messageId) {
+    if (messageId.isEmpty) return false;
+    for (final msgs in state.messages.values) {
+      for (final m in msgs) {
+        if (m.id == messageId || m.nymMessageId == messageId) return true;
+      }
+    }
+    return false;
   }
 
   /// Applies a single reaction add/remove to the reactor map and recomputes the
@@ -1916,6 +1956,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
     if (m.id.isNotEmpty && !_seenIds.add(m.id)) return;
+    // NIP-09: drop deleted PM/group-rumor copies (pms.js:3722-3724).
+    if (suppressDeletedMessage(m)) return;
 
     final key = _canonicalPmStorageKey(
         m.conversationKey ?? PmLogic.pmStorageKey(peer));
@@ -1995,6 +2037,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           nym: m.isOwn ? getNymFromPubkey('nym', peer) : m.author,
         );
         state.pmConversations.add(c);
+        onPMConversationAdded?.call(peer);
         return c;
       },
     );
@@ -2047,6 +2090,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
       return false;
     }
+    // NIP-09: drop deleted group messages (pms.js:3722-3724).
+    if (suppressDeletedMessage(m)) return false;
     m.seq = _nextIngestSeq();
 
     final key = m.conversationKey ?? GroupLogic.groupStorageKey(gid);
@@ -2621,6 +2666,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
             : (nym ?? getNymFromPubkey('nym', peerPubkey)),
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
+      onPMConversationAdded?.call(peerPubkey);
       state = state.copyWith();
     } else {
       // Existing thread → re-sync the row nym from the users map (the PWA's
@@ -2913,6 +2959,126 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return applyLocalEdit(hitKey, content);
   }
 
+  // -------------------------------------------------------------------------
+  // Inbound NIP-09 deletions (nostr-core.js `handleDeletionEvent` /
+  // `_findMessageAuthor` / `_applyVerifiedDeletion` / `_consumePendingDeletion`).
+  // -------------------------------------------------------------------------
+
+  /// Event ids (and paired PM/group `nymMessageId`s) verified as NIP-09
+  /// deleted. Gates ingest so relay backlog / D1 replay can't resurrect a
+  /// deleted message (`this.deletedEventIds`, checked at messages.js:437 /
+  /// pms.js:3722). Capped at 5000 → pruned to the newest 4000, like the PWA.
+  final Set<String> _deletedEventIds = <String>{};
+
+  /// Read-only snapshot for persistence (the PWA's `persistDedupSets`).
+  Set<String> get deletedEventIds => Set.unmodifiable(_deletedEventIds);
+
+  /// Deletions whose ORIGINAL message hasn't arrived yet: deleted id →
+  /// claimant pubkeys. Consumed on ingest when a matching message from the
+  /// same author lands (out-of-order relay delivery, nostr-core.js:2000-2013).
+  final Map<String, Set<String>> _pendingDeletions = <String, Set<String>>{};
+
+  /// Fired whenever [_deletedEventIds] grows, so the controller can persist
+  /// the set (PWA `persistDedupSets`). Best-effort; may be null in tests.
+  void Function()? onDeletedIdsChanged;
+
+  /// Seeds [_deletedEventIds] from the on-disk cache at boot.
+  void hydrateDeletedIds(Set<String> ids) {
+    _deletedEventIds.addAll(ids);
+  }
+
+  /// Applies an inbound public kind-5 (NIP-09) deletion — nostr-core.js
+  /// `handleDeletionEvent` (line 1985). Only the original author may delete:
+  /// a mismatched requester is ignored, and an unknown original is parked in
+  /// [_pendingDeletions] until (if) it arrives from the claimed author.
+  void ingestDeletionEvent(NostrEvent e) {
+    final requester = e.pubkey;
+    if (requester.isEmpty) return;
+    var deleted = false;
+    for (final t in e.tagsNamed('e')) {
+      if (t.length < 2 || t[1].isEmpty) continue;
+      final deletedId = t[1];
+      final originalAuthor = findMessageAuthor(deletedId);
+      if (originalAuthor != null && originalAuthor != requester) continue;
+      if (originalAuthor == null) {
+        (_pendingDeletions[deletedId] ??= <String>{}).add(requester);
+        if (_pendingDeletions.length > 5000) {
+          final entries = _pendingDeletions.entries.toList();
+          _pendingDeletions
+            ..clear()
+            ..addEntries(entries.sublist(entries.length - 4000));
+        }
+        continue;
+      }
+      _applyVerifiedDeletion(deletedId);
+      deleted = true;
+    }
+    if (deleted) onDeletedIdsChanged?.call();
+  }
+
+  /// The stored author of the message with [id] (event id or PM/group
+  /// `nymMessageId`), or null when we don't hold it
+  /// (`_findMessageAuthor`, nostr-core.js:2019).
+  String? findMessageAuthor(String id) {
+    if (id.isEmpty) return null;
+    for (final msgs in state.messages.values) {
+      for (final m in msgs) {
+        if (m.id == id || m.nymMessageId == id) {
+          return m.pubkey.isEmpty ? null : m.pubkey;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Records [deletedId] (plus any paired id of the same message) as deleted
+  /// and removes the message from every conversation
+  /// (`_applyVerifiedDeletion`, nostr-core.js:2038).
+  void _applyVerifiedDeletion(String deletedId) {
+    _deletedEventIds.add(deletedId);
+    for (final msgs in state.messages.values) {
+      for (final m in msgs) {
+        if (m.id == deletedId || m.nymMessageId == deletedId) {
+          if (m.id.isNotEmpty) _deletedEventIds.add(m.id);
+          final nid = m.nymMessageId;
+          if (nid != null && nid.isNotEmpty) _deletedEventIds.add(nid);
+        }
+      }
+    }
+    if (_deletedEventIds.length > 5000) {
+      final arr = _deletedEventIds.toList();
+      _deletedEventIds
+        ..clear()
+        ..addAll(arr.sublist(arr.length - 4000));
+    }
+    removeMessage(deletedId);
+  }
+
+  /// Ingest gate: true when [m] was already NIP-09 deleted, or a parked
+  /// out-of-order deletion from the SAME author matches it (which then
+  /// upgrades to a verified deletion). Mirrors the display gate at
+  /// messages.js:437-443 + `_consumePendingDeletion` (nostr-core.js:2093).
+  bool suppressDeletedMessage(Message m) {
+    final nid = m.nymMessageId;
+    if (_deletedEventIds.contains(m.id) ||
+        (nid != null && _deletedEventIds.contains(nid))) {
+      return true;
+    }
+    if (m.pubkey.isEmpty) return false;
+    for (final id in <String>[m.id, if (nid != null && nid.isNotEmpty) nid]) {
+      if (id.isEmpty) continue;
+      final claimants = _pendingDeletions[id];
+      if (claimants != null && claimants.contains(m.pubkey)) {
+        _pendingDeletions.remove(id);
+        if (m.id.isNotEmpty) _deletedEventIds.add(m.id);
+        if (nid != null && nid.isNotEmpty) _deletedEventIds.add(nid);
+        onDeletedIdsChanged?.call();
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Removes a message locally (deletion request / mod delete). Mirrors
   /// `publishDeletionEvent`'s DOM + stored-message removal. Matches on both the
   /// event id and the nymMessageId (PM/group bubbles key on nymMessageId).
@@ -3168,6 +3334,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         lastMessageTime:
             ts > 0 ? ts : DateTime.now().millisecondsSinceEpoch,
       ));
+      onPMConversationAdded?.call(peer);
       changed = true;
     }
     if (changed) state = state.copyWith();

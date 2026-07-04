@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/polls/poll_card.dart';
 import '../../features/reactions/reaction_picker.dart';
@@ -388,10 +389,7 @@ class _MessagesListState extends ConsumerState<MessagesList> {
       prev.pubkey == cur.pubkey &&
       (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
 
-  String _baseNym(String nym) {
-    final hash = nym.indexOf('#');
-    return hash > 0 ? nym.substring(0, hash) : nym;
-  }
+  String _baseNym(String nym) => splitNymSuffix(nym).base;
 
   /// The empty-state note text (`_appendEmptyNote`): "No recent messages in
   /// #channel" for a channel view (`messages.js:2840`), else the bare

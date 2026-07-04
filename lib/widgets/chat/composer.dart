@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../common/css_focus_ring.dart';
 import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
@@ -1943,27 +1944,21 @@ class _ComposerState extends ConsumerState<Composer> {
     }
 
     if (!_popout) {
-      // `.message-input:focus`: a 3px primary@0.06 focus ring (spread, no blur)
-      // hugging the field's rounded-bottom shape. ALWAYS render the DecoratedBox
-      // (toggling only the shadow) — conditionally returning `stack` vs
-      // `DecoratedBox(child: stack)` re-parents the TextField subtree the instant
-      // it focuses, which REMOUNTS the EditableText and drops the just-requested
-      // keyboard. That was the "first tap only highlights, tap again to actually
-      // open the keyboard (then the paste toolbar shows)" bug. A stable tree keeps
-      // the first tap focusing AND raising the keyboard.
-      return DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: radius,
-          boxShadow: focused
-              ? [
-                  BoxShadow(
-                    color: c.primaryA(0.06),
-                    spreadRadius: 3,
-                    blurRadius: 0,
-                  ),
-                ]
-              : const [],
-        ),
+      // `.message-input:focus`: a 3px primary@0.06 focus ring hugging the
+      // field's rounded-bottom shape — painted OUTSIDE the field only (CSS
+      // box-shadow semantics; a spread BoxShadow also fills behind the
+      // translucent field and highlights the whole input, which the PWA never
+      // does). ALWAYS rendered (toggling only `show`) — conditionally
+      // returning `stack` vs a wrapped `stack` re-parents the TextField
+      // subtree the instant it focuses, which REMOUNTS the EditableText and
+      // drops the just-requested keyboard. That was the "first tap only
+      // highlights, tap again to actually open the keyboard (then the paste
+      // toolbar shows)" bug. A stable tree keeps the first tap focusing AND
+      // raising the keyboard.
+      return CssFocusRing(
+        show: focused,
+        color: c.primaryA(0.06),
+        radius: radius,
         child: stack,
       );
     }
@@ -2844,9 +2839,9 @@ class _QuotePreviewChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final hashIdx = author.indexOf('#');
-    final base = hashIdx >= 0 ? author.substring(0, hashIdx) : author;
-    final suffix = hashIdx >= 0 ? author.substring(hashIdx) : '';
+    final split = splitNymSuffix(author);
+    final base = split.base;
+    final suffix = split.suffix;
     return _PreviewChip(
       barColor: c.primary,
       onClose: onClose,
