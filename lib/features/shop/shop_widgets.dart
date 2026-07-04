@@ -491,27 +491,26 @@ class ShopStyleBubblePreview extends StatelessWidget {
       // The style still carries its tiled `--style-pattern` watermark (ocean,
       // sakura, …) and/or content bg (satoshi/eclipse/crt) in IRC — just no
       // rounded bubble. The watermark Stack is clipped to the content rect.
+      // CSS `background-position` origin is the PADDING BOX: the watermark
+      // must fill the padded strip (tiles start at the box's top-left corner,
+      // not inside the text inset) — this is also what makes the pattern
+      // actually visible on the short IRC demo line.
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(color: styleBg),
         clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
         child: Stack(
-          alignment: Alignment.center,
           children: [
             if (watermark != null)
               Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
-            label,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              child: label,
+            ),
           ],
         ),
       );
     }
     return Container(
-      // Default bubble padding 8px 12px 6px (styles-features.css:3607); a
-      // style's own `.message-content` padding OUTRANKS it in the shop demo
-      // too — satoshi's `padding: 10px 15px` (specificity 0,3,0,
-      // styles-features.css:548-549) beats the chat-bubbles rule (0,2,1) —
-      // exactly like message_row.dart's bubble.
-      padding: deco.contentPadding ?? const EdgeInsets.fromLTRB(12, 8, 12, 6),
       decoration: BoxDecoration(
         // Bubble layout: `body.chat-bubbles .message-content` is the rounded
         // translucent bubble (`background: rgba(255,255,255,.14)`, radius 16 /
@@ -530,11 +529,22 @@ class ShopStyleBubblePreview extends StatelessWidget {
       ),
       clipBehavior: watermark != null ? Clip.antiAlias : Clip.none,
       child: Stack(
-        alignment: Alignment.center,
         children: [
+          // CSS `background-position` origin is the PADDING BOX — the tiled
+          // `--style-pattern` starts at the bubble's top-left corner, with the
+          // text inset by the padding on top of it (the previous structure
+          // tiled from INSIDE the padding, offsetting every pattern by the
+          // 12/8 inset vs the PWA card).
           if (watermark != null)
             Positioned.fill(child: StyleWatermarkLayer(watermark: watermark)),
-          label,
+          Padding(
+            // Default bubble padding 8px 12px 6px (styles-features.css:3607);
+            // a style's own `.message-content` padding OUTRANKS it — satoshi's
+            // `padding: 10px 15px` (0,3,0 beats 0,2,1) — like message_row.
+            padding:
+                deco.contentPadding ?? const EdgeInsets.fromLTRB(12, 8, 12, 6),
+            child: label,
+          ),
         ],
       ),
     );

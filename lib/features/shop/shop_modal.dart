@@ -346,17 +346,21 @@ class _ShopModalState extends ConsumerState<ShopModal> {
             ),
           ),
         ),
-        // Equal-width tabs: centre the label and ellipsize if a narrow modal
-        // can't fit it (the PWA's `flex:1` tabs likewise shrink their text).
-        child: Text(
-          t.label,
-          textAlign: TextAlign.center,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-            color: active ? c.primary : c.textDim,
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
+        // Equal-width tabs, FULL label always visible: the PWA's `.shop-tab`
+        // has no ellipsis/nowrap, so the label is never truncated. Single-word
+        // labels can't wrap; scale the text down on a narrow modal instead
+        // (the native analogue of the full label staying readable).
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            t.label,
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            style: TextStyle(
+              color: active ? c.primary : c.textDim,
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ),
