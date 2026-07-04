@@ -287,6 +287,12 @@ class NostrController {
   Future<void> init({Map<String, String>? unlockedSecrets}) async {
     if (_started) return;
     _started = true;
+    // Re-arm the onboarding hydration gate for this session, synchronously
+    // (before any await) so it's pending by the time the shell mounts and
+    // defers the tutorial on it.
+    if (_settingsHydratedC.isCompleted) {
+      _settingsHydratedC = Completer<void>();
+    }
     try {
       final kv = _ref.read(keyValueStoreProvider);
       // `secretWrite` routes identity-secret persistence through the vault
@@ -555,6 +561,9 @@ class NostrController {
         } catch (_) {}
       }
       _emitSystemMessage('Connection failed — working offline.');
+      // A failed boot must still release the onboarding gate — no settings
+      // restore is coming (mirrors the PWA's 10s hydration fallback).
+      _markSettingsHydrated();
     }
   }
 
@@ -969,6 +978,11 @@ class NostrController {
     _trustPersistTimer?.cancel();
     _trustPersistTimer = null;
     _lastVouchPublishAt = 0;
+    // Release the hydration gate (an in-flight onboarding await resolves; its
+    // `mounted` check no-ops it after the remount). The next [init] re-arms.
+    _settingsHydratedFallback?.cancel();
+    _settingsHydratedFallback = null;
+    if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
     _deletedIdsPersistTimer?.cancel();
     _deletedIdsPersistTimer = null;
     _ref.read(appStateProvider.notifier).onDeletedIdsChanged = null;
@@ -7068,12 +7082,40 @@ class NostrController {
 
   bool _groupBackfillInFlight = false;
 
+  /// Completes once the boot settings restore has applied (or determined it
+  /// never will: no durable login, a failed fetch, or the 10s fallback —
+  /// app.js:5691-5692). Onboarding (the first-run tutorial, via the boot
+  /// gate) awaits this so device-spanning flags like `tutorialSeen` from
+  /// another device land BEFORE deciding to show — the PWA's
+  /// `startOnboardingWhenHydrated` → `_onSettingsHydrated` deferral
+  /// (app.js:5652-5661 / settings.js:262-267).
+  Future<void> get settingsHydrated => _settingsHydratedC.future;
+
+  /// Starts COMPLETED so a shell mounted without a controller boot (pure
+  /// widget tests, or any pre-init read) never blocks on it; [init] re-arms a
+  /// fresh pending gate synchronously before its first await, which always
+  /// precedes the shell mount (runApp comes after the init() call in main,
+  /// and the post-panic/login setup flows re-init before completing).
+  Completer<void> _settingsHydratedC = Completer<void>()..complete();
+  Timer? _settingsHydratedFallback;
+
   /// Boot-time sync: merge cross-device encrypted settings (honoring
   /// `nym_last_settings_sync_ts`), then restore the PM backlog from D1 for
   /// durable identities (gated by `cachePMs`). Both best-effort.
   Future<void> _bootStorageSync() async {
     final sync = _storageSync;
-    if (sync == null) return;
+    if (sync == null) {
+      // No durable login → no remote settings will ever arrive; onboarding
+      // may proceed on the local flags (the PWA's no-sync fallback runs the
+      // onboarding callback immediately, app.js:5659-5660).
+      _markSettingsHydrated();
+      return;
+    }
+    // Arm the PWA's 10s hydration fallback so a hung/offline settings fetch
+    // can't suppress onboarding forever (app.js:5691-5692).
+    _settingsHydratedFallback ??=
+        Timer(const Duration(seconds: 10), _markSettingsHydrated);
+    // `_mergeRemoteSettings` marks hydration in its own `finally`.
     await _mergeRemoteSettings(sync);
     await _restorePmArchive(sync);
     // Profile-zap backfill for ourselves (relays.js:2819-2820:
@@ -8172,8 +8214,14 @@ class NostrController {
 
   /// Marks the initial settings load complete so saves may begin, flushing one
   /// reconcile save if any were suppressed while loading (the PWA's
-  /// `_markSettingsHydrated`, settings.js:230-246).
+  /// `_markSettingsHydrated`, settings.js:230-246). Also releases the
+  /// onboarding gate ([settingsHydrated]) — the PWA fires its
+  /// `_onHydratedCbs` (tutorial / bot welcome) from the same place
+  /// (settings.js:247-252).
   void _markSettingsHydrated() {
+    _settingsHydratedFallback?.cancel();
+    _settingsHydratedFallback = null;
+    if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
     if (_settingsHydrated) return;
     _settingsHydrated = true;
     if (_settingsSavePending) {
