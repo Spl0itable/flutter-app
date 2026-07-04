@@ -353,6 +353,11 @@ class NostrController {
       // Restore the per-conversation read watermark so a relaunch's D1 backfill
       // of older history doesn't re-count as unread (channelLastRead).
       _hydrateChannelLastRead(appState);
+      // Eagerly instantiate the recents notifier so its async prefs hydration
+      // completes at BOOT — created lazily on the first long-press it returned
+      // the initial empty list (quick-react popup showed no recents until the
+      // second open). The PWA loads `nym_recent_emojis` synchronously at boot.
+      _ref.read(recentEmojisProvider);
       // Seed the notification badge's blocked-sender exclusion from the restored
       // block list (C02-4).
       _ref

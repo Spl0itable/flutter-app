@@ -888,8 +888,21 @@ class ApiClient {
   /// from [proxiedJsonFetch]) decode UTF-8 instead of package:http's Latin-1
   /// default. JSON is UTF-8 by spec (RFC 8259 §8.1), and the PWA's
   /// `response.json()` always decodes UTF-8.
+  /// Case-insensitive response-header lookup. Real HTTP clients normalize
+  /// header names to lowercase, but MockClient (tests) preserves the given
+  /// casing — browser `Headers` (the PWA) is case-insensitive by spec.
+  static String? _header(http.Response res, String name) {
+    final direct = res.headers[name];
+    if (direct != null) return direct;
+    final lower = name.toLowerCase();
+    for (final e in res.headers.entries) {
+      if (e.key.toLowerCase() == lower) return e.value;
+    }
+    return null;
+  }
+
   static http.Response _utf8Response(http.Response res) {
-    final ct = res.headers['content-type'];
+    final ct = _header(res, 'content-type');
     if (ct != null && ct.toLowerCase().contains('charset=')) return res;
     return http.Response.bytes(
       res.bodyBytes,
@@ -1193,7 +1206,7 @@ class ApiClient {
     // `{error}` body (shop.js:232-237: `!resp.ok || ct.indexOf(
     // 'application/x-ndjson') < 0`). Without this gate a 200 JSON/HTML error
     // body would be line-split into bogus "items" instead of throwing.
-    final contentType = res.headers['content-type'] ?? '';
+    final contentType = _header(res, 'content-type') ?? '';
     if (res.statusCode < 200 ||
         res.statusCode >= 300 ||
         !contentType.contains('application/x-ndjson')) {
@@ -1214,7 +1227,7 @@ class ApiClient {
         // Skip malformed lines (mirrors `_readNdjsonStream`'s try/catch).
       }
     }
-    final hasMore = (res.headers['x-has-more'] ?? '') == '1';
+    final hasMore = (_header(res, 'x-has-more') ?? '') == '1';
     return StorageStream(items: items, hasMore: hasMore);
   }
 

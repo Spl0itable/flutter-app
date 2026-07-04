@@ -284,25 +284,31 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       SizedBox(height: isBio ? 20 : 40),
       // `.modal-actions`: flex row, gap 10, justify center; no
       // `align-items`, so the default stretch sizes the
-      // `.icon-btn` to the 42px `.send-btn` beside it.
+      // `.icon-btn` to the 42px `.send-btn` beside it. CSS flex items
+      // SHRINK when the row is tight — mirror that with loose Flexibles so a
+      // narrow viewport compresses the buttons instead of overflowing.
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          ModalChrome.iconButton(c, 'Forget identity', _busy ? null : _forget,
-              height: 42),
+          Flexible(
+              child: ModalChrome.iconButton(
+                  c, 'Forget identity', _busy ? null : _forget,
+                  height: 42)),
           const SizedBox(width: 10),
-          ModalChrome.sendButton(
-            c,
-            'Unlock',
-            _busy ? null : _unlock,
-            child: _busy
-                ? SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: c.primary),
-                  )
-                : null,
+          Flexible(
+            child: ModalChrome.sendButton(
+              c,
+              'Unlock',
+              _busy ? null : _unlock,
+              child: _busy
+                  ? SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: c.primary),
+                    )
+                  : null,
+            ),
           ),
         ],
       ),
@@ -324,10 +330,12 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          ModalChrome.iconButton(c, 'Forget identity', _forgetFromError,
-              height: 42),
+          Flexible(
+              child: ModalChrome.iconButton(
+                  c, 'Forget identity', _forgetFromError,
+                  height: 42)),
           const SizedBox(width: 10),
-          ModalChrome.sendButton(c, 'Try again', _retry),
+          Flexible(child: ModalChrome.sendButton(c, 'Try again', _retry)),
         ],
       ),
     ];

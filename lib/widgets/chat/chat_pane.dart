@@ -93,12 +93,14 @@ class ChatPane extends ConsumerWidget {
         (_, __) => scheduleCustomEmojiPrefetch(container));
     kickCustomEmojiPrefetch(container);
 
-    // Opening the Nymbot PM (sidebar row / profile "Message" / ?help) lands on
-    // the dedicated paid-chat surface: its header carries the bot credit meta
-    // (`E2E encrypted · N credits left`, pms.js:2934-2938) and its engine owns
-    // the `?` command interception / welcome intro / thinking strip. Columns
-    // mode keeps the canonical pane (the deck renders the bot column; the
-    // engine still runs via the always-alive app-state observer).
+    // Opening the Nymbot PM (sidebar row / profile "Message" / ?help / a
+    // focused bot column) lands on the dedicated paid-chat surface: its header
+    // carries the bot credit meta (`E2E encrypted · N credits left`,
+    // pms.js:2934-2938) and its engine owns the `?` command interception /
+    // welcome intro / thinking strip. This swap applies in BOTH view modes —
+    // the premium bot chat is an intentional native deviation and must be the
+    // surface for EVERY entry into the bot 1:1 (product decision; the deck
+    // returns as soon as another conversation is focused, its layout persists).
     //
     // The detection is the known bot-pubkey CONSTANT (`verifiedBot.pubkey`,
     // app.js:1096) compared case-insensitively — never an async-loaded list —
@@ -107,9 +109,7 @@ class ChatPane extends ConsumerWidget {
     // canonicalization in `switchView`, still routes here on every entry path
     // (sidebar tap, new-PM, notification, deep link, boot restore).
     final view = ref.watch(currentViewProvider);
-    if (!useColumns &&
-        view.kind == ViewKind.pm &&
-        view.id.toLowerCase() == kNymbotPubkey) {
+    if (view.kind == ViewKind.pm && view.id.toLowerCase() == kNymbotPubkey) {
       return BotChatScreen(onOpenSidebar: onOpenSidebar);
     }
 
