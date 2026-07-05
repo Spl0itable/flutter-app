@@ -334,10 +334,21 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                       // of each row's own padding/margins. Driven from the top
                       // edge; the list's very first child (the oldest unit, or
                       // the history notice above it) opens no gap.
-                      return Padding(
-                        padding: EdgeInsets.only(
-                            top: (forward > 0 || isChannel) ? 3 : 0),
-                        child: child,
+                      //
+                      // RepaintBoundary isolates each row into its own raster
+                      // layer: message rows paint expensively (shadows,
+                      // gradients, cosmetic CustomPaint overlays), and without a
+                      // boundary any repaint in the message area — a typing-dots
+                      // tick, a reaction burst, a relative-time refresh — forced
+                      // the whole visible list to re-rasterize. That full-layer
+                      // re-raster was a major driver of the pegged raster thread
+                      // behind the ANR.
+                      return RepaintBoundary(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                              top: (forward > 0 || isChannel) ? 3 : 0),
+                          child: child,
+                        ),
                       );
                     },
                   ),

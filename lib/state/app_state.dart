@@ -1564,13 +1564,36 @@ class AppStateNotifier extends StateNotifier<AppState> {
     list.insert(lo, m);
   }
 
-  /// Sorts every message list touched by an out-of-order append during a batch.
+  /// Channel keys that took an append this batch and need their history
+  /// re-capped once the batch's deferred sort has restored newest-last order.
+  /// Only populated while [_batchDepth] > 0.
+  final Set<String> _channelCapPending = <String>{};
+
+  /// Trims a public-channel conversation to the newest [_kChannelHistoryCap]
+  /// messages. [list] must already be in ascending (oldest-first) order, which
+  /// [_insertMessageSorted] maintains outside a batch and [_flushDirtySorts]
+  /// restores at batch end — so the overflow to drop is the front slice.
+  void _capChannelHistory(List<Message> list) {
+    if (list.length <= _kChannelHistoryCap) return;
+    list.removeRange(0, list.length - _kChannelHistoryCap);
+  }
+
+  /// Sorts every message list touched by an out-of-order append during a batch,
+  /// then re-caps any public channels that grew past their retention limit.
   void _flushDirtySorts() {
-    if (_dirtySortKeys.isEmpty) return;
-    for (final key in _dirtySortKeys) {
-      state.messages[key]?.sort(compareMessages);
+    if (_dirtySortKeys.isNotEmpty) {
+      for (final key in _dirtySortKeys) {
+        state.messages[key]?.sort(compareMessages);
+      }
+      _dirtySortKeys.clear();
     }
-    _dirtySortKeys.clear();
+    if (_channelCapPending.isNotEmpty) {
+      for (final key in _channelCapPending) {
+        final list = state.messages[key];
+        if (list != null) _capChannelHistory(list);
+      }
+      _channelCapPending.clear();
+    }
   }
 
   /// Routes a verified inbound Nostr event into the store (channel messages,
@@ -1621,6 +1644,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
     _insertMessageSorted(key, list, m);
+    // Bound the live channel history (see [_kChannelHistoryCap]). During a
+    // batch the list isn't sorted yet, so defer the trim to [_flushDirtySorts];
+    // otherwise trim now that the binary insert kept it ordered.
+    if (_batchDepth > 0) {
+      _channelCapPending.add(key);
+    } else {
+      _capChannelHistory(list);
+    }
 
     // Track the author as a seen user.
     final u = state.users.putIfAbsent(
@@ -2323,6 +2354,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Cross-device history cap per group conversation (PWA `pmStorageLimit`,
   /// app.js:650) applied after merging a restored backlog.
   static const int _kGroupHistoryCap = 1000;
+
+  /// In-memory retention cap for a single public channel (geohash / named)
+  /// conversation. Public channels stream indefinitely, and unlike group
+  /// conversations (capped above) their live list was previously unbounded — a
+  /// long session in a busy geohash channel grew `state.messages[key]` without
+  /// limit, which (a) inflated memory and (b) made the per-rebuild
+  /// merge+sort+group-fold in `messages_list.dart` O(n) in an ever-growing n
+  /// (effectively O(n^2) over the session), a primary contributor to the
+  /// Android input-dispatch ANR. We keep the newest [_kChannelHistoryCap]
+  /// messages in memory (matching the group cap); older history still lives in
+  /// the sqflite cache and is reloaded on demand.
+  static const int _kChannelHistoryCap = 1000;
 
   /// Applies one decoded `nymchat-groups` entry (`groupId → serialized group`)
   /// from cross-device sync, mirroring the PWA's `applyGroupData` additive branch

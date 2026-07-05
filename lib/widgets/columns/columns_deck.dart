@@ -1999,17 +1999,23 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
                               itemBuilder: (context, revIndex) {
                                 final entries =
                                     groups[groups.length - 1 - revIndex];
-                                return MessageGroup(
-                                  entries: entries,
-                                  settings: settings,
-                                  // `body.columns-mode` message-layout variants
-                                  // (styles-columns.css:27-82): IRC rows stack
-                                  // vertically, hover buttons stack, media caps
-                                  // at 100%, and desktop self bubble groups
-                                  // drop the 14px right padding.
-                                  columnsMode: true,
-                                  onReactionPicker: (msg) =>
-                                      showReactionPicker(context, ref, msg),
+                                // Per-row raster isolation (see the single-view
+                                // list in messages_list.dart): keeps a repaint
+                                // in one column's row from re-rasterizing every
+                                // other row across all open columns.
+                                return RepaintBoundary(
+                                  child: MessageGroup(
+                                    entries: entries,
+                                    settings: settings,
+                                    // `body.columns-mode` message-layout variants
+                                    // (styles-columns.css:27-82): IRC rows stack
+                                    // vertically, hover buttons stack, media caps
+                                    // at 100%, and desktop self bubble groups
+                                    // drop the 14px right padding.
+                                    columnsMode: true,
+                                    onReactionPicker: (msg) =>
+                                        showReactionPicker(context, ref, msg),
+                                  ),
                                 );
                               },
                             );
