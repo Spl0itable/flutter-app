@@ -210,6 +210,26 @@ class NostrController {
   /// debounce + on dispose). Null until [init].
   CacheStore? _cache;
   Timer? _flushTimer;
+
+  // --- live inbound coalescing (perf) --------------------------------------
+  // Live relay EVENTs arrive one per stream callback (separate event-loop
+  // turns), so a connect burst would fire one AppState rebuild — plus a re-run
+  // of the spam/flood render providers — PER event. Buffer a turn's worth and
+  // replay them through [_onEvent] inside a single [AppStateNotifier.runBatched]
+  // so the burst costs ~one rebuild. A zero-duration timer fires after the
+  // current microtask queue drains, so a whole verifier cohort (delivered as a
+  // microtask cascade in one turn) lands in one flush. `_onEvent` only reads raw
+  // `appStateProvider` state (mutated in place, so content stays fresh mid-batch)
+  // — never a cached derived provider — so deferring the emit changes nothing it
+  // sees. The D1 archive backfill is already batched at its own loops
+  // ([_runChannelBackfill] etc.); this covers the LIVE path.
+  final List<NostrEvent> _liveInboundBuffer = <NostrEvent>[];
+  Timer? _liveInboundTimer;
+
+  /// Hard cap so one turn's burst can't grow the buffer unbounded; reaching it
+  /// flushes immediately (an extra emit for a very large burst is acceptable).
+  static const int _kLiveInboundFlushCap = 512;
+
   final Set<String> _dirtyChannelKeys = {};
   final Set<String> _dirtyPmKeys = {};
   bool _flushScheduled = false;
@@ -448,7 +468,7 @@ class NostrController {
       final bootState = _ref.read(appStateProvider);
       await service.start(
         NostrHandlers(
-          onEvent: _onEvent,
+          onEvent: _enqueueLiveEvent,
           onConnectionChanged: _onConnectionChanged,
           onGiftWrap: _onGiftWrap,
         ),
@@ -692,29 +712,50 @@ class NostrController {
     } catch (_) {
       return;
     }
-    final valid = <NostrEvent>[];
+    final parsed = <NostrEvent>[];
     for (final raw in rows) {
       try {
         final ev = NostrEvent.fromJson(raw);
         if (ev.kind != EventKind.appData) continue;
-        if (schnorr.verifyEvent(ev)) valid.add(ev);
+        parsed.add(ev);
       } catch (_) {
         // Skip a malformed archived row.
       }
     }
-    if (valid.isEmpty) return;
-    var changed = true;
-    var guard = 0;
-    while (changed && guard++ < 20) {
-      final before = _ref.read(appStateProvider).nymchatPubkeys.length;
-      for (final ev in valid) {
-        try {
-          _ingestVouch(ev);
-        } catch (_) {}
+    if (parsed.isEmpty) return;
+    // Verify the whole archive cohort off the main isolate in ONE batched hop
+    // (this used to run `schnorr.verifyEvent` INLINE per row on the render
+    // thread). Build every future in this turn so IsolateVerifier coalesces
+    // them; fall back to the inline verify when the service isn't up yet.
+    final service = _service;
+    final valid = <NostrEvent>[];
+    if (service != null) {
+      final oks =
+          await Future.wait([for (final ev in parsed) service.verifyEvent(ev)]);
+      for (var i = 0; i < parsed.length; i++) {
+        if (oks[i]) valid.add(parsed[i]);
       }
-      changed =
-          _ref.read(appStateProvider).nymchatPubkeys.length != before;
+    } else {
+      for (final ev in parsed) {
+        if (schnorr.verifyEvent(ev)) valid.add(ev);
+      }
     }
+    if (valid.isEmpty) return;
+    // Coalesce the fixpoint expansion's per-vouch notifies into one rebuild.
+    _ref.read(appStateProvider.notifier).runBatched(() {
+      var changed = true;
+      var guard = 0;
+      while (changed && guard++ < 20) {
+        final before = _ref.read(appStateProvider).nymchatPubkeys.length;
+        for (final ev in valid) {
+          try {
+            _ingestVouch(ev);
+          } catch (_) {}
+        }
+        changed =
+            _ref.read(appStateProvider).nymchatPubkeys.length != before;
+      }
+    });
   }
 
   /// Max number of per-channel D1 archive restores in flight at once. The PWA
@@ -970,6 +1011,11 @@ class NostrController {
     // service. (Mirrors `cmdQuit` + the page reload dropping all in-memory NYM
     // state.)
     _flushTimer?.cancel();
+    // Drop any buffered live events (the session — and its AppState — is being
+    // torn down; they'd be re-fetched on the next connect).
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    _liveInboundBuffer.clear();
     _settingsSyncTimer?.cancel();
     _vouchPublishTimer?.cancel();
     _vouchPublishTimer = null;
@@ -1265,6 +1311,40 @@ class NostrController {
   // ---------------------------------------------------------------------------
   // Inbound routing
   // ---------------------------------------------------------------------------
+
+  /// Relay-service handler (wired in place of a direct `onEvent: _onEvent`):
+  /// buffers the event and schedules a coalesced flush so a connect burst is
+  /// one rebuild, not N. See [_liveInboundBuffer].
+  void _enqueueLiveEvent(NostrEvent event) {
+    _liveInboundBuffer.add(event);
+    if (_liveInboundBuffer.length >= _kLiveInboundFlushCap) {
+      _flushLiveInbound();
+    } else {
+      _liveInboundTimer ??= Timer(Duration.zero, _flushLiveInbound);
+    }
+  }
+
+  /// Drains the live inbound buffer, replaying each event through [_onEvent]
+  /// inside one [AppStateNotifier.runBatched] so the whole cohort emits once.
+  /// Order is preserved; a throwing event is isolated to its own slot (the
+  /// service previously delivered one event per call, so a throw could only ever
+  /// affect that one event).
+  void _flushLiveInbound() {
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    if (_liveInboundBuffer.isEmpty) return;
+    final batch = List<NostrEvent>.of(_liveInboundBuffer);
+    _liveInboundBuffer.clear();
+    _ref.read(appStateProvider.notifier).runBatched(() {
+      for (final event in batch) {
+        try {
+          _onEvent(event);
+        } catch (_) {
+          // Skip a single malformed/failed event; never abort the batch.
+        }
+      }
+    });
+  }
 
   void _onEvent(NostrEvent event) {
     final appState = _ref.read(appStateProvider.notifier);
@@ -5840,13 +5920,17 @@ class NostrController {
       try {
         final found = await sync.profileGet(pubkeys);
         if (found.isNotEmpty) {
-          for (final entry in found.entries) {
-            final ev = entry.value;
-            if (ev.isEmpty) continue; // cache hit, no event payload
-            try {
-              appState.ingestEvent(NostrEvent.fromJson(ev));
-            } catch (_) {}
-          }
+          // One emit for the whole D1 profile batch (up to 100 rows) instead of
+          // one Riverpod rebuild per profile.
+          appState.runBatched(() {
+            for (final entry in found.entries) {
+              final ev = entry.value;
+              if (ev.isEmpty) continue; // cache hit, no event payload
+              try {
+                appState.ingestEvent(NostrEvent.fromJson(ev));
+              } catch (_) {}
+            }
+          });
           missing = pubkeys
               .where((pk) => !found.containsKey(pk.toLowerCase()))
               .toList();
@@ -7032,13 +7116,17 @@ class NostrController {
             onTimeout: () => const <Map<String, dynamic>>[],
           );
       final appState = _ref.read(appStateProvider.notifier);
-      for (final raw in events) {
-        try {
-          appState.ingestEvent(NostrEvent.fromJson(raw));
-        } catch (_) {
-          // Skip a malformed archived event (mirrors the PWA's per-event catch).
+      // One emit for the whole archive page instead of one Riverpod rebuild (+
+      // spam/flood re-run) per archived event — the D1-backfill freeze fix.
+      appState.runBatched(() {
+        for (final raw in events) {
+          try {
+            appState.ingestEvent(NostrEvent.fromJson(raw));
+          } catch (_) {
+            // Skip a malformed archived event (mirrors the PWA's per-event catch).
+          }
         }
-      }
+      });
       // Zap-badge backfill for the hydrated history (`_backfillZapReceipts`
       // with the rendered ids, messages.js:3112-3120; channel scope).
       // `channel-get` streams zaps rows only within the channel window — this
@@ -8431,10 +8519,27 @@ class NostrController {
   Future<void> _restoreEmojiFromD1(StorageSync sync) async {
     try {
       final events = await sync.emojiGet();
+      final parsed = <NostrEvent>[];
       for (final raw in events) {
         try {
-          final event = NostrEvent.fromJson(raw);
-          if (!schnorr.verifyEvent(event)) continue;
+          parsed.add(NostrEvent.fromJson(raw));
+        } catch (_) {
+          // Skip a malformed archived pack.
+        }
+      }
+      if (parsed.isEmpty) return;
+      // Verify the whole emoji cohort off the main isolate in ONE batched hop
+      // (was inline `schnorr.verifyEvent` per pack on the render thread).
+      // Newest-wins dedup makes dispatch order irrelevant, so verify-all then
+      // dispatch is equivalent to the old interleaved loop.
+      final service = _service;
+      final oks = service != null
+          ? await Future.wait([for (final ev in parsed) service.verifyEvent(ev)])
+          : [for (final ev in parsed) schnorr.verifyEvent(ev)];
+      for (var i = 0; i < parsed.length; i++) {
+        if (!oks[i]) continue;
+        final event = parsed[i];
+        try {
           if (event.kind == EventKind.emojiPack) {
             _ingestEmojiPack(event);
           } else if (event.kind == EventKind.userEmojiList) {
@@ -9352,6 +9457,9 @@ class NostrController {
 
   Future<void> dispose() async {
     _flushTimer?.cancel();
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    _liveInboundBuffer.clear();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
     clearShopReceiptWait();
