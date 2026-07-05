@@ -7659,15 +7659,25 @@ class NostrController {
     _ephemeralSub = null;
     final pks = groups.allEphemeralPubkeys();
     if (pks.isEmpty) return;
-    // Filter split per relays.js:2711-2721: under an API host the REQ is
-    // real-time only (`limit: 1` — D1 supplies the history, so reconnects
-    // don't pull relay backlog through the id-deduped ingest); without one,
-    // a 7-day `since` + per-key limit recovers the relay backlog.
-    final hasApiHost = _storageSync != null;
+    // Filter split per relays.js:2711-2721: in PROXY/D1 mode the REQ is
+    // real-time only (`limit: 1` — D1 supplies the group history via
+    // `_backfillGroupArchive`, so reconnects don't pull a relay backlog through
+    // the expensive unwrap path); only in DIRECT mode (the proxy failed and we
+    // fell back to per-relay sockets) does a 7-day `since` + per-key limit
+    // recover the backlog from relays.
+    //
+    // Gate on the SAME live proxy-vs-direct signal the main critical filters use
+    // (`_d1Available` == `isProxyMode`, since the API host is always set), NOT on
+    // `_storageSync != null`: the latter is a durable-identity flag that is null
+    // for the first few boot frames (before `_initStorageSync`) and stays set
+    // after an auto-fallback to direct — both of which mis-selected the branch,
+    // so proxy-mode boots still backfilled a week of group gift wraps off relays
+    // (hundreds of kind-1059 events unwrapped on the main isolate at startup).
+    final d1Mode = service.isProxyMode;
     final sub = service.subscribeEphemeral(
       pks,
-      limit: hasApiHost ? 1 : 200 * pks.length,
-      since: hasApiHost
+      limit: d1Mode ? 1 : 200 * pks.length,
+      since: d1Mode
           ? null
           : DateTime.now().millisecondsSinceEpoch ~/ 1000 - 604800,
     );
