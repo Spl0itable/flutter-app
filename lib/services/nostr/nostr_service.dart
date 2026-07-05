@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -222,6 +223,49 @@ class NostrService {
   /// every service instance coalesce. Stateless aside from its in-flight batch,
   /// so one instance is safe.
   static final CryptoWorker _cryptoWorker = CryptoWorker.instance;
+
+  /// Wrap ids (kind-1059 event ids) we've ALREADY unwrapped this process.
+  ///
+  /// Unwrapping a gift wrap is a per-candidate secp256k1 ECDH + ChaCha20 +
+  /// HMAC decrypt plus a BIP340 seal verify — the single most expensive inbound
+  /// op. The D1 PM/group archive REPLAYS the very same wraps on every boot and
+  /// every resume (`_restorePmArchive` / `_backfillGroupArchive`), and the old
+  /// code re-did all that crypto for each one before the downstream id-dedup
+  /// discarded the duplicate rumor — a primary cause of the slow-to-open /
+  /// slow-after-background behavior. This set lets a replay skip the whole
+  /// unwrap. Process-wide (survives resume) and bounded (oldest-first eviction).
+  static final LinkedHashSet<String> _processedWrapIds = LinkedHashSet<String>();
+  static const int _processedWrapCap = 100000;
+
+  /// Seeds [ids] as already-verified signatures (e.g. channel message ids
+  /// restored from the local cache — verified when first received) so the
+  /// cold-boot archive/live replay of that history skips re-verification.
+  static void seedVerifiedIds(Iterable<String> ids) => _verifier.markVerified(ids);
+
+  /// Seeds [wrapIds] as already-unwrapped (e.g. cached PM message ids, which
+  /// ARE their wrap ids — see `_onGiftWrap`) so the cold-boot PM restore skips
+  /// re-unwrapping history already on disk.
+  static void seedProcessedWraps(Iterable<String> wrapIds) {
+    for (final id in wrapIds) {
+      if (id.isEmpty) continue;
+      _processedWrapIds.remove(id);
+      _processedWrapIds.add(id);
+    }
+    _evictProcessedWraps();
+  }
+
+  static void _rememberProcessedWrap(String id) {
+    if (id.isEmpty) return;
+    _processedWrapIds.remove(id);
+    _processedWrapIds.add(id);
+    _evictProcessedWraps();
+  }
+
+  static void _evictProcessedWraps() {
+    while (_processedWrapIds.length > _processedWrapCap) {
+      _processedWrapIds.remove(_processedWrapIds.first);
+    }
+  }
 
   /// The [EventVerifier] handed to every pool: verify each inbound event off
   /// the main thread (batched). Preserves the per-event keep/drop contract the
@@ -1066,6 +1110,10 @@ class NostrService {
   Future<void> _handleGiftWrap(NostrEvent wrap, {bool fromArchive = false}) async {
     final handlers = _handlers;
     if (handlers?.onGiftWrap == null) return;
+    // Already unwrapped this process (a boot/resume archive replay, or the live
+    // wrap whose archived copy this is)? Skip the expensive ECDH+decrypt+verify
+    // — the produced rumor would only be discarded by the downstream id dedup.
+    if (wrap.id.isNotEmpty && _processedWrapIds.contains(wrap.id)) return;
     final candidates = _candidates();
 
     // Remote-signer (NIP-46) path: no local identity key is available, so the
@@ -1138,6 +1186,10 @@ class NostrService {
     required bool isBitchat,
     bool fromArchive = false,
   }) async {
+    // We successfully decrypted this wrap — record its id so a later archive
+    // replay (boot/resume) skips re-unwrapping it. Recorded here (not gated on
+    // seal validity) so a known-forged wrap isn't re-checked every resume.
+    _rememberProcessedWrap(wrap.id);
     final rumorPubkey = rumor['pubkey'] as String?;
     if (rumorPubkey == null || rumorPubkey.isEmpty) return;
 
