@@ -220,6 +220,7 @@ class AppState {
     required this.unreadCounts,
     required this.view,
     this.connectedRelays = 0,
+    this.displayRev = 0,
     Map<String, int>? typing,
     Map<String, Poll>? polls,
     Map<String, MessageZaps>? zaps,
@@ -255,6 +256,18 @@ class AppState {
 
   /// Number of relays currently connected (0 = offline).
   final int connectedRelays;
+
+  /// Monotonic counter bumped whenever something the MESSAGE LIST renders
+  /// (messages, edits, deletions, reactions, zaps, polls) changes. Ambient
+  /// churn that the list does NOT render — typing indicators, presence, unread
+  /// pills, relay count — deliberately leaves it untouched (see
+  /// [AppStateNotifier.runAmbient]). The message/reaction/poll providers select
+  /// on it so a stream of typing/presence events no longer re-runs the whole
+  /// merge+sort+group-fold + row rebuilds. Bumping is the DEFAULT (every
+  /// [AppStateNotifier._scheduleEmit]); only explicitly-ambient paths skip it,
+  /// so a missed classification costs at most one extra rebuild, never a stale
+  /// list.
+  final int displayRev;
 
   final List<ChannelEntry> channels;
   final List<PMConversation> pmConversations;
@@ -469,6 +482,7 @@ class AppState {
     String? selfNym,
     ChatView? view,
     int? connectedRelays,
+    int? displayRev,
   }) =>
       AppState(
         selfPubkey: selfPubkey ?? this.selfPubkey,
@@ -482,6 +496,7 @@ class AppState {
         unreadCounts: unreadCounts,
         view: view ?? this.view,
         connectedRelays: connectedRelays ?? this.connectedRelays,
+        displayRev: displayRev ?? this.displayRev,
         typing: typing,
         polls: polls,
         zaps: zaps,
@@ -1168,6 +1183,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _seenNymMessageIds.clear();
     _deletedEventIds.clear();
     _pendingDeletions.clear();
+    // The caller wipes `messages` immediately before this; drop the id index in
+    // lockstep so it never outlives the store it points into.
+    _msgByAnyId.clear();
+    _convKeyByAnyId.clear();
   }
 
   int _localSeq = 1000000;
@@ -1266,6 +1285,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     _pendingDeletions.clear();
+    _msgByAnyId.clear();
+    _convKeyByAnyId.clear();
     state = AppState.live(pubkey, nym);
     // Seed the web-of-trust roots (app.js:1100-1101): the verified developer +
     // Nymbot anchor every transitive vouch chain.
@@ -1312,6 +1333,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // NIP-09 memory goes too: the on-disk copy was wiped (panic) or belongs
     // to the departing identity's cache (sign-out re-hydrates on next boot).
     _deletedEventIds.clear();
+    _msgByAnyId.clear();
+    _convKeyByAnyId.clear();
     state = AppState.empty();
   }
 
@@ -1487,10 +1510,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// per-event `list.sort`). Only populated while [_batchDepth] > 0.
   final Set<String> _dirtySortKeys = <String>{};
 
+  /// Monotonic display revision (see [AppState.displayRev]). Bumped by every
+  /// [_scheduleEmit] so the message/reaction/poll providers re-run; left alone
+  /// by [runAmbient] emits that change nothing the message list renders.
+  int _displayRev = 0;
+
+  /// When > 0 the current emit is ambient (typing/presence/unread/…) and must
+  /// NOT advance [_displayRev].
+  int _ambientDepth = 0;
+
   /// Notifies listeners, or defers the notify to the end of the enclosing
   /// [runBatched]. Outside a batch this is an immediate `state = state.copyWith()`
-  /// — identical to the call it replaces.
+  /// — identical to the call it replaces, plus a display-revision bump so the
+  /// list providers refresh (skipped inside [runAmbient]).
   void _scheduleEmit() {
+    if (_ambientDepth == 0) _displayRev++;
     if (_batchDepth > 0) {
       _pendingEmit = true;
       return;
@@ -1500,8 +1534,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   /// The single real notify. All coalesced paths funnel through here.
   void _emitNow() {
-    final next = state.copyWith();
+    final next = state.copyWith(displayRev: _displayRev);
     state = next;
+  }
+
+  /// Runs [body] as an AMBIENT mutation: it still emits (so widgets watching the
+  /// whole state, e.g. the sidebar/header, update), but does NOT advance
+  /// [AppState.displayRev], so the message list + rows — which select on that
+  /// revision — are not rebuilt. Use ONLY for changes the message list never
+  /// renders (typing indicators, etc.). Reentrant- and batch-safe.
+  T runAmbient<T>(T Function() body) {
+    _ambientDepth++;
+    try {
+      return body();
+    } finally {
+      _ambientDepth--;
+    }
   }
 
   /// Runs [body] with per-event notifies (and per-event message-list sorts)
@@ -1546,6 +1594,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// exactly (the comparator's `seq` tiebreak makes the order total) without the
   /// O(n log n) full re-sort per event.
   void _insertMessageSorted(String key, List<Message> list, Message m) {
+    _indexMessage(key, m);
     if (_batchDepth > 0) {
       list.add(m);
       _dirtySortKeys.add(key);
@@ -1575,7 +1624,61 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// restores at batch end — so the overflow to drop is the front slice.
   void _capChannelHistory(List<Message> list) {
     if (list.length <= _kChannelHistoryCap) return;
-    list.removeRange(0, list.length - _kChannelHistoryCap);
+    final drop = list.length - _kChannelHistoryCap;
+    for (var i = 0; i < drop; i++) {
+      _unindexMessage(list[i]);
+    }
+    list.removeRange(0, drop);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Message id index (id + nymMessageId -> Message / conversation key).
+  //
+  // Several inbound-event handlers (receipts, read-receipts, deletions, and the
+  // no-`k`-tag reaction guard) previously scanned `state.messages.values` — i.e.
+  // EVERY message in EVERY conversation — once per event. During a D1 backfill
+  // burst that is O(events x total-stored-messages), a primary source of the
+  // sustained DartWorker CPU behind the Android ANR. These maps turn those
+  // lookups into O(1). Both a message's event id and its (optional) PM/group
+  // nymMessageId map to the message, mirroring the `m.id == X || m.nymMessageId
+  // == X` predicate every scan used.
+  //
+  // Correctness note: ids/nymMessageIds are globally unique and immutable, so a
+  // stale entry (one whose message was removed without de-indexing) can only
+  // ever resolve to an already-gone object — every consumer degrades that to a
+  // no-op, never a wrong match. De-indexing at the removal sites is therefore a
+  // memory concern, not a correctness one.
+  // ---------------------------------------------------------------------------
+  final Map<String, Message> _msgByAnyId = <String, Message>{};
+  final Map<String, String> _convKeyByAnyId = <String, String>{};
+
+  /// Registers [m]'s event id and nymMessageId (both, when present) against
+  /// [convKey]. Idempotent; re-indexing an already-known message just refreshes
+  /// its entry (used when the dual-wrap merge adopts a nymMessageId in place).
+  void _indexMessage(String convKey, Message m) {
+    if (m.id.isNotEmpty) {
+      _msgByAnyId[m.id] = m;
+      _convKeyByAnyId[m.id] = convKey;
+    }
+    final nid = m.nymMessageId;
+    if (nid != null && nid.isNotEmpty) {
+      _msgByAnyId[nid] = m;
+      _convKeyByAnyId[nid] = convKey;
+    }
+  }
+
+  /// Drops [m]'s index entries, but only those still pointing at [m] (guards
+  /// against clobbering a re-used key).
+  void _unindexMessage(Message m) {
+    if (m.id.isNotEmpty && identical(_msgByAnyId[m.id], m)) {
+      _msgByAnyId.remove(m.id);
+      _convKeyByAnyId.remove(m.id);
+    }
+    final nid = m.nymMessageId;
+    if (nid != null && nid.isNotEmpty && identical(_msgByAnyId[nid], m)) {
+      _msgByAnyId.remove(nid);
+      _convKeyByAnyId.remove(nid);
+    }
   }
 
   /// Sorts every message list touched by an out-of-order append during a batch,
@@ -1671,8 +1774,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
         ?.toLowerCase();
     if (memberKey != null && memberKey.isNotEmpty) u.channels.add(memberKey);
 
-    // Track last activity for the channel sort (`channelLastActivity`).
-    state.channelLastActivity[key] = m.timestamp;
+    // Track last activity for the channel sort (`channelLastActivity`). Only
+    // ever RAISE it — never lower it. A D1-archive backfill replays OLD history
+    // through this same path; an unconditional assignment let each backfilled
+    // message stamp an older timestamp over a channel's real newest-activity
+    // time, so busy channels sank in the sidebar sort after a backfill. Take the
+    // max (mirrors the hydrate paths).
+    if (m.timestamp > (state.channelLastActivity[key] ?? 0)) {
+      state.channelLastActivity[key] = m.timestamp;
+    }
 
     // Surface the channel in the sidebar on first activity. The PWA lists
     // discovered/active channels (channels.js `addChannelToList`), so any channel
@@ -1860,12 +1970,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// notes out of the store and out of notifications.
   bool isKnownMessageId(String messageId) {
     if (messageId.isEmpty) return false;
-    for (final msgs in state.messages.values) {
-      for (final m in msgs) {
-        if (m.id == messageId || m.nymMessageId == messageId) return true;
-      }
-    }
-    return false;
+    // O(1) via the id index (keyed by both event id and nymMessageId), the same
+    // predicate the former full-store scan used.
+    return _msgByAnyId.containsKey(messageId);
   }
 
   /// Applies a single reaction add/remove to the reactor map and recomputes the
@@ -2143,6 +2250,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
           nymId.isNotEmpty) {
         dup.nymMessageId = nymId;
         _seenNymMessageIds.add(nymId);
+        // The row now carries a nymMessageId — index it so delivery receipts
+        // (keyed by nymMessageId) can find it in O(1).
+        _indexMessage(key, dup);
         changed = true;
       }
       if (m.content.length > dup.content.length) {
@@ -2575,10 +2685,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
         existingIds.add(id);
       }
       if (newMsgs.isEmpty) return;
+      for (final m in newMsgs) {
+        _indexMessage(convKey, m);
+      }
       final merged = [...existing, ...newMsgs]..sort(compareMessages);
       final capped = merged.length > _kGroupHistoryCap
           ? merged.sublist(merged.length - _kGroupHistoryCap)
           : merged;
+      if (capped.length < merged.length) {
+        for (final m in merged.sublist(0, merged.length - capped.length)) {
+          _unindexMessage(m);
+        }
+      }
       state.messages[convKey] = capped;
       changed.add(convKey);
     });
@@ -2641,20 +2759,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void applyReceipt(ReceiptInfo receipt) {
     final target = receipt.messageId.toLowerCase();
     final next = PmLogic.deliveryFromReceipt(receipt.receiptType);
-    var changed = false;
-    for (final list in state.messages.values) {
-      for (final m in list) {
-        if (m.isOwn &&
-            m.nymMessageId != null &&
-            m.nymMessageId!.toLowerCase() == target) {
-          if (PmLogic.statusOrder(next) > PmLogic.statusOrder(m.deliveryStatus)) {
-            m.deliveryStatus = next;
-            changed = true;
-          }
-        }
-      }
+    // Delivery/read receipts reference our own message by its nymMessageId — an
+    // O(1) index lookup replaces the former full-store scan.
+    final m = _msgByAnyId[receipt.messageId] ?? _msgByAnyId[target];
+    if (m == null || !m.isOwn) return;
+    final nid = m.nymMessageId;
+    if (nid == null || nid.toLowerCase() != target) return;
+    if (PmLogic.statusOrder(next) > PmLogic.statusOrder(m.deliveryStatus)) {
+      m.deliveryStatus = next;
+      _scheduleEmit();
     }
-    if (changed) _scheduleEmit();
   }
 
   /// Records a public channel read receipt (kind 24421): [readerPubkey] (shown
@@ -2687,17 +2801,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
   bool _mirrorChannelReaders(String messageId) {
     final readers = _channelMessageReaders[messageId];
     if (readers == null) return false;
-    for (final list in state.messages.values) {
-      for (final m in list) {
-        if (m.id == messageId && m.isOwn) {
-          m.readers
-            ..clear()
-            ..addAll(readers);
-          return true;
-        }
-      }
-    }
-    return false;
+    // Channel read receipts reference our own message by its event id — O(1).
+    final m = _msgByAnyId[messageId];
+    if (m == null || !m.isOwn || m.id != messageId) return false;
+    m.readers
+      ..clear()
+      ..addAll(readers);
+    return true;
   }
 
   /// Marks [pubkey] as typing (or not) within [storageKey]. [expiresAtMs] is
@@ -2716,7 +2826,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     } else {
       state.typing.remove(k);
     }
-    _scheduleEmit();
+    // Ambient: the typing indicator is its own widget (TypingIndicatorRow); the
+    // message list never renders it, so don't force a whole-list rebuild for
+    // every keystroke-driven typing event from every peer.
+    runAmbient(_scheduleEmit);
   }
 
   /// Updates a user's presence from a kind-30078 nym-presence event (or a
@@ -3174,14 +3287,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// (`_findMessageAuthor`, nostr-core.js:2019).
   String? findMessageAuthor(String id) {
     if (id.isEmpty) return null;
-    for (final msgs in state.messages.values) {
-      for (final m in msgs) {
-        if (m.id == id || m.nymMessageId == id) {
-          return m.pubkey.isEmpty ? null : m.pubkey;
-        }
-      }
-    }
-    return null;
+    final m = _msgByAnyId[id];
+    if (m == null) return null;
+    return m.pubkey.isEmpty ? null : m.pubkey;
   }
 
   /// Records [deletedId] (plus any paired id of the same message) as deleted
@@ -3189,14 +3297,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// (`_applyVerifiedDeletion`, nostr-core.js:2038).
   void _applyVerifiedDeletion(String deletedId) {
     _deletedEventIds.add(deletedId);
-    for (final msgs in state.messages.values) {
-      for (final m in msgs) {
-        if (m.id == deletedId || m.nymMessageId == deletedId) {
-          if (m.id.isNotEmpty) _deletedEventIds.add(m.id);
-          final nid = m.nymMessageId;
-          if (nid != null && nid.isNotEmpty) _deletedEventIds.add(nid);
-        }
-      }
+    // Pair the deleted id with the message's other id (event id <-> nymMessageId)
+    // so a later delivery keyed on either form is still suppressed. O(1) lookup.
+    final m = _msgByAnyId[deletedId];
+    if (m != null) {
+      if (m.id.isNotEmpty) _deletedEventIds.add(m.id);
+      final nid = m.nymMessageId;
+      if (nid != null && nid.isNotEmpty) _deletedEventIds.add(nid);
     }
     if (_deletedEventIds.length > 5000) {
       final arr = _deletedEventIds.toList();
@@ -3237,11 +3344,32 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// event id and the nymMessageId (PM/group bubbles key on nymMessageId).
   bool removeMessage(String messageId) {
     var changed = false;
-    for (final list in state.messages.values) {
-      final before = list.length;
-      list.removeWhere(
-          (m) => m.id == messageId || m.nymMessageId == messageId);
-      if (list.length != before) changed = true;
+    // Fast path: the id index points straight at the owning conversation, so we
+    // touch one list instead of scanning every conversation.
+    final convKey = _convKeyByAnyId[messageId];
+    if (convKey != null) {
+      final list = state.messages[convKey];
+      if (list != null) {
+        final before = list.length;
+        list.removeWhere((m) {
+          final hit = m.id == messageId || m.nymMessageId == messageId;
+          if (hit) _unindexMessage(m);
+          return hit;
+        });
+        if (list.length != before) changed = true;
+      }
+    } else {
+      // Fallback (index miss): preserve the original exhaustive behavior so a
+      // deletion is never silently skipped.
+      for (final list in state.messages.values) {
+        final before = list.length;
+        list.removeWhere((m) {
+          final hit = m.id == messageId || m.nymMessageId == messageId;
+          if (hit) _unindexMessage(m);
+          return hit;
+        });
+        if (list.length != before) changed = true;
+      }
     }
     if (changed) _scheduleEmit();
     return changed;
@@ -3513,17 +3641,22 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
     var added = false;
     var lastTs = 0;
+    final isChannelKey = !key.startsWith('pm-') && !key.startsWith('group-');
     for (final m in msgs) {
       if (m.id.isNotEmpty && !_seenIds.add(m.id)) continue;
       m.seq = _nextIngestSeq();
       list.add(m);
+      _indexMessage(key, m);
       added = true;
       if (m.timestamp > lastTs) lastTs = m.timestamp;
     }
     if (added) list.sort(compareMessages);
+    // Bound a hydrated public channel to the same retention cap as live ingest,
+    // so a large cached history can't reintroduce the unbounded list.
+    if (isChannelKey) _capChannelHistory(list);
     // Channel keys feed the sidebar recency sort (persistence.js sets
     // `channelLastActivity` from the hydrated history); PM/group keys don't.
-    if (lastTs > 0 && !key.startsWith('pm-') && !key.startsWith('group-')) {
+    if (lastTs > 0 && isChannelKey) {
       if (lastTs > (state.channelLastActivity[key] ?? 0)) {
         state.channelLastActivity[key] = lastTs;
       }
@@ -4066,7 +4199,12 @@ List<Message> visibleMessagesFor(AppState s, String storageKey) {
 /// (messages.js §11) plus the `spamHit` term of the non-own hide branch
 /// (messages.js:648).
 final messagesForCurrentViewProvider = Provider<List<Message>>((ref) {
-  final s = ref.watch(appStateProvider);
+  // Re-run only when the active view or the display revision changes — NOT on
+  // ambient emits (typing/presence) the list never renders. Previously this
+  // watched the whole AppState and rebuilt the entire message list on EVERY
+  // emit.
+  ref.watch(appStateProvider.select((s) => (s.view.storageKey, s.displayRev)));
+  final s = ref.read(appStateProvider);
   return visibleMessagesFor(s, s.view.storageKey);
 });
 
@@ -4113,7 +4251,10 @@ final flashedMessageProvider =
 
 /// Reactions for the active view's messages (message id → tallies).
 final reactionsProvider = Provider<Map<String, List<MessageReaction>>>((ref) {
-  return ref.watch(appStateProvider).reactions;
+  // Reactions render inside the message list, so refresh on the display
+  // revision (which a reaction change bumps) rather than every ambient emit.
+  ref.watch(appStateProvider.select((s) => s.displayRev));
+  return ref.read(appStateProvider).reactions;
 });
 
 /// Unread counts (channel key / pm pubkey / group id → count).
@@ -4138,7 +4279,10 @@ final typingForCurrentViewProvider = Provider<List<String>>((ref) {
 /// Polls visible in the active channel view (geohash match), time-ordered.
 /// Polls are channel-only (docs/specs/03 §6) — returns empty in PM/group views.
 final pollsForCurrentViewProvider = Provider<List<Poll>>((ref) {
-  final s = ref.watch(appStateProvider);
+  // Poll cards render in the message list, so key off view + display revision
+  // (poll ingest bumps it) rather than every ambient emit.
+  ref.watch(appStateProvider.select((s) => (s.view.storageKey, s.displayRev)));
+  final s = ref.read(appStateProvider);
   if (s.view.kind != ViewKind.channel) return const [];
   final geohash = s.view.id;
   final out = s.polls.values.where((p) => p.geohash == geohash).toList()
@@ -4449,6 +4593,15 @@ class NotificationHistoryNotifier
   final Ref? _ref;
   SharedPreferences? _prefs;
 
+  /// Debounce for the history blob write. [record] and the seen/viewed mutators
+  /// fire on essentially every inbound notification-worthy event; each write
+  /// re-serialized the whole history and rewrote the entire SharedPreferences
+  /// file. Coalesce a burst into one write (flushed on dispose).
+  Timer? _historyPersistTimer;
+
+  /// Debounce for the companion seen-keys blob write (same rationale).
+  Timer? _seenKeysPersistTimer;
+
   /// True while [_hydrate] is loading the persisted history + seen-map. A
   /// [record] landing in this window would be deduped against an EMPTY
   /// history/seen-map and then thrown away when `_hydrate` overwrites the
@@ -4585,7 +4738,18 @@ class NotificationHistoryNotifier
   /// Persists the current 24h history slice to SharedPreferences (N3). Mirrors
   /// the PWA's `_saveNotificationHistory` (notifications.js:231): re-encode the
   /// entries that are still within the 24h window. No-op in tests (no prefs).
+  /// Schedules a debounced history write (see [_historyPersistTimer]). All the
+  /// per-event call sites go through here so a burst collapses to one write.
   void _persist() {
+    if (_prefs == null) return;
+    _historyPersistTimer?.cancel();
+    _historyPersistTimer = Timer(const Duration(seconds: 2), () {
+      _historyPersistTimer = null;
+      _persistNow();
+    });
+  }
+
+  void _persistNow() {
     final prefs = _prefs;
     if (prefs == null) return;
     try {
@@ -4598,6 +4762,23 @@ class NotificationHistoryNotifier
     } catch (_) {
       // Quota/serialization failures are non-fatal; live state still works.
     }
+  }
+
+  @override
+  void dispose() {
+    // Flush any pending debounced writes so teardown never loses the most
+    // recent notification history / viewed flags.
+    if (_historyPersistTimer != null) {
+      _historyPersistTimer!.cancel();
+      _historyPersistTimer = null;
+      _persistNow();
+    }
+    if (_seenKeysPersistTimer != null) {
+      _seenKeysPersistTimer!.cancel();
+      _seenKeysPersistTimer = null;
+      _persistSeenKeysNow();
+    }
+    super.dispose();
   }
 
   /// Blocked-sender pubkeys, excluded from the badge count. The PWA's
@@ -4946,7 +5127,18 @@ class NotificationHistoryNotifier
     }
   }
 
+  /// Schedules a debounced seen-keys write. Like [_persist], this rides along on
+  /// nearly every inbound notification; coalesce the churn into one write.
   void _persistSeenKeys() {
+    if (_prefs == null) return;
+    _seenKeysPersistTimer?.cancel();
+    _seenKeysPersistTimer = Timer(const Duration(seconds: 2), () {
+      _seenKeysPersistTimer = null;
+      _persistSeenKeysNow();
+    });
+  }
+
+  void _persistSeenKeysNow() {
     final prefs = _prefs;
     if (prefs == null) return;
     _pruneSeenKeys();

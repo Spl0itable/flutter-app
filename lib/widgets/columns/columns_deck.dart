@@ -1872,8 +1872,13 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
     final transparent = widget.transparent;
     final mobile = widget.mobile;
     final settings = ref.watch(settingsProvider);
-    final app = ref.watch(appStateProvider);
-    final reactions = ref.watch(reactionsProvider);
+    // Re-run this column on rendered changes (display revision) and self-nym
+    // edits — NOT on every ambient emit (typing/presence), which previously
+    // rebuilt and re-grouped EVERY open column. `reactions` rides the same
+    // in-place map the single view reads.
+    ref.watch(appStateProvider.select((s) => (s.displayRev, s.selfNym)));
+    final app = ref.read(appStateProvider);
+    final reactions = app.reactions;
     // Columns render the same FILTERED view as the single chat: the PWA's
     // columns draw via `renderMessagesWithVirtualScroll` → `getFilteredMessages`
     // / `getFilteredPMMessages` (columns.js:510 → messages.js:2934-2949), so
