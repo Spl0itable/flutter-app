@@ -1024,6 +1024,10 @@ class NostrController {
     _liveInboundTimer?.cancel();
     _liveInboundTimer = null;
     _liveInboundBuffer.clear();
+    // Drop any buffered unwrapped gift-wraps (the session is tearing down).
+    _giftWrapFlushTimer?.cancel();
+    _giftWrapFlushTimer = null;
+    _giftWrapInbound.clear();
     _settingsSyncTimer?.cancel();
     _vouchPublishTimer?.cancel();
     _vouchPublishTimer = null;
@@ -2260,7 +2264,46 @@ class NostrController {
     service.updateCriticalInputs(vouchAuthors: authors);
   }
 
+  /// Buffer of unwrapped gift-wraps awaiting a coalesced ingest. The unwrap +
+  /// seal-verify run off-isolate and complete in bursts (one per crypto batch);
+  /// routing each completion straight into the store fired one Riverpod rebuild
+  /// PER wrap, so a first-load PM/group restore of hundreds of wraps caused a
+  /// rebuild storm on the main isolate even though the crypto itself was
+  /// off-thread. Coalesce a burst into ONE [AppStateNotifier.runBatched] emit,
+  /// mirroring [_flushLiveInbound] for channel events.
+  final List<GiftWrapUnwrapped> _giftWrapInbound = <GiftWrapUnwrapped>[];
+  Timer? _giftWrapFlushTimer;
+  static const int _kGiftWrapFlushCap = 256;
+
   void _onGiftWrap(GiftWrapUnwrapped u) {
+    _giftWrapInbound.add(u);
+    if (_giftWrapInbound.length >= _kGiftWrapFlushCap) {
+      _flushGiftWrapInbound();
+    } else {
+      _giftWrapFlushTimer ??= Timer(Duration.zero, _flushGiftWrapInbound);
+    }
+  }
+
+  /// Drains the unwrapped-gift-wrap buffer through one batched emit. Order is
+  /// preserved; a throwing wrap is isolated to its own slot.
+  void _flushGiftWrapInbound() {
+    _giftWrapFlushTimer?.cancel();
+    _giftWrapFlushTimer = null;
+    if (_giftWrapInbound.isEmpty) return;
+    final batch = List<GiftWrapUnwrapped>.of(_giftWrapInbound);
+    _giftWrapInbound.clear();
+    _ref.read(appStateProvider.notifier).runBatched(() {
+      for (final u in batch) {
+        try {
+          _processGiftWrap(u);
+        } catch (_) {
+          // Skip a single malformed/failed wrap; never abort the batch.
+        }
+      }
+    });
+  }
+
+  void _processGiftWrap(GiftWrapUnwrapped u) {
     final appState = _ref.read(appStateProvider.notifier);
     final rumor = u.rumor;
     final kind = u.rumorKind;
@@ -6607,6 +6650,26 @@ class NostrController {
       if (channelMsgs.isNotEmpty || pmMsgs.isNotEmpty) {
         appState.hydrateAllMessages({...channelMsgs, ...pmMsgs});
       }
+      // Seed the crypto skip-caches from what we just restored as PLAINTEXT, so
+      // the D1 archive/live replay after boot doesn't re-verify or re-unwrap
+      // history already on disk (the boot/resume CPU hammer). PM & group message
+      // ids ARE their gift-wrap ids (`_onGiftWrap` keys the row on `wrapId`), so
+      // they seed the unwrap skip; channel event ids seed the signature-verify
+      // skip. Both were signature-checked/decrypted when first received.
+      if (pmMsgs.isNotEmpty) {
+        NostrService.seedProcessedWraps([
+          for (final list in pmMsgs.values)
+            for (final m in list)
+              if (m.id.isNotEmpty) m.id,
+        ]);
+      }
+      if (channelMsgs.isNotEmpty) {
+        NostrService.seedVerifiedIds([
+          for (final list in channelMsgs.values)
+            for (final m in list)
+              if (m.id.isNotEmpty) m.id,
+        ]);
+      }
       if (!cachePms) unawaited(cache.clearPms());
       // Reactions hydrate AFTER messages so their tallies attach to rows that
       // now exist (same effective order as the PWA's single hydration pass).
@@ -9536,6 +9599,10 @@ class NostrController {
     _liveInboundTimer?.cancel();
     _liveInboundTimer = null;
     _liveInboundBuffer.clear();
+    // Drop any buffered unwrapped gift-wraps (the session is tearing down).
+    _giftWrapFlushTimer?.cancel();
+    _giftWrapFlushTimer = null;
+    _giftWrapInbound.clear();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
     clearShopReceiptWait();
