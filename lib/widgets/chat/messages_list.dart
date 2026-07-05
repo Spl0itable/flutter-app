@@ -166,13 +166,19 @@ class _MessagesListState extends ConsumerState<MessagesList> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final settings = ref.watch(settingsProvider);
-    final app = ref.watch(appStateProvider);
+    // Watch only the slices this widget renders — NOT the whole AppState, which
+    // emits on every ambient change (typing/presence/unread) and rebuilt the
+    // entire message list. The message/reaction/poll providers below are now
+    // display-revision–scoped, so this widget rebuilds on message/reaction/poll
+    // changes, view switches, and self-nym changes only.
+    final view = ref.watch(appStateProvider.select((s) => s.view));
+    final selfNym = ref.watch(appStateProvider.select((s) => s.selfNym));
     final messages = ref.watch(messagesForCurrentViewProvider);
     final reactions = ref.watch(reactionsProvider);
     final polls = ref.watch(pollsForCurrentViewProvider);
     // The history-edge notice is channel-only (the PWA's PM back-pager never
     // prepends one).
-    final isChannel = app.view.kind == ViewKind.channel;
+    final isChannel = view.kind == ViewKind.channel;
 
     // `.messages-container`: bg rgba(0,0,0,0.15) dark; light-mode flips it to
     // rgba(255,255,255,0.3) (a light wash over the page), so it must be
@@ -196,9 +202,12 @@ class _MessagesListState extends ConsumerState<MessagesList> {
               // Keyed on the active view so re-entering a conversation re-runs
               // the shimmer-then-settle grace period.
               child: _EmptyOrLoading(
-                key: ValueKey(app.view),
+                key: ValueKey(view),
                 useBubbles: settings.useBubbles,
-                emptyNote: _emptyNoteText(app),
+                // Rare cosmetic path (only while a conversation is empty); a
+                // read is fine — an arriving message bumps the display revision
+                // and re-renders this whole branch anyway.
+                emptyNote: _emptyNoteText(ref.read(appStateProvider)),
               ),
             ),
             const TypingIndicatorRow(),
@@ -207,7 +216,7 @@ class _MessagesListState extends ConsumerState<MessagesList> {
       );
     }
 
-    final mentionToken = '@${_baseNym(app.selfNym)}';
+    final mentionToken = '@${_baseNym(selfNym)}';
 
     // Merge messages + polls into one chronological list (oldest first), each
     // message carrying its resolved reactions + mention flag. The fast probe
@@ -334,10 +343,21 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                       // of each row's own padding/margins. Driven from the top
                       // edge; the list's very first child (the oldest unit, or
                       // the history notice above it) opens no gap.
-                      return Padding(
-                        padding: EdgeInsets.only(
-                            top: (forward > 0 || isChannel) ? 3 : 0),
-                        child: child,
+                      //
+                      // RepaintBoundary isolates each row into its own raster
+                      // layer: message rows paint expensively (shadows,
+                      // gradients, cosmetic CustomPaint overlays), and without a
+                      // boundary any repaint in the message area — a typing-dots
+                      // tick, a reaction burst, a relative-time refresh — forced
+                      // the whole visible list to re-rasterize. That full-layer
+                      // re-raster was a major driver of the pegged raster thread
+                      // behind the ANR.
+                      return RepaintBoundary(
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                              top: (forward > 0 || isChannel) ? 3 : 0),
+                          child: child,
+                        ),
                       );
                     },
                   ),

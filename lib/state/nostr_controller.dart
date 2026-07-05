@@ -194,6 +194,14 @@ class NostrController {
   /// `_debouncedNostrSettingsSave`, 5s).
   Timer? _settingsSyncTimer;
 
+  /// Debounce for the LOCAL SharedPreferences persist of the group store and
+  /// per-conversation read watermark. Both were previously rewritten on every
+  /// inbound group message / read-advance; because SharedPreferences serializes
+  /// the ENTIRE prefs file per write, that per-event churn was a background-I/O
+  /// contributor to the ANR. Coalesce a burst into one write.
+  Timer? _groupStorePersistTimer;
+  Timer? _channelLastReadPersistTimer;
+
   /// Throttle: pubkey/groupId-scoped last typing-start send time (ms).
   final Map<String, int> _typingThrottle = {};
 
@@ -1031,6 +1039,9 @@ class NostrController {
     if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
     _deletedIdsPersistTimer?.cancel();
     _deletedIdsPersistTimer = null;
+    // Flush any pending debounced group-store / read-watermark writes before we
+    // drop the identity + app-state handles below (the persist reads both).
+    _flushDebouncedPersists();
     _ref.read(appStateProvider.notifier).onDeletedIdsChanged = null;
     _dmRetryTimer?.cancel();
     _dmRetryTimer = null;
@@ -6322,6 +6333,47 @@ class NostrController {
         );
   }
 
+  /// Debounced local persist of the group store (`onGroupStoreChanged` fires on
+  /// every group mutation, including each inbound message). Coalesces a burst of
+  /// group traffic into one prefs write. The cross-device publish stays on its
+  /// own 5s-debounced `syncSettings`.
+  void _scheduleGroupStorePersist() {
+    _groupStorePersistTimer?.cancel();
+    _groupStorePersistTimer = Timer(const Duration(seconds: 2), () {
+      _groupStorePersistTimer = null;
+      _persistGroupStore();
+      _persistLeftGroups();
+    });
+  }
+
+  /// Debounced local persist of the read watermark (`onChannelReadChanged` fires
+  /// on nearly every ingested message in columns mode). Coalesces the churn into
+  /// one prefs write.
+  void _scheduleChannelLastReadPersist() {
+    _channelLastReadPersistTimer?.cancel();
+    _channelLastReadPersistTimer = Timer(const Duration(seconds: 2), () {
+      _channelLastReadPersistTimer = null;
+      _persistChannelLastRead();
+    });
+  }
+
+  /// Flushes any pending debounced local-prefs writes immediately. Called from
+  /// teardown so a sign-out / identity switch never drops the most recent group
+  /// or read-state mutation.
+  void _flushDebouncedPersists() {
+    if (_groupStorePersistTimer != null) {
+      _groupStorePersistTimer!.cancel();
+      _groupStorePersistTimer = null;
+      _persistGroupStore();
+      _persistLeftGroups();
+    }
+    if (_channelLastReadPersistTimer != null) {
+      _channelLastReadPersistTimer!.cancel();
+      _channelLastReadPersistTimer = null;
+      _persistChannelLastRead();
+    }
+  }
+
   /// Restores the read watermark from KV at boot.
   void _hydrateChannelLastRead(AppStateNotifier appState) {
     final raw =
@@ -6805,7 +6857,7 @@ class NostrController {
     // its unread badge on our other devices (the PWA's `_syncReadStateToD1`
     // debounce, settings.js:774-775). `syncSettings` is 5s-debounced + gated.
     _ref.read(appStateProvider.notifier).onChannelReadChanged = () {
-      _persistChannelLastRead();
+      _scheduleChannelLastReadPersist();
       syncSettings();
     };
     // Reading a conversation (locally, or via a synced watermark from another
@@ -6840,8 +6892,7 @@ class NostrController {
     // alongside the settings sections, and content-hash dedup makes an
     // unchanged group a no-op.
     _ref.read(appStateProvider.notifier).onGroupStoreChanged = () {
-      _persistGroupStore();
-      _persistLeftGroups();
+      _scheduleGroupStorePersist();
       syncSettings();
     };
   }

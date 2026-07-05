@@ -20,6 +20,7 @@ import '../../features/shop/cosmetics.dart';
 import '../../features/reactions/quick_context_items.dart';
 import '../../features/reactions/quick_react_popup.dart';
 import '../../features/reactions/reaction_burst.dart';
+import 'relative_time_ticker.dart';
 import '../../features/reactions/reactors_modal.dart';
 import '../../features/translate/message_translation.dart';
 import '../../features/zaps/zap_badge.dart';
@@ -280,10 +281,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// opacity. Only ever set on hover-capable (non-touch) platforms.
   bool _hovered = false;
 
-  /// Refreshes the in-bubble relative time ("2m ago") on a cadence, mirroring
-  /// `_ensureBubbleRelativeTimer` / `_refreshBubbleRelativeTimes`
-  /// (`messages.js:1051,3347`).
-  Timer? _relativeTimer;
+  /// Whether this row is subscribed to the shared 30s relative-time heartbeat
+  /// ([RelativeTimeTicker]). Mirrors `_ensureBubbleRelativeTimer` /
+  /// `_refreshBubbleRelativeTimes` (`messages.js:1051,3347`), but a single
+  /// process-wide timer now drives every bubble instead of one timer per row.
+  bool _relativeTickerSubscribed = false;
 
   /// Whether this row plays the `bubble-snap-in` entrance when it mounts. The
   /// PWA adds `.bubble-snap` to a LIVE-appended message that bubble-groups onto
@@ -299,8 +301,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   @override
   void dispose() {
-    _relativeTimer?.cancel();
+    if (_relativeTickerSubscribed) {
+      RelativeTimeTicker.instance.removeListener(_onRelativeTick);
+      _relativeTickerSubscribed = false;
+    }
     super.dispose();
+  }
+
+  /// Shared-ticker callback: refresh this row's relative-time label.
+  void _onRelativeTick() {
+    if (mounted) setState(() {});
   }
 
   Message get message => widget.message;
@@ -321,8 +331,14 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   }
 
   /// True when the author is a (non-self) friend — the cyan friend glyph.
+  ///
+  /// Selects just this author's friend flag rather than watching the whole
+  /// AppState: watching the whole store rebuilt EVERY visible row on every
+  /// ambient emit (typing/presence/unread). The select re-runs cheaply per emit
+  /// but only rebuilds this row when THIS author's friend status actually flips.
   bool get _isFriendAuthor =>
-      !message.isOwn && ref.watch(appStateProvider).isFriend(message.pubkey);
+      !message.isOwn &&
+      ref.watch(appStateProvider.select((s) => s.isFriend(message.pubkey)));
 
   /// The cryptographic-verification lock state for this message, or null when no
   /// lock should render. The PWA only shows the `.crypto-verified-badge` on
@@ -422,9 +438,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// time. Recent messages tick every ~10s; older ones drift slowly, so a 30s
   /// cadence is plenty (the PWA refreshes on a similar interval).
   void _ensureRelativeTimer() {
-    _relativeTimer ??= Timer.periodic(const Duration(seconds: 30), (_) {
-      if (mounted) setState(() {});
-    });
+    if (_relativeTickerSubscribed) return;
+    _relativeTickerSubscribed = true;
+    RelativeTimeTicker.instance.addListener(_onRelativeTick);
   }
 
   /// The author's active flair-shop cosmetics (style / flair / supporter),
