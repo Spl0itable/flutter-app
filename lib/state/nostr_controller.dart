@@ -210,6 +210,26 @@ class NostrController {
   /// debounce + on dispose). Null until [init].
   CacheStore? _cache;
   Timer? _flushTimer;
+
+  // --- live inbound coalescing (perf) --------------------------------------
+  // Live relay EVENTs arrive one per stream callback (separate event-loop
+  // turns), so a connect burst would fire one AppState rebuild — plus a re-run
+  // of the spam/flood render providers — PER event. Buffer a turn's worth and
+  // replay them through [_onEvent] inside a single [AppStateNotifier.runBatched]
+  // so the burst costs ~one rebuild. A zero-duration timer fires after the
+  // current microtask queue drains, so a whole verifier cohort (delivered as a
+  // microtask cascade in one turn) lands in one flush. `_onEvent` only reads raw
+  // `appStateProvider` state (mutated in place, so content stays fresh mid-batch)
+  // — never a cached derived provider — so deferring the emit changes nothing it
+  // sees. The D1 archive backfill is already batched at its own loops
+  // ([_runChannelBackfill] etc.); this covers the LIVE path.
+  final List<NostrEvent> _liveInboundBuffer = <NostrEvent>[];
+  Timer? _liveInboundTimer;
+
+  /// Hard cap so one turn's burst can't grow the buffer unbounded; reaching it
+  /// flushes immediately (an extra emit for a very large burst is acceptable).
+  static const int _kLiveInboundFlushCap = 512;
+
   final Set<String> _dirtyChannelKeys = {};
   final Set<String> _dirtyPmKeys = {};
   bool _flushScheduled = false;
@@ -448,7 +468,7 @@ class NostrController {
       final bootState = _ref.read(appStateProvider);
       await service.start(
         NostrHandlers(
-          onEvent: _onEvent,
+          onEvent: _enqueueLiveEvent,
           onConnectionChanged: _onConnectionChanged,
           onGiftWrap: _onGiftWrap,
         ),
@@ -991,6 +1011,11 @@ class NostrController {
     // service. (Mirrors `cmdQuit` + the page reload dropping all in-memory NYM
     // state.)
     _flushTimer?.cancel();
+    // Drop any buffered live events (the session — and its AppState — is being
+    // torn down; they'd be re-fetched on the next connect).
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    _liveInboundBuffer.clear();
     _settingsSyncTimer?.cancel();
     _vouchPublishTimer?.cancel();
     _vouchPublishTimer = null;
@@ -1286,6 +1311,40 @@ class NostrController {
   // ---------------------------------------------------------------------------
   // Inbound routing
   // ---------------------------------------------------------------------------
+
+  /// Relay-service handler (wired in place of a direct `onEvent: _onEvent`):
+  /// buffers the event and schedules a coalesced flush so a connect burst is
+  /// one rebuild, not N. See [_liveInboundBuffer].
+  void _enqueueLiveEvent(NostrEvent event) {
+    _liveInboundBuffer.add(event);
+    if (_liveInboundBuffer.length >= _kLiveInboundFlushCap) {
+      _flushLiveInbound();
+    } else {
+      _liveInboundTimer ??= Timer(Duration.zero, _flushLiveInbound);
+    }
+  }
+
+  /// Drains the live inbound buffer, replaying each event through [_onEvent]
+  /// inside one [AppStateNotifier.runBatched] so the whole cohort emits once.
+  /// Order is preserved; a throwing event is isolated to its own slot (the
+  /// service previously delivered one event per call, so a throw could only ever
+  /// affect that one event).
+  void _flushLiveInbound() {
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    if (_liveInboundBuffer.isEmpty) return;
+    final batch = List<NostrEvent>.of(_liveInboundBuffer);
+    _liveInboundBuffer.clear();
+    _ref.read(appStateProvider.notifier).runBatched(() {
+      for (final event in batch) {
+        try {
+          _onEvent(event);
+        } catch (_) {
+          // Skip a single malformed/failed event; never abort the batch.
+        }
+      }
+    });
+  }
 
   void _onEvent(NostrEvent event) {
     final appState = _ref.read(appStateProvider.notifier);
@@ -9398,6 +9457,9 @@ class NostrController {
 
   Future<void> dispose() async {
     _flushTimer?.cancel();
+    _liveInboundTimer?.cancel();
+    _liveInboundTimer = null;
+    _liveInboundBuffer.clear();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
     clearShopReceiptWait();
