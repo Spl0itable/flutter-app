@@ -6883,6 +6883,18 @@ class NostrController {
     _ref
         .read(notificationHistoryProvider.notifier)
         .markConversationSeen(view.id, tsSec: nowSec);
+    // Geo-relay keep-alive follows the ACTIVE view: run the 30s re-check only
+    // while a geohash channel is open, and stop it on any other view (named
+    // channel, PM, group, bot). This is the single-authority equivalent of the
+    // PWA's split wiring — `startGeoRelayKeepAlive` in switchChannel
+    // (channels.js:1303/1305) + `stopGeoRelayKeepAlive` on PM open
+    // (pms.js:3826). On resume [onAppResumed] re-runs this, so a geohash channel
+    // that was open when the app backgrounded gets its keep-alive restarted.
+    if (view.kind == ViewKind.channel && isChannelGeohash(view.id)) {
+      _service?.startGeoRelayKeepAlive(view.id);
+    } else {
+      _service?.stopGeoRelayKeepAlive();
+    }
     switch (view.kind) {
       case ViewKind.channel:
         unawaited(_backfillChannelArchive(view.id));
@@ -6957,6 +6969,14 @@ class NostrController {
     unawaited(_backfillFromD1OnReconnect());
     _ref.read(appStateProvider.notifier).markVisibleColumnsRead();
     unawaited(_reconcileShopPurchases());
+  }
+
+  /// App backgrounded / hidden: pause the geo-relay keep-alive so it doesn't
+  /// fire reconnect attempts while off-screen (the PWA's `document.hidden`
+  /// skip in `startGeoRelayKeepAlive`, relays.js:144). [onAppResumed] re-runs
+  /// `_onViewOpened`, which restarts it when a geohash channel is still active.
+  void onAppPaused() {
+    _service?.stopGeoRelayKeepAlive();
   }
 
   /// Per-channel in-flight backfill (channels.js `_channelD1FetchedAt`). The
@@ -7537,9 +7557,14 @@ class NostrController {
           ? null
           : DateTime.now().millisecondsSinceEpoch ~/ 1000 - 604800,
     );
-    // Route each wrap through the normal gift-wrap handler (the PWA's
-    // ephemeral REQ feeds `handleGiftWrapDM` like any other 1059).
-    sub.events.listen(service.unwrapArchivedWrap, onError: (_) {});
+    // Route each wrap through the LIVE gift-wrap handler (the PWA's ephemeral
+    // REQ feeds `handleGiftWrapDM` like any other live 1059, with `fromD1`
+    // unset). `unwrapLiveWrap` keeps `fromArchive: false` so a group message
+    // another member wrapped to our ephemeral key is archived to D1, notified,
+    // and shown real-time — NOT `unwrapArchivedWrap`, which would flag it
+    // `fromArchive` and skip the D1 upload, losing received group messages on
+    // relaunch.
+    sub.events.listen(service.unwrapLiveWrap, onError: (_) {});
     _ephemeralSub = sub;
   }
 

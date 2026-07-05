@@ -629,6 +629,7 @@ class RelayPoolProxy implements PoolTransport {
 
   /// The deduped set of relay URLs reported connected across all shards (for the
   /// Network Stats per-relay list). Same aggregation as [connectedCount].
+  @override
   Set<String> get connectedRelayUrls {
     final s = <String>{};
     for (final sock in _sockets) {
