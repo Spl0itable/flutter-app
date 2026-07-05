@@ -2046,6 +2046,57 @@ class NostrService {
     if (changed || lowDataMode) applyGeoRelays();
   }
 
+  // --- Geo-relay keep-alive (relays.js `startGeoRelayKeepAlive`, 135-176) -----
+
+  Timer? _geoKeepAliveTimer;
+  String? _geoKeepAliveGeohash;
+
+  /// Keep the active geohash channel's closest geo relays connected: every 30s,
+  /// re-check that each of the geohash's [RelayConfig.geoRelayCount] closest
+  /// relays is still in the pool's connected set and re-run
+  /// [connectGeoRelaysForGeohash] when any has dropped. Faithful port of
+  /// `startGeoRelayKeepAlive` (relays.js:135-168) — the transport owns per-socket
+  /// reconnection, but a geo relay the pool permanently dropped (or one whose
+  /// shard never came up) needs this channel-level nudge to be re-added, exactly
+  /// like the PWA's interval. Latest-wins: restarted with the new geohash on each
+  /// geohash-channel entry; [stopGeoRelayKeepAlive] cancels it on leaving.
+  ///
+  /// The `document.hidden` skip (relays.js:144) has no native analog here — the
+  /// controller stops the keep-alive when the app backgrounds — so the callback
+  /// only guards on the active geohash still matching and channel mode.
+  void startGeoRelayKeepAlive(String geohash) {
+    _geoKeepAliveTimer?.cancel();
+    _geoKeepAliveTimer = null;
+    if (geohash.isEmpty || !ch.isValidGeohash(geohash)) {
+      _geoKeepAliveGeohash = null;
+      return;
+    }
+    _geoKeepAliveGeohash = geohash;
+    _geoKeepAliveTimer =
+        Timer.periodic(const Duration(seconds: 30), (_) => _geoKeepAliveTick());
+  }
+
+  void _geoKeepAliveTick() {
+    final gh = _geoKeepAliveGeohash;
+    if (gh == null) return;
+    // groupChatPMOnlyMode → no channel filters are subscribed, skip
+    // (relays.js:145).
+    if (!_channelMode) return;
+    final closest = closestGeoRelays(gh);
+    if (closest.isEmpty) return;
+    final present = pool.connectedRelayUrls;
+    final anyMissing = closest.any((r) => !present.contains(r.url));
+    if (anyMissing) unawaited(connectGeoRelaysForGeohash(gh));
+  }
+
+  /// Stop the geo-relay keep-alive (`stopGeoRelayKeepAlive`, relays.js:170) —
+  /// on leaving a geohash channel, app teardown, or backgrounding.
+  void stopGeoRelayKeepAlive() {
+    _geoKeepAliveTimer?.cancel();
+    _geoKeepAliveTimer = null;
+    _geoKeepAliveGeohash = null;
+  }
+
   /// Picks the [count] geo relays closest to [geohash]'s center using the
   /// Haversine distance (`calculateDistance`, channel.dart). Mirrors
   /// `getClosestRelaysForGeohash`.
@@ -2080,6 +2131,7 @@ class NostrService {
     _statusTimer?.cancel();
     _criticalResubTimer?.cancel();
     _criticalResubTimer = null;
+    stopGeoRelayKeepAlive();
     _stopBgRestore();
     _poolFallbackActive = false;
     // Detach our api-stats sink if it's still the active one (avoid a stale
