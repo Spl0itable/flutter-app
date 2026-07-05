@@ -2027,6 +2027,11 @@ class NostrService {
   Future<void> connectGeoRelaysForGeohash(String geohash,
       {Future<String> Function(Uri url)? csvFetcher}) async {
     if (geohash.isEmpty) return;
+    // Skip geo-relay connections in group-chat/PM-only mode, exactly like the
+    // PWA (`if (this.settings.groupChatPMOnlyMode) return`, relays.js:185).
+    // `_channelMode` mirrors `!groupChatPMOnlyMode`, so no channel filters are
+    // in the critical REQ anyway — connecting geo relays would just be waste.
+    if (!_channelMode) return;
     if (geoRelays.isEmpty) {
       await fetchGeoRelays(csvFetcher: csvFetcher);
     }
