@@ -1124,7 +1124,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (alt != null && state.unreadCounts.remove(alt) != null) removed = true;
     markChannelRead(key, lastTs);
     if (alt != null) markChannelRead(alt, lastTs);
-    if (removed) _scheduleEmit();
+    // Ambient: unread badges + the read watermark render only in the sidebar
+    // (which watches the whole store), never in the message list, so clearing a
+    // badge must not rebuild the conversation.
+    if (removed) runAmbient(_scheduleEmit);
   }
 
   /// Clears the unread badge of every column the [columnsReadGate] passes —
@@ -2854,6 +2857,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String? avatarUrl,
     bool hasAvatarTag = false,
   }) {
+    // Snapshot the two fields a MESSAGE ROW renders from the user store — the
+    // author nym and avatar — BEFORE mutating, so we can tell a row-visible
+    // presence change (bump the display revision) from a bare status/away/
+    // lastSeen one (ambient: only the sidebar/header need it). A brand-new user
+    // is treated as row-visible to stay safe.
+    final existingUser = state.users[pubkey];
+    final beforeNym = existingUser?.nym;
+    final beforePic = existingUser?.profile?.picture;
     final u = state.users.putIfAbsent(
       pubkey,
       () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('nym', pubkey)),
@@ -2889,7 +2900,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // (OtherUsersShopController.invalidate), which is the authoritative
     // per-user cosmetics source. Presence never carries item data.
 
-    _scheduleEmit();
+    // Only a nym/avatar change is drawn in message rows; otherwise the emit is
+    // ambient. Public nym-presence broadcasts are frequent and usually repeat
+    // the same nym, so most of them now skip the whole-list rebuild.
+    final rowVisibleChanged = existingUser == null ||
+        u.nym != beforeNym ||
+        u.profile?.picture != beforePic;
+    if (rowVisibleChanged) {
+      _scheduleEmit();
+    } else {
+      runAmbient(_scheduleEmit);
+    }
   }
 
   /// Records a closed PM conversation so its older backlog is ignored. Stamps

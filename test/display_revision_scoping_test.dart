@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:nym_bar/core/constants/event_kinds.dart';
 import 'package:nym_bar/models/nostr_event.dart';
+import 'package:nym_bar/models/user.dart';
 import 'package:nym_bar/state/app_state.dart';
 
 NostrEvent _channelMsg(String d, int ts) => NostrEvent(
@@ -110,5 +111,66 @@ void main() {
     notifier.setTyping(storageKey: '#room', pubkey: 'bob_pk', typing: true);
     expect(c.read(typingForCurrentViewProvider), contains('bob_pk'),
         reason: 'ambient typing must still surface in the typing widget');
+  });
+
+  group('presence is ambient unless it changes a row-visible field', () {
+    test('a bare status change is ambient (no display-revision bump)', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      // Establish the user with a known nym first (this bump is expected).
+      n.setUserPresence(
+          pubkey: 'bob_pk', status: UserStatus.online, nym: 'bob');
+      final rev = n.state.displayRev;
+
+      // Same nym, only the online/away status flips → ambient.
+      n.setUserPresence(
+          pubkey: 'bob_pk', status: UserStatus.away, nym: 'bob');
+      expect(n.state.displayRev, rev,
+          reason: 'a bare status change must not rebuild the message list');
+      // …but the store still reflects it (sidebar/header read this).
+      expect(n.state.users['bob_pk']!.status, UserStatus.away);
+    });
+
+    test('a nym change bumps the display revision', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.setUserPresence(
+          pubkey: 'bob_pk', status: UserStatus.online, nym: 'bob');
+      final rev = n.state.displayRev;
+      n.setUserPresence(
+          pubkey: 'bob_pk', status: UserStatus.online, nym: 'robert');
+      expect(n.state.displayRev, greaterThan(rev),
+          reason: 'the author nym is drawn in rows — must rebuild');
+    });
+
+    test('an avatar change bumps the display revision', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.setUserPresence(
+          pubkey: 'bob_pk', status: UserStatus.online, nym: 'bob');
+      final rev = n.state.displayRev;
+      n.setUserPresence(
+        pubkey: 'bob_pk',
+        status: UserStatus.online,
+        nym: 'bob',
+        hasAvatarTag: true,
+        avatarUrl: 'https://example/new.png',
+      );
+      expect(n.state.displayRev, greaterThan(rev),
+          reason: 'the author avatar is drawn in rows — must rebuild');
+    });
+  });
+
+  test('clearUnread is ambient: clears the badge without rebuilding the list',
+      () {
+    final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+    // Active view is elsewhere so an inbound message to #room accrues unread.
+    n.switchView(const ChatView.channel('other'));
+    n.ingestEvent(_channelMsg('room', 5000));
+    expect(n.state.unreadCounts['#room'], 1);
+
+    final rev = n.state.displayRev;
+    n.clearUnread('#room');
+    expect(n.state.unreadCounts.containsKey('#room'), isFalse,
+        reason: 'the badge is cleared');
+    expect(n.state.displayRev, rev,
+        reason: 'clearing an unread badge must not rebuild the message list');
   });
 }
