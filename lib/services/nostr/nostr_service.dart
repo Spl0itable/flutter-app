@@ -229,6 +229,13 @@ class NostrService {
   static Future<bool> _verifyOffThread(NostrEvent event) =>
       _verifier.verify(event);
 
+  /// Off-main-thread signature verification for the D1 archive-replay paths
+  /// (vouch / emoji rows) that previously ran `schnorr.verifyEvent` INLINE on
+  /// the main isolate during a boot backfill. Routes through the same batched
+  /// [IsolateVerifier] as the live pool, so a whole archive cohort verified in
+  /// one turn coalesces into a single isolate hop. Fail-closed like the pool.
+  Future<bool> verifyEvent(NostrEvent event) => _verifier.verify(event);
+
   /// Default constructor. [useProxy] selects the transport: when true (the
   /// native default per spec §4.2) the service runs over the multiplexed
   /// `RelayPoolProxy` (`wss://<host>/api/relay-pool`); when false it uses the
@@ -1055,7 +1062,7 @@ class NostrService {
     if (sig != null && sig.isRemote && _isAddressedToSelf(wrap)) {
       final res = await _unwrapRemote(wrap, sig);
       if (res != null) {
-        _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
+        await _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
             isBitchat: false, fromArchive: fromArchive);
         return;
       }
@@ -1071,7 +1078,7 @@ class NostrService {
     final res = await _cryptoWorker.unwrap(wrap, candidates);
     if (res == null) return;
 
-    _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
+    await _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
         fromArchive: fromArchive,
         isBitchat: res.isBitchat);
   }
@@ -1108,14 +1115,14 @@ class NostrService {
 
   /// Verifies the seal authorship (NIP-59 sender auth) and emits the unwrapped
   /// rumor through [handlers]. Shared by the local + remote unwrap paths.
-  void _emitUnwrapped(
+  Future<void> _emitUnwrapped(
     NostrHandlers handlers,
     NostrEvent wrap,
     NostrEvent seal,
     Map<String, dynamic> rumor, {
     required bool isBitchat,
     bool fromArchive = false,
-  }) {
+  }) async {
     final rumorPubkey = rumor['pubkey'] as String?;
     if (rumorPubkey == null || rumorPubkey.isEmpty) return;
 
@@ -1134,7 +1141,11 @@ class NostrService {
       if (decoded == null) return;
       emitRumor = decoded;
     } else {
-      if (seal.pubkey != rumorPubkey || !schnorr.verifyEvent(seal)) {
+      // NIP-59 sender auth off the main isolate, batched with the live pool's
+      // verifier. During a PM/group D1 backfill this is up to ~1000 seal
+      // verifies (sha256 + BIP340) that used to run INLINE on the render thread.
+      // The cheap pubkey check stays inline so a mismatch short-circuits the hop.
+      if (seal.pubkey != rumorPubkey || !(await _verifier.verify(seal))) {
         return; // forged
       }
     }

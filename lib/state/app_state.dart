@@ -1109,7 +1109,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (alt != null && state.unreadCounts.remove(alt) != null) removed = true;
     markChannelRead(key, lastTs);
     if (alt != null) markChannelRead(alt, lastTs);
-    if (removed) state = state.copyWith();
+    if (removed) _scheduleEmit();
   }
 
   /// Clears the unread badge of every column the [columnsReadGate] passes —
@@ -1345,7 +1345,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       pubkey,
       selfPubkey: state.selfPubkey,
     );
-    if (added) state = state.copyWith();
+    if (added) _scheduleEmit();
     return added;
   }
 
@@ -1383,7 +1383,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         added = true;
       }
     }
-    if (added) state = state.copyWith();
+    if (added) _scheduleEmit();
     return added;
   }
 
@@ -1407,7 +1407,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (state.trustedPubkeys.length > 50000) {
         state.trustedPubkeys.remove(state.trustedPubkeys.first);
       }
-      state = state.copyWith();
+      _scheduleEmit();
       return true;
     }
     return false;
@@ -1426,7 +1426,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state.nymchatPubkeys.addAll(pubkeys);
     state.nymchatVouches.addAll(vouches);
     state.trustedPubkeys.addAll(trusted);
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// pubkey → distinct message ids seen this session, until the sender crosses
@@ -1459,6 +1459,119 @@ class AppStateNotifier extends StateNotifier<AppState> {
   final Map<String, List<PollVote>> _pendingPollVotes = {};
 
   Set<String> get processedPollVoteIds => _processedPollVoteIds;
+
+  // ---------------------------------------------------------------------------
+  // Coalesced emission (perf). A relay-connect / D1-backfill burst used to fire
+  // one `state = state.copyWith()` PER event — i.e. one Riverpod rebuild plus a
+  // full re-run of the spam/flood render providers and an O(n log n) message
+  // sort, per event. Because [copyWith] shares every collection reference and
+  // the ingest methods mutate those in place, the notify can be coalesced
+  // without changing what any synchronous reader sees: [runBatched] holds the
+  // notify until the burst finishes and emits exactly once. Every no-arg
+  // `state = state.copyWith()` site calls [_scheduleEmit] instead, which OUTSIDE
+  // a batch is an immediate emit — byte-identical to the call it replaces, so
+  // single live ingests and all existing callers/tests are unchanged.
+  //
+  // The scope is fully SYNCHRONOUS (body runs and flushes within one turn), so
+  // there is no lingering pending state across event-loop turns and thus no
+  // timer/dispose to manage.
+  // ---------------------------------------------------------------------------
+
+  /// Depth of the current [runBatched] scope (0 = not batching). Nested batches
+  /// only flush when the outermost scope closes.
+  int _batchDepth = 0;
+  bool _pendingEmit = false;
+
+  /// Storage keys whose message list gained an out-of-order append during the
+  /// current batch and must be sorted once at flush (workstream B — avoids the
+  /// per-event `list.sort`). Only populated while [_batchDepth] > 0.
+  final Set<String> _dirtySortKeys = <String>{};
+
+  /// Notifies listeners, or defers the notify to the end of the enclosing
+  /// [runBatched]. Outside a batch this is an immediate `state = state.copyWith()`
+  /// — identical to the call it replaces.
+  void _scheduleEmit() {
+    if (_batchDepth > 0) {
+      _pendingEmit = true;
+      return;
+    }
+    _emitNow();
+  }
+
+  /// The single real notify. All coalesced paths funnel through here.
+  void _emitNow() {
+    final next = state.copyWith();
+    state = next;
+  }
+
+  /// Runs [body] with per-event notifies (and per-event message-list sorts)
+  /// coalesced into a single emit at the end. Reentrant-safe: a nested call
+  /// flushes with the outermost scope. Used by the D1 archive backfill loops and
+  /// the live relay-burst batcher so a flood of events costs ~one rebuild, not N.
+  /// [body] MUST be synchronous — the flush runs when it returns.
+  T runBatched<T>(T Function() body) {
+    _batchDepth++;
+    try {
+      return body();
+    } finally {
+      _batchDepth--;
+      if (_batchDepth == 0) {
+        _flushDirtySorts();
+        if (_pendingEmit) {
+          _pendingEmit = false;
+          _emitNow();
+        }
+      }
+    }
+  }
+
+  /// Ingests a burst of events as one batch (single emit, single sort per list).
+  void ingestEvents(Iterable<NostrEvent> events) {
+    runBatched(() {
+      for (final e in events) {
+        try {
+          ingestEvent(e);
+        } catch (_) {
+          // Skip a malformed event; never abort the batch (per-event catch
+          // mirrors the archive replay loops' existing behaviour).
+        }
+      }
+    });
+  }
+
+  /// Appends [m] to [list] (keyed [key]) keeping it ordered by [compareMessages].
+  /// Inside a batch the sort is deferred to the flush (one sort per list); a
+  /// single live ingest inserts in place via binary search. The list is always
+  /// maintained sorted, so binary insertion reproduces `list.sort(compareMessages)`
+  /// exactly (the comparator's `seq` tiebreak makes the order total) without the
+  /// O(n log n) full re-sort per event.
+  void _insertMessageSorted(String key, List<Message> list, Message m) {
+    if (_batchDepth > 0) {
+      list.add(m);
+      _dirtySortKeys.add(key);
+      return;
+    }
+    var lo = 0;
+    var hi = list.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >> 1;
+      if (compareMessages(list[mid], m) <= 0) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    list.insert(lo, m);
+  }
+
+  /// Sorts every message list touched by an out-of-order append during a batch.
+  void _flushDirtySorts() {
+    if (_dirtySortKeys.isEmpty) return;
+    for (final key in _dirtySortKeys) {
+      state.messages[key]?.sort(compareMessages);
+    }
+    _dirtySortKeys.clear();
+  }
 
   /// Routes a verified inbound Nostr event into the store (channel messages,
   /// profiles, reactions, polls, zaps). Deduplicates by event id.
@@ -1507,8 +1620,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     m.seq = _ingestSeq++;
 
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
-    list.add(m);
-    list.sort(compareMessages);
+    _insertMessageSorted(key, list, m);
 
     // Track the author as a seen user.
     final u = state.users.putIfAbsent(
@@ -1577,7 +1689,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Apply a buffered out-of-order edit whose original is this message.
     _consumePendingEdit(id: m.id);
 
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Resolves a kind-0 display name with the PWA's fallback chain
@@ -1748,7 +1860,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           reactorNym ?? _nymForPubkey(reactor);
     }
     _recomputeReactionTally(messageId);
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Rebuilds [AppState.reactions] for [messageId] from the reactor map, marking
@@ -1822,7 +1934,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         poll.votes.putIfAbsent(v.voter, () => v.optionIndex);
       }
     }
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Ingests a poll-vote event (dedup `processedPollVoteIds` cap 3000, honor
@@ -1848,14 +1960,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     if (poll.votes.containsKey(vote.voter)) return; // no double-voting
     poll.votes[vote.voter] = vote.optionIndex;
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Registers a locally-created/voted poll/vote so the UI updates immediately
   /// (publishPoll / votePoll optimistic paths). Returns the [Poll].
   void upsertPoll(Poll poll) {
     state.polls[poll.id] = poll;
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Applies the local user's own vote optimistically (votePoll). No-op if the
@@ -1865,7 +1977,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (poll == null) return false;
     if (poll.votes.containsKey(state.selfPubkey)) return false;
     poll.votes[state.selfPubkey] = optionIndex;
-    state = state.copyWith();
+    _scheduleEmit();
     return true;
   }
 
@@ -1911,7 +2023,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // Already counted. A verified receipt for a previously-unverified payment
       // clears the unverified mark (the sats stay, only the flag flips).
       if (verified && mz.unverified.remove(dedupKey) != null) {
-        state = state.copyWith();
+        _scheduleEmit();
         return true;
       }
       return false;
@@ -1920,7 +2032,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (!verified) mz.unverified[dedupKey] = amountSats;
     mz.totalSats += amountSats;
     mz.zappers.add(zapperPubkey);
-    state = state.copyWith();
+    _scheduleEmit();
     return true;
   }
 
@@ -2010,7 +2122,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         dup.senderVerified = true;
         changed = true;
       }
-      if (changed) state = state.copyWith();
+      if (changed) _scheduleEmit();
       return;
     }
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
@@ -2018,8 +2130,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     m.seq = _nextIngestSeq();
 
-    list.add(m);
-    list.sort(compareMessages);
+    _insertMessageSorted(key, list, m);
 
     // Maintain the conversation meta entry. The PWA's `addPMConversation`
     // prefers the users-map nym over the message author on EVERY message
@@ -2073,7 +2184,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Apply a buffered out-of-order edit whose original is this PM (matches on
     // id or the shared nymMessageId).
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
-    state = state.copyWith();
+    _scheduleEmit();
     onPmMessageIngested?.call(key);
   }
 
@@ -2096,8 +2207,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
     final key = m.conversationKey ?? GroupLogic.groupStorageKey(gid);
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
-    list.add(m);
-    list.sort(compareMessages);
+    _insertMessageSorted(key, list, m);
 
     final idx = state.groups.indexWhere((g) => g.id == gid);
     if (idx >= 0 && m.timestamp > state.groups[idx].lastMessageTime) {
@@ -2128,7 +2238,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     // Apply a buffered out-of-order edit whose original is this group message.
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
-    state = state.copyWith();
+    _scheduleEmit();
     onPmMessageIngested?.call(key);
     onGroupStoreChanged?.call();
     return true;
@@ -2144,7 +2254,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     } else {
       state.groups.add(group);
     }
-    state = state.copyWith();
+    _scheduleEmit();
     onGroupStoreChanged?.call();
   }
 
@@ -2172,7 +2282,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         members: memberPubkeys.toSet().toList(),
         lastMessageTime: timestampMs,
       ));
-      state = state.copyWith();
+      _scheduleEmit();
       // A group first learned about via a regular message (missed invite) is
       // persisted/synced immediately — the PWA runs `_saveGroupConversations()`
       // + `_debouncedNostrSettingsSave(15000)` right after the
@@ -2197,7 +2307,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       changed = true;
     }
     if (changed) {
-      state = state.copyWith();
+      _scheduleEmit();
       onGroupStoreChanged?.call();
     }
   }
@@ -2288,7 +2398,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         lastModEventId: nz(data['lastModEventId']),
         modLog: parseLog(data['modLog']),
       ));
-      state = state.copyWith();
+      _scheduleEmit();
       return true;
     }
 
@@ -2371,7 +2481,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       g.lastModEventId = nz(data['lastModEventId']);
       changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
     return changed;
   }
 
@@ -2429,7 +2539,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.messages[convKey] = capped;
       changed.add(convKey);
     });
-    if (changed.isNotEmpty) state = state.copyWith();
+    if (changed.isNotEmpty) _scheduleEmit();
     return changed;
   }
 
@@ -2477,7 +2587,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           removeMessage(targetId);
         }
       }
-      state = state.copyWith();
+      _scheduleEmit();
       onGroupStoreChanged?.call();
     }
     return result;
@@ -2501,7 +2611,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
   }
 
   /// Records a public channel read receipt (kind 24421): [readerPubkey] (shown
@@ -2524,7 +2634,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // newest receipt wins for the display name; no-op if nothing changes.
     if (readers[readerPubkey] == readerNym) return;
     readers[readerPubkey] = readerNym;
-    if (_mirrorChannelReaders(messageId)) state = state.copyWith();
+    if (_mirrorChannelReaders(messageId)) _scheduleEmit();
   }
 
   /// Copies the stored reader set for [messageId] onto the matching own channel
@@ -2563,7 +2673,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     } else {
       state.typing.remove(k);
     }
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Updates a user's presence from a kind-30078 nym-presence event (or a
@@ -2623,7 +2733,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // (OtherUsersShopController.invalidate), which is the authoritative
     // per-user cosmetics source. Presence never carries item data.
 
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Records a closed PM conversation so its older backlog is ignored. Stamps
@@ -2644,7 +2754,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     state.unreadCounts.remove(peerPubkey);
     state.unreadCounts.remove(PmLogic.pmStorageKey(peerPubkey));
     onClosedPmsChanged?.call();
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Opens (or creates) a PM conversation entry for [peerPubkey] without a
@@ -2667,11 +2777,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
       onPMConversationAdded?.call(peerPubkey);
-      state = state.copyWith();
+      _scheduleEmit();
     } else {
       // Existing thread → re-sync the row nym from the users map (the PWA's
       // exists-branch, pms.js:2806-2812).
-      if (_syncPmConversationNym(peerPubkey)) state = state.copyWith();
+      if (_syncPmConversationNym(peerPubkey)) _scheduleEmit();
     }
   }
 
@@ -2729,7 +2839,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.messages.remove(GroupLogic.groupStorageKey(gid));
       changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
   }
 
   /// Snapshot of the left-group ids → leave timestamp (sec), for the
@@ -2815,19 +2925,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.friends.add(pubkey);
       nowFriend = true;
     }
-    state = state.copyWith();
+    _scheduleEmit();
     return nowFriend;
   }
 
   /// Adds [pubkey] to the friend set (idempotent).
   void addFriend(String pubkey) {
     if (pubkey.isEmpty) return;
-    if (state.friends.add(pubkey)) state = state.copyWith();
+    if (state.friends.add(pubkey)) _scheduleEmit();
   }
 
   /// Removes [pubkey] from the friend set.
   void removeFriend(String pubkey) {
-    if (state.friends.remove(pubkey)) state = state.copyWith();
+    if (state.friends.remove(pubkey)) _scheduleEmit();
   }
 
   /// Blocks [pubkey] (users.js `toggleBlockUserByPubkey` add branch →
@@ -2835,14 +2945,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   bool blockUser(String pubkey) {
     if (pubkey.isEmpty) return false;
     final added = state.blockedUsers.add(pubkey);
-    if (added) state = state.copyWith();
+    if (added) _scheduleEmit();
     return added;
   }
 
   /// Unblocks [pubkey] (users.js `unblockByPubkey`).
   bool unblockUser(String pubkey) {
     final removed = state.blockedUsers.remove(pubkey);
-    if (removed) state = state.copyWith();
+    if (removed) _scheduleEmit();
     return removed;
   }
 
@@ -2874,14 +2984,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final kw = keyword.trim().toLowerCase();
     if (kw.isEmpty) return null;
     if (!state.blockedKeywords.add(kw)) return null;
-    state = state.copyWith();
+    _scheduleEmit();
     return kw;
   }
 
   /// Removes a blocked keyword (users.js `removeBlockedKeyword`).
   bool removeBlockedKeyword(String keyword) {
     final removed = state.blockedKeywords.remove(keyword.toLowerCase());
-    if (removed) state = state.copyWith();
+    if (removed) _scheduleEmit();
     return removed;
   }
 
@@ -2897,7 +3007,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (blockedKeywords != null) {
       state.blockedKeywords.addAll(blockedKeywords.map((k) => k.toLowerCase()));
     }
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Applies an edit to a stored message (channel/PM/group): replaces its
@@ -2914,7 +3024,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
     return changed;
   }
 
@@ -3090,7 +3200,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           (m) => m.id == messageId || m.nymMessageId == messageId);
       if (list.length != before) changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
     return changed;
   }
 
@@ -3122,7 +3232,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (existing.isNotEmpty) return existing.first;
     final entry = ChannelEntry(channel: channel, geohash: geohash);
     state.channels.add(entry);
-    state = state.copyWith();
+    _scheduleEmit();
     return entry;
   }
 
@@ -3148,7 +3258,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (state.view.kind == ViewKind.channel && state.view.id.toLowerCase() == k) {
       switchView(const ChatView.channel(kDefaultChannel));
     } else {
-      state = state.copyWith();
+      _scheduleEmit();
     }
     return state.channels.length != before;
   }
@@ -3163,11 +3273,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (k == kDefaultChannel) return state.pinnedChannels.contains(k);
     if (state.pinnedChannels.contains(k)) {
       state.pinnedChannels.remove(k);
-      state = state.copyWith();
+      _scheduleEmit();
       return false;
     }
     state.pinnedChannels.add(k);
-    state = state.copyWith();
+    _scheduleEmit();
     return true;
   }
 
@@ -3178,14 +3288,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final k = key.toLowerCase();
     if (k == kDefaultChannel) return false; // #nymchat cannot be hidden
     final added = state.hiddenChannels.add(k);
-    if (added) state = state.copyWith();
+    if (added) _scheduleEmit();
     return added;
   }
 
   /// Unhides a channel.
   void unhideChannel(String key) {
     if (state.hiddenChannels.remove(key.toLowerCase())) {
-      state = state.copyWith();
+      _scheduleEmit();
     }
   }
 
@@ -3203,7 +3313,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (state.view.kind == ViewKind.channel && state.view.id.toLowerCase() == k) {
       switchView(const ChatView.channel(kDefaultChannel));
     } else {
-      state = state.copyWith();
+      _scheduleEmit();
     }
     return true;
   }
@@ -3265,14 +3375,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
     }
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Hydrates cached messages for a channel/PM/group key (boot from CacheStore).
   void hydrateMessages(String key, List<Message> msgs) {
     if (msgs.isEmpty) return;
     _hydrateMessagesInto(key, msgs);
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Bulk boot hydration of ALL cached channel + PM/group histories — the
@@ -3337,7 +3447,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       onPMConversationAdded?.call(peer);
       changed = true;
     }
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
   }
 
   /// Canonicalizes a `pm-<pubkey>` storage key's peer id to lowercase 64-hex,
@@ -3441,7 +3551,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
       _recomputeReactionTally(messageId);
     });
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Snapshot of reactions in the CacheStore `entries` shape, for flushing.
@@ -3464,7 +3574,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void touchChannelActivity(String storageKey, {int? ms}) {
     state.channelLastActivity[storageKey] =
         ms ?? DateTime.now().millisecondsSinceEpoch;
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Seeds the sidebar + activity/unread maps from a D1 channel-activity probe
@@ -3610,7 +3720,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       });
     }
 
-    if (changed) state = state.copyWith();
+    if (changed) _scheduleEmit();
   }
 
   /// Cap on how many never-opened channels a single D1 discovery pass surfaces
@@ -3715,7 +3825,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
 
     // New list identity so listeners rebuild.
-    state = state.copyWith();
+    _scheduleEmit();
     return m;
   }
 
@@ -3751,7 +3861,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // optimistic placeholder rather than keep a duplicate.
       if (alreadySeen && list.any((x) => x.id == realId && !identical(x, m))) {
         list.removeAt(idx);
-        state = state.copyWith();
+        _scheduleEmit();
         return;
       }
       final oldCreated = m.createdAt;
@@ -3763,12 +3873,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (realMs != null && realMs > 0) m.ms = realMs;
       m.optimistic = false;
       if (oldCreated != m.createdAt) list.sort(compareMessages);
-      state = state.copyWith();
+      _scheduleEmit();
       return;
     }
     // Optimistic message no longer present; the real id is registered so the
     // relay echo still won't double up.
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Marks an optimistic channel echo as failed (PWA `_markOptimisticFailed`,
@@ -3779,7 +3889,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       final idx = list.indexWhere((m) => m.id == optimisticId);
       if (idx < 0) continue;
       list[idx].deliveryStatus = DeliveryStatus.failed;
-      state = state.copyWith();
+      _scheduleEmit();
       return;
     }
   }
@@ -3796,7 +3906,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     list.add(Message.system(content, action: action, createdAtMs: nowMs)
       ..seq = _nextLocalSeq());
-    state = state.copyWith();
+    _scheduleEmit();
   }
 
   /// Like [addSystemMessage] but the injected pill carries an inline
@@ -3811,7 +3921,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     list.add(Message.systemWithAction(content, action, createdAtMs: nowMs)
       ..seq = _nextLocalSeq());
-    state = state.copyWith();
+    _scheduleEmit();
   }
 }
 

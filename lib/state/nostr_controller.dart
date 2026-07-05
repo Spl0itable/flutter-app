@@ -692,29 +692,50 @@ class NostrController {
     } catch (_) {
       return;
     }
-    final valid = <NostrEvent>[];
+    final parsed = <NostrEvent>[];
     for (final raw in rows) {
       try {
         final ev = NostrEvent.fromJson(raw);
         if (ev.kind != EventKind.appData) continue;
-        if (schnorr.verifyEvent(ev)) valid.add(ev);
+        parsed.add(ev);
       } catch (_) {
         // Skip a malformed archived row.
       }
     }
-    if (valid.isEmpty) return;
-    var changed = true;
-    var guard = 0;
-    while (changed && guard++ < 20) {
-      final before = _ref.read(appStateProvider).nymchatPubkeys.length;
-      for (final ev in valid) {
-        try {
-          _ingestVouch(ev);
-        } catch (_) {}
+    if (parsed.isEmpty) return;
+    // Verify the whole archive cohort off the main isolate in ONE batched hop
+    // (this used to run `schnorr.verifyEvent` INLINE per row on the render
+    // thread). Build every future in this turn so IsolateVerifier coalesces
+    // them; fall back to the inline verify when the service isn't up yet.
+    final service = _service;
+    final valid = <NostrEvent>[];
+    if (service != null) {
+      final oks =
+          await Future.wait([for (final ev in parsed) service.verifyEvent(ev)]);
+      for (var i = 0; i < parsed.length; i++) {
+        if (oks[i]) valid.add(parsed[i]);
       }
-      changed =
-          _ref.read(appStateProvider).nymchatPubkeys.length != before;
+    } else {
+      for (final ev in parsed) {
+        if (schnorr.verifyEvent(ev)) valid.add(ev);
+      }
     }
+    if (valid.isEmpty) return;
+    // Coalesce the fixpoint expansion's per-vouch notifies into one rebuild.
+    _ref.read(appStateProvider.notifier).runBatched(() {
+      var changed = true;
+      var guard = 0;
+      while (changed && guard++ < 20) {
+        final before = _ref.read(appStateProvider).nymchatPubkeys.length;
+        for (final ev in valid) {
+          try {
+            _ingestVouch(ev);
+          } catch (_) {}
+        }
+        changed =
+            _ref.read(appStateProvider).nymchatPubkeys.length != before;
+      }
+    });
   }
 
   /// Max number of per-channel D1 archive restores in flight at once. The PWA
@@ -5840,13 +5861,17 @@ class NostrController {
       try {
         final found = await sync.profileGet(pubkeys);
         if (found.isNotEmpty) {
-          for (final entry in found.entries) {
-            final ev = entry.value;
-            if (ev.isEmpty) continue; // cache hit, no event payload
-            try {
-              appState.ingestEvent(NostrEvent.fromJson(ev));
-            } catch (_) {}
-          }
+          // One emit for the whole D1 profile batch (up to 100 rows) instead of
+          // one Riverpod rebuild per profile.
+          appState.runBatched(() {
+            for (final entry in found.entries) {
+              final ev = entry.value;
+              if (ev.isEmpty) continue; // cache hit, no event payload
+              try {
+                appState.ingestEvent(NostrEvent.fromJson(ev));
+              } catch (_) {}
+            }
+          });
           missing = pubkeys
               .where((pk) => !found.containsKey(pk.toLowerCase()))
               .toList();
@@ -7032,13 +7057,17 @@ class NostrController {
             onTimeout: () => const <Map<String, dynamic>>[],
           );
       final appState = _ref.read(appStateProvider.notifier);
-      for (final raw in events) {
-        try {
-          appState.ingestEvent(NostrEvent.fromJson(raw));
-        } catch (_) {
-          // Skip a malformed archived event (mirrors the PWA's per-event catch).
+      // One emit for the whole archive page instead of one Riverpod rebuild (+
+      // spam/flood re-run) per archived event — the D1-backfill freeze fix.
+      appState.runBatched(() {
+        for (final raw in events) {
+          try {
+            appState.ingestEvent(NostrEvent.fromJson(raw));
+          } catch (_) {
+            // Skip a malformed archived event (mirrors the PWA's per-event catch).
+          }
         }
-      }
+      });
       // Zap-badge backfill for the hydrated history (`_backfillZapReceipts`
       // with the rendered ids, messages.js:3112-3120; channel scope).
       // `channel-get` streams zaps rows only within the channel window — this
@@ -8431,10 +8460,27 @@ class NostrController {
   Future<void> _restoreEmojiFromD1(StorageSync sync) async {
     try {
       final events = await sync.emojiGet();
+      final parsed = <NostrEvent>[];
       for (final raw in events) {
         try {
-          final event = NostrEvent.fromJson(raw);
-          if (!schnorr.verifyEvent(event)) continue;
+          parsed.add(NostrEvent.fromJson(raw));
+        } catch (_) {
+          // Skip a malformed archived pack.
+        }
+      }
+      if (parsed.isEmpty) return;
+      // Verify the whole emoji cohort off the main isolate in ONE batched hop
+      // (was inline `schnorr.verifyEvent` per pack on the render thread).
+      // Newest-wins dedup makes dispatch order irrelevant, so verify-all then
+      // dispatch is equivalent to the old interleaved loop.
+      final service = _service;
+      final oks = service != null
+          ? await Future.wait([for (final ev in parsed) service.verifyEvent(ev)])
+          : [for (final ev in parsed) schnorr.verifyEvent(ev)];
+      for (var i = 0; i < parsed.length; i++) {
+        if (!oks[i]) continue;
+        final event = parsed[i];
+        try {
           if (event.kind == EventKind.emojiPack) {
             _ingestEmojiPack(event);
           } else if (event.kind == EventKind.userEmojiList) {
