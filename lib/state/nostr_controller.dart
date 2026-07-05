@@ -7537,9 +7537,14 @@ class NostrController {
           ? null
           : DateTime.now().millisecondsSinceEpoch ~/ 1000 - 604800,
     );
-    // Route each wrap through the normal gift-wrap handler (the PWA's
-    // ephemeral REQ feeds `handleGiftWrapDM` like any other 1059).
-    sub.events.listen(service.unwrapArchivedWrap, onError: (_) {});
+    // Route each wrap through the LIVE gift-wrap handler (the PWA's ephemeral
+    // REQ feeds `handleGiftWrapDM` like any other live 1059, with `fromD1`
+    // unset). `unwrapLiveWrap` keeps `fromArchive: false` so a group message
+    // another member wrapped to our ephemeral key is archived to D1, notified,
+    // and shown real-time — NOT `unwrapArchivedWrap`, which would flag it
+    // `fromArchive` and skip the D1 upload, losing received group messages on
+    // relaunch.
+    sub.events.listen(service.unwrapLiveWrap, onError: (_) {});
     _ephemeralSub = sub;
   }
 

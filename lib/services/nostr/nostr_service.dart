@@ -1048,6 +1048,21 @@ class NostrService {
     unawaited(_handleGiftWrap(wrap, fromArchive: true));
   }
 
+  /// Unwraps a LIVE kind-1059 gift wrap that arrived on an auxiliary relay
+  /// subscription (the ephemeral group-key REQ, `_refreshEphemeralSubscriptions`)
+  /// through the SAME live path the main gift-wrap sub uses — i.e. `fromArchive:
+  /// false`, so a group message another member wrapped to our ephemeral key is
+  /// archived to D1, notified, and surfaced real-time exactly like a `#p:[self]`
+  /// wrap. This is NOT [unwrapArchivedWrap]: that flags the wrap `fromArchive`
+  /// and SKIPS the D1 archive (`_archiveGiftWrap`), which is correct only for
+  /// D1-replayed history — using it for live wraps means received group messages
+  /// are never persisted and vanish on relaunch. Mirrors the PWA, whose
+  /// ephemeral REQ feeds `handleGiftWrapDM` with `fromD1` unset (relays.js:2723).
+  void unwrapLiveWrap(NostrEvent wrap) {
+    if (wrap.kind != EventKind.giftWrap) return;
+    unawaited(_handleGiftWrap(wrap));
+  }
+
   Future<void> _handleGiftWrap(NostrEvent wrap, {bool fromArchive = false}) async {
     final handlers = _handlers;
     if (handlers?.onGiftWrap == null) return;
