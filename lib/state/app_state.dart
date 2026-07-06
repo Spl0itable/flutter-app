@@ -4167,9 +4167,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       final m = list[idx];
       // If a relay echo with the real id already landed (rare race), drop the
       // optimistic placeholder rather than keep a duplicate.
-      if (alreadySeen && list.any((x) => x.id == realId && !identical(x, m))) {
+      final landed = list.where((x) => x.id == realId && !identical(x, m));
+      if (alreadySeen && landed.isNotEmpty) {
         _unindexMessage(m);
         list.removeAt(idx);
+        // Also collapse any stale FAILED twin of this content — the echo that
+        // reconciled ahead of us went down the merge loop's sweep, but a batched
+        // path could still have left one. Keep the row that actually landed.
+        _dropFailedOptimisticTwins(list, m.content, landed.first);
         _scheduleEmit();
         return;
       }
