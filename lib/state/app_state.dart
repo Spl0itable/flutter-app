@@ -1684,6 +1684,37 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
   }
 
+  /// Drops any LEFTOVER failed optimistic self-echo of [content] from [list]
+  /// (except [keep]) when a fresh copy of the same message has just been
+  /// reconciled as SENT. A channel send that threw left a `_optim_*` placeholder
+  /// flipped to [DeliveryStatus.failed] ([markOptimisticFailed]) — and, unlike a
+  /// failed PM (whose `!` affordance splices the bubble before re-sending, see
+  /// message_row `_retryFailedPm`), a failed CHANNEL bubble has no such retry, so
+  /// it lingers. When the user simply retypes the same text and THAT send
+  /// succeeds, the stale failed placeholder stays beside the delivered copy —
+  /// TWO identical bubbles locally while the recipient only ever received the one
+  /// that went out (the user-reported "already-sent message re-appears when I
+  /// send it again"). The successful send IS the retry of that failed attempt, so
+  /// collapse them. Only FAILED same-author placeholders are swept — a still-live
+  /// `_optim_*` of the same content is a legitimate separate in-flight send (two
+  /// deliberate identical messages), and a delivered-but-echoing copy will
+  /// re-materialize from its own relay echo. Returns true if anything was removed.
+  bool _dropFailedOptimisticTwins(List<Message> list, String content, Message keep) {
+    var removed = false;
+    for (var i = list.length - 1; i >= 0; i--) {
+      final ex = list[i];
+      if (identical(ex, keep)) continue;
+      if (ex.id.startsWith('_optim_') &&
+          ex.deliveryStatus == DeliveryStatus.failed &&
+          ex.content == content) {
+        _unindexMessage(ex);
+        list.removeAt(i);
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
   /// Sorts every message list touched by an out-of-order append during a batch,
   /// then re-caps any public channels that grew past their retention limit.
   void _flushDirtySorts() {
@@ -1769,40 +1800,62 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // isOwn) and upgrade it IN PLACE to the real id. Whichever of this and
     // [replaceOptimistic] runs first wins; the other then no-ops (its lookup by
     // the now-rewritten id / the `_seenIds` gate finds nothing to do).
+    // Pick the placeholder to reconcile: PREFER a live (non-failed) optimistic
+    // row over a FAILED one. A channel publish that hit its OK-timeout is marked
+    // failed but may still have reached the relay, leaving a `_optim_*` row whose
+    // real echo is yet to come. If a LATER same-content send's echo matched that
+    // stale failed row first (the old unconditional `i=0` match), the failed
+    // row's OWN delayed echo then had nothing to merge and appended as a SECOND
+    // bubble — the "already-sent message re-injected when I send a new one"
+    // duplicate. Preferring the live placeholder leaves the failed row intact for
+    // its own echo to reconcile, so neither duplicates.
+    var matchIdx = -1;
     for (var i = 0; i < list.length; i++) {
       final ex = list[i];
       if ((ex.optimistic || ex.id.startsWith('_optim_')) &&
           ex.pubkey == m.pubkey &&
           ex.content == m.content &&
           (ex.createdAt - m.createdAt).abs() < 60) {
-        _unindexMessage(ex);
-        ex.id = m.id;
-        ex.optimistic = false;
-        final shifted = ex.createdAt != m.createdAt;
-        if (m.createdAt > 0) {
-          ex.createdAt = m.createdAt;
-          ex.timestamp = m.timestamp;
+        if (ex.deliveryStatus != DeliveryStatus.failed) {
+          matchIdx = i; // a live placeholder — the just-sent message; take it.
+          break;
         }
-        if (m.ms > 0) ex.ms = m.ms;
-        _indexMessage(key, ex);
-        // Keep newest-last order if the real created_at shifted (PoW can move
-        // it); defer to the batch sort mid-backfill like [_insertMessageSorted].
-        if (shifted) {
-          if (_batchDepth > 0) {
-            _dirtySortKeys.add(key);
-          } else {
-            list.sort(compareMessages);
-          }
-        }
-        // Raise the channel's sort activity like the normal append path (the
-        // early return below skips that bookkeeping); own messages never count
-        // toward unread, so no badge work is needed here.
-        if (m.timestamp > (state.channelLastActivity[key] ?? 0)) {
-          state.channelLastActivity[key] = m.timestamp;
-        }
-        _scheduleEmit();
-        return;
+        if (matchIdx < 0) matchIdx = i; // remember the first failed as fallback.
       }
+    }
+    if (matchIdx >= 0) {
+      final ex = list[matchIdx];
+      _unindexMessage(ex);
+      ex.id = m.id;
+      ex.optimistic = false;
+      ex.deliveryStatus = DeliveryStatus.sent;
+      final shifted = ex.createdAt != m.createdAt;
+      if (m.createdAt > 0) {
+        ex.createdAt = m.createdAt;
+        ex.timestamp = m.timestamp;
+      }
+      if (m.ms > 0) ex.ms = m.ms;
+      _indexMessage(key, ex);
+      // Collapse any stale FAILED placeholder of the same content (a prior failed
+      // channel send the user retyped) now that a copy landed as sent.
+      _dropFailedOptimisticTwins(list, ex.content, ex);
+      // Keep newest-last order if the real created_at shifted (PoW can move
+      // it); defer to the batch sort mid-backfill like [_insertMessageSorted].
+      if (shifted) {
+        if (_batchDepth > 0) {
+          _dirtySortKeys.add(key);
+        } else {
+          list.sort(compareMessages);
+        }
+      }
+      // Raise the channel's sort activity like the normal append path (the
+      // early return below skips that bookkeeping); own messages never count
+      // toward unread, so no badge work is needed here.
+      if (m.timestamp > (state.channelLastActivity[key] ?? 0)) {
+        state.channelLastActivity[key] = m.timestamp;
+      }
+      _scheduleEmit();
+      return;
     }
 
     _insertMessageSorted(key, list, m);
@@ -4106,18 +4159,29 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Register the real id first so even a relay echo that races ahead of this
     // call (already appended) can't slip a second copy through afterwards.
     final alreadySeen = !_seenIds.add(realId);
-    for (final list in state.messages.values) {
+    for (final entry in state.messages.entries) {
+      final key = entry.key;
+      final list = entry.value;
       final idx = list.indexWhere((m) => m.id == optimisticId);
       if (idx < 0) continue;
       final m = list[idx];
       // If a relay echo with the real id already landed (rare race), drop the
       // optimistic placeholder rather than keep a duplicate.
       if (alreadySeen && list.any((x) => x.id == realId && !identical(x, m))) {
+        _unindexMessage(m);
         list.removeAt(idx);
         _scheduleEmit();
         return;
       }
       final oldCreated = m.createdAt;
+      // Rewrite the temp id to the signed event id IN PLACE and refresh the
+      // id-index: [sendLocal] appends the placeholder with `list.add` (not
+      // [_insertMessageSorted]), so it was never indexed. Without this the
+      // reconciled own message stays absent from [_msgByAnyId], and later
+      // receipts/reactions/edits/deletions that resolve by the real id would
+      // no-op on it (the ingest merge path already does this — see
+      // [_ingestChannelMessage]).
+      _unindexMessage(m);
       m.id = realId;
       if (realCreatedAt != null && realCreatedAt > 0) {
         m.createdAt = realCreatedAt;
@@ -4125,6 +4189,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
       if (realMs != null && realMs > 0) m.ms = realMs;
       m.optimistic = false;
+      _indexMessage(key, m);
+      // Collapse any stale FAILED placeholder of the same content left by an
+      // earlier failed send the user retyped — the channel dual-bubble the user
+      // reported (see [_dropFailedOptimisticTwins]). This is the common ordering:
+      // the publish await returns and reconciles here while the relay echo is
+      // still buffered, so the merge-loop sweep above hasn't run.
+      _dropFailedOptimisticTwins(list, m.content, m);
       if (oldCreated != m.createdAt) list.sort(compareMessages);
       _scheduleEmit();
       return;
