@@ -2008,7 +2008,18 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
                                 // list in messages_list.dart): keeps a repaint
                                 // in one column's row from re-rasterizing every
                                 // other row across all open columns.
+                                //
+                                // Keyed by the group's LEAD message id (stable as
+                                // messages append to a group): without it the
+                                // keyless children reconcile by index, so a new
+                                // group shifts every reversed index and re-creates
+                                // still-visible rows, restarting their
+                                // `bubble-snap-in` from opacity 0 — the
+                                // semi-transparent grouped bubbles. See the single
+                                // view in messages_list.dart for the full rationale.
                                 return RepaintBoundary(
+                                  key: ValueKey(
+                                      'cvgroup_${entries.first.message.id}'),
                                   child: MessageGroup(
                                     entries: entries,
                                     settings: settings,

@@ -327,15 +327,34 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                       final forward = units.length - 1 - revIndex;
                       final unit = units[forward];
                       final Widget child;
+                      // A STABLE per-unit key on the sliver child (the widget
+                      // this builder returns, which `SliverChildBuilderDelegate`
+                      // reconciles by). Without it the keyless children are
+                      // matched by index, so appending a new unit shifts every
+                      // existing unit's reversed index by one and reuses each
+                      // slot's element for a NEIGHBORING unit — tearing down and
+                      // re-creating still-visible `MessageRow`s (their
+                      // `ValueKey(message.id)` is local and can't migrate across
+                      // parent slots). That recreation restarts each row's
+                      // `bubble-snap-in` from opacity 0 on every append, so in a
+                      // busy channel recent grouped bubbles never finish the
+                      // 240ms entrance and sit semi-transparent with no visible
+                      // background. Keying by the group's LEAD message id (stable
+                      // as messages append to the group) pins each unit's element
+                      // so the snap-in plays exactly once per bubble.
+                      final Key unitKey;
                       if (unit is _PollUnit) {
                         child = PollCard(poll: unit.poll, settings: settings);
+                        unitKey = ValueKey('poll_${unit.poll.id}');
                       } else {
+                        final group = unit as _GroupUnit;
                         child = MessageGroup(
-                          entries: (unit as _GroupUnit).entries,
+                          entries: group.entries,
                           settings: settings,
                           onReactionPicker: (msg) =>
                               showReactionPicker(context, ref, msg),
                         );
+                        unitKey = ValueKey('group_${group.entries.first.message.id}');
                       }
                       // `.messages-list { gap: 3px }` (styles-chat.css:1-7):
                       // a 3px flex gap between EVERY adjacent pair of list
@@ -353,6 +372,7 @@ class _MessagesListState extends ConsumerState<MessagesList> {
                       // re-raster was a major driver of the pegged raster thread
                       // behind the ANR.
                       return RepaintBoundary(
+                        key: unitKey,
                         child: Padding(
                           padding: EdgeInsets.only(
                               top: (forward > 0 || isChannel) ? 3 : 0),
