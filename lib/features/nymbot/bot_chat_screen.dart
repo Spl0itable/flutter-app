@@ -430,7 +430,13 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
                 // A reasoning-bearing bot reply renders its collapsed
                 // "💭 Reasoning" section INSIDE the bubble content — the
                 // canonical MessageRow prepends it (messages.js:796-797).
+                //
+                // Keyed by the group's LEAD message id so appending a reply
+                // doesn't shift every reversed index and re-create still-visible
+                // rows (which would restart their `bubble-snap-in` from opacity
+                // 0). See messages_list.dart for the full rationale.
                 return MessageGroup(
+                  key: ValueKey('botgroup_${unit.first.message.id}'),
                   entries: unit,
                   settings: settings,
                   onReactionPicker: (msg) =>
