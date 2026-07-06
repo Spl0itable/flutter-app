@@ -47,6 +47,18 @@ class EventMapper {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final createdAt = e.createdAt > nowSec + 60 ? nowSec : e.createdAt;
 
+    // A replayed-backlog message (PWA `messageAge > 10000` / [_isHistorical]):
+    // older than 10s at ingest. Marking it historical keeps D1/relay BACKFILL
+    // out of the live-only flood tracker and the bubble snap-in entrance —
+    // matching the PWA, which tracks/animates LIVE arrivals only. Without this,
+    // opening a busy channel replays its recent history through the flood gates
+    // as if live: any sender that ever tripped the rate/content gate within the
+    // loaded window is re-derived as "flooding" and every one of their bubbles
+    // dims to opacity 0.2 (the near-invisible, background-less rows the user
+    // reported). Genuine live sends (<10s) are still tracked, so real spam is
+    // still caught.
+    final isHistorical = nowSec - createdAt > 10;
+
     // A channel message can carry a P2P file offer on an `['offer', JSON]` tag
     // (`shareP2PFile` → `publishFileOffer`). nostr-core.js:434/502 parses it off
     // the inbound event and sets `isFileOffer`/`fileOffer` so the row renders a
@@ -67,6 +79,7 @@ class EventMapper {
       channel: channel,
       geohash: geohash,
       senderVerified: true,
+      isHistorical: isHistorical,
       isFileOffer: fileOffer != null,
       fileOffer: fileOffer?.toJson(),
     );

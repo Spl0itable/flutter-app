@@ -6771,7 +6771,15 @@ class NostrController {
         for (final key in channelKeys) {
           final msgs = state.messages[key];
           if (msgs != null) {
-            await cache.saveChannelMessages(key, _capChannel(msgs), txn);
+            // Never persist an UNRECONCILED optimistic row (`_optim_*`): its id
+            // isn't the real event id, so on reload it re-hydrates as a stale
+            // placeholder that the merge loop can mis-pair (or that lingers if
+            // its real event has aged out of relay/D1 retention), re-injecting a
+            // duplicate. Only real, reconciled sends belong in the cache.
+            final persistable =
+                msgs.where((m) => !m.optimistic && !m.id.startsWith('_optim_'));
+            await cache.saveChannelMessages(
+                key, _capChannel(persistable.toList()), txn);
           }
         }
         for (final key in pmKeys) {
@@ -6780,9 +6788,12 @@ class NostrController {
             // Transient Nymbot info bubbles never persist (the PWA's
             // `_displayBotInfoMessage`/help/welcome rows are display-only —
             // pms.js persists real messages via `persistPMMessages` but never
-            // these synthetic ids).
+            // these synthetic ids). Unreconciled optimistic rows are excluded for
+            // the same reason as channels (above).
             final persistable = msgs
                 .where((m) =>
+                    !m.optimistic &&
+                    !m.id.startsWith('_optim_') &&
                     !m.id.startsWith('nymbot-info-') &&
                     !m.id.startsWith('nymbot-help-') &&
                     m.id != 'nymbot-welcome')
