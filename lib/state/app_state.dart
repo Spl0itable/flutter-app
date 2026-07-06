@@ -1749,6 +1749,62 @@ class AppStateNotifier extends StateNotifier<AppState> {
     m.seq = _ingestSeq++;
 
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
+
+    // Reconcile an OUTSTANDING optimistic self-echo with this real relay echo
+    // BEFORE appending — the channel analogue of the PM dual-wrap merge above
+    // (and of [replaceOptimistic]). Channel sends carry no shared nymMessageId,
+    // so the ONLY thing that stops the `_optim_*` placeholder ([sendLocal]) and
+    // the real-id echo from both rendering is the real id being registered in
+    // [_seenIds]. That registration happens in [replaceOptimistic], which runs
+    // only AFTER `await publishChannelMessage` returns — but a relay echoes the
+    // event back on the read subscription the moment it lands, which in direct
+    // mode can beat the publish await by up to its 10s OK-timeout (and a crash
+    // mid-send persists an unreconciled `_optim_*` row that no later
+    // [replaceOptimistic] will ever rewrite). In those windows this real echo
+    // reaches here with its id not yet seen and, lacking a backstop, appended
+    // as a SECOND bubble — the user-reported "message re-injected on next send"
+    // duplicate. Match our own still-unreconciled placeholder (same ephemeral/
+    // durable pubkey + identical content within a small window — the
+    // pseudonymous path echoes under its per-message key, so gate on pubkey not
+    // isOwn) and upgrade it IN PLACE to the real id. Whichever of this and
+    // [replaceOptimistic] runs first wins; the other then no-ops (its lookup by
+    // the now-rewritten id / the `_seenIds` gate finds nothing to do).
+    for (var i = 0; i < list.length; i++) {
+      final ex = list[i];
+      if ((ex.optimistic || ex.id.startsWith('_optim_')) &&
+          ex.pubkey == m.pubkey &&
+          ex.content == m.content &&
+          (ex.createdAt - m.createdAt).abs() < 60) {
+        _unindexMessage(ex);
+        ex.id = m.id;
+        ex.optimistic = false;
+        final shifted = ex.createdAt != m.createdAt;
+        if (m.createdAt > 0) {
+          ex.createdAt = m.createdAt;
+          ex.timestamp = m.timestamp;
+        }
+        if (m.ms > 0) ex.ms = m.ms;
+        _indexMessage(key, ex);
+        // Keep newest-last order if the real created_at shifted (PoW can move
+        // it); defer to the batch sort mid-backfill like [_insertMessageSorted].
+        if (shifted) {
+          if (_batchDepth > 0) {
+            _dirtySortKeys.add(key);
+          } else {
+            list.sort(compareMessages);
+          }
+        }
+        // Raise the channel's sort activity like the normal append path (the
+        // early return below skips that bookkeeping); own messages never count
+        // toward unread, so no badge work is needed here.
+        if (m.timestamp > (state.channelLastActivity[key] ?? 0)) {
+          state.channelLastActivity[key] = m.timestamp;
+        }
+        _scheduleEmit();
+        return;
+      }
+    }
+
     _insertMessageSorted(key, list, m);
     // Bound the live channel history (see [_kChannelHistoryCap]). During a
     // batch the list isn't sorted yet, so defer the trim to [_flushDirtySorts];
