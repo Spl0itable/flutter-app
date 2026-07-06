@@ -1510,16 +1510,7 @@ class NostrController {
       //  (2) NIP-13 PoW meeting the Nymchat floor (16 bits) is a self-attestation
       //      that the sender runs Nymchat → add to the trust graph + our vouch
       //      list (`_markNymchatPubkey` + `_observeNymchatPubkey`).
-      final selfPk = _identity?.pubkey ?? '';
-      if (event.pubkey != selfPk) {
-        final earnedTrust = _ref
-            .read(appStateProvider.notifier)
-            .trackPubkeyMessage(event.pubkey, event.id);
-        if (earnedTrust) _scheduleTrustPersist();
-        if (pow.validatePow(event, _nymchatPowFloor)) {
-          _observeNymchatPubkey(event.pubkey);
-        }
-      }
+      _observeMessageTrust(event);
 
       // Hydrate the author's kind-0 from D1 if we don't have it (the PWA queues
       // a profile fetch for every message author it lacks a profile for —
@@ -2175,6 +2166,29 @@ class NostrController {
     final added = notifier.observeNymchatPubkey(pubkey);
     if (added) _scheduleVouchPublish();
     _scheduleTrustPersist();
+  }
+
+  /// Web-of-trust observation for a non-own message (nostr-core.js:383-392):
+  /// ≥2 distinct messages from a sender earns them session trust
+  /// ([AppStateNotifier.trackPubkeyMessage]); a message meeting the NIP-13 PoW
+  /// floor is a Nymchat-client self-attestation that adds the sender to the
+  /// trust graph + our vouch list ([_observeNymchatPubkey]).
+  ///
+  /// This MUST run on the D1 archive/backfill path as well as the live relay
+  /// path — otherwise, with the web-of-trust spam gate enabled (main.dart), a
+  /// channel's restored history from senders who aren't yet trusted is silently
+  /// filtered out of the visible list, so the channel "loads nothing" even
+  /// though `channel-get` returned the messages.
+  void _observeMessageTrust(NostrEvent event) {
+    final selfPk = _identity?.pubkey ?? '';
+    if (event.pubkey.isEmpty || event.pubkey == selfPk) return;
+    final earnedTrust = _ref
+        .read(appStateProvider.notifier)
+        .trackPubkeyMessage(event.pubkey, event.id);
+    if (earnedTrust) _scheduleTrustPersist();
+    if (pow.validatePow(event, _nymchatPowFloor)) {
+      _observeNymchatPubkey(event.pubkey);
+    }
   }
 
   /// NIP-13 PoW floor (leading zero bits) a channel message must meet to be
@@ -7255,7 +7269,17 @@ class NostrController {
       appState.runBatched(() {
         for (final raw in events) {
           try {
-            appState.ingestEvent(NostrEvent.fromJson(raw));
+            final ev = NostrEvent.fromJson(raw);
+            appState.ingestEvent(ev);
+            // Observe web-of-trust for restored channel messages exactly like the
+            // live path (`_onEvent`) does — WITHOUT this, the spam gate hides
+            // backfilled history from not-yet-trusted senders and the channel
+            // renders empty. Only channel-message kinds carry the PoW
+            // self-attestation the gate keys on.
+            if (ev.kind == EventKind.geoChannel ||
+                ev.kind == EventKind.namedChannel) {
+              _observeMessageTrust(ev);
+            }
           } catch (_) {
             // Skip a malformed archived event (mirrors the PWA's per-event catch).
           }
