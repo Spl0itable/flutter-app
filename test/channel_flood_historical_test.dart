@@ -6,7 +6,7 @@ import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/nostr/event_mapper.dart';
 
 NostrEvent _chan(String d, String id, String content,
-        {required String pubkey, required int createdAtSec}) =>
+        {required String pubkey, required int createdAtSec, int? ms}) =>
     NostrEvent(
       id: id,
       pubkey: pubkey,
@@ -15,6 +15,7 @@ NostrEvent _chan(String d, String id, String content,
       tags: [
         ['d', d],
         ['n', 'someone'],
+        if (ms != null) ['ms', '$ms'],
       ],
       content: content,
     );
@@ -41,16 +42,33 @@ void main() {
       )!;
       expect(m.isHistorical, isTrue);
     });
+
+    test(
+        'created_at re-stamped to ~now but a real (old) ms tag → historical, '
+        'and timestamp reflects the ms send time (not the re-stamp)', () {
+      final realSendMs = DateTime.now().millisecondsSinceEpoch - 180000; // 3m
+      final m = EventMapper.channelMessage(
+        // The proxy re-broadcast the ephemeral event with created_at ≈ now, but
+        // the ms tag still carries the true 3-minute-old send time.
+        _chan('room', 'c', 'hello there',
+            pubkey: sender, createdAtSec: nowSec(), ms: realSendMs),
+        selfPubkey: self,
+      )!;
+      expect(m.isHistorical, isTrue);
+      // Display/flood time comes from the ms tag, so the row reads "3m ago",
+      // not "now".
+      expect(m.timestamp, realSendMs);
+    });
   });
 
   group('flood tracker exempts backfilled history', () {
     // Three identical 6+char messages from one sender trip the content-flood
     // gate (>= kContentFloodRepeat within the window).
-    List<Message> mapped(int createdAtSec) => [
+    List<Message> mapped(int createdAtSec, {int? ms}) => [
           for (var i = 0; i < kContentFloodRepeat; i++)
             EventMapper.channelMessage(
-              _chan('room', 'evt$createdAtSec$i', 'flood flood',
-                  pubkey: sender, createdAtSec: createdAtSec),
+              _chan('room', 'evt$createdAtSec$ms$i', 'flood flood',
+                  pubkey: sender, createdAtSec: createdAtSec, ms: ms),
               selfPubkey: self,
             )!,
         ];
@@ -67,6 +85,19 @@ void main() {
       // it — the false-positive that dimmed legit senders to opacity 0.2.
       final tracker =
           FloodTracker.fromMessages(mapped(nowSec() - 60), selfPubkey: self);
+      expect(tracker.isFlooding(sender), isFalse);
+    });
+
+    test('re-stamped created_at ≈ now but real old ms tag does not dim', () {
+      // The proxy re-broadcast backfill with created_at ≈ now (which would
+      // cluster it into a false rate/content flood), but the ms tag exposes the
+      // true 3-minute-old send time, so the mapper marks it historical and the
+      // tracker skips it.
+      final realSendMs = DateTime.now().millisecondsSinceEpoch - 180000;
+      final tracker = FloodTracker.fromMessages(
+        mapped(nowSec(), ms: realSendMs),
+        selfPubkey: self,
+      );
       expect(tracker.isFlooding(sender), isFalse);
     });
   });
