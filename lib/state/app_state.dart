@@ -2522,6 +2522,74 @@ class AppStateNotifier extends StateNotifier<AppState> {
     onGroupStoreChanged?.call();
   }
 
+  /// Backfills identity/appearance onto an EXISTING group first learned as a
+  /// bare shell — [mergeGroupFromMessage] plants one (no `avatar`/`createdBy`)
+  /// for a member added by a NON-owner (the add-member create is owner-gated) or
+  /// reached by a group message before its invite. Adopts each field ONLY when
+  /// the group currently lacks it, so an owner's real metadata is never
+  /// clobbered. Setting `createdBy` also un-gates the owner's later
+  /// [GroupLogic] `_applyMetadata` avatar update. Safe by construction: it
+  /// enriches a group we ALREADY have (never conjures a new one, so the
+  /// anti-spoof create-gates are untouched). Emits if anything changed — the fix
+  /// for a custom group avatar not showing in the sidebar. Returns whether it
+  /// changed anything.
+  bool enrichGroupIdentity(
+    String groupId, {
+    String? createdBy,
+    String? name,
+    String? avatar,
+    String? banner,
+    String? description,
+    List<String>? members,
+    List<String>? mods,
+  }) {
+    final g = groupById(groupId);
+    if (g == null) return false;
+    bool has(String? v) => v != null && v.isNotEmpty;
+    var changed = false;
+    if (!has(g.createdBy) && has(createdBy)) {
+      g.createdBy = createdBy;
+      changed = true;
+    }
+    if (g.name.isEmpty && has(name)) {
+      g.name = name!;
+      changed = true;
+    }
+    if (!has(g.avatar) && has(avatar)) {
+      g.avatar = avatar;
+      changed = true;
+    }
+    if (!has(g.banner) && has(banner)) {
+      g.banner = banner;
+      changed = true;
+    }
+    if (!has(g.description) && has(description)) {
+      g.description = description;
+      changed = true;
+    }
+    if (members != null) {
+      for (final pk in members) {
+        if (pk.isNotEmpty && !g.members.contains(pk)) {
+          g.members.add(pk);
+          changed = true;
+        }
+      }
+    }
+    if (mods != null && g.mods.isEmpty) {
+      for (final pk in mods) {
+        if (pk.isNotEmpty && !g.mods.contains(pk)) {
+          g.mods.add(pk);
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      _scheduleEmit();
+      onGroupStoreChanged?.call();
+    }
+    return changed;
+  }
+
   /// Merges an inbound group MESSAGE's carried metadata into the group entry —
   /// the PWA's `addGroupConversation(groupId, groupName, memberPubkeys, ts)`
   /// call on every group message (groups.js:1292 → :2454). Existing group:

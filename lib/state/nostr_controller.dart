@@ -2833,7 +2833,6 @@ class NostrController {
       // `created_at > leaveTime` (F04-H4, groups.js:719-722): a stale invite
       // older than our leave is rejected and the group stays gone.
       if (!appState.clearLeftGroup(groupId, createdAtSec: inviteTs)) return;
-      if (appState.groupById(groupId) != null) return;
       final members = tags
           .where((t) => t.length > 1 && t[0] == 'p')
           .map((t) => t[1])
@@ -2851,6 +2850,23 @@ class NostrController {
           .where((t) => t.length > 1 && t[0] == 'mod')
           .map((t) => t[1])
           .toList();
+      // A bare shell (learned via a group MESSAGE before this invite, planted by
+      // `mergeGroupFromMessage` with no owner/avatar) already exists: BACKFILL
+      // its owner + appearance from the invite bootstrap instead of dropping them
+      // — the custom-group-avatar-missing-in-sidebar bug — then stop (an existing
+      // group is not re-notified). Enriching a known group is safe; only CREATING
+      // one stays gated below.
+      if (appState.groupById(groupId) != null) {
+        appState.enrichGroupIdentity(groupId,
+            createdBy: owner,
+            name: name,
+            avatar: avatar,
+            banner: banner,
+            description: description,
+            members: members,
+            mods: mods);
+        return;
+      }
       appState.upsertGroup(Group(
         id: groupId,
         name: name,
@@ -2957,21 +2973,21 @@ class NostrController {
         // claimed owner IS the sender (`senderIsClaimedOwner`, groups.js:900-904)
         // so a non-owner can't conjure a group into the sidebar. Mirrors the
         // PWA's `trustBootstrap` create (groups.js:912-934).
+        final claimedOwner = _tagValue(tags, 'owner');
+        final members = tags
+            .where((t) => t.length > 1 && t[0] == 'p')
+            .map((t) => t[1])
+            .toList();
+        final name = _tagValue(tags, 'subject') ?? '';
+        final avatar = _tagValue(tags, 'avatar');
+        final banner = _tagValue(tags, 'banner');
+        final description = _tagValue(tags, 'description');
+        final mods = tags
+            .where((t) => t.length > 1 && t[0] == 'mod')
+            .map((t) => t[1])
+            .toList();
         if (appState.groupById(groupId) == null) {
-          final claimedOwner = _tagValue(tags, 'owner');
           if (claimedOwner != null && claimedOwner == senderPubkey) {
-            final members = tags
-                .where((t) => t.length > 1 && t[0] == 'p')
-                .map((t) => t[1])
-                .toList();
-            final name = _tagValue(tags, 'subject') ?? '';
-            final avatar = _tagValue(tags, 'avatar');
-            final banner = _tagValue(tags, 'banner');
-            final description = _tagValue(tags, 'description');
-            final mods = tags
-                .where((t) => t.length > 1 && t[0] == 'mod')
-                .map((t) => t[1])
-                .toList();
             final allowInv = _tagValue(tags, 'allow_invites');
             final inviteEnabledTag = _tagValue(tags, 'invite_enabled');
             final inviteEpochTag = _tagValue(tags, 'invite_epoch');
@@ -2994,6 +3010,20 @@ class NostrController {
                   : DateTime.now().millisecondsSinceEpoch,
             ));
           }
+        } else {
+          // The group is already known — possibly a bare message-shell with no
+          // owner/avatar (member added by a NON-owner never hit the create above,
+          // which stays owner-gated to block spoofed conjuring). Backfill its
+          // owner + appearance from the add-member bootstrap so the sidebar shows
+          // the custom avatar; enriching a group we're already in is safe.
+          appState.enrichGroupIdentity(groupId,
+              createdBy: claimedOwner,
+              name: name,
+              avatar: avatar,
+              banner: banner,
+              description: description,
+              members: members,
+              mods: mods);
         }
       }
     }
