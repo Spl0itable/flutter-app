@@ -2580,6 +2580,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       blurImages: blur,
       glyphShadows: deco?.textShadows,
       monospace: deco?.monospace ?? false,
+      // This message's own id, so a tapped top-level blockquote can EXCLUDE it
+      // when searching for the quoted source (PWA `hostKey`); without it the
+      // jump-to-quoted-source / flash resolves against the host itself.
+      hostMessageId: message.id,
     );
     final gradient = deco?.gradient;
     if (gradient != null && gradient.length >= 2) {
@@ -2600,6 +2604,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           baseColor: Colors.white,
           fontSize: fontSize,
           blurImages: blur,
+          hostMessageId: message.id,
         ),
       );
       final glow = deco?.gradientGlow;
