@@ -248,15 +248,19 @@ class GroupLogic {
   /// inbound side already reads it ([_applyMetadata] via the `meta_ts`
   /// piggyback handler). Only the OWNER attaches it, and only once metadata has
   /// been set (`metaUpdatedAt > 0`); `meta_ts` is the group's real metadata
-  /// timestamp so the inbound monotonic guard makes re-application idempotent —
-  /// safe to ride EVERY owner message (the PWA additionally time-windows it; we
-  /// omit the window so a late backfill still heals, at a few extra tags/msg).
+  /// timestamp so the inbound monotonic guard makes re-application idempotent.
+  /// Rides EVERY owner message: the PWA gates on a `GROUP_META_PIGGYBACK_WINDOW`,
+  /// but that constant is never actually defined in the PWA source — so
+  /// `now - metaTs > undefined` is always false and the window is a dead no-op,
+  /// i.e. the PWA piggybacks unconditionally too (owner + metaTs). Tag order
+  /// mirrors `_attachGroupMetaTags` (groups.js:2135-2141): meta_ts, banner,
+  /// avatar, description, allow_invites, invite_enabled, invite_epoch.
   static List<List<String>> groupMetaPiggybackTags(Group g, String selfPubkey) {
     if (g.createdBy != selfPubkey || g.metaUpdatedAt <= 0) return const [];
     return [
       ['meta_ts', '${g.metaUpdatedAt}'],
-      ['avatar', g.avatar ?? ''],
       ['banner', g.banner ?? ''],
+      ['avatar', g.avatar ?? ''],
       ['description', g.description ?? ''],
       ['allow_invites', g.allowMemberInvites ? '1' : '0'],
       ['invite_enabled', g.inviteEnabled ? '1' : '0'],
