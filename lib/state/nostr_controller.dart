@@ -3949,10 +3949,15 @@ class NostrController {
         nymMessageId: nymMessageId,
         ephemeralPk: next.pk,
         // NIP-30 declarations for any known custom `:shortcode:` in the body
-        // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`).
-        extraTags: _ref
-            .read(liveCustomEmojiProvider.notifier)
-            .emojiTagsForContent(trimmed),
+        // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`),
+        // plus the owner's group-metadata piggyback (`_attachGroupMetaTags`) so
+        // members converge on the custom avatar/banner even from a D1 backfill.
+        extraTags: [
+          ..._ref
+              .read(liveCustomEmojiProvider.notifier)
+              .emojiTagsForContent(trimmed),
+          ...GroupLogic.groupMetaPiggybackTags(group, identity.pubkey),
+        ],
       );
       await service.publishGroupMessage(
         rumor: rumor,
@@ -5198,6 +5203,8 @@ class NostrController {
         content: trimmed,
         nymMessageId: GroupLogic.generateGroupId(),
         ephemeralPk: next.pk,
+        // Owner metadata piggyback, same as a fresh send.
+        extraTags: GroupLogic.groupMetaPiggybackTags(group, identity.pubkey),
       );
       await service.publishGroupMessage(
         rumor: _withEditTag(base, messageId),
@@ -6919,6 +6926,16 @@ class NostrController {
         .read(nymbotServiceProvider)
         .setApiSocketRequest(api.botSocketRequest);
     _storageSync = sync;
+    // Wire the relay-side NIP-59 `nym-sync` publisher so every synced category
+    // (settings sections, notifications, read-state, group conversations/keys/
+    // history) is BOTH written to D1 AND pushed live as a gift-wrapped event to
+    // our other devices — the PWA's dual sink (`_publishEncryptedSettings` calls
+    // `_saveSettingsBlobToD1` AND `_publishWrappedNostrEvent`). Without this the
+    // wrap half was dead: D1 held the truth but online devices only saw changes
+    // on their next boot/reconnect `settings-get`, never a live push.
+    sync.setSyncWrapPublisher((payload, dTag) async {
+      await _service?.publishNymSyncWrap(payload: payload, dTag: dTag);
+    });
     _zapArchive?.dispose();
     _zapArchive = ZapArchive(sync);
 
