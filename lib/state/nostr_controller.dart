@@ -3949,10 +3949,15 @@ class NostrController {
         nymMessageId: nymMessageId,
         ephemeralPk: next.pk,
         // NIP-30 declarations for any known custom `:shortcode:` in the body
-        // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`).
-        extraTags: _ref
-            .read(liveCustomEmojiProvider.notifier)
-            .emojiTagsForContent(trimmed),
+        // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`),
+        // plus the owner's group-metadata piggyback (`_attachGroupMetaTags`) so
+        // members converge on the custom avatar/banner even from a D1 backfill.
+        extraTags: [
+          ..._ref
+              .read(liveCustomEmojiProvider.notifier)
+              .emojiTagsForContent(trimmed),
+          ...GroupLogic.groupMetaPiggybackTags(group, identity.pubkey),
+        ],
       );
       await service.publishGroupMessage(
         rumor: rumor,
@@ -5198,6 +5203,8 @@ class NostrController {
         content: trimmed,
         nymMessageId: GroupLogic.generateGroupId(),
         ephemeralPk: next.pk,
+        // Owner metadata piggyback, same as a fresh send.
+        extraTags: GroupLogic.groupMetaPiggybackTags(group, identity.pubkey),
       );
       await service.publishGroupMessage(
         rumor: _withEditTag(base, messageId),
