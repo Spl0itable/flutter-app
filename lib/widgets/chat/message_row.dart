@@ -736,9 +736,16 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       );
     }
     // `.message.flooded { opacity: 0.2 }` — a flooding (others') pubkey in the
-    // current conversation is dimmed (`messages.js:652-656`). Own messages are
-    // never flooded.
+    // current conversation is dimmed (`messages.js:652-656`). The PWA gates this
+    // on `!message.isPM && !message.isHistorical && isFlooding(pubkey)`: the dim
+    // marks LIVE flooding only, so PMs and replayed BACKLOG (D1/relay backfill,
+    // marked historical at ingest) are NEVER dimmed even when the sender's LIVE
+    // burst tripped the gate. Without the `!isHistorical` guard, opening a busy
+    // channel dimmed a flagged sender's whole backfilled history to opacity 0.2.
+    // Own messages are never flooded (the tracker excludes self).
     if (!message.isOwn &&
+        !message.isPM &&
+        !message.isHistorical &&
         ref.watch(floodTrackerProvider).isFlooding(message.pubkey)) {
       row = Opacity(opacity: 0.2, child: row);
     }
