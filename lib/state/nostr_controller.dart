@@ -7371,9 +7371,11 @@ class NostrController {
       return;
     }
     // Arm the PWA's 10s hydration fallback so a hung/offline settings fetch
-    // can't suppress onboarding forever (app.js:5691-5692).
+    // can't suppress onboarding forever (app.js:5691-5692). It releases ONLY the
+    // onboarding gate — a hung load must not open the SAVE gate, or a pending
+    // save would clobber the account's unread D1 settings with default state.
     _settingsHydratedFallback ??=
-        Timer(const Duration(seconds: 10), _markSettingsHydrated);
+        Timer(const Duration(seconds: 10), _releaseOnboardingGate);
     // `_mergeRemoteSettings` marks hydration in its own `finally`.
     await _mergeRemoteSettings(sync);
     await _restorePmArchive(sync);
@@ -7520,7 +7522,15 @@ class NostrController {
     try {
       final result = await sync.settingsGet();
       if (result == null) {
+        // Load FAILED (offline / flaky /api/storage). Do NOT open the save gate:
+        // a pending outbound save would publish this device's local/default
+        // settings over the account's real D1 row that we never read — the
+        // cross-device clobber. The PWA returns false here and keeps the gate
+        // closed; the reconnect retry ([_backfillFromD1OnReconnect]) re-attempts
+        // and opens the gate only once a load succeeds. Release just the
+        // onboarding gate so the tutorial isn't blocked.
         _settingsGetFailed = true;
+        _releaseOnboardingGate();
         return;
       }
       _settingsGetFailed = false;
@@ -7566,16 +7576,17 @@ class NostrController {
       if (newestSec > lastTs) {
         kv.setString(StorageKeys.lastSettingsSyncTs, '$newestSec');
       }
-    } catch (_) {
-      // Best-effort — retried on the next reconnect edge.
-      _settingsGetFailed = true;
-    } finally {
-      // The boot restore attempt has settled — allow outbound settings saves.
-      // The PWA marks hydration after `settingsLoadFromD1` succeeds, or (on
-      // failure) at the relay-fallback load's EOSE (`_flushSettingsLoadBuffer`
-      // → `_markSettingsHydrated`, settings.js:272-295) — either way the gate
-      // holds only until the load attempt completes.
+      // Load SUCCEEDED — the account's existing settings have been read and
+      // merged (even an empty result means "nothing saved yet", so there is
+      // nothing to clobber). ONLY NOW open the outbound-save gate, matching the
+      // PWA's `_markSettingsHydrated` after `settingsLoadFromD1` succeeds.
       _markSettingsHydrated();
+    } catch (_) {
+      // Best-effort — retried on the next reconnect edge. As with the null
+      // result, leave the SAVE gate closed (don't clobber unread remote state);
+      // release only the onboarding gate.
+      _settingsGetFailed = true;
+      _releaseOnboardingGate();
     }
   }
 
@@ -8493,15 +8504,29 @@ class NostrController {
   /// `_onHydratedCbs` (tutorial / bot welcome) from the same place
   /// (settings.js:247-252).
   void _markSettingsHydrated() {
-    _settingsHydratedFallback?.cancel();
-    _settingsHydratedFallback = null;
-    if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
+    _releaseOnboardingGate();
     if (_settingsHydrated) return;
     _settingsHydrated = true;
     if (_settingsSavePending) {
       _settingsSavePending = false;
       syncSettings();
     }
+  }
+
+  /// Releases ONLY the onboarding gate ([settingsHydrated] future) — the
+  /// tutorial / bot-welcome may proceed — WITHOUT opening the outbound-save gate
+  /// ([_settingsHydrated]). Used when the boot settings load FAILS or times out:
+  /// onboarding must not hang, but a device that never read the account's
+  /// existing D1 settings must NOT publish its local/default state over them (the
+  /// PWA keeps the save gate closed on a failed `settingsLoadFromD1` and only
+  /// opens it at a real load's completion — settings.js). The reconnect retry
+  /// ([_backfillFromD1OnReconnect] → [_mergeRemoteSettings]) opens the save gate
+  /// once a load actually succeeds, flushing any deferred save merged with the
+  /// restored remote state.
+  void _releaseOnboardingGate() {
+    _settingsHydratedFallback?.cancel();
+    _settingsHydratedFallback = null;
+    if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
   }
 
   /// Debounced encrypted-settings publish (`_debouncedNostrSettingsSave`, 5s).
