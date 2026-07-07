@@ -4141,6 +4141,29 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
 
+    // Raise the conversation's sort key so the just-sent PM/group jumps to the
+    // TOP of the sidebar's PRIVATE MESSAGES list right away (the PWA's
+    // `insertPMInOrder` / `addGroupConversation` bump `lastMessageTime` on send).
+    // Inbound messages do this in their ingest; the optimistic own echo must too
+    // — otherwise your own send doesn't reorder the list until the self-copy
+    // round-trips back (and it's deduped by nymMessageId before the meta update,
+    // so it never does). No-op for a brand-new peer with no conversation row yet.
+    if (view.kind == ViewKind.pm) {
+      for (final conv in state.pmConversations) {
+        if (conv.pubkey == view.id) {
+          if (m.timestamp > conv.lastMessageTime) {
+            conv.lastMessageTime = m.timestamp;
+          }
+          break;
+        }
+      }
+    } else if (view.kind == ViewKind.group) {
+      final g = groupById(view.id);
+      if (g != null && m.timestamp > g.lastMessageTime) {
+        g.lastMessageTime = m.timestamp;
+      }
+    }
+
     // New list identity so listeners rebuild.
     _scheduleEmit();
     return m;
