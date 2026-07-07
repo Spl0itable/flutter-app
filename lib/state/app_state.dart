@@ -1735,11 +1735,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   /// Routes a verified inbound Nostr event into the store (channel messages,
   /// profiles, reactions, polls, zaps). Deduplicates by event id.
-  void ingestEvent(NostrEvent e) {
+  /// [historical] marks the event as a REPLAYED BACKLOG restore (D1/relay
+  /// channel backfill) rather than a live arrival. Provenance — not the event's
+  /// timestamp — is what makes a message historical: an ephemeral geohash event
+  /// re-served from the archive can carry a `created_at`/`ms` of ≈now (so it
+  /// still reads "now"), yet it is backlog and must NOT be flood-dimmed or
+  /// snap-in animated, exactly as the PWA's restore path flags it. Only the
+  /// channel-message path honours it; other kinds ignore it.
+  void ingestEvent(NostrEvent e, {bool historical = false}) {
     switch (e.kind) {
       case EventKind.geoChannel:
       case EventKind.namedChannel:
-        _ingestChannelMessage(e);
+        _ingestChannelMessage(e, historical: historical);
       case EventKind.profile:
         _ingestProfile(e);
       case EventKind.reaction:
@@ -1757,7 +1764,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
   }
 
-  void _ingestChannelMessage(NostrEvent e) {
+  void _ingestChannelMessage(NostrEvent e, {bool historical = false}) {
     if (e.id.isNotEmpty && !_seenIds.add(e.id)) return;
     // An incoming edit (the published/echoed edit event carries
     // `['edit', originalId]`, buildChannelEditTags) rewrites the original in
@@ -1772,6 +1779,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
+    // A backlog restore is historical by PROVENANCE regardless of the mapper's
+    // timestamp-age guess (the archived event can read as ≈now). Keeps it out of
+    // the flood dim and the snap-in entrance, matching the PWA restore path.
+    if (historical) m.isHistorical = true;
     // NIP-09: drop messages already deleted (or matched by a parked
     // out-of-order deletion from the same author) — messages.js:437-443.
     if (suppressDeletedMessage(m)) return;
