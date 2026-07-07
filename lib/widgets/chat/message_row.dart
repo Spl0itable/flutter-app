@@ -217,12 +217,18 @@ class MessageRow extends ConsumerStatefulWidget {
     this.onReactionPicker,
     this.bubbleAnchorKey,
     this.swipeAvatarDx,
+    this.scrollKey,
   });
 
   final Message message;
   final Settings settings;
   final List<MessageReaction> reactions;
   final bool mentioned;
+
+  /// Conversation `storageKey` of the list this row lives in — forwarded to the
+  /// message body's tappable blockquote so a columns column jumps its OWN list.
+  /// Null in the single-chat view (the quote falls back to the active view).
+  final String? scrollKey;
 
   /// This row renders inside a columns-deck `.cv-list` (`body.columns-mode`,
   /// styles-columns.css). IRC rows stack vertically (`.cv-list .message
@@ -2584,6 +2590,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       // when searching for the quoted source (PWA `hostKey`); without it the
       // jump-to-quoted-source / flash resolves against the host itself.
       hostMessageId: message.id,
+      // Which list to jump within (a columns column passes its storageKey).
+      scrollKey: widget.scrollKey,
     );
     final gradient = deco?.gradient;
     if (gradient != null && gradient.length >= 2) {
@@ -2605,6 +2613,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           fontSize: fontSize,
           blurImages: blur,
           hostMessageId: message.id,
+          scrollKey: widget.scrollKey,
         ),
       );
       final glow = deco?.gradientGlow;
@@ -4128,10 +4137,16 @@ class MessageGroup extends ConsumerStatefulWidget {
     required this.settings,
     this.columnsMode = false,
     this.onReactionPicker,
+    this.scrollKey,
   });
 
   final List<MessageGroupEntry> entries;
   final Settings settings;
+
+  /// Conversation `storageKey` of the list this group renders in — forwarded to
+  /// every [MessageRow] so a tapped blockquote jumps its OWN list (a columns
+  /// column sets it; the single-chat view leaves it null → active view).
+  final String? scrollKey;
 
   /// This group renders inside a columns-deck `.cv-list` (`body.columns-mode`).
   /// Forwarded to every [MessageRow] (IRC rows stack vertically, hover buttons
@@ -4185,6 +4200,7 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
               reactions: entries[i].reactions,
               mentioned: entries[i].mentioned,
               columnsMode: widget.columnsMode,
+              scrollKey: widget.scrollKey,
               grouped: useBubbles && i > 0,
               showName: !(useBubbles && i > 0),
               showAvatar: false,
