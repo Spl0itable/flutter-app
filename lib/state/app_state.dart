@@ -1848,20 +1848,42 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // bubble — the "already-sent message re-injected when I send a new one"
     // duplicate. Preferring the live placeholder leaves the failed row intact for
     // its own echo to reconcile, so neither duplicates.
+    //
+    // Among LIVE placeholders, bind to the one CLOSEST IN TIME to this echo, not
+    // simply the first. Channel echoes carry no shared id, so several outstanding
+    // same-content sends can only be told apart by their send time. Relays don't
+    // guarantee echo ordering, so a LATER send's echo can arrive first; the old
+    // "first live" match then bound it to the EARLIER placeholder and overwrote
+    // that already-placed message's created_at/timestamp with the later send's —
+    // re-stamping an already-sent bubble to "now" and yanking it out of its slot
+    // in the feed (the phantom-resend the user reported). The two echoes also
+    // cross-wired ids, so the trailing replaceOptimistic dropped a row and one
+    // bubble vanished on the next boot. Matching by nearest send time (sub-second
+    // `ms` when both have it, else `created_at` seconds) pairs each echo with the
+    // placeholder for THAT send regardless of arrival order.
     var matchIdx = -1;
+    int? bestLiveDist;
+    var failedIdx = -1;
     for (var i = 0; i < list.length; i++) {
       final ex = list[i];
-      if ((ex.optimistic || ex.id.startsWith('_optim_')) &&
-          ex.pubkey == m.pubkey &&
-          ex.content == m.content &&
-          (ex.createdAt - m.createdAt).abs() < 60) {
-        if (ex.deliveryStatus != DeliveryStatus.failed) {
-          matchIdx = i; // a live placeholder — the just-sent message; take it.
-          break;
-        }
-        if (matchIdx < 0) matchIdx = i; // remember the first failed as fallback.
+      if (!(ex.optimistic || ex.id.startsWith('_optim_'))) continue;
+      if (ex.pubkey != m.pubkey) continue;
+      if (ex.content != m.content) continue;
+      if ((ex.createdAt - m.createdAt).abs() >= 60) continue;
+      if (ex.deliveryStatus == DeliveryStatus.failed) {
+        if (failedIdx < 0) failedIdx = i; // first failed as a fallback.
+        continue;
+      }
+      // Live placeholder — keep the nearest one in send time to this echo.
+      final dist = (ex.ms > 0 && m.ms > 0)
+          ? (ex.ms - m.ms).abs()
+          : (ex.createdAt - m.createdAt).abs() * 1000;
+      if (matchIdx < 0 || dist < bestLiveDist!) {
+        matchIdx = i;
+        bestLiveDist = dist;
       }
     }
+    if (matchIdx < 0) matchIdx = failedIdx; // no live match; take a failed one.
     if (matchIdx >= 0) {
       final ex = list[matchIdx];
       _unindexMessage(ex);
