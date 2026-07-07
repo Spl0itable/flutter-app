@@ -6919,6 +6919,16 @@ class NostrController {
         .read(nymbotServiceProvider)
         .setApiSocketRequest(api.botSocketRequest);
     _storageSync = sync;
+    // Wire the relay-side NIP-59 `nym-sync` publisher so every synced category
+    // (settings sections, notifications, read-state, group conversations/keys/
+    // history) is BOTH written to D1 AND pushed live as a gift-wrapped event to
+    // our other devices — the PWA's dual sink (`_publishEncryptedSettings` calls
+    // `_saveSettingsBlobToD1` AND `_publishWrappedNostrEvent`). Without this the
+    // wrap half was dead: D1 held the truth but online devices only saw changes
+    // on their next boot/reconnect `settings-get`, never a live push.
+    sync.setSyncWrapPublisher((payload, dTag) async {
+      await _service?.publishNymSyncWrap(payload: payload, dTag: dTag);
+    });
     _zapArchive?.dispose();
     _zapArchive = ZapArchive(sync);
 
