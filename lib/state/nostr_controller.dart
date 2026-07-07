@@ -7281,7 +7281,9 @@ class NostrController {
         for (final raw in events) {
           try {
             final ev = NostrEvent.fromJson(raw);
-            appState.ingestEvent(ev);
+            // Backlog restore: mark historical by provenance so an archived event
+            // that reads as ≈now isn't flood-dimmed or snap-in animated.
+            appState.ingestEvent(ev, historical: true);
             // Observe web-of-trust for restored channel messages exactly like the
             // live path (`_onEvent`) does — WITHOUT this, the spam gate hides
             // backfilled history from not-yet-trusted senders and the channel

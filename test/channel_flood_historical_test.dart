@@ -4,6 +4,7 @@ import 'package:nym_bar/features/messages/flood_tracker.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/nostr/event_mapper.dart';
+import 'package:nym_bar/state/app_state.dart';
 
 NostrEvent _chan(String d, String id, String content,
         {required String pubkey, required int createdAtSec, int? ms}) =>
@@ -58,6 +59,35 @@ void main() {
       // Display/flood time comes from the ms tag, so the row reads "3m ago",
       // not "now".
       expect(m.timestamp, realSendMs);
+    });
+  });
+
+  group('backfill provenance overrides the timestamp-age guess', () {
+    AppStateNotifier fresh() {
+      final n = AppStateNotifier()..goLive(self, 'me#0001');
+      n.switchView(const ChatView.channel('room'));
+      return n;
+    }
+
+    test('a ≈now event ingested as backfill is historical (not dimmable)', () {
+      final n = fresh();
+      // The archive re-served this ephemeral event with created_at/ms ≈ now, so
+      // the age heuristic alone would call it live — but provenance says backlog.
+      n.ingestEvent(
+        _chan('room', 'id1', 'hello there',
+            pubkey: sender, createdAtSec: nowSec()),
+        historical: true,
+      );
+      expect(n.state.messages['#room']!.single.isHistorical, isTrue);
+    });
+
+    test('the SAME ≈now event ingested LIVE is not historical', () {
+      final n = fresh();
+      n.ingestEvent(
+        _chan('room', 'id2', 'hello there',
+            pubkey: sender, createdAtSec: nowSec()),
+      );
+      expect(n.state.messages['#room']!.single.isHistorical, isFalse);
     });
   });
 
