@@ -5722,9 +5722,14 @@ class NostrController {
     final service = _service;
     if (service == null || !service.canSign) return false;
 
-    // Private reactions (PM/group) are gift-wrapped to the conversation.
+    // Private reactions (PM/group) are gift-wrapped to the conversation. The
+    // PUBLISHED `e` tag must reference the SHARED `nymMessageId` — the local
+    // gift-wrap id is meaningless to the recipient's client (and the PWA), which
+    // correlate the reaction to their own copy by the shared id. The optimistic
+    // local update above stays keyed on the wrap `messageId`.
     if (kind == '1059' || kind == '14') {
-      return _sendPrivateReaction(messageId, emoji, target, remove);
+      final shareId = appState.messageById(messageId)?.nymMessageId ?? messageId;
+      return _sendPrivateReaction(shareId, emoji, target, remove);
     }
 
     // Public channel reaction. Resolve the channel context from the active view.

@@ -1285,6 +1285,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _reactors.clear();
     _reactionLastAction.clear();
     _channelMessageReaders.clear();
+    _pendingPmReceipts.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     _pendingDeletions.clear();
@@ -1330,6 +1331,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _reactors.clear();
     _reactionLastAction.clear();
     _channelMessageReaders.clear();
+    _pendingPmReceipts.clear();
     _processedPollVoteIds.clear();
     _pendingPollVotes.clear();
     _pendingDeletions.clear();
@@ -1477,6 +1479,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// lands; [applyChannelReader] copies the live set onto `message.readers`
   /// (the avatar-row consumer) whenever either side updates.
   final Map<String, Map<String, String>> _channelMessageReaders = {};
+
+  /// Early PM/group delivery-read receipts (kind 69420) that arrived BEFORE the
+  /// own outgoing message they ack was indexed — the async cache/D1 restore
+  /// race. Keyed by lowercased `nymMessageId` → the highest-ranked
+  /// [DeliveryStatus] seen. Replayed the instant the own message lands
+  /// ([_indexMessage]), the PM/group analogue of [_channelMessageReaders].
+  /// Receipts are LIVE-ONLY (never archived), so without this a receipt that
+  /// wins the race against the restore is lost forever and the ✓✓ never advances
+  /// — the "receipts don't work, especially when backfilled" report.
+  final Map<String, DeliveryStatus> _pendingPmReceipts = {};
 
   /// Dedup set for poll-vote events (`processedPollVoteIds`, cap 3000).
   final Set<String> _processedPollVoteIds = {};
@@ -1667,8 +1679,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (nid != null && nid.isNotEmpty) {
       _msgByAnyId[nid] = m;
       _convKeyByAnyId[nid] = convKey;
+      // Replay a PM/group delivery-read receipt that arrived before this OWN
+      // message was indexed (the restore race — see [_pendingPmReceipts]). The
+      // caller emits after the ingest/restore, so no emit is needed here.
+      if (m.isOwn && _pendingPmReceipts.isNotEmpty) {
+        final pending = _pendingPmReceipts.remove(nid.toLowerCase());
+        if (pending != null &&
+            PmLogic.statusOrder(pending) >
+                PmLogic.statusOrder(m.deliveryStatus)) {
+          m.deliveryStatus = pending;
+        }
+      }
     }
   }
+
+  /// The stored [Message] for any id it is indexed under — its real event/
+  /// gift-wrap id OR its shared `nymMessageId` — or null. Public accessor over
+  /// the id-index (used e.g. to resolve a PM/group reaction's shared target id).
+  Message? messageById(String id) => id.isEmpty ? null : _msgByAnyId[id];
 
   /// Drops [m]'s index entries, but only those still pointing at [m] (guards
   /// against clobbering a re-used key).
@@ -2065,8 +2093,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // another Nostr app to a non-Nymchat note that merely shares an id space.
     if (kTag == null && !isKnownMessageId(r.messageId)) return;
 
+    // Canonicalize the target to the stored [Message.id]. A PM/group reaction's
+    // `e` tag references the shared `nymMessageId` (or rumor id), but the row
+    // renders reactions keyed by the gift-wrap `Message.id`; store the tally
+    // under that id (via the `_msgByAnyId` index which maps both) so it actually
+    // attaches (the PWA's `_migrateReactionKey` intent). Channels are unaffected
+    // — there the `e` tag already equals `Message.id`.
+    final canonicalId = _msgByAnyId[r.messageId]?.id ?? r.messageId;
+
     // Latest-by-timestamp wins on out-of-order delivery (reactions.js).
-    final actionKey = '${r.messageId}:${r.emoji}:${r.reactor}';
+    final actionKey = '$canonicalId:${r.emoji}:${r.reactor}';
     final last = _reactionLastAction[actionKey];
     if (last != null && last > r.ts) return;
     _reactionLastAction[actionKey] = r.ts;
@@ -2078,7 +2114,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
 
     applyReaction(
-      messageId: r.messageId,
+      messageId: canonicalId,
       emoji: r.emoji,
       reactor: r.reactor,
       removed: r.removed,
@@ -2953,7 +2989,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Delivery/read receipts reference our own message by its nymMessageId — an
     // O(1) index lookup replaces the former full-store scan.
     final m = _msgByAnyId[receipt.messageId] ?? _msgByAnyId[target];
-    if (m == null || !m.isOwn) return;
+    if (m == null) {
+      // The own message this acks isn't indexed yet — a live receipt that beat
+      // the async cache/D1 restore. Buffer it (keeping the highest-ranked
+      // status) and replay when the message lands ([_indexMessage]); receipts
+      // are never archived, so dropping it here would lose it forever.
+      final cur = _pendingPmReceipts[target];
+      if (cur == null || PmLogic.statusOrder(next) > PmLogic.statusOrder(cur)) {
+        _pendingPmReceipts[target] = next;
+      }
+      return;
+    }
+    if (!m.isOwn) return;
     final nid = m.nymMessageId;
     if (nid == null || nid.toLowerCase() != target) return;
     if (PmLogic.statusOrder(next) > PmLogic.statusOrder(m.deliveryStatus)) {
