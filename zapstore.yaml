@@ -14,16 +14,14 @@
 release_source: build/app/outputs/flutter-apk/app-release.apk
 
 # Source repository (shown on the listing).
-repository: https://github.com/Spl0itable/flutter-app
+repository: https://github.com/Spl0itable/NYM
 
 # --- App metadata ---
 name: Nymchat
-summary: Secure, decentralized Nostr chat — a native shell around the Nymchat PWA.
+summary: Secure, decentralized Nostr chat — private messaging, calls, and zaps.
 description: |
-  Experience the future of decentralized communication with Nymchat, a sleek
-  and secure app that wraps around our powerful PWA, delivering instant
-  notifications and seamless external browsing for an uncompromised user
-  experience.
+  Experience the future of decentralized communication with Nymchat, a sleek,
+  secure, native Nostr client for private messaging, calls, and Lightning zaps.
 
   - End-to-end Nostr messaging with your own keys
   - Voice, video and screen-share calls over WebRTC
