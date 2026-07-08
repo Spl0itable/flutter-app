@@ -3056,7 +3056,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
     required String pubkey,
     required bool typing,
     int? expiresAtMs,
+    String? nym,
   }) {
+    // Record the sender's display nym from the typing event's `['n']` tag so the
+    // typing row resolves a name instead of falling back to "Someone" — the PWA
+    // stores the nym straight off the event (nostr-core.js
+    // `handleChannelTypingEvent`: `convTypers.set(pubkey, { nym: displayNym })`).
+    // We only SEED an unknown pubkey (mirroring the group memberProfiles seeding
+    // pattern); a live profile / message-derived nym still supersedes it.
+    if (typing &&
+        nym != null &&
+        nym.isNotEmpty &&
+        !state.users.containsKey(pubkey)) {
+      state.users[pubkey] =
+          User(pubkey: pubkey, nym: getNymFromPubkey(nym, pubkey));
+    }
     final k = '$storageKey|$pubkey';
     if (typing) {
       state.typing[k] =
