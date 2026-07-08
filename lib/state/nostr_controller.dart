@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/crypto/bech32_codec.dart' as bech32;
+import '../core/crypto/bitchat.dart' as bitchat;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/pow.dart' as pow;
 import '../core/crypto/schnorr.dart' as schnorr;
@@ -1524,19 +1525,26 @@ class NostrController {
       // our visibility proxy (no scroll-position tracking on native).
       final self = _identity?.pubkey ?? '';
       final geohash = event.tagValue('g');
+      final isGeo = geohash != null && geohash.isNotEmpty;
+      // Raw channel-wire key (no `#`) for the receipt's `g`/`d` tag: the geohash
+      // for a geo channel, else the named channel's `d` value.
+      final wireKey = isGeo ? geohash : event.tagValue('d');
+      // `#`-prefixed storage key for the seen check / unread keying.
       final key = EventMapper.channelKeyOf(event);
       // In columns view the "visible" proxy is the deck's seen gate (focused +
       // at-bottom + app visible — the PWA sends the receipt only when
       // `_cvMarkColumnRead` returned true, messages.js:546-555); in single
-      // view it degrades to "is the active view".
+      // view it degrades to "is the active view". Works for geohash (`g`) and
+      // named (`d`) channels alike.
       if (event.pubkey != self &&
-          geohash != null &&
-          geohash.isNotEmpty &&
+          key != null &&
+          wireKey != null &&
+          wireKey.isNotEmpty &&
           _isChannelMessageId(event.id) &&
           !_isHistorical(event.createdAt) &&
-          key != null &&
           appState.isConversationSeen(key)) {
-        unawaited(sendChannelReadReceipt(event.id, event.pubkey, geohash));
+        unawaited(sendChannelReadReceipt(event.id, event.pubkey, wireKey,
+            isGeohash: isGeo));
       }
     }
   }
@@ -2322,6 +2330,18 @@ class NostrController {
     final rumor = u.rumor;
     final kind = u.rumorKind;
     final self = _service?.selfPubkey ?? '';
+
+    // Track the peer's PM transport so replies go out in a format they can
+    // decrypt (PWA `handleGiftWrapDM`: bitchatUsers / nymUsers). A bitchat-
+    // encrypted wrap → bitchat; a NIP-17 wrap carrying an `['x', …]` id → nym.
+    final sender = rumor['pubkey'] as String?;
+    if (sender != null && sender.isNotEmpty && sender != self) {
+      if (u.isBitchat) {
+        _bitchatUsers.add(sender);
+      } else if (_tags(rumor).any((t) => t.length > 1 && t[0] == 'x')) {
+        _nymUsers.add(sender);
+      }
+    }
 
     switch (kind) {
       case EventKind.dmRumor: // 14 — PM or group message
@@ -3684,6 +3704,71 @@ class NostrController {
   final Map<String, _PendingDm> _pendingDms = <String, _PendingDm>{};
   Timer? _dmRetryTimer;
 
+  /// Peers we've received a bitchat-format PM from (PWA `bitchatUsers`) — we
+  /// send them a parallel `bitchat1:` wrap so the bitchat app can decrypt us.
+  final Set<String> _bitchatUsers = <String>{};
+
+  /// Peers we've received a Nymchat-format PM/receipt from (PWA `nymUsers`) —
+  /// they get a NIP-17 wrap. An UNKNOWN peer (in neither set) gets BOTH.
+  final Set<String> _nymUsers = <String>{};
+
+  /// Publishes a 1:1 PM in the transport(s) the peer understands (PWA
+  /// `sendNIP17PM` dual-send, pms.js:326-372). A known-bitchat peer gets a
+  /// `bitchat1:` wrap, a known-nym peer a NIP-17 wrap, and an unknown peer BOTH.
+  /// The self-copy is always NIP-17 (handled inside [NostrService.publishPM]).
+  /// Used by the initial send and every auto-retry so the format decision stays
+  /// consistent as [_bitchatUsers] / [_nymUsers] learn the peer over time.
+  Future<void> _publishDualPm({
+    required UnsignedEvent rumor,
+    required String recipientPubkey,
+    void Function(NostrEvent wrap)? onWrap,
+  }) async {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+
+    final isKnownBitchat = _bitchatUsers.contains(recipientPubkey);
+    final isKnownNym = _nymUsers.contains(recipientPubkey);
+    final isUnknown = !isKnownBitchat && !isKnownNym;
+
+    UnsignedEvent? bitchatRumor;
+    if (isKnownBitchat || isUnknown) {
+      // The bitchat rumor's content is a `bitchat1:` packet; it carries the SAME
+      // `nymMessageId` (`x` tag) as the nym rumor so a peer's reaction/receipt
+      // matches across both formats (pms.js:339-346).
+      String? nymMessageId;
+      for (final t in rumor.tags) {
+        if (t.length > 1 && t[0] == 'x') {
+          nymMessageId = t[1];
+          break;
+        }
+      }
+      final encoded = bitchat.encodeBitchatMessage(
+        rumor.content,
+        identity.pubkey,
+        recipientPubkey: recipientPubkey,
+      );
+      bitchatRumor = UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: rumor.createdAt,
+        kind: EventKind.dmRumor,
+        tags: [
+          if (nymMessageId != null) ['x', nymMessageId],
+        ],
+        content: encoded.content,
+      );
+    }
+
+    await service.publishPM(
+      rumor: rumor,
+      recipientPubkey: recipientPubkey,
+      settings: _msgSettings,
+      onWrap: onWrap,
+      bitchatRumor: bitchatRumor,
+      sendNymWrap: isKnownNym || isUnknown,
+    );
+  }
+
   /// Enqueues a freshly-sent PM for receipt-driven auto-retry and starts the
   /// retry checker if idle (pms.js:116-130 `trackPendingDM`).
   void _trackPendingDm({
@@ -3745,10 +3830,9 @@ class NostrController {
       pending.attempts++;
       pending.lastAttemptMs = now;
       if (service != null) {
-        unawaited(service.publishPM(
+        unawaited(_publishDualPm(
           rumor: pending.rumor,
           recipientPubkey: pending.recipientPubkey,
-          settings: _msgSettings,
         ));
       }
     });
@@ -3776,10 +3860,9 @@ class NostrController {
         return;
       }
       pending.lastAttemptMs = now;
-      unawaited(service.publishPM(
+      unawaited(_publishDualPm(
         rumor: pending.rumor,
         recipientPubkey: pending.recipientPubkey,
-        settings: _msgSettings,
       ));
     });
     for (final id in done) {
@@ -3897,10 +3980,9 @@ class NostrController {
               content: base.content,
             );
       try {
-        await service.publishPM(
+        await _publishDualPm(
           rumor: rumor,
           recipientPubkey: view.id,
-          settings: _msgSettings,
           onWrap: _archiveSentWrap,
         );
         // Queue for automatic re-send until a delivery receipt acks it
@@ -5439,13 +5521,17 @@ class NostrController {
     _typingThrottle[key] = now;
 
     if (view.kind == ViewKind.channel) {
-      // Public channel typing (kind 24420) — only for geohash channels, exactly
-      // like the PWA `handleChannelTypingSignal` (gated on `currentGeohash`).
+      // Public channel typing (kind 24420). The channel wire tag is `g` for a
+      // geohash channel and `d` for a named channel (e.g. #nymchat); the PWA
+      // gates its send on `currentGeohash`, but the receive + subscribe sides
+      // already handle both tags, so we send for both to make named-channel
+      // typing work Flutter↔Flutter.
       final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
-      if (entry.isEmpty || !entry.first.isGeohash) return;
+      if (entry.isEmpty) return;
       await service.publishChannelTyping(
         status: 'start',
-        geohash: entry.first.geohash,
+        channelKey: entry.first.key,
+        isGeohash: entry.first.isGeohash,
         nym: identity.nym,
       );
       return;
@@ -5551,13 +5637,15 @@ class NostrController {
           _ref.read(settingsProvider).readReceiptsScope, 'channel');
 
   /// Publishes a public channel read receipt (kind 24421) for [messageId] by
-  /// [authorPubkey] in [geohash], once per message. Scope-gated to the channel
-  /// context and geohash channels only (PWA `sendChannelReadReceipt`): never
-  /// receipts our own message, and dedupes via [_sentChannelReadReceipts].
+  /// [authorPubkey] in [channelKey], once per message. Scope-gated to the
+  /// channel context (PWA `sendChannelReadReceipt`): never receipts our own
+  /// message, and dedupes via [_sentChannelReadReceipts]. [isGeohash] selects
+  /// the `g` (geohash) vs `d` (named channel) wire tag.
   Future<void> sendChannelReadReceipt(
-      String messageId, String authorPubkey, String geohash) async {
+      String messageId, String authorPubkey, String channelKey,
+      {bool isGeohash = true}) async {
     if (!_channelReceiptAllowed()) return;
-    if (messageId.isEmpty || authorPubkey.isEmpty || geohash.isEmpty) return;
+    if (messageId.isEmpty || authorPubkey.isEmpty || channelKey.isEmpty) return;
     final identity = _identity;
     final service = _service;
     if (identity == null || service == null) return;
@@ -5574,7 +5662,8 @@ class NostrController {
     await service.publishChannelReceipt(
       messageId: messageId,
       authorPubkey: authorPubkey,
-      geohash: geohash,
+      channelKey: channelKey,
+      isGeohash: isGeohash,
       nym: identity.nym,
     );
   }
@@ -5592,8 +5681,9 @@ class NostrController {
     final view = state.view;
     if (view.kind != ViewKind.channel) return;
     final entry = state.channels.where((c) => c.key == view.id.toLowerCase());
-    if (entry.isEmpty || !entry.first.isGeohash) return;
-    final geohash = entry.first.geohash;
+    if (entry.isEmpty) return;
+    final channelKey = entry.first.key;
+    final isGeohash = entry.first.isGeohash;
     final messages = state.messages[view.storageKey];
     if (messages == null || messages.isEmpty) return;
     // Mirror the PWA's tail window (`messages.slice(-channelPageSize)`); 100 is
@@ -5604,8 +5694,13 @@ class NostrController {
     for (final m in tail) {
       if (m.isOwn || m.isHistorical) continue;
       if (!_isChannelMessageId(m.id)) continue;
-      final gh = (m.geohash ?? '').isNotEmpty ? m.geohash! : geohash;
-      unawaited(sendChannelReadReceipt(m.id, m.pubkey, gh));
+      // Geohash channels can carry a per-message geohash; named channels always
+      // use the channel key as the `d`-tag value.
+      final key = isGeohash
+          ? ((m.geohash ?? '').isNotEmpty ? m.geohash! : channelKey)
+          : channelKey;
+      unawaited(
+          sendChannelReadReceipt(m.id, m.pubkey, key, isGeohash: isGeohash));
     }
   }
 
@@ -6498,8 +6593,9 @@ class NostrController {
     if (state.view.kind != ViewKind.channel) return;
     final entry =
         state.channels.where((c) => c.key == state.view.id.toLowerCase());
-    if (entry.isEmpty || !entry.first.isGeohash) return;
-    _service?.subscribeChannelTyping(entry.first.geohash);
+    if (entry.isEmpty) return;
+    _service?.subscribeChannelTyping(entry.first.key,
+        isGeohash: entry.first.isGeohash);
     // Receipt the messages that piled up here while we were away (PWA
     // `openChannel` → `markVisibleChannelMessagesRead`).
     markVisibleChannelMessagesRead();
