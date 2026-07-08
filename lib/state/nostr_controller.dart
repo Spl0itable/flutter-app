@@ -5641,11 +5641,14 @@ class NostrController {
     // The typing store keys on the active view's storageKey; a geohash channel
     // view is `ChatView.channel(geohash)` → storageKey `'#<geohash>'`
     // (app_state.dart:94). `setTyping` removes the entry on `typing: false`,
-    // mirroring the PWA's `status === 'stop'` branch.
+    // mirroring the PWA's `status === 'stop'` branch. The `['n', nym]` tag lets
+    // the typing row show the real name for a sender we've never seen a message
+    // from (else it falls back to "Someone").
     appState.setTyping(
       storageKey: '#${geohash.toLowerCase()}',
       pubkey: event.pubkey,
       typing: status == 'start',
+      nym: event.tagValue('n'),
     );
   }
 
