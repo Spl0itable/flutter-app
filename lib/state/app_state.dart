@@ -2982,13 +2982,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Applies a parsed delivery/read [receipt] to our own outgoing message that
-  /// shares its `nymMessageId`. Only advances delivery status, never regresses.
+  /// shares its `nymMessageId`. For a 1:1 PM this advances the delivery status
+  /// (checkmark), never regressing; for a GROUP message a 'read' receipt instead
+  /// records the reader's avatar (groups show a reader row, not ticks — PWA
+  /// `pms.js:948-958`).
   void applyReceipt(ReceiptInfo receipt) {
     final target = receipt.messageId.toLowerCase();
     final next = PmLogic.deliveryFromReceipt(receipt.receiptType);
     // Delivery/read receipts reference our own message by its nymMessageId — an
     // O(1) index lookup replaces the former full-store scan.
     final m = _msgByAnyId[receipt.messageId] ?? _msgByAnyId[target];
+
+    // GROUP read receipt → reader avatar. Own group messages are indexed on send
+    // (and hydrated on boot), so a 'read' receipt for one always resolves here —
+    // no early-buffer needed (a read receipt can't precede its own message).
+    final readerPk = receipt.readerPubkey;
+    if (m != null &&
+        m.isOwn &&
+        m.isGroup &&
+        receipt.receiptType == 'read' &&
+        readerPk != null &&
+        readerPk.isNotEmpty) {
+      final nid = m.nymMessageId;
+      if (nid != null && nid.toLowerCase() == target) {
+        final nym = state.users[readerPk]?.nym ?? getNymFromPubkey('nym', readerPk);
+        applyChannelReader(messageId: nid, readerPubkey: readerPk, readerNym: nym);
+      }
+      return;
+    }
+
     if (m == null) {
       // The own message this acks isn't indexed yet — a live receipt that beat
       // the async cache/D1 restore. Buffer it (keeping the highest-ranked
@@ -3039,9 +3061,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
   bool _mirrorChannelReaders(String messageId) {
     final readers = _channelMessageReaders[messageId];
     if (readers == null) return false;
-    // Channel read receipts reference our own message by its event id — O(1).
     final m = _msgByAnyId[messageId];
-    if (m == null || !m.isOwn || m.id != messageId) return false;
+    if (m == null || !m.isOwn) return false;
+    // A public-channel receipt references the own message by its EVENT id; a
+    // group receipt references it by its nymMessageId (the wrap id differs).
+    // Accept either so the same reader store serves channels AND groups.
+    if (m.id != messageId && m.nymMessageId != messageId) return false;
     m.readers
       ..clear()
       ..addAll(readers);
@@ -4235,6 +4260,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
     );
     list.add(m);
     m.optimistic = true;
+    // Index the own optimistic echo so a live delivery/read receipt — which
+    // references it by `nymMessageId` and resolves through the O(1) id index in
+    // [applyReceipt] — can actually find it. Receipts are ephemeral (never
+    // re-delivered), so an unindexed echo leaves the PM checkmark stuck on ✓
+    // (and a group message's reader avatars empty) forever. Also replays any
+    // receipt that beat the echo (via [_indexMessage]'s pending-receipt hook).
+    // Channels are excluded: their own echo reconciles + indexes by event id via
+    // [replaceOptimistic], not by nymMessageId.
+    if (view.kind != ViewKind.channel) _indexMessage(view.storageKey, m);
     if (nymMessageId != null) _seenNymMessageIds.add(nymMessageId);
 
     // Own-message local-hide notices (messages.js:637-650). The message is still

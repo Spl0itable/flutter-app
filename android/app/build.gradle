@@ -42,7 +42,7 @@ android {
         applicationId "com.nym.bar"
         minSdkVersion = flutter.minSdkVersion
         targetSdk = 36
-        versionCode = 147
+        versionCode = 149
         versionName = flutter.versionName
         
         // Support all ABIs - AGP 8.9.1 automatically handles 16 KB alignment

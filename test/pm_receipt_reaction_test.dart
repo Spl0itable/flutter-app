@@ -54,6 +54,38 @@ void main() {
     expect(msg.deliveryStatus, DeliveryStatus.delivered);
   });
 
+  test('an own PM echo is indexed on send so a live receipt advances its tick',
+      () {
+    final n = AppStateNotifier()..goLive('self_pk', 'me#0001');
+    n.switchView(const ChatView.pm('peer_pk'));
+    // The optimistic echo must be indexed by its nymMessageId immediately —
+    // receipts are ephemeral, so an unindexed echo would strand the checkmark.
+    final echo = n.sendLocal('hello', nymMessageId: 'nymP1');
+    expect(echo, isNotNull);
+    expect(echo!.deliveryStatus, DeliveryStatus.sent);
+    n.applyReceipt(ReceiptInfo(messageId: 'nymP1', receiptType: 'delivered'));
+    expect(echo.deliveryStatus, DeliveryStatus.delivered);
+    n.applyReceipt(ReceiptInfo(messageId: 'nymP1', receiptType: 'read'));
+    expect(echo.deliveryStatus, DeliveryStatus.read);
+  });
+
+  test('a group read receipt records the reader avatar (not a checkmark)', () {
+    final n = AppStateNotifier()..goLive('self_pk', 'me#0001');
+    _restoreOwn(n,
+        convKey: 'group-g3', id: 'wrap3', nymMessageId: 'nym3', groupId: 'g3');
+    // A peer reads our group message → a 'read' receipt carrying their pubkey.
+    n.applyReceipt(ReceiptInfo(
+      messageId: 'nym3',
+      receiptType: 'read',
+      readerPubkey: 'reader_pk',
+    ));
+    final msg =
+        n.state.messages['group-g3']!.firstWhere((m) => m.id == 'wrap3');
+    // Groups show a reader avatar, not a delivery tick.
+    expect(msg.readers.containsKey('reader_pk'), isTrue);
+    expect(msg.deliveryStatus, isNot(DeliveryStatus.read));
+  });
+
   test('a reaction targeting the shared nymMessageId attaches to the row', () {
     final n = AppStateNotifier()..goLive('self_pk', 'me#0001');
     // A peer's group message, stored under its wrap id, indexed by nym2.
