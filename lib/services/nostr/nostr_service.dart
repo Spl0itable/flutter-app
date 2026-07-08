@@ -994,25 +994,36 @@ class NostrService {
   /// (docs/specs/03 §1.4) Returns the [Subscription].
   Subscription? _channelTypingSub;
   String? _channelTypingKey;
-  Subscription subscribeChannelTyping(String geohash, {bool isGeohash = true}) {
-    if (_channelTypingKey == geohash && _channelTypingSub != null) {
-      return _channelTypingSub!;
+  Subscription subscribeChannelTyping(String channelKey, {bool isGeohash = true}) {
+    // Dedup identity is (tag-kind, key) — a named channel whose name is a valid
+    // geohash string must NOT reuse the geohash sub, and vice versa. Only reuse
+    // the cached sub when it is STILL OPEN: after a proxy pool-swap or any close
+    // the old `Subscription` is dead, so returning it would silently stop the
+    // typing/receipt feed until the channel key changes.
+    final id = '${isGeohash ? 'g' : 'd'}:$channelKey';
+    final cached = _channelTypingSub;
+    if (_channelTypingKey == id && cached != null && !cached.isClosed) {
+      return cached;
     }
     _channelTypingSub?.close();
+    // 1h window: ephemeral kinds aren't stored, but a live event whose
+    // created_at is slightly in the past (sender clock skew) must not be dropped
+    // by a relay applying `since` to the live stream — so keep a safe margin
+    // rather than the PWA's tighter `since: now` (relays.js:1430).
     final since = DateTime.now().millisecondsSinceEpoch ~/ 1000 - 3600;
     final sub = pool.subscribe([
       NostrFilter(
         kinds: [EventKind.channelTyping, EventKind.channelReceipt],
         since: since,
         tags: {
-          if (isGeohash) 'g': [geohash] else 'd': [geohash],
+          if (isGeohash) 'g': [channelKey] else 'd': [channelKey],
         },
       ),
     ]);
     final s = sub.events.listen((e) => _handlers?.onEvent?.call(e));
     sub.eose.then((_) => null);
     _channelTypingSub = sub;
-    _channelTypingKey = geohash;
+    _channelTypingKey = id;
     // Route typing events through onEvent; cancellation handled on close.
     s.onError((_) {});
     return sub;

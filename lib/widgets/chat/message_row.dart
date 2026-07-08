@@ -2103,12 +2103,17 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       (message.isGroup || _isChannelMessage) &&
       message.readers.isNotEmpty;
 
-  /// A channel message: not a PM, not a group, with a geohash set and a
-  /// canonical 64-hex EVENT id (the PWA gate `message.geohash && message.id &&
-  /// /^[0-9a-f]{64}$/i.test(message.id)`, messages.js:826-828).
+  /// A public channel message: not a PM, not a group, with a canonical 64-hex
+  /// EVENT id. The PWA gate additionally requires `message.geohash`
+  /// (messages.js:826-828), but the native build also sends/receives read
+  /// receipts for NAMED channels (kind 23333, `d` tag), so accept a named
+  /// channel (`channel` set) as well — else a named-channel own message could
+  /// never show reader avatars even though its receipts arrive and store.
   bool get _isChannelMessage {
     if (message.isPM || message.isGroup) return false;
-    if ((message.geohash ?? '').isEmpty) return false;
+    if ((message.geohash ?? '').isEmpty && (message.channel ?? '').isEmpty) {
+      return false;
+    }
     return RegExp(r'^[0-9a-f]{64}$', caseSensitive: false)
         .hasMatch(message.id);
   }

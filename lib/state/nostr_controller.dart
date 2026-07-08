@@ -495,6 +495,13 @@ class NostrController {
       // ephemeral keys never arrive live. No-op when no keys are known yet.
       _refreshEphemeralSubscriptions();
 
+      // Subscribe the INITIAL channel's typing/read-receipt feed (kinds
+      // 24420/24421). The boot view is a channel (default #nymchat / restored
+      // last channel) reached WITHOUT going through [switchChannel], so without
+      // this its typing indicators + reader avatars would never arrive until the
+      // user manually switches channels once.
+      _subscribeActiveChannelTyping();
+
       // Broadcast presence on connect. The PWA's presence is purely
       // event-driven (`recordOwnActivity` fires on send/react only — there is
       // NO `setInterval` heartbeat), so a connected-but-idle user decays to
@@ -2715,6 +2722,12 @@ class NostrController {
           recipientPubkey: senderPubkey,
           encryptToPubkey: ek?.encryptionPubkeyFor(senderPubkey, self),
         );
+        // When the group is the active view, also send a READ receipt so the
+        // sender sees our reader avatar (PWA groups.js:1321). Group receipts show
+        // as stacked reader avatars, not a checkmark. Scope-gated + deduped.
+        if (_isActiveView(GroupLogic.groupStorageKey(groupId))) {
+          unawaited(sendGroupReadReceipt(m.nymMessageId!, senderPubkey, groupId));
+        }
       }
       return;
     }
@@ -5709,6 +5722,68 @@ class NostrController {
   static final RegExp _channelMessageIdRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
   bool _isChannelMessageId(String id) => _channelMessageIdRe.hasMatch(id);
 
+  // --- Group read receipts (gift-wrapped kind-69420, shown as reader avatars) -
+  // Mirrors the PWA's group receipt path (groups.js `sendNymReceipt(..,'read',
+  // ..,'group',groupId)` + `_markVisibleGroupMessagesRead`). A group renders
+  // stacked reader avatars (like channels), NOT a delivery checkmark, so we only
+  // send/track the 'read' receipt; encryption targets the sender's ephemeral key.
+
+  /// nymMessageIds we've already published a group 'read' receipt for.
+  final Set<String> _sentGroupReadReceipts = <String>{};
+
+  /// Publishes a group read receipt (gift-wrapped kind 69420, `receipt:'read'`)
+  /// for [messageId] to its author [authorPubkey] in [groupId], encrypted to the
+  /// author's advertised ephemeral key. Scope-gated to the `group` context and
+  /// deduped once per message; never receipts our own message.
+  Future<void> sendGroupReadReceipt(
+      String messageId, String authorPubkey, String groupId) async {
+    if (!_indicatorScopeAllows(
+        _ref.read(settingsProvider).readReceiptsScope, 'group')) {
+      return;
+    }
+    if (messageId.isEmpty || authorPubkey.isEmpty) return;
+    final identity = _identity;
+    final service = _service;
+    if (identity == null || service == null) return;
+    if (authorPubkey == identity.pubkey) return;
+    if (!_sentGroupReadReceipts.add(messageId)) return;
+    if (_sentGroupReadReceipts.length > 2000) {
+      final keep = _sentGroupReadReceipts
+          .toList()
+          .sublist(_sentGroupReadReceipts.length - 1500);
+      _sentGroupReadReceipts
+        ..clear()
+        ..addAll(keep);
+    }
+    final ek = _groups?.keysFor(groupId);
+    await service.publishReceipt(
+      messageId: messageId,
+      receiptType: 'read',
+      recipientPubkey: authorPubkey,
+      encryptToPubkey: ek?.encryptionPubkeyFor(authorPubkey, identity.pubkey),
+    );
+  }
+
+  /// Catch-up: read-receipts every loaded, non-own message in the open group
+  /// [groupId] (PWA `_markVisibleGroupMessagesRead`). Called on opening / return
+  /// to a group so receipts fire for messages that piled up while away.
+  void markVisibleGroupMessagesRead(String groupId) {
+    if (groupId.isEmpty) return;
+    if (!_indicatorScopeAllows(
+        _ref.read(settingsProvider).readReceiptsScope, 'group')) {
+      return;
+    }
+    final messages =
+        _ref.read(appStateProvider).messages[GroupLogic.groupStorageKey(groupId)];
+    if (messages == null || messages.isEmpty) return;
+    for (final m in messages) {
+      if (m.isOwn || m.isHistorical) continue;
+      final id = m.nymMessageId;
+      if (id == null || id.isEmpty) continue;
+      unawaited(sendGroupReadReceipt(id, m.pubkey, groupId));
+    }
+  }
+
   /// Routes an inbound public channel typing indicator (kind 24420): a peer is
   /// typing in a geohash channel. Mirrors the PWA's `handleChannelTypingEvent`
   /// (nostr-core.js:1542-1578): skips our own + scope-disallowed + stale (>5s,
@@ -7194,6 +7269,9 @@ class NostrController {
         markVisibleChannelMessagesRead();
       case ViewKind.group:
         unawaited(_backfillGroupArchive());
+        // Catch up read receipts for the loaded group backlog (PWA
+        // `_markVisibleGroupMessagesRead`) so the sender sees our reader avatar.
+        markVisibleGroupMessagesRead(view.id);
         // PM-scope zap badges for the rendered group backlog (messages.js:3112
         // gathers the rendered ids → `_backfillZapReceipts`, pm scope).
         _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
