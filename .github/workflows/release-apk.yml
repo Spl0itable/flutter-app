@@ -1,0 +1,104 @@
+name: Build & publish APK to Zapstore
+
+# Builds the signed universal release APK and publishes it to Zapstore.
+#
+# Triggers:
+#   - push a tag like v1.0.1  ->  full build + Zapstore publish
+#   - manual "Run workflow"   ->  build only by default (tick publish to also
+#                                  push to Zapstore)
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   ANDROID_KEYSTORE_BASE64    base64 of your .jks  (base64 -w0 nym-release-key.jks)
+#   ANDROID_KEYSTORE_PASSWORD  keystore/store password
+#   ANDROID_KEY_PASSWORD       key password (often same as store)
+#   ANDROID_KEY_ALIAS          key alias (nym-release)
+#   ZAPSTORE_SIGN_WITH         your Zapstore Nostr key, nsec1...  (publish only)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to Zapstore after building"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore keystore and key.properties
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > android/app/nym-release-key.jks
+          cat > android/key.properties <<EOF
+          storePassword=$STORE_PW
+          keyPassword=$KEY_PW
+          keyAlias=$KEY_ALIAS
+          storeFile=nym-release-key.jks
+          EOF
+
+      - name: Build signed universal APK
+        run: |
+          flutter pub get
+          flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Set up Go
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install zsp (Zapstore CLI)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        run: go install github.com/zapstore/zsp@latest
+
+      - name: Publish to Zapstore
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        env:
+          SIGN_WITH: ${{ secrets.ZAPSTORE_SIGN_WITH }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$SIGN_WITH" ]; then
+            echo "::error::ZAPSTORE_SIGN_WITH secret is not set."
+            exit 1
+          fi
+          "$(go env GOPATH)/bin/zsp" publish
+
+      - name: Clean up signing material
+        if: always()
+        run: rm -f android/app/nym-release-key.jks android/key.properties
