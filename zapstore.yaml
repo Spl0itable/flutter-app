@@ -18,15 +18,49 @@ repository: https://github.com/Spl0itable/NYM
 
 # --- App metadata ---
 name: Nymchat
-summary: Secure, decentralized Nostr chat — private messaging, calls, and zaps.
+summary: Ephemeral Nostr chat with E2E-encrypted DMs, group calls, and Lightning zaps — no registration required.
 description: |
-  Experience the future of decentralized communication with Nymchat, a sleek,
-  secure, native Nostr client for private messaging, calls, and Lightning zaps.
+  Nymchat (NYM — Nostr Ynstant Messenger) is a feature-rich, ephemeral chat
+  client built on the Nostr protocol, bridged with Bitchat for pseudonymous,
+  temporary messaging. No registration required — pick a nym and start
+  chatting instantly, or log in with an existing Nostr account.
 
-  - End-to-end Nostr messaging with your own keys
-  - Voice, video and screen-share calls over WebRTC
-  - Lightning zaps and an in-app shop
-  - No Google Play Services, Firebase, or trackers required
+  **Identity**
+  - Ephemeral sessions: generate a temporary keypair and pseudonym per session
+  - Log in with a persistent Nostr identity (NIP-07, NIP-46, or nsec)
+  - Optional identity encryption with password, PIN, passkey, or biometrics
+  - Panic wipe: press-and-hold to instantly destroy all local data
+
+  **Messaging**
+  - End-to-end encrypted 1:1 DMs via NIP-17 gift wraps (NIP-59)
+  - End-to-end encrypted group chats with rotating ephemeral keys and
+    post-compromise recovery — relays cannot correlate group membership
+  - Forward secrecy and configurable disappearing messages
+  - Read receipts and typing indicators (per-scope: everyone, friends, or off)
+  - Rich text (Markdown), emoji reactions (NIP-25), polls, and custom emoji
+  - Peer-to-peer file sharing over WebRTC data channels
+
+  **Channels**
+  - Location-based geohash channels (kind 20000)
+  - Named topic channels (kind 23333)
+  - Geohash Explorer: browse location channels on an interactive globe
+
+  **Voice & Video**
+  - 1:1 and group audio/video calls — signaling over NIP-17 gift wraps,
+    media peer-to-peer over WebRTC
+
+  **Lightning**
+  - Send and receive Lightning zaps on messages and profiles (NIP-57)
+  - In-app flair shop: buy cosmetic styles and badges with Bitcoin
+
+  **Privacy & Moderation**
+  - No Google Play Services, Firebase, or trackers
+  - User and keyword blocking, flood protection, image blur
+  - Group roles: owner, moderator, kick, ban, transfer ownership
+
+  **Customization**
+  - Themes: Bitchat, Matrix Green, Amber Terminal, Cyberpunk, Hacker Blue, Ghost
+  - IRC-style or bubble layout, adjustable text size, wallpapers
 
 tags:
   - nostr
