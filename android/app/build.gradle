@@ -40,7 +40,12 @@ android {
 
     defaultConfig {
         applicationId "com.nym.bar"
-        minSdkVersion = flutter.minSdkVersion
+        // Explicit floor (not flutter.minSdkVersion, which the AGP 8.9.1 upgrade
+        // switched to) so the minimum required by flutter_webrtc / local_auth
+        // (>=23) is pinned in-repo and can't silently drift with the Flutter SDK.
+        // 24 matches the current flutter.minSdkVersion, so runtime coverage is
+        // unchanged.
+        minSdk = 24
         targetSdk = 36
         versionCode = 149
         versionName = flutter.versionName
