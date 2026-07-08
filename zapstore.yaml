@@ -1,0 +1,55 @@
+# Zapstore publishing manifest for Nymchat (com.nym.bar)
+# Docs: https://zapstore.dev/docs/publish   CLI: https://github.com/zapstore/zsp
+#
+# Publish with:   SIGN_WITH=nsec1... zsp publish
+# (run from the repo root, after `flutter build apk --release`)
+#
+# zsp reads the version/versionCode straight out of the APK, so there is no
+# `version:` field here — bump `version:` in pubspec.yaml instead.
+
+# The signed, universal release APK produced by `flutter build apk --release`.
+# This is a LOCAL path, which also lets zsp use the local icon/screenshots
+# below (offline-friendly). Point it at a URL/GitHub release instead if you
+# ever want zsp to pull the artifact remotely.
+release_source: build/app/outputs/flutter-apk/app-release.apk
+
+# Source repository (shown on the listing).
+repository: https://github.com/Spl0itable/NYM
+
+# --- App metadata ---
+name: Nymchat
+summary: Secure, decentralized Nostr chat — private messaging, calls, and zaps.
+description: |
+  Experience the future of decentralized communication with Nymchat, a sleek,
+  secure, native Nostr client for private messaging, calls, and Lightning zaps.
+
+  - End-to-end Nostr messaging with your own keys
+  - Voice, video and screen-share calls over WebRTC
+  - Lightning zaps and an in-app shop
+  - No Google Play Services, Firebase, or trackers required
+
+tags:
+  - nostr
+  - messaging
+  - social
+  - bitcoin
+  - lightning
+
+website: https://nymchat.app
+
+# SPDX identifier. Add a LICENSE file to the repo, then set this to match
+# (e.g. MIT, Apache-2.0, GPL-3.0-only). Left commented until a license exists.
+# license: MIT
+
+# --- Media (local paths, relative to repo root) ---
+icon: assets/images/NYM-icon.png
+# Add real device screenshots (phone-sized PNGs) and list them here — the
+# listing looks much better with 2–5 of them.
+# images:
+#   - assets/store/screenshots/1-chats.png
+#   - assets/store/screenshots/2-call.png
+
+# --- Release notes ---
+# Point at a CHANGELOG.md (Keep a Changelog format lets zsp pull the section
+# that matches the APK version). Create one, then uncomment:
+# release_notes: CHANGELOG.md
