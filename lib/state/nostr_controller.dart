@@ -6232,6 +6232,15 @@ class NostrController {
     if (sync != null) {
       try {
         final found = await sync.profileGet(pubkeys);
+        assert(() {
+          final withPics = found.values
+              .where((ev) => ev.isNotEmpty && (ev['content']?.toString() ?? '')
+                  .contains('"picture"'))
+              .length;
+          debugPrint('[avatar-pop] resolve req=${pubkeys.length} '
+              'd1Found=${found.length} d1WithPicture=$withPics');
+          return true;
+        }());
         if (found.isNotEmpty) {
           // One emit for the whole D1 profile batch (up to 100 rows) instead of
           // one Riverpod rebuild per profile.
@@ -7562,6 +7571,15 @@ class NostrController {
             if (ev.kind == EventKind.geoChannel ||
                 ev.kind == EventKind.namedChannel) {
               _observeMessageTrust(ev);
+              // Backfill each restored author's kind-0 (with avatar) from D1.
+              // The LIVE path does this via `_maybeBackfillProfiles`
+              // (queueProfileFetch, nostr-core.js:1767), but this archive replay
+              // ingests straight into app_state and would otherwise leave every
+              // HISTORICAL author stuck on the identicon until they post again
+              // live — the reason restored-channel avatars never loaded. Self-
+              // /picture-/throttle-guarded + debounced inside, so calling it per
+              // restored message coalesces into one batched `profile-get`.
+              _maybeBackfillProfiles(ev.pubkey);
             }
           } catch (_) {
             // Skip a malformed archived event (mirrors the PWA's per-event catch).
