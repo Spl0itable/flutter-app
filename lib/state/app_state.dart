@@ -2061,8 +2061,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
         if (resolved != state.selfNym) selfNym = resolved;
       }
     }
-    if (changed || selfNym != null) {
+    if (selfNym != null) {
       state = state.copyWith(selfNym: selfNym);
+    }
+    // A row-visible avatar/nym change must REPAINT the message list — the PWA's
+    // `updateRenderedAvatars` (nostr-core.js:665) swaps identicon→picture on
+    // already-painted rows. Route through [_scheduleEmit] so `displayRev` bumps
+    // and `messagesForCurrentViewProvider` re-runs; otherwise a kind-0 that
+    // lands after first paint (D1 `profile-get` / a relay kind-0, with no
+    // accompanying presence emit) leaves the author stuck on the identicon
+    // until some unrelated event happens to bump the revision. The no-op guard
+    // above keeps `changed` false for unchanged periodic refreshes, and inside
+    // [resolveProfiles]' `runBatched` a 100-profile batch coalesces to one bump.
+    if (changed || selfNym != null) {
+      _scheduleEmit();
     }
   }
 
