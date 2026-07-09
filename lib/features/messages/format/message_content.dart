@@ -692,36 +692,37 @@ class _MentionChip extends ConsumerWidget {
       ),
     );
 
+    // Resolve the mention to a known user (same matcher the tap path uses) so we
+    // can append their nickname flair after the nym — on EVERY mention, not just
+    // inside a /me action. (The PWA does this for /me mentions today via
+    // `_enrichActionMentions`, messages.js:1396, and is being extended to all
+    // mentions; NymAvatar's kind-0 avatar is still prepended only in the /me
+    // action form, `getAvatarUrl(pubkey)`, messages.js:1395.)
+    final users = ref.watch(usersProvider);
+    final raw = node.suffix != null ? '${node.base}#${node.suffix}' : node.base;
+    final t = resolveTarget(raw, users);
     Widget chip = text;
-    if (withAvatar) {
-      // Resolve the mention to a known user (same matcher the tap path uses) and
-      // pull its kind-0 avatar; NymAvatar falls back to the identicon when the
-      // profile carries no picture. Mirrors `getAvatarUrl(pubkey)` in
-      // `_enrichActionMentions` (messages.js:1395).
-      final users = ref.watch(usersProvider);
-      final raw =
-          node.suffix != null ? '${node.base}#${node.suffix}' : node.base;
-      final t = resolveTarget(raw, users);
-      if (t != null) {
-        final pic = users[t.pubkey]?.profile?.picture;
-        chip = Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+    if (t != null) {
+      chip = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (withAvatar) ...[
             // `.avatar-message` inline avatar — sized to the mention text.
-            NymAvatar(seed: t.pubkey, size: size, imageUrl: pic),
+            NymAvatar(
+                seed: t.pubkey,
+                size: size,
+                imageUrl: users[t.pubkey]?.profile?.picture),
             const SizedBox(width: 3),
-            text,
-            // Nickname flair + supporter badge — the PWA `_enrichActionMentions`
-            // appends `getFlairForUser(pubkey)` after the mention (messages.js:
-            // 1396); self-hides when the user has none.
-            CosmeticNymBadges(
-              cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
-              flairSize: size,
-              supporterHeight: size,
-            ),
           ],
-        );
-      }
+          text,
+          // Nickname flair + supporter badge (self-hides when the user has none).
+          CosmeticNymBadges(
+            cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
+            flairSize: size,
+            supporterHeight: size,
+          ),
+        ],
+      );
     }
 
     if (onTap == null) return chip;
