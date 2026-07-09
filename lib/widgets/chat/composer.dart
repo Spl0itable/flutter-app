@@ -14,6 +14,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../common/css_focus_ring.dart';
+import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
@@ -2838,8 +2839,11 @@ class _ChipSlideInState extends State<_ChipSlideIn>
 }
 
 /// `.quote-preview`: author (primary 12/w600 with a muted `#suffix`) over the
-/// truncated quoted text (dim 12, ellipsis).
-class _QuotePreviewChip extends StatelessWidget {
+/// truncated quoted text (dim 12, ellipsis). The author line leads with the
+/// quoted user's avatar and trails their flair/supporter badge — parity with
+/// the rendered reply blockquote (`_quoteAuthor`, message_content.dart) and the
+/// @mention chip, both of which the user extended to carry avatar + flair.
+class _QuotePreviewChip extends ConsumerWidget {
   const _QuotePreviewChip({
     required this.author,
     required this.text,
@@ -2851,11 +2855,15 @@ class _QuotePreviewChip extends StatelessWidget {
   final VoidCallback onClose;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.nym;
     final split = splitNymSuffix(author);
     final base = split.base;
     final suffix = split.suffix;
+    // Resolve the quoted author's nym to a pubkey so the chip can show their
+    // real avatar + flair; an unresolved author renders plain (like the PWA).
+    final users = ref.watch(usersProvider);
+    final t = resolveTarget(author, users);
     return _PreviewChip(
       barColor: c.primary,
       onClose: onClose,
@@ -2871,6 +2879,19 @@ class _QuotePreviewChip extends StatelessWidget {
               style: TextStyle(
                   color: c.primary, fontSize: 12, fontWeight: FontWeight.w600),
               children: [
+                // Leading avatar before the quoted author's nym.
+                if (t != null)
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 3),
+                      child: NymAvatar(
+                        seed: t.pubkey,
+                        size: 12,
+                        imageUrl: users[t.pubkey]?.profile?.picture,
+                      ),
+                    ),
+                  ),
                 TextSpan(text: base),
                 if (suffix.isNotEmpty)
                   TextSpan(
@@ -2881,6 +2902,16 @@ class _QuotePreviewChip extends StatelessWidget {
                       color: c.primary.withValues(alpha: 0.7),
                       fontWeight: FontWeight.w100,
                       fontSize: 12 * 0.9,
+                    ),
+                  ),
+                // Flair + supporter badge after the nym (self-hides when none).
+                if (t != null)
+                  WidgetSpan(
+                    alignment: PlaceholderAlignment.middle,
+                    child: CosmeticNymBadges(
+                      cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
+                      flairSize: 12,
+                      supporterHeight: 12,
                     ),
                   ),
               ],
