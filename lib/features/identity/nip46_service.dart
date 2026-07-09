@@ -687,6 +687,26 @@ class Nip46Service implements Nip46Signer {
     _authUrlController = null;
   }
 
+  /// Aborts an in-progress / idle connection but leaves the object REUSABLE
+  /// (unlike [dispose], which also tears down the auth-url stream). The login
+  /// modal calls this when it closes before a session is established, so the
+  /// shared [nip46ServiceProvider] instance can be re-used — and a SUCCESSFUL
+  /// session's live socket is never killed just because the modal disposed.
+  Future<void> cancelConnect() async {
+    for (final p in _pendingRequests.values) {
+      p.timer.cancel();
+      if (!p.completer.isCompleted) {
+        p.completer.completeError(StateError('NIP-46 connect cancelled'));
+      }
+    }
+    _pendingRequests.clear();
+    await _socketSub?.cancel();
+    _socketSub = null;
+    await _socket?.close();
+    _socket = null;
+    _connected = false;
+  }
+
   // --- form-encoding helpers (URLSearchParams parity) -----------------------
 
   static String _formEncode(String s) =>
