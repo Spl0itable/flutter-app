@@ -168,6 +168,39 @@ void main() {
     expect(newer.readers.containsKey('reader_pk'), isTrue);
   });
 
+  test('a channel receipt that beats our own echo renders once the optimistic '
+      'row reconciles to its real event id', () {
+    final n = AppStateNotifier()..goLive('self_pk', 'me#0001');
+    n.switchView(const ChatView.channel('room3'));
+    // We send a message → an optimistic `_optim_*` placeholder, no real id yet.
+    final echo = n.sendLocal('hello everyone');
+    expect(echo, isNotNull);
+    expect(echo!.id.startsWith('_optim_'), isTrue);
+    // A reader acks the PUBLISHED event id before our own echo comes back and
+    // reconciles the placeholder — the reader is buffered but has no own message
+    // to mirror onto yet, so no avatar shows.
+    n.applyChannelReader(
+        messageId: 'real_evt', readerPubkey: 'reader_pk', readerNym: 'r#0001');
+    expect(echo.readers.containsKey('reader_pk'), isFalse);
+    // Our own relay echo lands with the real id and reconciles the placeholder
+    // in place → the buffered receipt replays and the avatar appears.
+    n.ingestEvent(NostrEvent(
+      id: 'real_evt',
+      pubkey: 'self_pk',
+      createdAt: echo.createdAt,
+      kind: EventKind.namedChannel,
+      tags: [
+        ['d', 'room3'],
+        ['n', 'me#0001'],
+      ],
+      content: 'hello everyone',
+    ));
+    final reconciled =
+        n.state.messages['#room3']!.firstWhere((m) => m.id == 'real_evt');
+    expect(reconciled.readers.containsKey('reader_pk'), isTrue,
+        reason: 'buffered receipt must render once the row owns its real id');
+  });
+
   test('waterfall is per-conversation: a reader shows in each channel they read',
       () {
     final n = AppStateNotifier()..goLive('self_pk', 'me#0001');

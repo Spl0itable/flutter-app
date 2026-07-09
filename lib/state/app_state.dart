@@ -1876,6 +1876,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
       if (m.ms > 0) ex.ms = m.ms;
       _indexMessage(key, ex);
+      // A read receipt can beat our own optimistic echo's reconciliation: the
+      // reader acks the published event id while our placeholder still carries
+      // its `_optim_*` id, so the buffered readers had no own message to mirror
+      // onto. Now that this row owns its real event id, replay them so the
+      // avatar renders immediately instead of waiting for the next re-mirror.
+      final reconciledReaders = _channelMessageReaders[ex.id];
+      if (reconciledReaders != null) {
+        _remirrorForReaders(reconciledReaders.keys.toList());
+      }
       // Collapse any stale FAILED placeholder of the same content (a prior failed
       // channel send the user retyped) now that a copy landed as sent.
       _dropFailedOptimisticTwins(list, ex.content, ex);
