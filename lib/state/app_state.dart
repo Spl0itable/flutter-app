@@ -1975,8 +1975,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Replay any channel read receipts (kind 24421) that arrived before this
     // message landed (the receipt and its message race across relays). Mirrors
     // the PWA keeping `channelMessageReaders` keyed independently of the message.
-    if (m.isOwn && _channelMessageReaders.containsKey(m.id)) {
-      _mirrorChannelReaders(m.id);
+    final landedReaders = m.isOwn ? _channelMessageReaders[m.id] : null;
+    if (landedReaders != null) {
+      // This own message may be a reader's newer target — re-waterfall its
+      // readers so their avatar slides off any older own message onto this one.
+      _remirrorForReaders(landedReaders.keys.toList());
     }
 
     // Apply a buffered out-of-order edit whose original is this message.
@@ -3061,28 +3064,106 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (state.blockedUsers.contains(readerPubkey)) return;
     final readers =
         _channelMessageReaders.putIfAbsent(messageId, () => <String, String>{});
-    // newest receipt wins for the display name; no-op if nothing changes.
-    if (readers[readerPubkey] == readerNym) return;
+    // newest receipt wins for the display name; the store keeps every message a
+    // reader has seen (like the PWA) — the waterfall below decides where the
+    // avatar actually shows.
     readers[readerPubkey] = readerNym;
-    if (_mirrorChannelReaders(messageId)) _scheduleEmit();
+    // Re-mirror every message this reader appears in so their avatar slides off
+    // any older own message onto their newest-seen one in this conversation.
+    if (_remirrorForReaders([readerPubkey])) _scheduleEmit();
   }
 
-  /// Copies the stored reader set for [messageId] onto the matching own channel
-  /// message's `readers` map (the avatar-row consumer). Returns true when a
-  /// message was found and updated. Only OWN messages carry reader avatars in
-  /// the UI, so non-own matches are skipped.
+  /// Re-mirrors the waterfalled reader set onto `message.readers` for every own
+  /// message any of [pubkeys] has read. Returns true when any message's visible
+  /// set changed. Used when a receipt lands (a reader advanced) or an own
+  /// message lands late (a newer target appeared) — both can move an avatar.
+  bool _remirrorForReaders(Iterable<String> pubkeys) {
+    final set = pubkeys.toSet();
+    if (set.isEmpty) return false;
+    var changed = false;
+    // Snapshot the keys — _mirrorChannelReaders only mutates message.readers,
+    // not the store map, but iterate a copy to be defensive.
+    for (final id in _channelMessageReaders.keys.toList()) {
+      final readers = _channelMessageReaders[id];
+      if (readers == null || !readers.keys.any(set.contains)) continue;
+      if (_mirrorChannelReaders(id)) changed = true;
+    }
+    return changed;
+  }
+
+  /// Copies the WATERFALLED reader set for [messageId] onto the matching own
+  /// message's `readers` map (the avatar-row consumer). Returns true when the
+  /// visible set changed. Only OWN messages carry reader avatars in the UI, so
+  /// non-own matches are skipped.
+  ///
+  /// Waterfall (PWA `_computeWaterfallReaders`, groups.js:2586-2608): a reader
+  /// keeps a receipt on every message they have seen in [_channelMessageReaders],
+  /// but their avatar renders only on their NEWEST-seen own message within the
+  /// same conversation. Without this, an already-seen older message keeps the
+  /// avatar and the reader ends up shown on every message (the reported bug).
   bool _mirrorChannelReaders(String messageId) {
-    final readers = _channelMessageReaders[messageId];
-    if (readers == null) return false;
+    final stored = _channelMessageReaders[messageId];
+    if (stored == null) return false;
     final m = _msgByAnyId[messageId];
     if (m == null || !m.isOwn) return false;
     // A public-channel receipt references the own message by its EVENT id; a
     // group receipt references it by its nymMessageId (the wrap id differs).
     // Accept either so the same reader store serves channels AND groups.
     if (m.id != messageId && m.nymMessageId != messageId) return false;
+    final conv = _conversationIdOf(m);
+    final display = <String, String>{};
+    stored.forEach((pk, nym) {
+      if (_waterfallTargetId(pk, conv) == messageId) display[pk] = nym;
+    });
+    if (_readersEqual(m.readers, display)) return false;
     m.readers
       ..clear()
-      ..addAll(readers);
+      ..addAll(display);
+    return true;
+  }
+
+  /// The stored-receipt key of [readerPubkey]'s NEWEST-seen own message within
+  /// conversation [conv] (the single message their avatar should render on), or
+  /// null when they have no resolvable own message there. Ordering matches the
+  /// message list (`compareMessages`); a not-yet-landed message is skipped, so
+  /// the target falls back to the newest landed one and corrects itself when the
+  /// newer message lands (replayed via [_remirrorForReaders]).
+  String? _waterfallTargetId(String readerPubkey, String? conv) {
+    String? bestId;
+    Message? best;
+    _channelMessageReaders.forEach((id, readers) {
+      if (!readers.containsKey(readerPubkey)) return;
+      final m = _msgByAnyId[id];
+      if (m == null || !m.isOwn) return;
+      if (m.id != id && m.nymMessageId != id) return;
+      if (_conversationIdOf(m) != conv) return;
+      if (best == null || compareMessages(m, best!) > 0) {
+        best = m;
+        bestId = id;
+      }
+    });
+    return bestId;
+  }
+
+  /// A stable per-conversation identity for [m], so the waterfall never moves a
+  /// reader's avatar between DIFFERENT channels/groups (each conversation
+  /// waterfalls independently, as the PWA renders one conversation at a time).
+  String? _conversationIdOf(Message m) {
+    final ck = m.conversationKey;
+    if (ck != null && ck.isNotEmpty) return ck;
+    final g = m.geohash;
+    if (g != null && g.isNotEmpty) return '#$g';
+    final ch = m.channel;
+    if (ch != null && ch.isNotEmpty) return '#$ch';
+    return m.groupId;
+  }
+
+  /// Order-independent equality of two `pubkey → nym` reader maps.
+  static bool _readersEqual(Map<String, String> a, Map<String, String> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      if (b[e.key] != e.value) return false;
+    }
     return true;
   }
 
