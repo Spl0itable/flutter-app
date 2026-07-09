@@ -110,4 +110,29 @@ void main() {
         'https://cdn.example/late.png');
     addTearDown(c.dispose);
   });
+
+  test('usersProvider.select notifies when a picture lands (reactivity)',
+      () async {
+    final c = await _container();
+    final n = c.read(appStateProvider.notifier);
+    final seen = <String?>[];
+    final sub = c.listen(
+      usersProvider.select((m) => m[_other]?.profile?.picture),
+      (prev, next) => seen.add(next),
+    );
+    addTearDown(sub.close);
+
+    // A profile picture landing in the (in-place-mutated, reused) users map must
+    // still propagate — usersProvider now returns a fresh view each emit so the
+    // selector re-runs and observes null → url.
+    n.ingestEvent(_kind0(
+      _other,
+      '{"name":"alice","picture":"https://cdn.example/live.png"}',
+      ts: 100,
+    ));
+    await Future<void>.delayed(Duration.zero);
+    expect(seen, contains('https://cdn.example/live.png'),
+        reason: 'a landed avatar must notify usersProvider.select subscribers');
+    addTearDown(c.dispose);
+  });
 }
