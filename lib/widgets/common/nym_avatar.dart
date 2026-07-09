@@ -57,15 +57,20 @@ Color statusColor(UserStatus status) {
 /// PWA's `<img>`/blob does (raster AND SVG), so the fetched picture replaces the
 /// identicon regardless of format.
 ///
-/// BLOB LOADING (`memoryOnly`) — the actual reason the picture stayed an
-/// identicon: the default `cached_network_image` / `flutter_cache_manager` path
-/// fails to load the proxied avatar bytes (the same disk-cache loader the app's
-/// working custom emoji deliberately AVOID). `memoryOnly` fetches the bytes with
-/// `http.get` and paints them via `Image.memory` — the native equivalent of the
-/// PWA's `fetch(url) → blob` (`cacheAvatarImage`) — which is the exact path the
-/// emoji picker already uses successfully against this same media proxy. So
-/// avatars load byte-for-byte like the PWA, not through the disk-cache decoder.
-class NymAvatar extends StatelessWidget {
+/// BROWSER USER-AGENT — the actual reason the picture stayed an identicon: many
+/// avatar hosts (Cloudflare bot protection, hotlink guards) 403 a bare `Dart/x`
+/// User-Agent, so when the media proxy can't fetch the image upstream and BOTH
+/// clients fall back to the RAW direct host, the PWA (a real browser) loads it
+/// but native's fetch was rejected. [InlineNetworkImage] now presents a
+/// browser-like UA (`imageFetchHeaders`) on every image request, so the
+/// direct-host fallback behaves like the PWA's `<img>`.
+///
+/// Rendered through the DISK-cached [CachedNetworkImage] path (not `memoryOnly`)
+/// so a fetched avatar persists across launches instead of re-fetching every
+/// time — the native counterpart of the PWA's IndexedDB blob cache
+/// (`persistAvatarBlob`). SVG avatars still route through the SVG-aware in-memory
+/// path automatically.
+class NymAvatar extends StatefulWidget {
   const NymAvatar({
     super.key,
     required this.seed,
@@ -85,8 +90,31 @@ class NymAvatar extends StatelessWidget {
   final String? imageUrl;
 
   @override
+  State<NymAvatar> createState() => _NymAvatarState();
+}
+
+class _NymAvatarState extends State<NymAvatar> {
+  @override
+  void didUpdateWidget(NymAvatar old) {
+    super.didUpdateWidget(old);
+    // The user changed their avatar (the profile's `picture` URL changed): drop
+    // the OLD image from every cache so a re-used URL / stale disk entry can't
+    // keep serving the previous photo — the PWA revokes the old blob on an
+    // avatar URL change (`cacheAvatarImage`). The NEW URL is a fresh cache key,
+    // so it re-fetches automatically; this only cleans up the superseded one.
+    final oldUrl = old.imageUrl;
+    if (oldUrl != null &&
+        oldUrl.isNotEmpty &&
+        oldUrl != widget.imageUrl) {
+      final oldProxied = proxiedAvatarUrl(oldUrl);
+      if (oldProxied != null) InlineNetworkImage.evict(oldProxied);
+      if (oldProxied != oldUrl) InlineNetworkImage.evict(oldUrl);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final proxied = proxiedAvatarUrl(imageUrl);
+    final proxied = proxiedAvatarUrl(widget.imageUrl);
     final fallback = _identicon(context);
     if (proxied == null) return fallback;
     // The RAW original URL, tried directly when the proxied load fails — the
@@ -94,24 +122,20 @@ class NymAvatar extends StatelessWidget {
     // Only meaningful when we actually proxied something (an http(s) URL that
     // isn't already a proxy link); for a pass-through data:/blob:/relative URL
     // `proxied == imageUrl`, so there's no distinct raw mirror to add.
-    final raw = imageUrl;
+    final raw = widget.imageUrl;
     final fallbackUrls = <String>[
       if (raw != null && raw.isNotEmpty && raw != proxied) raw,
     ];
     return ClipOval(
       child: SizedBox(
-        width: size,
-        height: size,
+        width: widget.size,
+        height: widget.size,
         child: InlineNetworkImage(
           url: proxied,
           fallbackUrls: fallbackUrls,
-          width: size,
-          height: size,
+          width: widget.size,
+          height: widget.size,
           fit: BoxFit.cover,
-          // Fetch bytes via http.get → Image.memory (the PWA's blob load), NOT
-          // the cached_network_image disk-cache decoder that leaves avatars
-          // stuck on the identicon. This is the emoji picker's proven path.
-          memoryOnly: true,
           // Identicon while loading AND after every source (proxy + raw) fails
           // — the swap to the real avatar happens once a source resolves.
           placeholder: fallback,
@@ -130,8 +154,8 @@ class NymAvatar extends StatelessWidget {
   Widget _identicon(BuildContext context) {
     return ClipOval(
       child: CustomPaint(
-        size: Size(size, size),
-        painter: _IdenticonPainter(seed),
+        size: Size(widget.size, widget.size),
+        painter: _IdenticonPainter(widget.seed),
       ),
     );
   }
