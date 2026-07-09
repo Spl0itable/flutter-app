@@ -403,7 +403,9 @@ class Nip46Service implements Nip46Signer {
     return Nip46ConnectionUri(
       scheme: scheme,
       pubkey: host.toLowerCase(),
-      relay: relay ?? RelayConfig.nip46Relay,
+      // Canonicalize so a trailing-slash relay (Amber's bunker URIs) matches the
+      // pool and persists/restores consistently.
+      relay: relay != null ? _canonicalRelayUrl(relay) : RelayConfig.nip46Relay,
       secret: secret,
       metadataName: metadataName,
     );
