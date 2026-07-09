@@ -256,6 +256,11 @@ class NostrController {
   /// boot. Every publish / gift-wrap path flows through this.
   EventSigner? get signer => _signer;
 
+  /// The live relay [PoolTransport] (proxy or direct), or null before boot.
+  /// Exposed so the NIP-46 remote-signer transport can ride the already-connected
+  /// pool instead of a dedicated raw socket ([nip46ServiceProvider]).
+  PoolTransport? get pool => _service?.pool;
+
   /// Per-relay connection status (url → connected) for the Network Stats modal
   /// (`relay_stats_modal.dart`). Direct mode reads [RelayPool.connectionStatus];
   /// proxy mode exposes its live connected set as `url → true`. Empty before boot.
@@ -10216,6 +10221,10 @@ final nip46ServiceProvider = Provider<Nip46Service>((ref) {
   final svc = Nip46Service(
     kv: _Nip46KvAdapter(ref.read(keyValueStoreProvider)),
     secure: _Nip46SecureAdapter(SecureStore()),
+    // Route NIP-46 through the shared relay pool (proxy/direct, already
+    // connected to the default signer relay) when it covers the relay. Lazy —
+    // resolved at `_openRelay` time, by which point the controller/pool exist.
+    poolProvider: () => ref.read(nostrControllerProvider).pool,
   );
   ref.onDispose(svc.dispose);
   return svc;
