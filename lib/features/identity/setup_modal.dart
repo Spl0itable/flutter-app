@@ -483,15 +483,16 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         style: TextStyle(color: c.textDim, fontSize: 11),
       ),
       const SizedBox(height: 20),
-      // `.send-btn` (translucent primary pill), h42.
-      Padding(
+      // `.send-btn` (translucent primary pill), h42. `.modal-actions` is a
+      // centered flex and the button is `flex: 0 1 auto`, so it's content-width
+      // and centered — NOT full-bleed (index.html:1338, styles-chat.css:1920).
+      Align(
         key: const Key('setupEnterBtn'),
-        padding: EdgeInsets.zero,
+        alignment: Alignment.center,
         child: ModalChrome.sendButton(
           c,
           'Enter',
           _busy ? null : _enter,
-          fullWidth: true,
           child: _busy
               ? SizedBox(
                   width: 18,
@@ -550,22 +551,27 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         'Your private key stays local and is never sent to any server',
         style: TextStyle(color: c.textDim, fontSize: 11),
       ),
-      const SizedBox(height: 20),
-      ModalChrome.sendButton(
-        c,
-        'Login',
-        _loggingIn ? null : _loginWithNsec,
-        fullWidth: true,
-        child: _loggingIn
-            ? SizedBox(
-                width: 18,
-                height: 18,
-                child:
-                    CircularProgressIndicator(strokeWidth: 2, color: c.primary),
-              )
-            : null,
+      // `.modal-actions.nm-h-81 { margin: 40px auto 20px }`.
+      const SizedBox(height: 40),
+      // `.send-btn.nm-h-82 { flex: 0 1 auto }` in a centered `.modal-actions`:
+      // content-width, centered — not full-bleed.
+      Align(
+        alignment: Alignment.center,
+        child: ModalChrome.sendButton(
+          c,
+          'Login',
+          _loggingIn ? null : _loginWithNsec,
+          child: _loggingIn
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: c.primary),
+                )
+              : null,
+        ),
       ),
-      const SizedBox(height: 16),
+      const SizedBox(height: 20),
       _tosText(c, 'By logging in, you agree to our '),
     ];
   }
