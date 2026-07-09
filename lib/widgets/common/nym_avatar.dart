@@ -1,6 +1,6 @@
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../../features/messages/inline_network_image.dart';
 import '../../models/user.dart';
 import '../../services/api/api_client.dart';
 
@@ -39,6 +39,23 @@ Color statusColor(UserStatus status) {
 /// loaded through the media proxy (PWA `getProxiedMediaUrl`); on error or when
 /// absent it falls back to a generated identicon that derives a stable tint
 /// from the seed (mirroring the bitchat multicolor feel).
+///
+/// PROXY→RAW FALLBACK — the fix for avatars that render in the PWA but not
+/// natively. The PWA's `cacheAvatarImage` (users.js:945) fetches the PROXIED
+/// URL as a blob and, when that fetch fails (CORS, network, a non-200 from the
+/// proxy), FALLS BACK to the RAW direct URL — `updateRenderedAvatars(pubkey,
+/// url)` re-renders with the un-proxied `url`. Lots of avatar hosts block the
+/// proxy's egress IP, hotlink-protect, or rate-limit it, so their pictures only
+/// load via that raw fallback. The old native path only ever tried the proxied
+/// URL and then gave up to the identicon, so every one of those users showed a
+/// generated avatar natively while the PWA showed their real one.
+///
+/// We reproduce it by handing [InlineNetworkImage] the proxied URL as the
+/// primary source and the RAW original as a [InlineNetworkImage.fallbackUrls]
+/// mirror: a failed proxied load swaps to the direct host before degrading to
+/// the identicon. [InlineNetworkImage] also renders any image type the way the
+/// PWA's `<img>`/blob does (raster AND SVG), so the fetched picture replaces the
+/// identicon regardless of format.
 class NymAvatar extends StatelessWidget {
   const NymAvatar({
     super.key,
@@ -63,17 +80,29 @@ class NymAvatar extends StatelessWidget {
     final proxied = proxiedAvatarUrl(imageUrl);
     final fallback = _identicon(context);
     if (proxied == null) return fallback;
+    // The RAW original URL, tried directly when the proxied load fails — the
+    // PWA's proxied-blob→raw-URL fallback (`cacheAvatarImage`, users.js:983).
+    // Only meaningful when we actually proxied something (an http(s) URL that
+    // isn't already a proxy link); for a pass-through data:/blob:/relative URL
+    // `proxied == imageUrl`, so there's no distinct raw mirror to add.
+    final raw = imageUrl;
+    final fallbackUrls = <String>[
+      if (raw != null && raw.isNotEmpty && raw != proxied) raw,
+    ];
     return ClipOval(
       child: SizedBox(
         width: size,
         height: size,
-        child: CachedNetworkImage(
-          imageUrl: proxied,
+        child: InlineNetworkImage(
+          url: proxied,
+          fallbackUrls: fallbackUrls,
           width: size,
           height: size,
           fit: BoxFit.cover,
-          placeholder: (_, __) => fallback,
-          errorWidget: (_, __, ___) => fallback,
+          // Identicon while loading AND after every source (proxy + raw) fails
+          // — the swap to the real avatar happens once a source resolves.
+          placeholder: fallback,
+          errorChild: fallback,
         ),
       ),
     );
