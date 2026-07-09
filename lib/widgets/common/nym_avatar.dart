@@ -56,6 +56,15 @@ Color statusColor(UserStatus status) {
 /// the identicon. [InlineNetworkImage] also renders any image type the way the
 /// PWA's `<img>`/blob does (raster AND SVG), so the fetched picture replaces the
 /// identicon regardless of format.
+///
+/// BLOB LOADING (`memoryOnly`) — the actual reason the picture stayed an
+/// identicon: the default `cached_network_image` / `flutter_cache_manager` path
+/// fails to load the proxied avatar bytes (the same disk-cache loader the app's
+/// working custom emoji deliberately AVOID). `memoryOnly` fetches the bytes with
+/// `http.get` and paints them via `Image.memory` — the native equivalent of the
+/// PWA's `fetch(url) → blob` (`cacheAvatarImage`) — which is the exact path the
+/// emoji picker already uses successfully against this same media proxy. So
+/// avatars load byte-for-byte like the PWA, not through the disk-cache decoder.
 class NymAvatar extends StatelessWidget {
   const NymAvatar({
     super.key,
@@ -99,6 +108,10 @@ class NymAvatar extends StatelessWidget {
           width: size,
           height: size,
           fit: BoxFit.cover,
+          // Fetch bytes via http.get → Image.memory (the PWA's blob load), NOT
+          // the cached_network_image disk-cache decoder that leaves avatars
+          // stuck on the identicon. This is the emoji picker's proven path.
+          memoryOnly: true,
           // Identicon while loading AND after every source (proxy + raw) fails
           // — the swap to the real avatar happens once a source resolves.
           placeholder: fallback,

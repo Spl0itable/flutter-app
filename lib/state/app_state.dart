@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -4502,7 +4503,16 @@ final usersProvider = Provider<Map<String, User>>((ref) {
   // cannot fire.
   final gibberishActive = appSpamFilterEnabled && appSpamFilterAggressive;
   if (s.blockedUsers.isEmpty && s.blockedKeywords.isEmpty && !gibberishActive) {
-    return s.users;
+    // Return a FRESH O(1) view, not the raw `s.users`, so this provider's value
+    // identity changes on every `AppState` emit. `_ingestProfile` (and the
+    // presence avatar-update path) mutate a User's `profile` IN PLACE and reuse
+    // the same `users` map across `copyWith`; returning the same instance made
+    // Riverpod treat the value as unchanged, so `usersProvider` never notified
+    // and a just-fetched avatar/nym never reached widgets that don't otherwise
+    // rebuild (sidebar rows, modals) — it stayed on the identicon. The filtered
+    // path below already returns a fresh map every emit, so this only makes the
+    // no-block fast path consistent with it.
+    return UnmodifiableMapView(s.users);
   }
   final out = <String, User>{};
   s.users.forEach((pubkey, user) {
