@@ -1698,18 +1698,34 @@ class _QuoteBox extends ConsumerWidget {
     final split = splitNymSuffix(author);
     final base = split.base;
     final suffix = split.suffix.isEmpty ? null : split.suffix;
-    // Resolve the quoted author's nym to a pubkey so their flair can follow the
-    // name — the PWA `_resolveQuoteFlair` → `.quote-author …${flairHtml}:`
-    // (message-format.js:318). Unknown author → no flair (plain name).
-    final t = resolveTarget(author, ref.watch(usersProvider));
+    // Resolve the quoted author's nym to a pubkey so their avatar can lead and
+    // their flair can follow the name — the PWA `_resolveQuoteFlair` →
+    // `.quote-author …${flairHtml}:` (message-format.js:318), plus the inline
+    // avatar mentions/quotes carry. Unknown author → plain name.
+    final users = ref.watch(usersProvider);
+    final t = resolveTarget(author, users);
+    final authorSize = size - 1;
     return Text.rich(
       TextSpan(
         children: [
+          // Leading avatar before the quoted author's nym.
+          if (t != null)
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 3),
+                child: NymAvatar(
+                  seed: t.pubkey,
+                  size: authorSize,
+                  imageUrl: users[t.pubkey]?.profile?.picture,
+                ),
+              ),
+            ),
           TextSpan(
             text: base,
             style: TextStyle(
               color: c.secondary,
-              fontSize: size - 1,
+              fontSize: authorSize,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -1718,7 +1734,7 @@ class _QuoteBox extends ConsumerWidget {
               text: suffix,
               style: TextStyle(
                 color: c.secondaryA(0.7),
-                fontSize: (size - 1) * 0.9,
+                fontSize: authorSize * 0.9,
                 fontWeight: FontWeight.w100,
               ),
             ),
@@ -1728,15 +1744,15 @@ class _QuoteBox extends ConsumerWidget {
               alignment: PlaceholderAlignment.middle,
               child: CosmeticNymBadges(
                 cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
-                flairSize: size - 1,
-                supporterHeight: size - 1,
+                flairSize: authorSize,
+                supporterHeight: authorSize,
               ),
             ),
           TextSpan(
             text: ':',
             style: TextStyle(
               color: c.secondary,
-              fontSize: size - 1,
+              fontSize: authorSize,
               fontWeight: FontWeight.w600,
             ),
           ),
