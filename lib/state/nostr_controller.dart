@@ -6244,9 +6244,20 @@ class NostrController {
               } catch (_) {}
             }
           });
-          missing = pubkeys
-              .where((pk) => !found.containsKey(pk.toLowerCase()))
-              .toList();
+          // Relay-fallback for anyone D1 didn't supply an AVATAR for — not just
+          // D1 misses. A D1 row that exists but carries no `picture` (e.g. a
+          // kind-0 that predates the user's avatar, set in another client), or a
+          // pictureless TTL cache-hit (reported as an empty entry), would
+          // otherwise be treated as "resolved" and stay stuck on the identicon.
+          // Re-read the store AFTER the batched ingest so just-applied pictures
+          // count.
+          final users = _ref.read(appStateProvider).users;
+          missing = pubkeys.where((pk) {
+            final low = pk.toLowerCase();
+            if (!found.containsKey(low)) return true; // D1 miss
+            final pic = (users[low] ?? users[pk])?.profile?.picture;
+            return pic == null || pic.isEmpty; // D1/cache had no avatar
+          }).toList();
         }
       } catch (_) {
         // Fall through to relays.
