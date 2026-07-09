@@ -30,6 +30,7 @@ import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
+import '../../shop/cosmetics.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
 import 'link_preview.dart';
@@ -710,6 +711,14 @@ class _MentionChip extends ConsumerWidget {
             NymAvatar(seed: t.pubkey, size: size, imageUrl: pic),
             const SizedBox(width: 3),
             text,
+            // Nickname flair + supporter badge — the PWA `_enrichActionMentions`
+            // appends `getFlairForUser(pubkey)` after the mention (messages.js:
+            // 1396); self-hides when the user has none.
+            CosmeticNymBadges(
+              cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
+              flairSize: size,
+              supporterHeight: size,
+            ),
           ],
         );
       }
@@ -1571,7 +1580,7 @@ class _QuoteBox extends ConsumerWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (block.author != null) _quoteAuthor(c, block.author!),
+        if (block.author != null) _quoteAuthor(c, ref, block.author!),
         for (final child in block.children) _quoteChild(context, c, child),
       ],
     );
@@ -1710,10 +1719,14 @@ class _QuoteBox extends ConsumerWidget {
 
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
   /// the base nym (secondary 600) from a dimmed `.nym-suffix` (`#xxxx`).
-  Widget _quoteAuthor(NymColors c, String author) {
+  Widget _quoteAuthor(NymColors c, WidgetRef ref, String author) {
     final split = splitNymSuffix(author);
     final base = split.base;
     final suffix = split.suffix.isEmpty ? null : split.suffix;
+    // Resolve the quoted author's nym to a pubkey so their flair can follow the
+    // name — the PWA `_resolveQuoteFlair` → `.quote-author …${flairHtml}:`
+    // (message-format.js:318). Unknown author → no flair (plain name).
+    final t = resolveTarget(author, ref.watch(usersProvider));
     return Text.rich(
       TextSpan(
         children: [
@@ -1732,6 +1745,16 @@ class _QuoteBox extends ConsumerWidget {
                 color: c.secondaryA(0.7),
                 fontSize: (size - 1) * 0.9,
                 fontWeight: FontWeight.w100,
+              ),
+            ),
+          // Flair sits AFTER the nym/suffix and BEFORE the ':' (PWA order).
+          if (t != null)
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: CosmeticNymBadges(
+                cosmetics: ref.watch(userCosmeticsProvider(t.pubkey)),
+                flairSize: size - 1,
+                supporterHeight: size - 1,
               ),
             ),
           TextSpan(
