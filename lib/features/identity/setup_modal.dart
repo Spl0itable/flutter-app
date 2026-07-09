@@ -59,6 +59,11 @@ class _SetupModalState extends ConsumerState<SetupModal> {
 
   // ---- Login tab state (inlined from the former Nostr-login popup) ----
   final _nsecCtl = TextEditingController();
+
+  /// A pasted `bunker://` (or `nostrconnect://`) signer connection URI.
+  final _bunkerCtl = TextEditingController();
+  bool _connectingUri = false;
+
   String? _loginError;
   bool _remoteSignerOpen = false;
   String? _nostrConnectUri;
@@ -113,6 +118,7 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     _nymCtl.dispose();
     _bioCtl.dispose();
     _nsecCtl.dispose();
+    _bunkerCtl.dispose();
     // Only abort an INCOMPLETE handshake — a successful session is the shared
     // [nip46ServiceProvider] instance the controller now signs with.
     if (!_loginSucceeded) _nip46?.cancelConnect();
@@ -302,6 +308,40 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       _nostrConnectUri = null;
       _remoteStatus = 'Waiting for remote signer...';
     });
+  }
+
+  /// Connects to a signer from a pasted `bunker://` (or `nostrconnect://`) URI
+  /// via [Nip46Service.connectViaUri] — for a `bunker://` we send the explicit
+  /// `connect` RPC and adopt on the signer's ack; for a pasted `nostrconnect://`
+  /// we wait for the signer to initiate. Then adopts at runtime like the QR flow.
+  Future<void> _connectViaUri() async {
+    if (_connectingUri || _loggingIn) return;
+    final uri = _bunkerCtl.text.trim();
+    if (uri.isEmpty) {
+      setState(() => _loginError = 'Paste a bunker:// or nostrconnect:// URI.');
+      return;
+    }
+    final service = ref.read(nip46ServiceProvider);
+    setState(() {
+      _nip46 = service;
+      _connectingUri = true;
+      _loginError = null;
+      _remoteSignerOpen = false;
+    });
+    try {
+      await service.connectViaUri(uri);
+      if (!mounted) return;
+      _loginSucceeded = true;
+      await ref.read(nostrControllerProvider).loginWithNip46();
+      if (!mounted) return;
+      widget.onComplete();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _connectingUri = false;
+        _loginError = 'Signer connection failed. Check the URI and try again.';
+      });
+    }
   }
 
   /// Validates the pasted nsec, then ADOPTS it as the running identity via
@@ -532,6 +572,34 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         style: TextStyle(color: c.textDim, fontSize: 11),
       ),
       if (_remoteSignerOpen) ..._remoteSignerConnect(c),
+      const SizedBox(height: 14),
+      // Paste a signer connection URI (bunker:// or a nostrconnect:// string) —
+      // an alternative to scanning the QR, and the way to use a signer whose
+      // relay isn't the default (the URI carries its own relay).
+      _label(c, 'Or paste a signer URI'),
+      const SizedBox(height: 6),
+      Row(
+        children: [
+          Expanded(
+            child: _field(
+              c,
+              controller: _bunkerCtl,
+              hint: 'bunker://…  or  nostrconnect://…',
+            ),
+          ),
+          const SizedBox(width: 8),
+          _smallButton(
+            c,
+            _connectingUri ? 'Connecting…' : 'Connect',
+            _connectingUri ? () {} : _connectViaUri,
+          ),
+        ],
+      ),
+      const SizedBox(height: 5),
+      Text(
+        'Paste a bunker:// URI from your signer, or a nostrconnect:// string',
+        style: TextStyle(color: c.textDim, fontSize: 11),
+      ),
       ModalChrome.orDivider(c),
       // Paste-nsec option.
       _label(c, 'Paste your nsec'),
