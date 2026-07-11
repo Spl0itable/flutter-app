@@ -168,7 +168,7 @@ class AutoTranslateNotifier
     try {
       for (var attempt = 0; attempt < _attempts; attempt++) {
         try {
-          final res = await _service.translate(source, target);
+          final res = await _translateQuoteAware(source, target);
           final translated = res.translatedText.trim();
           // "Already in the target language" — detected == target, or the
           // upstream returned the input unchanged. Treated as a silent no-op
@@ -208,6 +208,58 @@ class AutoTranslateNotifier
     } finally {
       _inflight.remove(key);
     }
+  }
+
+  /// Translates [source] into [target] while keeping quoted lines (those the
+  /// message parser treats as a blockquote — i.e. starting with `>` at column
+  /// 0) **verbatim**, translating only the non-quote reply text.
+  ///
+  /// A quote reply's header line is `> @author: …`. Sending it through the proxy
+  /// can drop/shift the leading `>` or reflow the line, after which the parser
+  /// no longer sees a blockquote and renders `@author` as a bare @mention (the
+  /// reported bug). Preserving quote lines byte-for-byte keeps the blockquote —
+  /// and the author mention inside it — intact. Each contiguous run of reply
+  /// lines is translated as one call (usually just one), so this stays cheap.
+  Future<TranslationResult> _translateQuoteAware(
+    String source,
+    String target,
+  ) async {
+    final lines = source.split('\n');
+    // Fast path: no quote lines → translate the whole thing in one call.
+    if (!lines.any((l) => l.startsWith('>'))) {
+      return _service.translate(source, target);
+    }
+    final out = <String>[];
+    var detected = 'auto';
+    var i = 0;
+    while (i < lines.length) {
+      if (lines[i].startsWith('>')) {
+        out.add(lines[i]); // quote line: keep exactly as authored
+        i++;
+        continue;
+      }
+      final seg = <String>[];
+      while (i < lines.length && !lines[i].startsWith('>')) {
+        seg.add(lines[i]);
+        i++;
+      }
+      final segText = seg.join('\n');
+      if (segText.trim().isEmpty) {
+        out.add(segText); // blank separators between quote and reply
+      } else {
+        final res = await _service.translate(segText, target);
+        if (detected == 'auto' &&
+            res.detectedLanguage.isNotEmpty &&
+            res.detectedLanguage != 'auto') {
+          detected = res.detectedLanguage;
+        }
+        out.add(res.translatedText);
+      }
+    }
+    return TranslationResult(
+      translatedText: out.join('\n'),
+      detectedLanguage: detected,
+    );
   }
 
   /// Commits an entry only if it still reflects the latest requested input —

@@ -232,6 +232,22 @@ void main() {
       expect(e.translated.contains('@ALICE'), isFalse);
     });
 
+    test('keeps a quote-reply line verbatim (renders as a quote, not a mention)',
+        () async {
+      final n = AutoTranslateNotifier(service: _uppercasingService());
+      // A quote reply: `> @author: quoted` header + the reply below.
+      n.ensure(_msg(content: '> @alice#1a2b: hola amigo\nyes i agree'), 'en');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final e = n.state['m1']!;
+      expect(e.status, AutoTranslateStatus.ready);
+      final out = e.translated.split('\n');
+      // The quote line is byte-identical (still starts with '>' at col 0), so
+      // the parser still renders it as a blockquote with the author mention.
+      expect(out.first, '> @alice#1a2b: hola amigo');
+      // Only the reply text was translated (upper-cased).
+      expect(out.last, 'YES I AGREE');
+    });
+
     test('retries a failing translation before succeeding', () async {
       final n = AutoTranslateNotifier(
         service: _FlakyTranslate(
