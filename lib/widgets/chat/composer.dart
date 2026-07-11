@@ -28,6 +28,7 @@ import '../../features/emoji/emoji_data.dart';
 import '../../features/emoji/emoji_picker.dart';
 import '../../features/emoji/gif_picker.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/i18n/i18n.dart';
 import '../../features/identity/dev_nsec_modal.dart';
 import '../../features/messages/format/message_content.dart'
     show InlineEmojiText, proxiedMedia;
@@ -426,11 +427,13 @@ class _ComposerState extends ConsumerState<Composer> {
       // NOT the cache alone (F07-Z18).
       openZap: (pubkey, nym) async {
         final baseNym = stripPubkeySuffix(nym);
-        _onSystemMessage('Checking if @$baseNym can receive zaps...');
+        _onSystemMessage(
+            tr('Checking if @{nym} can receive zaps...', {'nym': baseNym}));
         final lnAddr = await controller.resolveLightningAddressForZap(pubkey);
         if (lnAddr == null || lnAddr.isEmpty) {
-          _onSystemMessage(
-              '@$baseNym cannot receive zaps (no lightning address set)');
+          _onSystemMessage(tr(
+              '@{nym} cannot receive zaps (no lightning address set)',
+              {'nym': baseNym}));
           return;
         }
         if (!mounted) return;
@@ -444,7 +447,7 @@ class _ComposerState extends ConsumerState<Composer> {
       // `/group @a @b [name]` → create the group (`cmdGroup` → createGroup).
       createGroup: (members, name) {
         if (members.isEmpty) {
-          _onSystemMessage('Usage: /group @nym1 @nym2 [group name]');
+          _onSystemMessage(tr('Usage: /group @nym1 @nym2 [group name]'));
           return;
         }
         unawaited(controller.createGroup(name, members));
@@ -486,7 +489,7 @@ class _ComposerState extends ConsumerState<Composer> {
     if (!mounted) return;
     final result = await DevNsecModal.open(context);
     if (result == null) {
-      _onSystemMessage('Nickname change cancelled.');
+      _onSystemMessage(tr('Nickname change cancelled.'));
       return;
     }
     try {
@@ -494,12 +497,13 @@ class _ComposerState extends ConsumerState<Composer> {
     } catch (_) {
       // The modal pre-verified the nsec, so a failure here is a login-flow
       // error; surface the abort line rather than crashing the composer.
-      if (mounted) _onSystemMessage('Nickname change cancelled.');
+      if (mounted) _onSystemMessage(tr('Nickname change cancelled.'));
       return;
     }
     if (!mounted) return;
     final nym = ref.read(appStateProvider).selfNym;
-    _onSystemMessage('Identity verified. You are now logged in as $nym.');
+    _onSystemMessage(
+        tr('Identity verified. You are now logged in as {nym}.', {'nym': nym}));
   }
 
   /// Runs [action] against the current group id when the active view is a group.
@@ -512,12 +516,12 @@ class _ComposerState extends ConsumerState<Composer> {
   void _addMemberToCurrentGroup(String arg) {
     final view = ref.read(currentViewProvider);
     if (view.kind != ViewKind.group) {
-      _onSystemMessage('You must be in a group to add members.');
+      _onSystemMessage(tr('You must be in a group to add members.'));
       return;
     }
     final target = resolveTarget(arg, ref.read(usersProvider));
     if (target == null) {
-      _onSystemMessage('User ${arg.trim()} not found');
+      _onSystemMessage(tr('User {user} not found', {'user': arg.trim()}));
       return;
     }
     unawaited(
@@ -541,11 +545,11 @@ class _ComposerState extends ConsumerState<Composer> {
     final group = appState.groupById(view.id);
     if (group == null) return;
     if (!GroupLogic.isOwner(group, app.selfPubkey)) {
-      _onSystemMessage('Only the group owner can unban users.');
+      _onSystemMessage(tr('Only the group owner can unban users.'));
       return;
     }
     if (!group.banned.contains(pubkey)) {
-      _onSystemMessage('That user is not banned.');
+      _onSystemMessage(tr('That user is not banned.'));
       return;
     }
     appState.applyGroupControl(
@@ -562,7 +566,8 @@ class _ComposerState extends ConsumerState<Composer> {
     ref.read(nostrControllerProvider).ensureProfiles([pubkey]);
     final nym = ref.read(usersProvider)[pubkey]?.nym ??
         'anon#${pubkey.substring(pubkey.length - 4)}';
-    _onSystemMessage('@$nym was unbanned. They can be re-invited.');
+    _onSystemMessage(
+        tr('@{nym} was unbanned. They can be re-invited.', {'nym': nym}));
   }
 
   /// `/groupinfo` — the PWA's `cmdGroupInfo` (groups.js:3487-3525): sort the
@@ -1326,7 +1331,7 @@ class _ComposerState extends ConsumerState<Composer> {
         continue;
       }
       if (bytes.length > maxUpload) {
-        _onSystemMessage('Files must be under 50MB.');
+        _onSystemMessage(tr('Files must be under 50MB.'));
         continue;
       }
       final contentType = file.mimeType ?? _guessImageMime(file.name);
@@ -1346,7 +1351,7 @@ class _ComposerState extends ConsumerState<Composer> {
       if (!mounted) return;
       if (_uploadCancelled) break;
       if (url == null) {
-        _onSystemMessage('Failed to upload media.');
+        _onSystemMessage(tr('Failed to upload media.'));
         continue;
       }
       urls.add(url);
@@ -1387,7 +1392,7 @@ class _ComposerState extends ConsumerState<Composer> {
     final file = result.files.first;
     final bytes = file.bytes;
     if (bytes == null) {
-      _onSystemMessage('Could not read the selected file.');
+      _onSystemMessage(tr('Could not read the selected file.'));
       return;
     }
     await ref.read(nostrControllerProvider).shareP2PFile(
@@ -1395,7 +1400,7 @@ class _ComposerState extends ConsumerState<Composer> {
           name: file.name,
           type: _guessImageMime(file.name),
         );
-    if (mounted) _onSystemMessage('File offered for P2P download.');
+    if (mounted) _onSystemMessage(tr('File offered for P2P download.'));
   }
 
   static String _guessImageMime(String name) {
@@ -1577,10 +1582,10 @@ class _ComposerState extends ConsumerState<Composer> {
   Widget _uploadBar(BuildContext context) {
     final c = context.nym;
     final isVideo = (_uploadMime ?? '').startsWith('video/');
-    final kind = isVideo ? 'video' : 'image';
     final label = _uploadTotal > 1
-        ? 'Uploading $_uploadIndex of $_uploadTotal...'
-        : 'Uploading $kind...';
+        ? tr('Uploading {i} of {total}...',
+            {'i': _uploadIndex, 'total': _uploadTotal})
+        : (isVideo ? tr('Uploading video...') : tr('Uploading image...'));
     final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
     // In solid-ui the panel is repainted with --glass-bg (#14141e dark /
     // opaque #ffffff light — styles-themes-responsive.css:1593-1627, sourced
@@ -1846,7 +1851,7 @@ class _ComposerState extends ConsumerState<Composer> {
       verified: isDev || isBot,
       friend: friend,
       verifiedTitle:
-          isDev ? 'Nymchat Developer' : (isBot ? 'Nymchat Bot' : null),
+          isDev ? tr('Nymchat Developer') : (isBot ? tr('Nymchat Bot') : null),
     );
   }
 
@@ -1938,7 +1943,7 @@ class _ComposerState extends ConsumerState<Composer> {
       decoration: InputDecoration(
         isDense: true,
         // PWA `data-placeholder` teaches the `/` and `?` affordances (F9).
-        hintText: 'Message, / for commands, ? for Nymbot...',
+        hintText: tr('Message, / for commands, ? for Nymbot...'),
         hintStyle: TextStyle(
             // `div.message-input:empty::before` → white@0.4 (dark) /
             // black@0.4 (`body.light-mode …`, styles-themes-responsive.css:58).
@@ -2142,7 +2147,7 @@ class _ComposerState extends ConsumerState<Composer> {
                         cursorColor: c.isLight ? Colors.black : Colors.white,
                         decoration: InputDecoration(
                           isDense: true,
-                          hintText: 'Search languages...',
+                          hintText: tr('Search languages...'),
                           hintStyle: TextStyle(color: c.textDim, fontSize: 13),
                           filled: true,
                           // `.translate-dropdown-search input` is white@0.05
@@ -2173,7 +2178,7 @@ class _ComposerState extends ConsumerState<Composer> {
                       child: langs.isEmpty
                           ? Padding(
                               padding: const EdgeInsets.all(14),
-                              child: Text('No languages found',
+                              child: Text(tr('No languages found'),
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
                                       color: c.textDim, fontSize: 13)),
@@ -2224,8 +2229,8 @@ class _ComposerState extends ConsumerState<Composer> {
       // the original (detected language already matches the target) —
       // `translateInputText` (translate.js:479-483).
       if (out.trim().isEmpty || out.trim() == text) {
-        _onSystemMessage(
-            'Nothing to translate (text may already be in the target language).');
+        _onSystemMessage(tr(
+            'Nothing to translate (text may already be in the target language).'));
         return;
       }
       _controller.text = out;
@@ -2238,7 +2243,7 @@ class _ComposerState extends ConsumerState<Composer> {
       if (mounted) {
         _onSystemMessage(e is TranslateException
             ? e.message
-            : 'Translation failed: Unknown error');
+            : tr('Translation failed: Unknown error'));
       }
     } finally {
       if (mounted) {
@@ -2253,7 +2258,7 @@ class _ComposerState extends ConsumerState<Composer> {
     final buttons = <Widget>[
       _IconBtn(
         svg: NymIcons.composerImage,
-        tooltip: 'Upload Image/Video',
+        tooltip: tr('Upload Image/Video'),
         expand: widget.compact,
         // Inert until relays connect (same `sendEnabled` as SEND), then the
         // existing in-upload guard takes over.
@@ -2262,7 +2267,7 @@ class _ComposerState extends ConsumerState<Composer> {
       ),
       _IconBtn(
         svg: NymIcons.composerFile,
-        tooltip: 'Share File (P2P)',
+        tooltip: tr('Share File (P2P)'),
         expand: widget.compact,
         enabled: sendEnabled,
         onTap: _pickAndShareFile,
@@ -2329,7 +2334,7 @@ class _ComposerState extends ConsumerState<Composer> {
         ),
         child: _IconBtn(
           svg: NymIcons.composerEmoji,
-          tooltip: 'Emoji',
+          tooltip: tr('Emoji'),
           expand: widget.compact,
           enabled: enabled,
           onTap: _toggleEmojiPicker,
@@ -2732,7 +2737,7 @@ class _SendButtonState extends State<_SendButton> {
                       horizontal: widget.phone ? 10 : 22),
                   alignment: Alignment.center,
                   child: Text(
-                    _anonFired ? 'ANON' : 'SEND',
+                    _anonFired ? tr('ANON') : tr('SEND'),
                     style: TextStyle(
                       color: c.primary,
                       fontSize: widget.phone ? 11 : 12,
@@ -2891,7 +2896,7 @@ class _QuotePreviewChip extends ConsumerWidget {
     return _PreviewChip(
       barColor: c.primary,
       onClose: onClose,
-      closeTooltip: 'Cancel reply',
+      closeTooltip: tr('Cancel reply'),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -2976,16 +2981,16 @@ class _EditPreviewChip extends StatelessWidget {
     return _PreviewChip(
       barColor: amber,
       onClose: onClose,
-      closeTooltip: 'Cancel edit',
+      closeTooltip: tr('Cancel edit'),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text(
-            'Editing message',
+          Text(
+            tr('Editing message'),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
+            style: const TextStyle(
                 color: amber, fontSize: 12, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 2),
@@ -3125,7 +3130,7 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
           ? 1.0
           : (widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4),
       child: Tooltip(
-        message: 'Translate text',
+        message: tr('Translate text'),
         child: MouseRegion(
           cursor: widget.enabled
               ? SystemMouseCursors.click

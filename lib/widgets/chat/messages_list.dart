@@ -7,6 +7,7 @@ import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../features/i18n/i18n.dart';
 import '../../features/polls/poll_card.dart';
 import '../../features/reactions/reaction_picker.dart';
 import '../../models/channel.dart';
@@ -448,9 +449,10 @@ class _MessagesListState extends ConsumerState<MessagesList> {
         (c) => c.key == view.id,
         orElse: () => ChannelEntry(channel: view.id),
       );
-      return 'No recent messages in #${ch.isGeohash ? ch.geohash : ch.channel}';
+      return tr('No recent messages in #{channel}',
+          {'channel': ch.isGeohash ? ch.geohash : ch.channel});
     }
-    return 'No recent messages';
+    return tr('No recent messages');
   }
 }
 
@@ -554,7 +556,7 @@ class _ChannelHistoryEdgeNotice extends StatelessWidget {
             borderRadius: const BorderRadius.all(Radius.circular(20)),
           ),
           child: Text(
-            "You've reached the edge of this channel's history.",
+            tr("You've reached the edge of this channel's history."),
             textAlign: TextAlign.center,
             style: TextStyle(
               color: c.textDim,

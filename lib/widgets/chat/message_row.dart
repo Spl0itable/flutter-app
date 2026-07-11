@@ -10,6 +10,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/autocomplete/pending_edit.dart';
+import '../../features/i18n/i18n.dart';
 import '../../features/messages/flood_tracker.dart';
 import '../../features/messages/format/message_content.dart';
 import '../../features/messages/inline_network_image.dart';
@@ -857,7 +858,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // `.group-info-title { font-weight: 600; margin-bottom: 2px }` —
         // inherits the pill's text-dim + `textSize − 3`.
         Text(
-          'Group: "${info.name}"',
+          tr('Group: "{name}"', {'name': info.name}),
           style: TextStyle(
             color: c.textDim,
             fontSize: size,
@@ -869,7 +870,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // `.group-info-count { color: --text-dim; font-size: 12px;
         // margin-bottom: 6px }`.
         Text(
-          'Members (${info.count})',
+          tr('Members ({count})', {'count': info.count}),
           style: TextStyle(color: c.textDim, fontSize: 12),
         ),
         const SizedBox(height: 6),
@@ -1438,7 +1439,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             child: Padding(
               padding: const EdgeInsets.only(top: 2),
               child: Text(
-                '(edited)',
+                tr('(edited)'),
                 style: TextStyle(
                   color: c.textDim.withValues(alpha: 0.7),
                   fontSize: 10,
@@ -1692,7 +1693,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       children: [
         if (message.isEdited)
           Text(
-            '(edited) ',
+            '${tr('(edited)')} ',
             // `.edited-indicator` base (styles-chat.css:1549-1554): 10px
             // italic text-dim AT OPACITY 0.7 — the in-bubble variant
             // (`.bubble-time-inner .edited-indicator`) inherits it.
@@ -2193,7 +2194,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       context,
       anchorRect: _globalRectOfContext(context) ?? Rect.zero,
       emoji: '',
-      title: 'Seen by ${abbreviateNumber(reactors.length)}',
+      title: tr('Seen by {count}', {'count': abbreviateNumber(reactors.length)}),
       reactors: reactors,
       // "Click user row to open their context menu" (`_showReadersModalFromMap`,
       // groups.js:2861-2869): close the modal, then
@@ -2422,7 +2423,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         Clipboard.setData(ClipboardData(text: message.content));
         ref
             .read(appStateProvider.notifier)
-            .addSystemMessage('Message copied to clipboard');
+            .addSystemMessage(tr('Message copied to clipboard'));
         return;
       case 'react':
         _quickReact(context, settings.swipeReactEmoji);
@@ -2434,7 +2435,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         if (message.isOwn) {
           ref
               .read(appStateProvider.notifier)
-              .addSystemMessage('Cannot zap your own message');
+              .addSystemMessage(tr('Cannot zap your own message'));
           return;
         }
         _zapMessage(context, baseNym);
@@ -2463,19 +2464,22 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// "Failed to check if @X can receive zaps".
   Future<void> _zapMessage(BuildContext context, String baseNym) async {
     final notifier = ref.read(appStateProvider.notifier);
-    notifier.addSystemMessage('Checking if @$baseNym can receive zaps...');
+    notifier.addSystemMessage(
+        tr('Checking if @{nym} can receive zaps...', {'nym': baseNym}));
     final String? lnAddr;
     try {
       lnAddr = await ref
           .read(nostrControllerProvider)
           .resolveLightningAddressForZap(message.pubkey);
     } catch (_) {
-      notifier.addSystemMessage('Failed to check if @$baseNym can receive zaps');
+      notifier.addSystemMessage(
+          tr('Failed to check if @{nym} can receive zaps', {'nym': baseNym}));
       return;
     }
     if (lnAddr == null || lnAddr.isEmpty) {
-      notifier.addSystemMessage(
-          '@$baseNym cannot receive zaps (no lightning address set)');
+      notifier.addSystemMessage(tr(
+          '@{nym} cannot receive zaps (no lightning address set)',
+          {'nym': baseNym}));
       return;
     }
     if (!context.mounted || !mounted) return;
@@ -2693,7 +2697,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
             behavior: HitTestBehavior.opaque,
             onTap: _retryFailedPm,
             child: Tooltip(
-              message: 'Failed to send - click to retry',
+              message: tr('Failed to send - click to retry'),
               child: Text(
                 '!',
                 style: TextStyle(
@@ -3168,7 +3172,7 @@ class _BotThinkSectionState extends State<_BotThinkSection> {
                   ),
                   const SizedBox(width: 6),
                   // `.bot-think summary` has no font-weight (normal/w400).
-                  Text('💭 Reasoning',
+                  Text(tr('💭 Reasoning'),
                       style: TextStyle(
                           color: c.textDim,
                           fontSize: fs,
@@ -3317,7 +3321,7 @@ class _MsgHoverButtons extends StatelessWidget {
       _HoverActionButton(
         svg: NymIcons.translate,
         onTap: onTranslate,
-        tooltip: 'Translate',
+        tooltip: tr('Translate'),
       ),
     ];
     return vertical
@@ -3720,7 +3724,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
                         ),
                         Text(
                           '${formatFileSize(offer.size)} • '
-                          '${offer.type.isEmpty ? 'Unknown type' : offer.type}'
+                          '${offer.type.isEmpty ? tr('Unknown type') : offer.type}'
                           '${isTorrent ? ' • Torrent' : ''}',
                           style: TextStyle(color: c.textDim, fontSize: 12),
                         ),
@@ -3746,7 +3750,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
     // Own offer: seeding (pulsing primary dot + Stop) or no-longer-seeding.
     if (isOwn) {
       if (unseeded) {
-        return _dotRow(c, 'No longer seeding');
+        return _dotRow(c, tr('No longer seeding'));
       }
       // `.file-offer-seeding`: gap 6, --primary 11px, margin-top 8; the dot
       // pulses opacity 1↔0.5 on a 1.5s loop (`animation: pulse 1.5s infinite`,
@@ -3758,7 +3762,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
             _SeedingDot(color: c.primary),
             const SizedBox(width: 6),
             Expanded(
-              child: Text('Seeding - available for download',
+              child: Text(tr('Seeding - available for download'),
                   style: TextStyle(color: c.primary, fontSize: 11)),
             ),
             _StopBtn(
@@ -3773,7 +3777,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
     // (messages.js:876-882). A card that saw the offer seeded keeps its
     // button and flips it to "Unavailable" below (`updateFileOfferUI`).
     if (unseeded && !_sawSeeded) {
-      return _dotRow(c, 'No longer available');
+      return _dotRow(c, tr('No longer available'));
     }
 
     // Peer offer: the `.file-offer-btn` stays visible through the WHOLE
@@ -3793,7 +3797,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
     final Widget button;
     if (unseeded) {
       button = _OfferBtn(
-        label: 'Unavailable',
+        label: tr('Unavailable'),
         textColor: c.textDim,
         borderColor: c.textDim,
         fillColor: base.withValues(alpha: 0.08),
@@ -3804,7 +3808,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
       // `.file-offer-btn.downloading`: border + text --secondary (the fill
       // keeps the base class tint), default cursor.
       button = _OfferBtn(
-        label: 'Connecting...',
+        label: tr('Connecting...'),
         textColor: c.secondary,
         borderColor: c.secondary,
         fillColor: base.withValues(alpha: 0.08),
@@ -3812,7 +3816,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
       );
     } else if (transfer != null && transfer.status == P2PStatus.complete) {
       button = _OfferBtn(
-        label: 'Downloaded',
+        label: tr('Downloaded'),
         textColor: base,
         borderColor: base.withValues(alpha: 0.25),
         fillColor: base.withValues(alpha: 0.08),
@@ -3820,7 +3824,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
       );
     } else if (transfer != null && transfer.status == P2PStatus.error) {
       button = _OfferBtn(
-        label: 'Retry',
+        label: tr('Retry'),
         textColor: base,
         borderColor: base.withValues(alpha: 0.25),
         fillColor: base.withValues(alpha: 0.08),
@@ -3828,7 +3832,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
       );
     } else {
       button = _OfferBtn(
-        label: offer.isTorrent ? 'Download (Torrent)' : 'Download',
+        label: offer.isTorrent ? tr('Download (Torrent)') : tr('Download'),
         textColor: base,
         borderColor: base.withValues(alpha: 0.25),
         fillColor: base.withValues(alpha: 0.08),
@@ -3902,7 +3906,7 @@ class _FileOfferCardState extends State<FileOfferCard> {
       return '${transfer.progress.toStringAsFixed(1)}% • '
           '${formatFileSize(speed)}/s';
     }
-    return transfer.message ?? 'Connecting...';
+    return transfer.message ?? tr('Connecting...');
   }
 
   /// `.file-offer-unseeded` (styles-features.css:2228-2244): text-dim 11px row
@@ -4056,7 +4060,7 @@ class _StopBtn extends StatelessWidget {
           // `.file-offer-btn { border-radius: var(--radius-xs)=8 }` (:2110).
           borderRadius: const BorderRadius.all(Radius.circular(8)),
         ),
-        child: Text('Stop',
+        child: Text(tr('Stop'),
             style: TextStyle(color: c.danger, fontSize: 10)),
       ),
     );
