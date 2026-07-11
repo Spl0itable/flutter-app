@@ -125,7 +125,14 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     // or the modal would open twice.
 
     return Scaffold(
-      backgroundColor: c.bg,
+      // Transparent so the shell's fixed `#wallpaperLayer` (mounted behind the
+      // pane in home_shell) shows through the bot chat exactly like the canonical
+      // ChatPane, which is itself transparent. The opaque base still comes from
+      // the shell Scaffold (`c.bg`); the AppBar/composer paint their own glass
+      // surfaces and the messages area only a translucent wash, so the wallpaper
+      // (default pattern or custom upload) reads through the bot thread too.
+      // Painting an opaque `c.bg` here covered the wallpaper for the whole view.
+      backgroundColor: Colors.transparent,
       appBar: _header(context, c, state),
       body: Column(
         children: [
@@ -253,16 +260,22 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
                             TextSpan(
                               text: '#${getPubkeySuffix(kNymbotPubkey)}',
                               // `.nym-suffix`: opacity 0.7 / 0.9em / weight 100.
+                              // Tinted from `--primary` like every other 1:1 PM
+                              // header nym (chat_pane.dart `_titleLine` pm case),
+                              // NOT `--text-bright` (which read as a different
+                              // colour from every other PM header).
                               style: TextStyle(
-                                color: c.textBright.withValues(alpha: 0.7),
+                                color: c.primary.withValues(alpha: 0.7),
                                 fontSize: 16 * 0.9,
                                 fontWeight: FontWeight.w100,
                               ),
                             ),
                           ]),
                           overflow: TextOverflow.ellipsis,
+                          // Base nym in `--primary` to match the canonical PM
+                          // header (chat_pane.dart:445), not `--text-bright`.
                           style: TextStyle(
-                              color: c.textBright,
+                              color: c.primary,
                               fontSize: 16,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.2),
