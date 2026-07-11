@@ -122,6 +122,25 @@ void main() {
         isFalse,
       );
     });
+
+    test('always applies to the Nymbot welcome, even with the toggle off', () {
+      const off = Settings(autoTranslate: false);
+      expect(autoTranslateAppliesTo(_msg(id: 'nymbot-welcome'), off), isTrue);
+      expect(
+        autoTranslateAppliesTo(_msg(id: 'nymbot-welcome-1700000000'), off),
+        isTrue,
+      );
+      // …but never your own message or a system row.
+      expect(
+        autoTranslateAppliesTo(_msg(id: 'nymbot-welcome', isOwn: true), off),
+        isFalse,
+      );
+      expect(
+        autoTranslateAppliesTo(
+            _msg(id: 'nymbot-welcome', kind: MessageKind.system), off),
+        isFalse,
+      );
+    });
   });
 
   group('autoTranslateTargetFor', () {
@@ -249,6 +268,19 @@ void main() {
       expect(e.translated.contains(':PARTY:'), isFalse);
       // …but the surrounding prose was.
       expect(e.translated, contains('HELLO'));
+    });
+
+    test('preserves inline code spans so commands survive (e.g. `?help`)',
+        () async {
+      final n = AutoTranslateNotifier(service: _uppercasingService());
+      n.ensure(_msg(content: 'type `?help` for the guide'), 'en');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final e = n.state['m1']!;
+      expect(e.status, AutoTranslateStatus.ready);
+      // The code span is byte-identical; the surrounding prose is translated.
+      expect(e.translated, contains('`?help`'));
+      expect(e.translated.contains('`?HELP`'), isFalse);
+      expect(e.translated, contains('TYPE'));
     });
 
     test('keeps a quote-reply line verbatim (renders as a quote, not a mention)',

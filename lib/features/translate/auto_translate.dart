@@ -309,11 +309,21 @@ String autoTranslateTargetFor(Settings settings) {
 /// system/action rows are never auto-translated. Callers must still check that
 /// a target language is set (see [autoTranslateTargetFor]).
 bool autoTranslateAppliesTo(Message message, Settings settings) {
-  if (!settings.autoTranslate) return false;
   if (message.isOwn) return false;
   if (message.isSystemRow) return false;
+  // The Nymbot welcome always localizes to the user's chosen language — even
+  // when the general auto-translate toggle is off — so a brand-new user is
+  // greeted in the language they picked. (Callers still require a target
+  // language via [autoTranslateTargetFor], so English users see the original.)
+  if (message.id.startsWith(kNymbotWelcomeIdPrefix)) return true;
+  if (!settings.autoTranslate) return false;
   if (message.isGroup) return settings.autoTranslateGroups;
   if (message.isPM) return settings.autoTranslatePMs;
   // Neither PM nor group ⇒ a public channel message.
   return settings.autoTranslateChannels;
 }
+
+/// Message-id prefix of Nymbot's welcome messages (the transient premium
+/// welcome `nymbot-welcome` and the persisted first-contact PM
+/// `nymbot-welcome-<ts>`), which always auto-translate to the chosen language.
+const String kNymbotWelcomeIdPrefix = 'nymbot-welcome';

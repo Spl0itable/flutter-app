@@ -42,13 +42,16 @@ class TranslateService {
   /// Tokens that must pass through translation UNTRANSLATED. Split out (like the
   /// PWA's `@mention` handling, `translate.js:298`) so the upstream never sees
   /// them and can't translate/reflow/break them:
+  ///  * `` `inline code` `` — keeps command tokens (e.g. `` `?help` ``, `` `?model` ``
+  ///    in the Nymbot welcome) and code verbatim (matched FIRST so anything
+  ///    inside a code span is preserved whole);
   ///  * bare `http(s)://…` URLs — so media, rich link previews, and clickable
   ///    links survive in the re-rendered translation, and any `@` inside a URL
-  ///    isn't mistaken for a mention (URL is matched FIRST for that reason);
+  ///    isn't mistaken for a mention (URL is matched before mentions);
   ///  * `@nym` mentions — handles stay clickable and nicknames aren't translated;
   ///  * `:shortcode:` custom emoji — render as inline images, not translated text.
   static final RegExp _rxPreserve =
-      RegExp(r'https?://[^\s]+|@[^\s@]+|:[a-zA-Z0-9_+\-]+:');
+      RegExp(r'`[^`\n]*`|https?://[^\s]+|@[^\s@]+|:[a-zA-Z0-9_+\-]+:');
 
   /// Per-chunk leading/trailing whitespace capture (`translate.js:305`).
   static final RegExp _rxEdgeWhitespace = RegExp(r'^(\s*)([\s\S]*?)(\s*)$');
