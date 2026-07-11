@@ -31,6 +31,7 @@ import '../../features/groups/group_logic.dart';
 import '../../features/identity/dev_nsec_modal.dart';
 import '../../features/messages/format/message_content.dart'
     show InlineEmojiText, proxiedMedia;
+import '../../features/messages/format/nym_format.dart' show NymFormat;
 import '../../features/messages/inline_network_image.dart';
 import '../../features/nymbot/nymbot_models.dart';
 import '../../features/polls/poll_create_modal.dart';
@@ -337,10 +338,12 @@ class _ComposerState extends ConsumerState<Composer> {
         .trim();
   }
 
-  /// The chip's cleaned preview text: strip HTML/markdown punctuation, cap 120
-  /// (`cleanText` in setQuoteReply, messages.js:1845-1846).
+  /// The chip's cleaned preview text: drop the hidden game-state token, then
+  /// strip HTML/markdown punctuation, cap 120 (`cleanText` in setQuoteReply,
+  /// messages.js:1845-1846). The game token is elided FIRST so quoting a Nymbot
+  /// game message never flashes a literal `[gc:…]` blob in the quote chip.
   static String _quotePreviewText(String text) {
-    final clean = text
+    final clean = NymFormat.stripGameTokens(text)
         .replaceAll(RegExp(r'<[^>]*>'), '')
         .replaceAll(RegExp(r'[*_~`>#]'), '');
     return clean.length > 120 ? '${clean.substring(0, 120)}...' : clean;
