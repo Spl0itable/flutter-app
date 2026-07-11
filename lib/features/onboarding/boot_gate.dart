@@ -72,6 +72,11 @@ class _BootGateState extends ConsumerState<BootGate> {
 
   void _onLanguageChosen() {
     if (!mounted) return;
+    // Start translating the tutorial IMMEDIATELY — at middle priority, so it's
+    // processed right after the welcome/signup modal (which translates on
+    // demand) and ahead of the full-app background sweep. This way it's ready
+    // by the time the user reaches it, rather than waiting until it's shown.
+    LocalizationService.instance.prime(tutorialStringsForPretranslate());
     setState(() => _languageChosen = true);
   }
 

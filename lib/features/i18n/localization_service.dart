@@ -78,6 +78,18 @@ class LocalizationService {
   /// the same string within a language session.
   final Set<String> _requested = {};
 
+  /// MIDDLE-priority queue: [prime]d screens that aren't on screen yet but
+  /// should be translated ahead of the bulk catalog — the onboarding tutorial,
+  /// primed the moment a language is chosen so it's ready before the user
+  /// reaches it. Drained after [_pending] (what's actually on screen) but
+  /// before [_sweepPending].
+  final Set<String> _primePending = {};
+
+  /// LOW-priority queue: the full-app catalog [sweep]. Drained last, so the
+  /// visible screen (the welcome/signup modal) translates first, then the
+  /// primed tutorial, then the rest of the app fills in behind them.
+  final Set<String> _sweepPending = {};
+
   Timer? _debounce;
   bool _flushing = false;
 
@@ -134,6 +146,8 @@ class LocalizationService {
     _cache.clear();
     _requested.clear();
     _pending.clear();
+    _primePending.clear();
+    _sweepPending.clear();
     _failed.clear();
     _retryTimer?.cancel();
     _retryTimer = null;
@@ -165,6 +179,10 @@ class LocalizationService {
     final hit = _cache[source];
     if (hit != null) return _subst(hit, args);
     if (!_requested.contains(source)) {
+      // A string actually being rendered jumps to the top lane (promoting it
+      // out of the prime/sweep lanes if it was queued there).
+      _sweepPending.remove(source);
+      _primePending.remove(source);
       _pending.add(source);
       _scheduleFlush();
     }
@@ -183,52 +201,40 @@ class LocalizationService {
     for (final s in sources) {
       if (s.isEmpty) continue;
       _seen.add(s);
-      if (isActive && !_cache.containsKey(s) && !_requested.contains(s)) {
-        _pending.add(s);
+      if (isActive &&
+          !_cache.containsKey(s) &&
+          !_requested.contains(s) &&
+          !_pending.contains(s)) {
+        // MIDDLE lane: ahead of the background sweep, behind on-screen strings.
+        _sweepPending.remove(s);
+        _primePending.add(s);
       }
     }
-    if (_pending.isNotEmpty) _scheduleFlush();
+    if (_primePending.isNotEmpty) _scheduleFlush();
   }
 
-  /// Kicks a background sweep translating [catalog] — the app's full UI-string
-  /// catalog (`kAppStringsCatalog`) — into the active language, so EVERY screen
-  /// is pre-populated in the cache and nothing has to translate on demand (no
-  /// flashes anywhere). Cheap when strings are already cached (hits are skipped)
-  /// and safe to call repeatedly; a no-op for English. The sweep runs in
-  /// chunks with retries and survives interruption (partial progress persists),
-  /// so calling it again — on a later launch or after a language switch — just
-  /// fills whatever is still missing.
-  void sweep(Iterable<String> catalog) => prime(catalog);
-
-  /// Awaitable bulk translation used by the first-run language picker so it can
-  /// show progress while the strings already registered are localized before
-  /// the user proceeds. Reports progress as `(done, total)`. Completes
-  /// immediately for English.
-  Future<void> pretranslate({
-    Iterable<String>? sources,
-    void Function(int done, int total)? onProgress,
-  }) async {
-    if (!isActive) {
-      onProgress?.call(1, 1);
-      return;
+  /// Kicks a LOW-PRIORITY background sweep translating [catalog] — the app's
+  /// full UI-string catalog (`kAppStringsCatalog`) — into the active language,
+  /// so every screen is eventually pre-populated in the cache and nothing has
+  /// to translate on demand. It NEVER render-blocks: the user can start using
+  /// the app immediately, and any string actually being rendered (or [prime]d —
+  /// the welcome/signup modal, then the tutorial) preempts the sweep via the
+  /// high-priority lane. Cheap when strings are already cached, safe to call
+  /// repeatedly, a no-op for English, chunked with retries, and resumable
+  /// (partial progress persists) across launches / language switches.
+  void sweep(Iterable<String> catalog) {
+    for (final s in catalog) {
+      if (s.isEmpty) continue;
+      _seen.add(s);
+      if (isActive &&
+          !_cache.containsKey(s) &&
+          !_requested.contains(s) &&
+          !_pending.contains(s) &&
+          !_primePending.contains(s)) {
+        _sweepPending.add(s);
+      }
     }
-    final todo = <String>{
-      ...(sources ?? _seen),
-    }..removeWhere((s) => _cache.containsKey(s) || s.isEmpty);
-    final total = todo.length;
-    if (total == 0) {
-      onProgress?.call(1, 1);
-      return;
-    }
-    todo.forEach(_requested.add);
-    var done = 0;
-    await _mapPooled(todo.toList(), 8, (s) async {
-      await _translateOne(s);
-      done++;
-      onProgress?.call(done, total);
-    });
-    _persist();
-    onChanged?.call();
+    if (_sweepPending.isNotEmpty) _scheduleFlush();
   }
 
   // --- internals ------------------------------------------------------------
@@ -269,8 +275,11 @@ class LocalizationService {
     } catch (_) {}
   }
 
+  bool get _anyPending =>
+      _pending.isNotEmpty || _primePending.isNotEmpty || _sweepPending.isNotEmpty;
+
   void _scheduleFlush() {
-    if (_pending.isEmpty || _flushing) return;
+    if (_flushing || !_anyPending) return;
     _debounce?.cancel();
     // Coalesce the many `tr()` calls a single screen makes into one batch.
     _debounce = Timer(const Duration(milliseconds: 200), _flush);
@@ -281,13 +290,20 @@ class LocalizationService {
     _flushing = true;
     final lang = _lang;
     try {
-      // Drain the pending set in chunks, persisting + repainting after each so a
-      // large background sweep localizes the app progressively (and survives an
-      // interruption with partial progress saved) rather than in one long silent
-      // batch. New misses queued mid-flush are picked up by the loop.
-      while (_pending.isNotEmpty && lang == _lang) {
-        final chunk = _pending.take(_chunkSize).toList();
-        _pending.removeAll(chunk);
+      // Drain in chunks, persisting + repainting after each so translation lands
+      // progressively (and survives an interruption with partial progress
+      // saved) rather than in one long silent batch. Lanes are drained strictly
+      // by priority: on-screen strings (_pending) first, then primed screens
+      // (_primePending: the tutorial), then the full-app [sweep] (_sweepPending)
+      // — so the welcome/signup modal translates first, the tutorial next (even
+      // before it's shown), and the rest fills in behind them regardless of the
+      // order the lanes were fed.
+      while (_anyPending && lang == _lang) {
+        final queue = _pending.isNotEmpty
+            ? _pending
+            : (_primePending.isNotEmpty ? _primePending : _sweepPending);
+        final chunk = queue.take(_chunkSize).toList();
+        queue.removeAll(chunk);
         chunk.forEach(_requested.add);
         await _mapPooled(chunk, 8, _translateOne);
         if (lang != _lang) return; // language switched mid-flight
@@ -298,7 +314,7 @@ class LocalizationService {
       _flushing = false;
     }
     if (lang != _lang) return;
-    if (_pending.isNotEmpty) {
+    if (_anyPending) {
       _scheduleFlush();
     } else if (_failed.isNotEmpty) {
       // Everything reachable is cached; give parked failures a delayed retry.

@@ -896,7 +896,6 @@ const List<String> kAppStringsCatalog = <String>[
   'Translate Message',
   'Translate text',
   'Translating...',
-  'Translating…',
   'Translation Language',
   'Translation Language {name} Choose your preferred language for translating messages via the context menu.',
   'Translation failed',

@@ -119,5 +119,46 @@ void main() {
 
       svc.setLanguage('en'); // cleanup so the singleton doesn't leak state
     });
+
+    test('drains lanes by priority: on-screen → primed → swept', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = await KeyValueStore.open();
+      final svc = LocalizationService.instance;
+      svc.setLanguage('en'); // reset
+
+      final order = <String>[];
+      final mock = MockClient((req) async {
+        final text = (jsonDecode(req.body)['text'] ?? '').toString();
+        order.add(text);
+        return http.Response(
+          jsonEncode(
+              {'translatedText': text.toUpperCase(), 'detectedLanguage': 'de'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      svc.configure(
+        kv: kv,
+        language: 'de',
+        apiClient: ApiClient(client: mock, baseUrl: 'https://h/api/proxy'),
+      );
+
+      // Feed the lanes in REVERSE priority to prove priority — not insertion
+      // order — decides what translates first.
+      svc.sweep(['ZZ sweep one', 'ZZ sweep two']); // low
+      svc.prime(['YY primed tutorial']); // middle
+      svc.translate('AA on screen now'); // high
+
+      await Future<void>.delayed(const Duration(milliseconds: 700));
+
+      final iScreen = order.indexOf('AA on screen now');
+      final iPrimed = order.indexOf('YY primed tutorial');
+      final iSweep = order.indexWhere((s) => s.startsWith('ZZ sweep'));
+      expect(iScreen, isNonNegative);
+      expect(iScreen < iPrimed, isTrue, reason: 'on-screen before primed');
+      expect(iPrimed < iSweep, isTrue, reason: 'primed before swept');
+
+      svc.setLanguage('en'); // cleanup
+    });
   });
 }

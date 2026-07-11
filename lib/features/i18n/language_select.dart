@@ -37,51 +37,25 @@ String uiLanguageName(String code) {
   return languageName(code);
 }
 
-/// Applies [code] as the app UI language: persists the setting (which drives
-/// `LocalizationService.setLanguage` via the root listener) then awaits a bulk
-/// pre-translation of the strings already on screen so the switch is complete
-/// before the caller proceeds. Shows a small blocking progress dialog while the
-/// pass runs (skipped instantly for English). Safe to call from anywhere with a
-/// [ref].
-Future<void> applyUiLanguage(
-  BuildContext context,
-  WidgetRef ref,
-  String code,
-) async {
+/// Applies [code] as the app UI language and kicks translation. NON-BLOCKING:
+/// the caller can proceed immediately (no progress dialog, no render block), so
+/// the user starts using the app right away.
+///
+/// Prioritization is handled by [LocalizationService]'s two-lane queue: the
+/// screens shown next — the welcome/signup modal, then the tutorial — translate
+/// FIRST via the high-priority lane (their on-demand `tr()` renders + the
+/// tutorial's [LocalizationService.prime]), while the full-app catalog [sweep]
+/// kicked here runs in the LOW-priority background behind them. A brief English
+/// flash before each screen's strings land is fine.
+void applyUiLanguage(WidgetRef ref, String code) {
   ref.read(settingsProvider.notifier).setUiLanguage(code);
   // Apply immediately rather than waiting on the root's settings listener (its
   // callback fires asynchronously); setLanguage is idempotent, so the listener
   // re-invoking it with the same code is a harmless no-op.
   final svc = LocalizationService.instance;
   svc.setLanguage(code);
-  if (!svc.isActive) return; // English: nothing to pre-translate.
-
-  final progress = ValueNotifier<double>(0);
-  final navigator = Navigator.of(context, rootNavigator: true);
-  var dialogOpen = true;
-  // A lightweight, non-dismissible progress dialog.
-  unawaited(showDialog<void>(
-    context: context,
-    barrierDismissible: false,
-    builder: (_) => _TranslatingDialog(progress: progress),
-  ).then((_) => dialogOpen = false));
-
-  await svc.pretranslate(onProgress: (done, total) {
-    progress.value = total == 0 ? 1 : done / total;
-  });
-
-  if (dialogOpen) navigator.pop();
-  progress.dispose();
-
-  // Give the screen shown right after the picker (the welcome/setup modal, then
-  // the shell) a head start: its on-demand `tr()` misses queue and translate
-  // first, so it localizes promptly. Then sweep the REST of the app's UI in the
-  // background so every later screen is pre-populated in the cache — no
-  // on-demand flashes as the user navigates. Non-blocking; runs in chunks.
-  unawaited(Future<void>.delayed(
-    const Duration(milliseconds: 2500),
-    () => svc.sweep(kAppStringsCatalog),
-  ));
+  if (!svc.isActive) return; // English: nothing to translate.
+  svc.sweep(kAppStringsCatalog);
 }
 
 /// First-run, full-screen language chooser shown at the very start of
@@ -131,8 +105,8 @@ class LanguageSelectScreen extends ConsumerWidget {
                     child: LanguagePickerList(
                       selectedCode: ref.watch(
                           settingsProvider.select((s) => s.uiLanguage)),
-                      onSelected: (code) async {
-                        await applyUiLanguage(context, ref, code);
+                      onSelected: (code) {
+                        applyUiLanguage(ref, code);
                         onComplete();
                       },
                     ),
@@ -340,56 +314,13 @@ Future<void> showLanguageListDialog(
 }
 
 /// The Appearance → Language chooser: opens the shared dialog and applies the
-/// pick as the app UI language (with the translating-progress pass).
+/// pick as the app UI language (translation runs non-blocking in the
+/// background).
 Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
   return showLanguageListDialog(
     context,
     selectedCode: ref.read(settingsProvider).uiLanguage,
     title: tr('Language'),
-    onSelected: (code) => applyUiLanguage(context, ref, code),
+    onSelected: (code) => applyUiLanguage(ref, code),
   );
-}
-
-/// Non-dismissible "Translating…" progress dialog shown while a language switch
-/// pre-translates the on-screen strings.
-class _TranslatingDialog extends StatelessWidget {
-  const _TranslatingDialog({required this.progress});
-  final ValueListenable<double> progress;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    return Dialog(
-      backgroundColor: c.bgSecondary,
-      shape: RoundedRectangleBorder(
-        borderRadius: NymRadius.rlg,
-        side: BorderSide(color: c.glassBorder),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ValueListenableBuilder<double>(
-              valueListenable: progress,
-              builder: (_, v, __) => SizedBox(
-                width: 40,
-                height: 40,
-                child: CircularProgressIndicator(
-                  value: v > 0 && v < 1 ? v : null,
-                  strokeWidth: 3,
-                  color: c.primary,
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              tr('Translating…'),
-              style: TextStyle(color: c.text, fontSize: 15),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
