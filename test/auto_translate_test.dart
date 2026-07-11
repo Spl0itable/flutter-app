@@ -1,9 +1,14 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'package:nym_bar/features/translate/auto_translate.dart';
 import 'package:nym_bar/features/translate/translate_service.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/models/settings.dart';
+import 'package:nym_bar/services/api/api_client.dart';
 
 /// A [TranslateService] that returns a canned result without touching the
 /// network, so the notifier's caching / no-op logic can be exercised offline.
@@ -16,6 +21,39 @@ class _FakeTranslate extends TranslateService {
     calls?.add(text);
     return result;
   }
+}
+
+/// A [TranslateService] that throws [failTimes] times, then returns [result] —
+/// exercises the notifier's retry/backoff path.
+class _FlakyTranslate extends TranslateService {
+  _FlakyTranslate({required this.failTimes, required this.result}) : super();
+  int failTimes;
+  final TranslationResult result;
+  @override
+  Future<TranslationResult> translate(String text, String target) async {
+    if (failTimes > 0) {
+      failTimes--;
+      throw const TranslateException('boom');
+    }
+    return result;
+  }
+}
+
+/// A real [TranslateService] whose proxy "translates" by upper-casing the text
+/// it actually receives — so what it never receives (an `@mention`) is provably
+/// left untouched.
+TranslateService _uppercasingService() {
+  final mock = MockClient((req) async {
+    final text = (jsonDecode(req.body)['text'] ?? '').toString();
+    return http.Response(
+      jsonEncode({'translatedText': text.toUpperCase(), 'detectedLanguage': 'es'}),
+      200,
+      headers: {'content-type': 'application/json'},
+    );
+  });
+  return TranslateService(
+    api: ApiClient(client: mock, baseUrl: 'https://h/api/proxy'),
+  );
 }
 
 Message _msg({
@@ -121,6 +159,34 @@ void main() {
       n.ensure(_msg(content: 'hello'), 'en');
       await Future<void>.delayed(Duration.zero);
       expect(n.state['m1']!.status, AutoTranslateStatus.noop);
+    });
+
+    test('preserves @mention nicknames — never translates them', () async {
+      final n = AutoTranslateNotifier(service: _uppercasingService());
+      n.ensure(_msg(content: '@alice#1a2b hello there'), 'en');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final e = n.state['m1']!;
+      expect(e.status, AutoTranslateStatus.ready);
+      // The prose is translated (upper-cased) but the mention is byte-identical.
+      expect(e.translated, contains('@alice#1a2b'));
+      expect(e.translated, contains('HELLO THERE'));
+      // The nickname itself was not sent upstream, so it wasn't upper-cased.
+      expect(e.translated.contains('@ALICE'), isFalse);
+    });
+
+    test('retries a failing translation before succeeding', () async {
+      final n = AutoTranslateNotifier(
+        service: _FlakyTranslate(
+          failTimes: 2, // fail twice, succeed on the 3rd attempt
+          result: const TranslationResult(
+              translatedText: 'hello', detectedLanguage: 'es'),
+        ),
+      );
+      n.ensure(_msg(content: 'hola'), 'en');
+      // Backoff is 400ms + 800ms before the successful 3rd attempt.
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      expect(n.state['m1']!.status, AutoTranslateStatus.ready);
+      expect(n.state['m1']!.translated, 'hello');
     });
 
     test('caches per (message, target): no duplicate proxy calls', () async {

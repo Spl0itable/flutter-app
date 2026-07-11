@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/theme/nym_theme.dart';
+import 'features/i18n/app_strings_catalog.dart';
 import 'features/i18n/i18n.dart';
 import 'features/i18n/localization_service.dart';
 import 'features/onboarding/boot_gate.dart';
@@ -132,6 +133,15 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
         ref.read(i18nVersionProvider.notifier).state++;
       };
       LocalizationService.instance.configure(kv: kv, language: lang);
+      // Returning user already in a non-English language: sweep the full UI
+      // catalog in the background to fill any strings not cached from a prior
+      // session (or newly added by an app update). Deferred so it doesn't
+      // compete with boot; cheap when everything is already cached.
+      if (LocalizationService.instance.isActive) {
+        Future<void>.delayed(const Duration(seconds: 3), () {
+          if (mounted) LocalizationService.instance.sweep(kAppStringsCatalog);
+        });
+      }
     } catch (_) {
       // No KV override (e.g. some tests) — stay in English, tr() is a no-op.
     }

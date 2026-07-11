@@ -108,33 +108,51 @@ class AutoTranslateNotifier
     _run(message.id, source, target, key);
   }
 
+  /// In-line attempts (with backoff) before a message translation is marked
+  /// failed. The message keeps rendering its original meanwhile.
+  static const int _attempts = 3;
+
   Future<void> _run(
     String messageId,
     String source,
     String target,
     String key,
   ) async {
+    // `_service.translate` preserves `@mention` tokens verbatim (it never sends
+    // them upstream), so user nicknames are never translated — only the prose
+    // between mentions is.
     try {
-      final res = await _service.translate(source, target);
-      final translated = res.translatedText.trim();
-      // "Already in the target language" — detected == target, or the upstream
-      // returned the input unchanged. Treated as a silent no-op (no icon, no
-      // error), so the proxy result for a same-language message just renders
-      // the original.
-      final noop = translated.isEmpty ||
-          translated == source.trim() ||
-          (res.detectedLanguage != 'auto' && res.detectedLanguage == target);
-      _set(
-        messageId,
-        AutoTranslateEntry(
-          status: noop ? AutoTranslateStatus.noop : AutoTranslateStatus.ready,
-          source: source,
-          target: target,
-          translated: res.translatedText,
-          detected: res.detectedLanguage,
-        ),
-      );
-    } catch (_) {
+      for (var attempt = 0; attempt < _attempts; attempt++) {
+        try {
+          final res = await _service.translate(source, target);
+          final translated = res.translatedText.trim();
+          // "Already in the target language" — detected == target, or the
+          // upstream returned the input unchanged. Treated as a silent no-op
+          // (no icon, no error), so a same-language message just renders as-is.
+          final noop = translated.isEmpty ||
+              translated == source.trim() ||
+              (res.detectedLanguage != 'auto' &&
+                  res.detectedLanguage == target);
+          _set(
+            messageId,
+            AutoTranslateEntry(
+              status:
+                  noop ? AutoTranslateStatus.noop : AutoTranslateStatus.ready,
+              source: source,
+              target: target,
+              translated: res.translatedText,
+              detected: res.detectedLanguage,
+            ),
+          );
+          return;
+        } catch (_) {
+          if (attempt + 1 < _attempts) {
+            await Future<void>.delayed(
+                Duration(milliseconds: 400 * (1 << attempt)));
+          }
+        }
+      }
+      // Every attempt failed — fall back to the original silently.
       _set(
         messageId,
         AutoTranslateEntry(

@@ -1,8 +1,16 @@
-import 'package:flutter_test/flutter_test.dart';
+import 'dart:convert';
 
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:nym_bar/features/i18n/app_strings_catalog.dart';
 import 'package:nym_bar/features/i18n/i18n.dart';
 import 'package:nym_bar/features/i18n/language_select.dart';
 import 'package:nym_bar/features/i18n/localization_service.dart';
+import 'package:nym_bar/services/api/api_client.dart';
+import 'package:nym_bar/services/storage/key_value_store.dart';
 
 void main() {
   group('tr() in English (unconfigured) mode', () {
@@ -64,6 +72,52 @@ void main() {
       expect(uiLanguageName('en'), 'English');
       expect(uiLanguageName('es'), 'Spanish');
       expect(uiLanguageName('fr'), 'French');
+    });
+  });
+
+  group('app strings catalog (background sweep source)', () {
+    test('is populated with the app\'s direct tr() literals', () {
+      expect(kAppStringsCatalog.length, greaterThan(500));
+      for (final s in const ['Settings', 'Language', 'Show original']) {
+        expect(kAppStringsCatalog, contains(s), reason: s);
+      }
+    });
+
+    test('has no duplicate or empty entries', () {
+      expect(kAppStringsCatalog.toSet().length, kAppStringsCatalog.length);
+      expect(kAppStringsCatalog.any((s) => s.trim().isEmpty), isFalse);
+    });
+  });
+
+  group('LocalizationService sweep pipeline', () {
+    test('queues, translates and caches a string via the proxy', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = await KeyValueStore.open();
+      final svc = LocalizationService.instance;
+      svc.setLanguage('en'); // reset any state left by earlier tests
+
+      final mock = MockClient((req) async {
+        final text = (jsonDecode(req.body)['text'] ?? '').toString();
+        return http.Response(
+          jsonEncode(
+              {'translatedText': text.toUpperCase(), 'detectedLanguage': 'de'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      svc.configure(
+        kv: kv,
+        language: 'de',
+        apiClient: ApiClient(client: mock, baseUrl: 'https://h/api/proxy'),
+      );
+
+      // Cache miss ⇒ English fallback now, translation queued.
+      expect(svc.translate('Sweep me please'), 'Sweep me please');
+      // Debounced flush (200ms) + mock round-trip.
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(svc.translate('Sweep me please'), 'SWEEP ME PLEASE');
+
+      svc.setLanguage('en'); // cleanup so the singleton doesn't leak state
     });
   });
 }
