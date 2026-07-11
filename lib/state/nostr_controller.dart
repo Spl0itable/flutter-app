@@ -1541,6 +1541,20 @@ class NostrController {
       }
       _maybeNotifyChannel(event);
 
+      // Clear the "Nymbot is thinking" channel typing strip the moment the bot's
+      // reply lands — the PWA's `if (message.isBot) this._setBotChannelThinking(
+      // false)` in the channel ingest path (nostr-core.js:508-510). The command
+      // path only sets the indicator (with a 45s auto-expiry) and clears it on
+      // the ERROR branches; the SUCCESS branch relies on the reply arriving to
+      // clear it. Without this the strip hung for the full 45s even after the
+      // answer was already shown (the reported "stuck thinking indicator").
+      if (isVerifiedBot(event.pubkey)) {
+        final botChannelKey = EventMapper.channelKeyOf(event);
+        if (botChannelKey != null) {
+          _setBotChannelThinking(botChannelKey, false);
+        }
+      }
+
       // Web-of-trust observation for a non-own channel message (nostr-core.js:
       // 383-392). Two effects:
       //  (1) ≥2 distinct messages from a sender earns them session trust
