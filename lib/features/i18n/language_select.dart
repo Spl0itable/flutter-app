@@ -73,10 +73,15 @@ Future<void> applyUiLanguage(
   if (dialogOpen) navigator.pop();
   progress.dispose();
 
-  // With the on-screen strings translated, sweep the REST of the app's UI in
-  // the background so every screen is pre-populated in the cache — no on-demand
-  // flashes as the user navigates later. Non-blocking; runs in chunks.
-  svc.sweep(kAppStringsCatalog);
+  // Give the screen shown right after the picker (the welcome/setup modal, then
+  // the shell) a head start: its on-demand `tr()` misses queue and translate
+  // first, so it localizes promptly. Then sweep the REST of the app's UI in the
+  // background so every later screen is pre-populated in the cache — no
+  // on-demand flashes as the user navigates. Non-blocking; runs in chunks.
+  unawaited(Future<void>.delayed(
+    const Duration(milliseconds: 2500),
+    () => svc.sweep(kAppStringsCatalog),
+  ));
 }
 
 /// First-run, full-screen language chooser shown at the very start of
@@ -103,17 +108,6 @@ class LanguageSelectScreen extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const SizedBox(height: 8),
-                  Text(
-                    'Nymchat',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: c.primary,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1,
-                    ),
-                  ),
                   const SizedBox(height: 8),
                   Text(
                     // English by design — the user hasn't chosen a language yet,

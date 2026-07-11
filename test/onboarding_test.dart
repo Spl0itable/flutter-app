@@ -49,7 +49,11 @@ void main() {
         'shows the setup modal when not logged-in + auto-ephemeral off',
         (tester) async {
       roomy(tester);
-      SharedPreferences.setMockInitialValues(<String, Object>{});
+      // Language already chosen so the first-run picker (which now leads
+      // onboarding) is skipped and we land on the setup modal directly.
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'flutter.${StorageKeys.uiLanguageChosen}': 'true',
+      });
       final kv = await KeyValueStore.open();
 
       await tester.pumpWidget(_host(kv, const BootGate()));
@@ -66,6 +70,7 @@ void main() {
       roomy(tester);
       SharedPreferences.setMockInitialValues(<String, Object>{
         'flutter.${StorageKeys.autoEphemeral}': 'true',
+        'flutter.${StorageKeys.uiLanguageChosen}': 'true',
       });
       final kv = await KeyValueStore.open();
 
@@ -81,6 +86,7 @@ void main() {
       roomy(tester);
       SharedPreferences.setMockInitialValues(<String, Object>{
         'flutter.${StorageKeys.nostrLoginMethod}': 'nsec',
+        'flutter.${StorageKeys.uiLanguageChosen}': 'true',
       });
       final kv = await KeyValueStore.open();
 
@@ -215,7 +221,7 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  // 5. First-run language picker precedes the tutorial.
+  // 5. First-run language picker LEADS onboarding (before the welcome modal).
   // ---------------------------------------------------------------------------
   group('First-run language picker', () {
     testWidgets('shows before the tutorial when no language chosen yet',
@@ -234,6 +240,39 @@ void main() {
       // The picker is up; the tutorial is held behind it.
       expect(find.byType(LanguageSelectScreen), findsOneWidget);
       expect(find.byType(TutorialOverlay), findsNothing);
+    });
+
+    testWidgets('precedes the welcome/setup modal when setup is needed',
+        (tester) async {
+      roomy(tester);
+      // Not logged-in + no auto-ephemeral ⇒ setup is needed, but the language
+      // picker must lead so the welcome modal renders in the chosen language.
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = await KeyValueStore.open();
+
+      await tester.pumpWidget(_host(kv, const BootGate()));
+      await tester.pump();
+
+      expect(find.byType(LanguageSelectScreen), findsOneWidget);
+      expect(find.byType(SetupModal), findsNothing);
+    });
+
+    testWidgets('choosing a language then reveals the setup modal',
+        (tester) async {
+      roomy(tester);
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = await KeyValueStore.open();
+
+      await tester.pumpWidget(_host(kv, const BootGate()));
+      await tester.pump();
+      expect(find.byType(LanguageSelectScreen), findsOneWidget);
+
+      await tester.tap(find.text('English').first);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(LanguageSelectScreen), findsNothing);
+      expect(find.byType(SetupModal), findsOneWidget);
+      expect(kv.getBool(StorageKeys.uiLanguageChosen), isTrue);
     });
 
     testWidgets('choosing a language dismisses the picker and starts tutorial',
