@@ -75,7 +75,6 @@ class MessageContent extends ConsumerWidget {
     this.blurImages = false,
     this.glyphShadows,
     this.monospace = false,
-    this.neverTruncate = false,
   });
 
   final String content;
@@ -106,12 +105,6 @@ class MessageContent extends ConsumerWidget {
 
   /// Render the body in a monospace family (the CRT style). (`F13`.)
   final bool monospace;
-
-  /// Skip the "Read more" height truncation entirely (render the full body).
-  /// Used for the auto-translated view of a long message that contains inline
-  /// media, so the media stays visible instead of being clipped inside the
-  /// collapsed body — mirroring the PWA's unwrap-before-restructure fix.
-  final bool neverTruncate;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -228,10 +221,7 @@ class MessageContent extends ConsumerWidget {
       children: [
         // Link-preview cards (`_attachLinkPreviews`) are appended OUTSIDE the
         // `.truncated-inner` in the PWA, so they stay below the collapsible body.
-        if (!neverTruncate && replyText.length > threshold)
-          _Collapsible(child: body)
-        else
-          body,
+        if (replyText.length > threshold) _Collapsible(child: body) else body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
     );

@@ -2717,13 +2717,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     );
   }
 
-  /// Inline image/video media URL — used to keep media visible in an
-  /// auto-translated long message (see [_content]).
-  static final RegExp _rxInlineMedia = RegExp(
-    r'https?://[^\s]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|ogg|mov)(?:\?[^\s]*)?',
-    caseSensitive: false,
-  );
-
   Widget _content(
     BuildContext context,
     Color color,
@@ -2734,16 +2727,11 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final blur = _shouldBlurImages();
     // When this message is auto-translated (and the user isn't peeking at the
     // original), the translated text REPLACES the message body in place.
-    final translated = _autoEntry?.isReady == true && !_showOriginal;
-    final displayContent =
-        translated ? _autoEntry!.translated : message.content;
-    // For an auto-translated long message that carries inline media, skip the
-    // "Read more" truncation so the media stays visible rather than being
-    // clipped inside the collapsed body (mirrors the PWA fix).
-    final neverTruncate = translated && _rxInlineMedia.hasMatch(displayContent);
+    final displayContent = (_autoEntry?.isReady == true && !_showOriginal)
+        ? _autoEntry!.translated
+        : message.content;
     final body = MessageContent(
       content: displayContent,
-      neverTruncate: neverTruncate,
       // fire/ice paint a brighter glyph in the bubble than IRC (`#ff6600`/
       // `#00ccff` vs `#ffaa00`/`#00ccee`) — `textColorFor` returns the override.
       baseColor: deco?.textColorFor(bubble: bubble) ?? color,
@@ -2774,7 +2762,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         ).createShader(rect),
         child: MessageContent(
           content: displayContent,
-          neverTruncate: neverTruncate,
           baseColor: Colors.white,
           fontSize: fontSize,
           blurImages: blur,
@@ -2790,7 +2777,6 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           // shadow, sitting behind the gradient-clipped text.
           MessageContent(
             content: displayContent,
-            neverTruncate: neverTruncate,
             baseColor: const Color(0x00000000),
             fontSize: fontSize,
             blurImages: false,
