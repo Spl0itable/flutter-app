@@ -232,6 +232,25 @@ void main() {
       expect(e.translated.contains('@ALICE'), isFalse);
     });
 
+    test('preserves URLs and :shortcode: emoji so media/links survive',
+        () async {
+      final n = AutoTranslateNotifier(service: _uppercasingService());
+      n.ensure(
+          _msg(content: 'look https://ex.com/a.png :party: hello'), 'en');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      final e = n.state['m1']!;
+      expect(e.status, AutoTranslateStatus.ready);
+      // URL + custom-emoji shortcode kept byte-identical (never sent upstream),
+      // so MessageContent re-renders the image, link preview, and emoji.
+      expect(e.translated, contains('https://ex.com/a.png'));
+      expect(e.translated, contains(':party:'));
+      // The URL was NOT translated/upper-cased…
+      expect(e.translated.contains('HTTPS://'), isFalse);
+      expect(e.translated.contains(':PARTY:'), isFalse);
+      // …but the surrounding prose was.
+      expect(e.translated, contains('HELLO'));
+    });
+
     test('keeps a quote-reply line verbatim (renders as a quote, not a mention)',
         () async {
       final n = AutoTranslateNotifier(service: _uppercasingService());
