@@ -73,6 +73,14 @@ class StorageKeys {
   /// [translateLanguage], which is the on-the-fly message-translation target.
   static const uiLanguage = 'nym_ui_language';
 
+  /// Auto-translate incoming messages (in the active conversation) that aren't
+  /// already in [translateLanguage]. Master switch + per-conversation-type
+  /// gates (channels / PMs / groups), each default-on once the master is on.
+  static const autoTranslate = 'nym_auto_translate';
+  static const autoTranslateChannels = 'nym_auto_translate_channels';
+  static const autoTranslatePms = 'nym_auto_translate_pms';
+  static const autoTranslateGroups = 'nym_auto_translate_groups';
+
   /// Device-local flag: the first-run language picker has been answered (even
   /// if the user kept English), so onboarding shows it at most once per device.
   static const uiLanguageChosen = 'nym_ui_language_chosen';

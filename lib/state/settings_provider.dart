@@ -319,6 +319,32 @@ class SettingsController extends StateNotifier<Settings> {
 
   void setTimestamps(bool v) => setShowTimestamps(v);
 
+  /// Auto-translate master switch + per-conversation-type gates. Synced like the
+  /// other messaging preferences so the choice follows the user across devices.
+  void setAutoTranslate(bool v) {
+    _kv.setBool(StorageKeys.autoTranslate, v);
+    state = state.copyWith(autoTranslate: v);
+    _syncedChanged();
+  }
+
+  void setAutoTranslateChannels(bool v) {
+    _kv.setBool(StorageKeys.autoTranslateChannels, v);
+    state = state.copyWith(autoTranslateChannels: v);
+    _syncedChanged();
+  }
+
+  void setAutoTranslatePMs(bool v) {
+    _kv.setBool(StorageKeys.autoTranslatePms, v);
+    state = state.copyWith(autoTranslatePMs: v);
+    _syncedChanged();
+  }
+
+  void setAutoTranslateGroups(bool v) {
+    _kv.setBool(StorageKeys.autoTranslateGroups, v);
+    state = state.copyWith(autoTranslateGroups: v);
+    _syncedChanged();
+  }
+
   // --- Channels -------------------------------------------------------------
 
   /// Hook fired after [setGroupChatPMOnlyMode] persists a CHANGED value, so

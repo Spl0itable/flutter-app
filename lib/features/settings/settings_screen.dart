@@ -654,6 +654,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     ctrl.setCachePMs(d.cachePMs);
     ctrl.setTranslateLanguage(d.translateLanguage);
+    ctrl.setAutoTranslate(d.autoTranslate);
+    ctrl.setAutoTranslateChannels(d.autoTranslateChannels);
+    ctrl.setAutoTranslatePMs(d.autoTranslatePMs);
+    ctrl.setAutoTranslateGroups(d.autoTranslateGroups);
     ctrl.setSound(d.sound);
     ctrl.setAutoscroll(d.autoscroll);
     ctrl.setShowTimestamps(d.showTimestamps);
@@ -1845,6 +1849,78 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
       ),
+      // Auto-translate: master switch directly under the translation language.
+      _GroupSpec(
+        text: tr('Auto-translate Messages Enabled Disabled Automatically '
+            'translate messages in the conversation you are viewing that are '
+            'not already in your translation language.'),
+        child: FormGroup(
+          label: tr('Auto-translate Messages'),
+          hint: s.translateLanguage.isEmpty
+              ? tr('Set a translation language above to use auto-translate.')
+              : tr('Automatically translate messages in the conversation you '
+                  'are viewing that are not already in your translation '
+                  'language. The original is one tap away on each message.'),
+          child: FormSelect<bool>(
+            value: s.autoTranslate,
+            items: [
+              (value: true, label: tr('Enabled')),
+              (value: false, label: tr('Disabled')),
+            ],
+            onChanged: (v) => _mutate((d) => d.copyWith(autoTranslate: v)),
+          ),
+        ),
+      ),
+      // Per-conversation-type gates — only meaningful (and only shown) when the
+      // master switch is on. Default all-on: auto-translate applies everywhere
+      // until the user narrows it.
+      if (s.autoTranslate) ...[
+        _GroupSpec(
+          text: tr('Auto-translate Public Channels Enabled Disabled'),
+          child: FormGroup(
+            label: tr('Auto-translate Public Channels'),
+            child: FormSelect<bool>(
+              value: s.autoTranslateChannels,
+              items: [
+                (value: true, label: tr('Enabled')),
+                (value: false, label: tr('Disabled')),
+              ],
+              onChanged: (v) =>
+                  _mutate((d) => d.copyWith(autoTranslateChannels: v)),
+            ),
+          ),
+        ),
+        _GroupSpec(
+          text: tr('Auto-translate Private Messages Enabled Disabled'),
+          child: FormGroup(
+            label: tr('Auto-translate Private Messages'),
+            child: FormSelect<bool>(
+              value: s.autoTranslatePMs,
+              items: [
+                (value: true, label: tr('Enabled')),
+                (value: false, label: tr('Disabled')),
+              ],
+              onChanged: (v) =>
+                  _mutate((d) => d.copyWith(autoTranslatePMs: v)),
+            ),
+          ),
+        ),
+        _GroupSpec(
+          text: tr('Auto-translate Group Chats Enabled Disabled'),
+          child: FormGroup(
+            label: tr('Auto-translate Group Chats'),
+            child: FormSelect<bool>(
+              value: s.autoTranslateGroups,
+              items: [
+                (value: true, label: tr('Enabled')),
+                (value: false, label: tr('Disabled')),
+              ],
+              onChanged: (v) =>
+                  _mutate((d) => d.copyWith(autoTranslateGroups: v)),
+            ),
+          ),
+        ),
+      ],
       _GroupSpec(
         text: tr('Notification Sound {options}',
             {'options': _optText(_soundOptions())}),

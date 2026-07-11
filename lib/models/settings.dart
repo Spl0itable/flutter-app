@@ -38,6 +38,10 @@ class Settings {
     this.groupChatPMOnlyMode = false,
     this.translateLanguage = '',
     this.uiLanguage = '',
+    this.autoTranslate = false,
+    this.autoTranslateChannels = true,
+    this.autoTranslatePMs = true,
+    this.autoTranslateGroups = true,
     this.gesturesEnabled = true,
     this.swipeLeftAction = 'quote',
     this.swipeRightAction = 'translate',
@@ -80,6 +84,17 @@ class Settings {
   /// authored). See [StorageKeys.uiLanguage]; localized at runtime by
   /// `LocalizationService`.
   final String uiLanguage;
+
+  /// Master switch: automatically translate incoming messages in the active
+  /// conversation whose detected language differs from [translateLanguage].
+  /// Requires a non-empty [translateLanguage] to have any effect.
+  final bool autoTranslate;
+
+  /// Per-conversation-type gates for [autoTranslate] (all default-on). A user
+  /// can, e.g., auto-translate public channels but not their private chats.
+  final bool autoTranslateChannels;
+  final bool autoTranslatePMs;
+  final bool autoTranslateGroups;
 
   final bool gesturesEnabled;
   final String swipeLeftAction;
@@ -148,6 +163,10 @@ class Settings {
     bool? groupChatPMOnlyMode,
     String? translateLanguage,
     String? uiLanguage,
+    bool? autoTranslate,
+    bool? autoTranslateChannels,
+    bool? autoTranslatePMs,
+    bool? autoTranslateGroups,
     bool? gesturesEnabled,
     String? swipeLeftAction,
     String? swipeRightAction,
@@ -188,6 +207,11 @@ class Settings {
       groupChatPMOnlyMode: groupChatPMOnlyMode ?? this.groupChatPMOnlyMode,
       translateLanguage: translateLanguage ?? this.translateLanguage,
       uiLanguage: uiLanguage ?? this.uiLanguage,
+      autoTranslate: autoTranslate ?? this.autoTranslate,
+      autoTranslateChannels:
+          autoTranslateChannels ?? this.autoTranslateChannels,
+      autoTranslatePMs: autoTranslatePMs ?? this.autoTranslatePMs,
+      autoTranslateGroups: autoTranslateGroups ?? this.autoTranslateGroups,
       gesturesEnabled: gesturesEnabled ?? this.gesturesEnabled,
       swipeLeftAction: swipeLeftAction ?? this.swipeLeftAction,
       swipeRightAction: swipeRightAction ?? this.swipeRightAction,
@@ -286,6 +310,13 @@ class Settings {
           kv.getBool(StorageKeys.groupchatPmOnlyMode, defaultValue: false),
       translateLanguage: kv.getString(StorageKeys.translateLanguage) ?? '',
       uiLanguage: kv.getString(StorageKeys.uiLanguage) ?? '',
+      autoTranslate: kv.getBool(StorageKeys.autoTranslate, defaultValue: false),
+      autoTranslateChannels:
+          kv.getBool(StorageKeys.autoTranslateChannels, defaultValue: true),
+      autoTranslatePMs:
+          kv.getBool(StorageKeys.autoTranslatePms, defaultValue: true),
+      autoTranslateGroups:
+          kv.getBool(StorageKeys.autoTranslateGroups, defaultValue: true),
       gesturesEnabled:
           kv.getBool(StorageKeys.gesturesEnabled, defaultValue: true),
       swipeLeftAction: kv.getString(StorageKeys.swipeLeftAction) ?? 'quote',

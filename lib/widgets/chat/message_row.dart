@@ -23,7 +23,9 @@ import '../../features/reactions/quick_react_popup.dart';
 import '../../features/reactions/reaction_burst.dart';
 import 'relative_time_ticker.dart';
 import '../../features/reactions/reactors_modal.dart';
+import '../../features/translate/auto_translate.dart';
 import '../../features/translate/message_translation.dart';
+import '../../features/translate/translate_languages.dart';
 import '../../features/zaps/zap_badge.dart';
 import '../../features/zaps/zap_modal.dart';
 import '../../models/message.dart';
@@ -282,6 +284,17 @@ class MessageRow extends ConsumerStatefulWidget {
 class _MessageRowState extends ConsumerState<MessageRow> {
   bool _showTranslation = false;
   String? _translateLangOverride;
+
+  /// Auto-translate: when the message has been auto-translated in place, this is
+  /// the toggle for the "show original" reveal (default hidden ⇒ translated text
+  /// is the message body). See [_resolveAutoTranslate] / [_autoTranslateFooter].
+  bool _showOriginal = false;
+
+  /// The fresh (non-stale) auto-translation entry for this message, resolved at
+  /// the top of [build] so [_content] can swap in the translated text and the
+  /// footer can offer the original. Null when auto-translate doesn't apply, no
+  /// target language is set, or nothing has been translated yet.
+  AutoTranslateEntry? _autoEntry;
 
   /// Desktop row hover (`@media(hover:hover) .message:hover`, styles-chat.css
   /// :124-132): drives the IRC row hover tint and the `.msg-hover-buttons`
@@ -689,6 +702,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (message.isSystemRow) return _buildSystemMessage(context);
     // `/me …` emote → italic "* author action *" line.
     if (message.isMeAction) return _buildActionMessage(context);
+    // Auto-translate: resolve (and lazily kick) this message's translation so
+    // `_content` can render the translated text in place and the footer can
+    // reveal the original.
+    _resolveAutoTranslate();
     Widget row =
         settings.useBubbles ? _buildBubble(context) : _buildIrc(context);
     // Hover-capable (non-touch) devices: track `.message:hover` for the IRC row
@@ -1448,6 +1465,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               ),
             ),
           ),
+        // Auto-translate affordance (icon + "show original" reveal), when this
+        // message was translated in place.
+        _autoTranslateFooter(context),
         // `.message-translation`: full-width left-primary-bordered block BELOW
         // the message content (a sibling after `.message-content`, width:100%).
         if (_showTranslation)
@@ -1855,6 +1875,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // bubble, right-aligned — NOT inside the bubble next to the time. Identical
         // placement to the IRC layout (which also appends it as a sibling).
         if (self && message.isPM && !message.isGroup) _deliveryTicks(context),
+        // Auto-translate affordance (icon + "show original" reveal), aligned to
+        // the bubble's side, when this message was translated in place.
+        if (_autoEntry?.isReady == true)
+          Align(
+            alignment: sideAlign,
+            child: _autoTranslateFooter(context),
+          ),
         // `.message-translation`: a full-width left-primary-bordered block BELOW
         // the bubble (a sibling after `.message-content`, NOT inside it).
         if (_showTranslation)
@@ -2578,6 +2605,117 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return false;
   }
 
+  /// Resolves this message's auto-translation for the current build and, when
+  /// eligible but not yet cached, schedules a (proxy-bound, idempotent) request.
+  ///
+  /// Only messages that actually reach this method — i.e. rows currently laid
+  /// out in the viewed conversation — are ever translated, which is what keeps
+  /// auto-translate from asking the proxy to translate whole histories at once.
+  /// Sets [_autoEntry] to the fresh entry (matching the current target language
+  /// and message content) or null.
+  void _resolveAutoTranslate() {
+    _autoEntry = null;
+    if (!autoTranslateAppliesTo(message, widget.settings)) return;
+    final target =
+        ref.watch(settingsProvider.select((s) => s.translateLanguage));
+    if (target.isEmpty) return;
+    final raw = ref.watch(autoTranslateProvider.select((m) => m[message.id]));
+    final fresh = (raw != null &&
+            raw.target == target &&
+            raw.source == message.content)
+        ? raw
+        : null;
+    _autoEntry = fresh;
+    if (fresh == null) {
+      // No (or stale) entry: kick the translation after this frame so we don't
+      // mutate the provider mid-build. `ensure` is idempotent + de-duped.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ref.read(autoTranslateProvider.notifier).ensure(message, target);
+        }
+      });
+    }
+  }
+
+  /// The "🌐 translated · show original" affordance shown below an
+  /// auto-translated message: a translation icon + toggle that expands the
+  /// ORIGINAL text (in its source language) on tap. Renders nothing unless a
+  /// ready translation is being shown in place — a no-op / already-in-language
+  /// message shows neither the icon nor any error.
+  Widget _autoTranslateFooter(BuildContext context) {
+    final entry = _autoEntry;
+    if (entry == null || !entry.isReady) return const SizedBox.shrink();
+    final c = context.nym;
+    final baseSize = settings.textSize.toDouble();
+    final detected = entry.detected;
+    final sourceName =
+        (detected.isNotEmpty && detected != 'auto') ? languageName(detected) : '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Icon + toggle. The 🌐 glyph marks the message as auto-translated; the
+        // label flips between revealing and hiding the original.
+        InkWell(
+          onTap: () => setState(() => _showOriginal = !_showOriginal),
+          borderRadius: NymRadius.rxs,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                NymSvgIcon(NymIcons.translate, size: 12, color: c.primary),
+                const SizedBox(width: 4),
+                Text(
+                  _showOriginal ? tr('Hide original') : tr('Show original'),
+                  style: TextStyle(
+                    color: c.textDim,
+                    fontSize: baseSize * 0.75,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        // The revealed original, in a dim left-accented block mirroring the
+        // manual `.message-translation` styling (but carrying the SOURCE text).
+        if (_showOriginal)
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.only(top: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.04),
+              border: Border(left: BorderSide(color: c.textDim, width: 3)),
+              borderRadius: const BorderRadius.only(
+                topRight: Radius.circular(NymRadius.xs),
+                bottomRight: Radius.circular(NymRadius.xs),
+              ),
+            ),
+            child: Text.rich(
+              TextSpan(
+                style: TextStyle(
+                    color: c.textDim, fontSize: baseSize * 0.9, height: 1.4),
+                children: [
+                  TextSpan(
+                    text: sourceName.isEmpty
+                        ? tr('Original: ')
+                        : tr('Original ({lang}): ', {'lang': sourceName}),
+                    style: TextStyle(
+                      color: c.textDim.withValues(alpha: 0.7),
+                      fontSize: baseSize * 0.8,
+                    ),
+                  ),
+                  TextSpan(text: message.content),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _content(
     BuildContext context,
     Color color,
@@ -2586,8 +2724,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     bool bubble = false,
   }) {
     final blur = _shouldBlurImages();
+    // When this message is auto-translated (and the user isn't peeking at the
+    // original), the translated text REPLACES the message body in place.
+    final displayContent = (_autoEntry?.isReady == true && !_showOriginal)
+        ? _autoEntry!.translated
+        : message.content;
     final body = MessageContent(
-      content: message.content,
+      content: displayContent,
       // fire/ice paint a brighter glyph in the bubble than IRC (`#ff6600`/
       // `#00ccff` vs `#ffaa00`/`#00ccee`) — `textColorFor` returns the override.
       baseColor: deco?.textColorFor(bubble: bubble) ?? color,
@@ -2617,7 +2760,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           colors: gradient,
         ).createShader(rect),
         child: MessageContent(
-          content: message.content,
+          content: displayContent,
           baseColor: Colors.white,
           fontSize: fontSize,
           blurImages: blur,
@@ -2632,7 +2775,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           // The blue glow halo: transparent glyphs whose only paint is the
           // shadow, sitting behind the gradient-clipped text.
           MessageContent(
-            content: message.content,
+            content: displayContent,
             baseColor: const Color(0x00000000),
             fontSize: fontSize,
             blurImages: false,
