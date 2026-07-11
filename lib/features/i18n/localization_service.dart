@@ -143,6 +143,24 @@ class LocalizationService {
     return _subst(source, args);
   }
 
+  /// Registers [sources] as strings the app is about to render, so a bulk
+  /// [pretranslate] pass (and every future language switch) covers them even
+  /// before they first appear on screen. Used to pre-translate the onboarding
+  /// tutorial the moment a language is chosen — a static overlay that never
+  /// rebuilds on its own, so it must be translated up front rather than on
+  /// demand. If the active language already has some of these cached, they're
+  /// skipped; anything missing is queued.
+  void prime(Iterable<String> sources) {
+    for (final s in sources) {
+      if (s.isEmpty) continue;
+      _seen.add(s);
+      if (isActive && !_cache.containsKey(s) && !_requested.contains(s)) {
+        _pending.add(s);
+      }
+    }
+    if (_pending.isNotEmpty) _scheduleFlush();
+  }
+
   /// Awaitable bulk translation used by the first-run language picker so it can
   /// show progress while the strings already registered are localized before
   /// the user proceeds. Reports progress as `(done, total)`. Completes

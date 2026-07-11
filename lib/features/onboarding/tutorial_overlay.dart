@@ -231,6 +231,20 @@ const List<TutorialStep> kTutorialSteps = [
   ),
 ];
 
+/// Every user-facing string the guided tutorial renders — each step's title and
+/// body plus the fixed chrome labels — so onboarding can pre-translate the WHOLE
+/// tutorial the moment a language is chosen (before its first step mounts),
+/// rather than letting each step flash English and swap in translation. Kept in
+/// lockstep with the literals `_card` passes to `tr(...)`.
+List<String> tutorialStringsForPretranslate() => <String>[
+      for (final step in kTutorialSteps) ...[step.title, step.body],
+      'Skip',
+      'Back',
+      'Next',
+      'Done',
+      'Step {n} of {total}',
+    ];
+
 /// The guided tutorial overlay (`#tutorialOverlay`).
 ///
 /// For each step with a [TutorialStep.target] it measures the target widget's

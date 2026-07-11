@@ -9,7 +9,9 @@ import '../../screens/home_shell.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../i18n/i18n.dart';
 import '../i18n/language_select.dart';
+import '../i18n/localization_service.dart';
 import '../identity/setup_modal.dart';
 import '../identity/vault_settings_modal.dart';
 import 'tutorial_overlay.dart';
@@ -142,6 +144,13 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     final seen = kv.getString(StorageKeys.tutorialSeen) == 'true' ||
         kv.getBool(StorageKeys.tutorialSeen, defaultValue: false);
     if (!seen) {
+      // Kick a background translation of the ENTIRE tutorial (every step's body
+      // + the Skip/Back/Next/Done labels), not just the few titles that happen
+      // to overlap already-cached shell strings. The overlay is static and only
+      // re-renders via the i18n-version watch in [build], so without this its
+      // unique body text/buttons would stay in English. A brief English flash
+      // before the translations land is fine.
+      LocalizationService.instance.prime(tutorialStringsForPretranslate());
       // The PWA's 300ms settle delay before starting (app.js:446).
       _tutorialDelay = Timer(const Duration(milliseconds: 300), () {
         if (mounted) setState(() => _showTutorial = true);
@@ -228,14 +237,25 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
           ),
         if (_showTutorial)
           Positioned.fill(
-            // The tutorial renders one frame after the shell mounts (post-frame
-            // setState below), so `tutorialKey.currentState` is populated here.
-            // On narrow layouts the overlay drives the drawer per step; on wide
-            // layouts the driver's open/close are no-ops and targets spotlight
-            // in place.
-            child: TutorialOverlay(
-              onDismiss: _dismissTutorial,
-              sidebar: HomeShell.tutorialKey.currentState,
+            // The tutorial is a STATIC overlay — it never rebuilds on its own,
+            // so on-demand translations that land after it mounts would never
+            // be re-read. Watch the i18n version HERE (scoped to just the
+            // overlay, so the shell below isn't rebuilt on every translation
+            // batch) and rebuild the overlay when new translations cache. The
+            // TutorialOverlay's own State (current step, etc.) is preserved
+            // across these rebuilds since its type/position are unchanged.
+            child: Consumer(
+              builder: (context, ref, _) {
+                ref.watch(i18nVersionProvider);
+                // The tutorial renders one frame after the shell mounts, so
+                // `tutorialKey.currentState` is populated here. On narrow
+                // layouts the overlay drives the drawer per step; on wide
+                // layouts the driver's open/close are no-ops.
+                return TutorialOverlay(
+                  onDismiss: _dismissTutorial,
+                  sidebar: HomeShell.tutorialKey.currentState,
+                );
+              },
             ),
           ),
       ],
