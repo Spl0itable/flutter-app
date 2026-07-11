@@ -39,10 +39,19 @@ class _BootGateState extends ConsumerState<BootGate> {
   /// Null until decided; true => show the setup modal.
   late bool _needsSetup;
 
+  /// Whether the first-run language chooser still needs answering. Gated on the
+  /// device-local `nym_ui_language_chosen` flag so it appears at most once — and
+  /// it now LEADS onboarding (before the welcome/setup modal) so the whole app,
+  /// including that welcome modal, renders in the chosen language from the start.
+  late bool _languageChosen;
+
   @override
   void initState() {
     super.initState();
     _needsSetup = _computeNeedsSetup();
+    final kv = ref.read(keyValueStoreProvider);
+    _languageChosen =
+        kv.getBool(StorageKeys.uiLanguageChosen, defaultValue: false);
   }
 
   /// Mirrors setup-modal-init.js: needs setup when there is no saved login
@@ -61,15 +70,34 @@ class _BootGateState extends ConsumerState<BootGate> {
     setState(() => _needsSetup = false);
   }
 
+  void _onLanguageChosen() {
+    if (!mounted) return;
+    setState(() => _languageChosen = true);
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 1) Language chooser leads onboarding. Picking here localizes everything
+    //    that follows — the welcome/setup modal, the shell, and the tutorial.
+    if (!_languageChosen) {
+      return LanguageSelectScreen(onComplete: _onLanguageChosen);
+    }
+    // 2) First-run setup (welcome) modal. It's a static modal, so wrap it in a
+    //    version-watching Consumer: as the post-pick translation sweep caches
+    //    its strings, it re-renders in the chosen language (a brief English
+    //    flash first is fine) rather than staying in the source language.
     if (_needsSetup) {
       return Scaffold(
         backgroundColor: context.nym.bg,
-        body: SetupModal(onComplete: _onSetupComplete),
+        body: Consumer(
+          builder: (context, ref, _) {
+            ref.watch(i18nVersionProvider);
+            return SetupModal(onComplete: _onSetupComplete);
+          },
+        ),
       );
     }
-    // Reached the shell: overlay the first-run tutorial above it.
+    // 3) Reached the shell: overlay the first-run tutorial above it.
     return const _ShellWithTutorial();
   }
 }
@@ -85,11 +113,6 @@ class _ShellWithTutorial extends ConsumerStatefulWidget {
 
 class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
   bool _showTutorial = false;
-
-  /// First-run language chooser, shown at the very start of onboarding (before
-  /// the tutorial) until the user picks an app language. Gated on the
-  /// device-local `nym_ui_language_chosen` flag so it appears at most once.
-  bool _showLanguagePicker = false;
 
   @override
   void initState() {
@@ -121,21 +144,13 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
       await ref.read(nostrControllerProvider).settingsHydrated;
     } catch (_) {}
     if (!mounted) return;
-    // The language chooser leads onboarding: until the user has answered it
-    // (even by keeping English), hold the tutorial + prompts so the whole app
-    // — including the tutorial — renders in the chosen language from the start.
-    final kv = ref.read(keyValueStoreProvider);
-    final languageChosen =
-        kv.getBool(StorageKeys.uiLanguageChosen, defaultValue: false);
-    if (!languageChosen) {
-      setState(() => _showLanguagePicker = true);
-      return;
-    }
+    // The language chooser has already run in the BootGate (it leads
+    // onboarding), so the shell + tutorial render in the chosen language.
     _startTutorialAndPrompts();
   }
 
-  /// Runs after the language is chosen (or when it was already set): the
-  /// tutorial-seen gate + the deferred encrypt-at-rest prompt.
+  /// Runs after settings hydrate: the tutorial-seen gate + the deferred
+  /// encrypt-at-rest prompt.
   void _startTutorialAndPrompts() {
     if (!mounted) return;
     // maybeStartTutorial(false): skip if already seen (now including a flag
@@ -165,13 +180,6 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     _encryptPromptDelay = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) unawaited(_maybePromptEncryptAtRest());
     });
-  }
-
-  /// The language chooser has been answered; hide it and start the tutorial.
-  void _onLanguageChosen() {
-    if (!mounted) return;
-    setState(() => _showLanguagePicker = false);
-    _startTutorialAndPrompts();
   }
 
   /// Shows the "Protect your identity here too?" prompt when
@@ -229,12 +237,6 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     return Stack(
       children: [
         HomeShell(key: HomeShell.tutorialKey),
-        // First-run language chooser, opaque over the shell so the shell's
-        // strings still register for pre-translation underneath.
-        if (_showLanguagePicker)
-          Positioned.fill(
-            child: LanguageSelectScreen(onComplete: _onLanguageChosen),
-          ),
         if (_showTutorial)
           Positioned.fill(
             // The tutorial is a STATIC overlay — it never rebuilds on its own,

@@ -313,7 +313,11 @@ class SettingsController extends StateNotifier<Settings> {
     _kv.setString(StorageKeys.uiLanguage, lang);
     // Choosing a language (even English) answers the first-run picker.
     _kv.setBool(StorageKeys.uiLanguageChosen, true);
-    state = state.copyWith(uiLanguage: lang);
+    // Default the message-translation target to the chosen app language too, so
+    // translating/auto-translating messages is ready to go without a second
+    // setting. English ('') maps to the translate dropdown's Disabled ('').
+    _kv.setString(StorageKeys.translateLanguage, lang);
+    state = state.copyWith(uiLanguage: lang, translateLanguage: lang);
     _syncedChanged();
   }
 

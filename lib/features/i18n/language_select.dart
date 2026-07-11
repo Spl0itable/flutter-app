@@ -73,10 +73,15 @@ Future<void> applyUiLanguage(
   if (dialogOpen) navigator.pop();
   progress.dispose();
 
-  // With the on-screen strings translated, sweep the REST of the app's UI in
-  // the background so every screen is pre-populated in the cache — no on-demand
-  // flashes as the user navigates later. Non-blocking; runs in chunks.
-  svc.sweep(kAppStringsCatalog);
+  // Give the screen shown right after the picker (the welcome/setup modal, then
+  // the shell) a head start: its on-demand `tr()` misses queue and translate
+  // first, so it localizes promptly. Then sweep the REST of the app's UI in the
+  // background so every later screen is pre-populated in the cache — no
+  // on-demand flashes as the user navigates. Non-blocking; runs in chunks.
+  unawaited(Future<void>.delayed(
+    const Duration(milliseconds: 2500),
+    () => svc.sweep(kAppStringsCatalog),
+  ));
 }
 
 /// First-run, full-screen language chooser shown at the very start of
@@ -103,17 +108,6 @@ class LanguageSelectScreen extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const SizedBox(height: 8),
-                  Text(
-                    'Nymchat',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: c.primary,
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 1,
-                    ),
-                  ),
                   const SizedBox(height: 8),
                   Text(
                     // English by design — the user hasn't chosen a language yet,
@@ -281,9 +275,17 @@ class _LanguageRow extends StatelessWidget {
   }
 }
 
-/// Opens the language chooser as a modal dialog (used from Settings). Applies
-/// the selection (with the translating-progress dialog) on tap, then closes.
-Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
+/// Opens the shared, searchable language chooser — the same ~130-language list
+/// [kUiLanguageOptions] the onboarding picker uses. [selectedCode] is checked in
+/// the list; [onSelected] receives the picked code once the dialog closes. Used
+/// for BOTH the app language (Appearance) and the message-translation target
+/// (Messaging & Display) so the two offer the exact same list.
+Future<void> showLanguageListDialog(
+  BuildContext context, {
+  required String selectedCode,
+  required ValueChanged<String> onSelected,
+  String? title,
+}) {
   final c = context.nym;
   return showDialog<void>(
     context: context,
@@ -305,7 +307,7 @@ Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
                 children: [
                   Expanded(
                     child: Text(
-                      tr('Language'),
+                      title ?? tr('Language'),
                       style: TextStyle(
                         color: c.text,
                         fontSize: 18,
@@ -321,15 +323,12 @@ Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
               ),
               const SizedBox(height: 8),
               Expanded(
-                child: Consumer(
-                  builder: (context, ref, _) => LanguagePickerList(
-                    selectedCode:
-                        ref.watch(settingsProvider.select((s) => s.uiLanguage)),
-                    onSelected: (code) async {
-                      Navigator.of(dialogContext).pop();
-                      await applyUiLanguage(context, ref, code);
-                    },
-                  ),
+                child: LanguagePickerList(
+                  selectedCode: selectedCode,
+                  onSelected: (code) {
+                    Navigator.of(dialogContext).pop();
+                    onSelected(code);
+                  },
                 ),
               ),
             ],
@@ -337,6 +336,17 @@ Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
         ),
       ),
     ),
+  );
+}
+
+/// The Appearance → Language chooser: opens the shared dialog and applies the
+/// pick as the app UI language (with the translating-progress pass).
+Future<void> showLanguagePickerDialog(BuildContext context, WidgetRef ref) {
+  return showLanguageListDialog(
+    context,
+    selectedCode: ref.read(settingsProvider).uiLanguage,
+    title: tr('Language'),
+    onSelected: (code) => applyUiLanguage(context, ref, code),
   );
 }
 

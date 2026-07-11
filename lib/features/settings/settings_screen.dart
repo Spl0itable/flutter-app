@@ -1169,7 +1169,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           hint: tr('Show the app interface in your chosen language.'),
           child: _LanguageSelectRow(
             currentName: uiLanguageName(s.uiLanguage),
-            onTap: () => showLanguagePickerDialog(context, ref),
+            onTap: () async {
+              await showLanguagePickerDialog(context, ref);
+              if (!mounted) return;
+              // Choosing the app language also sets the translation language
+              // (setUiLanguage). Mirror both back into the Save-gated draft so
+              // the row reflects the change and Save doesn't revert it.
+              final live = ref.read(settingsProvider);
+              _mutate((d) => d.copyWith(
+                    uiLanguage: live.uiLanguage,
+                    translateLanguage: live.translateLanguage,
+                  ));
+            },
           ),
         ),
       ),
@@ -1836,17 +1847,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     return [
       _GroupSpec(
         text: tr(
-            'Translation Language {options} Choose your preferred language '
+            'Translation Language {name} Choose your preferred language '
             'for translating messages via the context menu.',
-            {'options': _optText(_translationLanguages())}),
+            {'name': uiLanguageName(s.translateLanguage)}),
         child: FormGroup(
           label: tr('Translation Language'),
           hint: tr('Choose your preferred language for translating messages '
               'via the context menu.'),
-          child: FormSelect<String>(
-            value: s.translateLanguage,
-            items: _translationLanguages(),
-            onChanged: (v) => _mutate((d) => d.copyWith(translateLanguage: v)),
+          // Same searchable ~130-language chooser as the app language above.
+          child: _LanguageSelectRow(
+            currentName: uiLanguageName(s.translateLanguage),
+            onTap: () => showLanguageListDialog(
+              context,
+              selectedCode: s.translateLanguage,
+              title: tr('Translation Language'),
+              onSelected: (code) =>
+                  _mutate((d) => d.copyWith(translateLanguage: code)),
+            ),
           ),
         ),
       ),
@@ -3457,56 +3474,6 @@ List<({String value, String label})> _soundOptions() => [
 
 /// Translation-language options, verbatim and in order from
 /// `#translateLanguageSelect` (empty value = Disabled).
-List<({String value, String label})> _translationLanguages() => [
-  (value: '', label: tr('Disabled')),
-  (value: 'en', label: tr('English')),
-  (value: 'es', label: tr('Spanish')),
-  (value: 'fr', label: tr('French')),
-  (value: 'de', label: tr('German')),
-  (value: 'it', label: tr('Italian')),
-  (value: 'pt', label: tr('Portuguese')),
-  (value: 'ru', label: tr('Russian')),
-  (value: 'zh', label: tr('Chinese')),
-  (value: 'ja', label: tr('Japanese')),
-  (value: 'ko', label: tr('Korean')),
-  (value: 'ar', label: tr('Arabic')),
-  (value: 'hi', label: tr('Hindi')),
-  (value: 'tr', label: tr('Turkish')),
-  (value: 'nl', label: tr('Dutch')),
-  (value: 'pl', label: tr('Polish')),
-  (value: 'uk', label: tr('Ukrainian')),
-  (value: 'vi', label: tr('Vietnamese')),
-  (value: 'th', label: tr('Thai')),
-  (value: 'id', label: tr('Indonesian')),
-  (value: 'sv', label: tr('Swedish')),
-  (value: 'af', label: tr('Afrikaans')),
-  (value: 'bg', label: tr('Bulgarian')),
-  (value: 'bn', label: tr('Bengali')),
-  (value: 'ca', label: tr('Catalan')),
-  (value: 'cs', label: tr('Czech')),
-  (value: 'da', label: tr('Danish')),
-  (value: 'el', label: tr('Greek')),
-  (value: 'et', label: tr('Estonian')),
-  (value: 'fa', label: tr('Persian')),
-  (value: 'fi', label: tr('Finnish')),
-  (value: 'fil', label: tr('Filipino')),
-  (value: 'he', label: tr('Hebrew')),
-  (value: 'hr', label: tr('Croatian')),
-  (value: 'hu', label: tr('Hungarian')),
-  (value: 'lt', label: tr('Lithuanian')),
-  (value: 'lv', label: tr('Latvian')),
-  (value: 'ms', label: tr('Malay')),
-  (value: 'no', label: tr('Norwegian')),
-  (value: 'ro', label: tr('Romanian')),
-  (value: 'sk', label: tr('Slovak')),
-  (value: 'sl', label: tr('Slovenian')),
-  (value: 'sr', label: tr('Serbian')),
-  (value: 'sw', label: tr('Swahili')),
-  (value: 'ta', label: tr('Tamil')),
-  (value: 'te', label: tr('Telugu')),
-  (value: 'ur', label: tr('Urdu')),
-];
-
 /// The Appearance → Language control: a select-styled row showing the active
 /// UI language that opens the full [showLanguagePickerDialog] chooser on tap
 /// (the ~130-language list is too long for an inline dropdown).
