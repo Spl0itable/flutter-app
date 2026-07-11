@@ -9,6 +9,7 @@ import '../../screens/home_shell.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../i18n/language_select.dart';
 import '../identity/setup_modal.dart';
 import '../identity/vault_settings_modal.dart';
 import 'tutorial_overlay.dart';
@@ -83,6 +84,11 @@ class _ShellWithTutorial extends ConsumerStatefulWidget {
 class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
   bool _showTutorial = false;
 
+  /// First-run language chooser, shown at the very start of onboarding (before
+  /// the tutorial) until the user picks an app language. Gated on the
+  /// device-local `nym_ui_language_chosen` flag so it appears at most once.
+  bool _showLanguagePicker = false;
+
   @override
   void initState() {
     super.initState();
@@ -113,6 +119,23 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
       await ref.read(nostrControllerProvider).settingsHydrated;
     } catch (_) {}
     if (!mounted) return;
+    // The language chooser leads onboarding: until the user has answered it
+    // (even by keeping English), hold the tutorial + prompts so the whole app
+    // — including the tutorial — renders in the chosen language from the start.
+    final kv = ref.read(keyValueStoreProvider);
+    final languageChosen =
+        kv.getBool(StorageKeys.uiLanguageChosen, defaultValue: false);
+    if (!languageChosen) {
+      setState(() => _showLanguagePicker = true);
+      return;
+    }
+    _startTutorialAndPrompts();
+  }
+
+  /// Runs after the language is chosen (or when it was already set): the
+  /// tutorial-seen gate + the deferred encrypt-at-rest prompt.
+  void _startTutorialAndPrompts() {
+    if (!mounted) return;
     // maybeStartTutorial(false): skip if already seen (now including a flag
     // that just arrived from the remote settings restore).
     final kv = ref.read(keyValueStoreProvider);
@@ -133,6 +156,13 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     _encryptPromptDelay = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) unawaited(_maybePromptEncryptAtRest());
     });
+  }
+
+  /// The language chooser has been answered; hide it and start the tutorial.
+  void _onLanguageChosen() {
+    if (!mounted) return;
+    setState(() => _showLanguagePicker = false);
+    _startTutorialAndPrompts();
   }
 
   /// Shows the "Protect your identity here too?" prompt when
@@ -190,6 +220,12 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     return Stack(
       children: [
         HomeShell(key: HomeShell.tutorialKey),
+        // First-run language chooser, opaque over the shell so the shell's
+        // strings still register for pre-translation underneath.
+        if (_showLanguagePicker)
+          Positioned.fill(
+            child: LanguageSelectScreen(onComplete: _onLanguageChosen),
+          ),
         if (_showTutorial)
           Positioned.fill(
             // The tutorial renders one frame after the shell mounts (post-frame

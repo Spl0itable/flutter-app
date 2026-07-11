@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../i18n/i18n.dart';
 
 /// The element each tutorial step points at (the PWA step `selector`s, see
 /// `js/app.js` `buildSteps`). The shell + sidebar register a [GlobalKey] for
@@ -553,7 +554,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
               children: [
                 Expanded(
                   child: Text(
-                    step.title.toUpperCase(), // uppercase, --primary, ls1
+                    tr(step.title).toUpperCase(), // uppercase, --primary, ls1
                     style: TextStyle(
                       color: c.primary,
                       fontSize: 14,
@@ -568,12 +569,13 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
             ),
             const SizedBox(height: 10),
             Text(
-              step.body,
+              tr(step.body),
               style: TextStyle(color: c.text, fontSize: 13, height: 1.4),
             ),
             const SizedBox(height: 10),
             Text(
-              'Step ${_index + 1} of ${kTutorialSteps.length}',
+              tr('Step {n} of {total}',
+                  {'n': _index + 1, 'total': kTutorialSteps.length}),
               style: TextStyle(color: c.textDim, fontSize: 11),
             ),
             const SizedBox(height: 12),
@@ -583,7 +585,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
               children: [
                 _ghostPill(
                   c,
-                  'Back',
+                  tr('Back'),
                   key: const Key('tutorialPrevBtn'),
                   enabled: _index != 0,
                   onTap: _back,
@@ -591,7 +593,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
                 const SizedBox(width: 8),
                 _ghostPill(
                   c,
-                  _isFinal ? 'Done' : 'Next',
+                  _isFinal ? tr('Done') : tr('Next'),
                   key: const Key('tutorialNextBtn'),
                   enabled: true,
                   onTap: _next,
@@ -620,7 +622,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
           border: Border.all(color: c.glassBorder),
         ),
         child: Text(
-          'SKIP',
+          tr('Skip').toUpperCase(),
           style: TextStyle(
             color: c.textDim,
             fontSize: 11,

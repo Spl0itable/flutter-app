@@ -30,6 +30,7 @@ import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
+import '../../i18n/i18n.dart';
 import '../../shop/cosmetics.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
@@ -748,9 +749,10 @@ class _InviteChip extends ConsumerWidget {
     final controller = ref.read(nostrControllerProvider);
     final ok = await showAppConfirm(
       context,
-      'Join "$name"? A join request will be sent to a group member.',
-      title: 'Join Group',
-      okLabel: 'Join',
+      tr('Join "{name}"? A join request will be sent to a group member.',
+          {'name': name}),
+      title: tr('Join Group'),
+      okLabel: tr('Join'),
     );
     if (!ok) return;
     await controller.joinGroupViaInvite(parsed);
@@ -779,7 +781,7 @@ class _InviteChip extends ConsumerWidget {
             ),
             SizedBox(width: size * 0.35),
             Text(
-              'Join $name',
+              tr('Join {name}', {'name': name}),
               style: TextStyle(color: c.secondary, fontSize: size),
             ),
           ],
@@ -1285,7 +1287,7 @@ class _CodeCopyButtonState extends State<_CodeCopyButton> {
           border: Border.all(color: c.primaryA(0.3)),
         ),
         child: Text(
-          _copied ? 'Copied!' : 'Copy',
+          _copied ? tr('Copied!') : tr('Copy'),
           style: TextStyle(color: c.primary, fontSize: widget.size * 0.75),
         ),
       ),
@@ -2757,7 +2759,7 @@ class _CollapsibleState extends ConsumerState<_Collapsible> {
                     )
                   : null,
               child: Text(
-                _expanded ? 'Show less' : 'Read more',
+                _expanded ? tr('Show less') : tr('Read more'),
                 textAlign: TextAlign.center,
                 style: TextStyle(color: c.primary, fontSize: 12),
               ),

@@ -19,6 +19,7 @@ import '../features/emoji/custom_emoji.dart'
 import '../features/emoji/emoji_data.dart';
 import '../features/emoji/emoji_prefetch.dart' show scheduleCustomEmojiPrefetch;
 import '../features/groups/group_logic.dart';
+import '../features/i18n/i18n.dart';
 import '../features/messages/spam_filter.dart';
 import '../features/messages/trust_graph.dart';
 import '../features/pms/pm_logic.dart';
@@ -4385,10 +4386,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
         // Blocked keyword / block rule → the body is hidden locally (filtered by
         // [isMessageFiltered]); a system line explains it was still sent.
         final reason = keywordHit
-            ? 'matched one of your blocked keywords'
-            : 'matched a block rule';
+            ? tr('matched one of your blocked keywords')
+            : tr('matched a block rule');
         addSystemMessage(
-            'Your message $reason and was hidden locally. It was still sent.');
+            tr('Your message {reason} and was hidden locally. It was still sent.',
+                {'reason': reason}));
       } else if (SpamFilter.isSpamMessage(trimmed,
           enabled: appSpamFilterEnabled,
           aggressive: appSpamFilterAggressive)) {
@@ -4396,11 +4398,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
         // filtered), but a self-only line explains it was filtered for everyone
         // else, with a "Report false positive" action (messages.js:643-647).
         addSystemMessageWithAction(
-          'Your message was flagged by the spam filter and not shown to anyone '
-          'but yourself.',
+          tr('Your message was flagged by the spam filter and not shown to '
+              'anyone but yourself.'),
           SystemAction(
             kind: SystemActionKind.reportSpamFalsePositive,
-            label: 'Report false positive',
+            label: tr('Report false positive'),
             payload: trimmed,
           ),
         );
