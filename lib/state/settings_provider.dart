@@ -305,6 +305,18 @@ class SettingsController extends StateNotifier<Settings> {
     _syncedChanged();
   }
 
+  /// The app's static-text UI language (empty ⇒ English). Persisted and synced
+  /// like the message-translation target so a user's chosen app language
+  /// follows them across devices. The root widget listens for changes and
+  /// drives `LocalizationService.setLanguage`, so this setter stays UI-agnostic.
+  void setUiLanguage(String lang) {
+    _kv.setString(StorageKeys.uiLanguage, lang);
+    // Choosing a language (even English) answers the first-run picker.
+    _kv.setBool(StorageKeys.uiLanguageChosen, true);
+    state = state.copyWith(uiLanguage: lang);
+    _syncedChanged();
+  }
+
   void setTimestamps(bool v) => setShowTimestamps(v);
 
   // --- Channels -------------------------------------------------------------

@@ -68,6 +68,14 @@ class StorageKeys {
   static const swipeReactEmoji = 'nym_swipe_react_emoji';
   static const translateLanguage = 'nym_translate_language';
   static const translateFavorites = 'nym_translate_favorites';
+
+  /// The app's static-text UI language (empty ⇒ English). Distinct from
+  /// [translateLanguage], which is the on-the-fly message-translation target.
+  static const uiLanguage = 'nym_ui_language';
+
+  /// Device-local flag: the first-run language picker has been answered (even
+  /// if the user kept English), so onboarding shows it at most once per device.
+  static const uiLanguageChosen = 'nym_ui_language_chosen';
   static const powDifficulty = 'nym_pow_difficulty';
   static const hideNonPinned = 'nym_hide_non_pinned';
   static const imageBlur = 'nym_image_blur';

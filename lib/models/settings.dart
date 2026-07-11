@@ -37,6 +37,7 @@ class Settings {
     this.transparencyEnabled = false,
     this.groupChatPMOnlyMode = false,
     this.translateLanguage = '',
+    this.uiLanguage = '',
     this.gesturesEnabled = true,
     this.swipeLeftAction = 'quote',
     this.swipeRightAction = 'translate',
@@ -74,6 +75,12 @@ class Settings {
   final bool transparencyEnabled;
   final bool groupChatPMOnlyMode;
   final String translateLanguage;
+
+  /// The app's static-text UI language code (empty ⇒ English source shown as
+  /// authored). See [StorageKeys.uiLanguage]; localized at runtime by
+  /// `LocalizationService`.
+  final String uiLanguage;
+
   final bool gesturesEnabled;
   final String swipeLeftAction;
   final String swipeRightAction;
@@ -140,6 +147,7 @@ class Settings {
     bool? transparencyEnabled,
     bool? groupChatPMOnlyMode,
     String? translateLanguage,
+    String? uiLanguage,
     bool? gesturesEnabled,
     String? swipeLeftAction,
     String? swipeRightAction,
@@ -179,6 +187,7 @@ class Settings {
       transparencyEnabled: transparencyEnabled ?? this.transparencyEnabled,
       groupChatPMOnlyMode: groupChatPMOnlyMode ?? this.groupChatPMOnlyMode,
       translateLanguage: translateLanguage ?? this.translateLanguage,
+      uiLanguage: uiLanguage ?? this.uiLanguage,
       gesturesEnabled: gesturesEnabled ?? this.gesturesEnabled,
       swipeLeftAction: swipeLeftAction ?? this.swipeLeftAction,
       swipeRightAction: swipeRightAction ?? this.swipeRightAction,
@@ -276,6 +285,7 @@ class Settings {
       groupChatPMOnlyMode:
           kv.getBool(StorageKeys.groupchatPmOnlyMode, defaultValue: false),
       translateLanguage: kv.getString(StorageKeys.translateLanguage) ?? '',
+      uiLanguage: kv.getString(StorageKeys.uiLanguage) ?? '',
       gesturesEnabled:
           kv.getBool(StorageKeys.gesturesEnabled, defaultValue: true),
       swipeLeftAction: kv.getString(StorageKeys.swipeLeftAction) ?? 'quote',
