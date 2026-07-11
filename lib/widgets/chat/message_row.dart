@@ -2616,8 +2616,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   void _resolveAutoTranslate() {
     _autoEntry = null;
     if (!autoTranslateAppliesTo(message, widget.settings)) return;
-    final target =
-        ref.watch(settingsProvider.select((s) => s.translateLanguage));
+    // widget.settings is the live Settings the list passes down (it watches
+    // settingsProvider), so this reacts to translation/app-language changes.
+    final target = autoTranslateTargetFor(widget.settings);
     if (target.isEmpty) return;
     final raw = ref.watch(autoTranslateProvider.select((m) => m[message.id]));
     final fresh = (raw != null &&

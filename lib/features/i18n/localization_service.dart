@@ -81,6 +81,25 @@ class LocalizationService {
   Timer? _debounce;
   bool _flushing = false;
 
+  /// Sources whose translation failed every in-line attempt, parked for a
+  /// delayed retry round so a transient proxy hiccup doesn't leave them stuck
+  /// in English. Cleared on a language switch.
+  final Set<String> _failed = {};
+  Timer? _retryTimer;
+  int _retryRounds = 0;
+
+  /// In-line attempts (with backoff) before a source is parked in [_failed].
+  static const int _attemptsPerString = 3;
+
+  /// How many delayed retry rounds to run for parked failures before giving up
+  /// (10s, 20s, 30s, 40s apart).
+  static const int _maxRetryRounds = 4;
+
+  /// Strings translated per flush chunk before persisting + repainting, so a
+  /// large background sweep localizes the app progressively rather than in one
+  /// long silent batch.
+  static const int _chunkSize = 40;
+
   /// Fires after a batch of translations is cached, so the host can trigger a
   /// rebuild (root widget bumps its version provider). Set by the root widget.
   VoidCallback? onChanged;
@@ -94,7 +113,13 @@ class LocalizationService {
     ApiClient? apiClient,
   }) {
     _kv = kv;
-    _translator ??= TranslateService(api: apiClient ?? ApiClient());
+    // An explicit [apiClient] forces a fresh translator (used by tests to inject
+    // a mock); otherwise create one lazily on first configure.
+    if (apiClient != null) {
+      _translator = TranslateService(api: apiClient);
+    } else {
+      _translator ??= TranslateService(api: ApiClient());
+    }
     setLanguage(language);
   }
 
@@ -109,6 +134,10 @@ class LocalizationService {
     _cache.clear();
     _requested.clear();
     _pending.clear();
+    _failed.clear();
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _retryRounds = 0;
     if (!isActive) {
       // English: nothing to load or translate; just repaint.
       onChanged?.call();
@@ -142,6 +171,34 @@ class LocalizationService {
     // English fallback until the translation lands.
     return _subst(source, args);
   }
+
+  /// Registers [sources] as strings the app is about to render, so a bulk
+  /// [pretranslate] pass (and every future language switch) covers them even
+  /// before they first appear on screen. Used to pre-translate the onboarding
+  /// tutorial the moment a language is chosen — a static overlay that never
+  /// rebuilds on its own, so it must be translated up front rather than on
+  /// demand. If the active language already has some of these cached, they're
+  /// skipped; anything missing is queued.
+  void prime(Iterable<String> sources) {
+    for (final s in sources) {
+      if (s.isEmpty) continue;
+      _seen.add(s);
+      if (isActive && !_cache.containsKey(s) && !_requested.contains(s)) {
+        _pending.add(s);
+      }
+    }
+    if (_pending.isNotEmpty) _scheduleFlush();
+  }
+
+  /// Kicks a background sweep translating [catalog] — the app's full UI-string
+  /// catalog (`kAppStringsCatalog`) — into the active language, so EVERY screen
+  /// is pre-populated in the cache and nothing has to translate on demand (no
+  /// flashes anywhere). Cheap when strings are already cached (hits are skipped)
+  /// and safe to call repeatedly; a no-op for English. The sweep runs in
+  /// chunks with retries and survives interruption (partial progress persists),
+  /// so calling it again — on a later launch or after a language switch — just
+  /// fills whatever is still missing.
+  void sweep(Iterable<String> catalog) => prime(catalog);
 
   /// Awaitable bulk translation used by the first-run language picker so it can
   /// show progress while the strings already registered are localized before
@@ -221,39 +278,81 @@ class LocalizationService {
 
   Future<void> _flush() async {
     if (_flushing || !isActive) return;
-    final batch = _pending.toList();
-    if (batch.isEmpty) return;
-    _pending.clear();
-    batch.forEach(_requested.add);
     _flushing = true;
     final lang = _lang;
     try {
-      await _mapPooled(batch, 8, _translateOne);
+      // Drain the pending set in chunks, persisting + repainting after each so a
+      // large background sweep localizes the app progressively (and survives an
+      // interruption with partial progress saved) rather than in one long silent
+      // batch. New misses queued mid-flush are picked up by the loop.
+      while (_pending.isNotEmpty && lang == _lang) {
+        final chunk = _pending.take(_chunkSize).toList();
+        _pending.removeAll(chunk);
+        chunk.forEach(_requested.add);
+        await _mapPooled(chunk, 8, _translateOne);
+        if (lang != _lang) return; // language switched mid-flight
+        _persist();
+        onChanged?.call();
+      }
     } finally {
       _flushing = false;
     }
-    // A language switch mid-flight invalidates these results.
     if (lang != _lang) return;
-    _persist();
-    onChanged?.call();
-    // Anything that missed while we were flushing gets the next pass.
-    if (_pending.isNotEmpty) _scheduleFlush();
+    if (_pending.isNotEmpty) {
+      _scheduleFlush();
+    } else if (_failed.isNotEmpty) {
+      // Everything reachable is cached; give parked failures a delayed retry.
+      _scheduleFailedRetry();
+    }
   }
 
-  /// Translates a single [source] into [_lang] and stores it. Placeholders are
-  /// shielded so the upstream can't translate/reorder them.
+  /// Translates a single [source] into [_lang] and stores it, retrying a few
+  /// times with backoff on failure. Placeholders are shielded so the upstream
+  /// can't translate/reorder them. If every attempt fails the source is parked
+  /// in [_failed] (and un-marked from [_requested]) for a later delayed retry.
   Future<void> _translateOne(String source) async {
     final translator = _translator;
     if (translator == null) return;
     final lang = _lang;
     final shielded = _shieldPlaceholders(source);
-    try {
-      final res = await translator.translate(shielded.text, lang);
+    for (var attempt = 0; attempt < _attemptsPerString; attempt++) {
       if (lang != _lang) return; // language changed under us
-      _cache[source] = _restorePlaceholders(res.translatedText, shielded.tokens);
-    } catch (_) {
-      // Leave uncached ⇒ English fallback; a later pass may retry.
+      try {
+        final res = await translator.translate(shielded.text, lang);
+        if (lang != _lang) return;
+        _cache[source] =
+            _restorePlaceholders(res.translatedText, shielded.tokens);
+        _failed.remove(source);
+        return;
+      } catch (_) {
+        // Backoff before the next attempt (300ms, 600ms, …); the last attempt
+        // falls through to parking the source for a delayed retry round.
+        if (attempt + 1 < _attemptsPerString) {
+          await Future<void>.delayed(
+              Duration(milliseconds: 300 * (1 << attempt)));
+        }
+      }
     }
+    if (lang != _lang) return;
+    _requested.remove(source);
+    _failed.add(source);
+  }
+
+  /// Re-queues parked [_failed] sources after an increasing delay (10s, 20s, …),
+  /// up to [_maxRetryRounds] rounds, so a transient proxy/network outage doesn't
+  /// permanently leave strings in English. Cancelled/reset on a language switch.
+  void _scheduleFailedRetry() {
+    if (_failed.isEmpty || _retryTimer != null) return;
+    if (_retryRounds >= _maxRetryRounds) return;
+    _retryRounds++;
+    _retryTimer = Timer(Duration(seconds: 10 * _retryRounds), () {
+      _retryTimer = null;
+      if (!isActive) return;
+      final retry = _failed.where((s) => !_cache.containsKey(s)).toList();
+      _failed.clear();
+      _pending.addAll(retry);
+      _scheduleFlush();
+    });
   }
 
   /// Runs [action] over [items] with at most [concurrency] in flight.

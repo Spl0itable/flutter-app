@@ -72,6 +72,12 @@ class AutoTranslateNotifier
   /// the same row don't fire duplicate proxy calls.
   final Set<String> _inflight = {};
 
+  /// At most this many message translations run at once, so entering a channel
+  /// (or a backfill) with many messages doesn't fire a burst of proxy calls.
+  static const int _maxConcurrent = 5;
+  int _active = 0;
+  final List<_Job> _queue = [];
+
   /// The cached entry for [messageId], but only if it still matches the current
   /// [target] language and [source] content; otherwise null (stale → re-fetch).
   AutoTranslateEntry? entryFor(String messageId, String target, String source) {
@@ -105,8 +111,50 @@ class AutoTranslateNotifier
         target: target,
       ),
     };
-    _run(message.id, source, target, key);
+    _queue.add(_Job(message.id, source, target, key));
+    _pump();
   }
+
+  /// Ensures auto-translation for the loaded messages of the conversation being
+  /// viewed — called on channel/PM/group entry, on backfill/reload, and as new
+  /// messages arrive — so visible messages localize without waiting for each row
+  /// to scroll into view. Only eligible messages ([autoTranslateAppliesTo]) are
+  /// queued, capped to the most recent [max] (the visible/backfilled window) to
+  /// bound proxy load; already-cached messages are skipped.
+  void ensureForView(
+    List<Message> messages,
+    String target,
+    Settings settings, {
+    int max = 60,
+  }) {
+    if (target.isEmpty || !settings.autoTranslate) return;
+    final eligible = <Message>[
+      for (final m in messages)
+        if (autoTranslateAppliesTo(m, settings)) m,
+    ];
+    // messagesForCurrentViewProvider is oldest-first, so the tail is the most
+    // recent (what the user sees at the bottom on entry).
+    final start = eligible.length > max ? eligible.length - max : 0;
+    for (var i = start; i < eligible.length; i++) {
+      ensure(eligible[i], target);
+    }
+  }
+
+  /// Starts queued jobs up to the [_maxConcurrent] limit.
+  void _pump() {
+    while (_active < _maxConcurrent && _queue.isNotEmpty) {
+      final job = _queue.removeAt(0);
+      _active++;
+      _run(job.id, job.source, job.target, job.key).whenComplete(() {
+        _active--;
+        _pump();
+      });
+    }
+  }
+
+  /// In-line attempts (with backoff) before a message translation is marked
+  /// failed. The message keeps rendering its original meanwhile.
+  static const int _attempts = 3;
 
   Future<void> _run(
     String messageId,
@@ -114,27 +162,41 @@ class AutoTranslateNotifier
     String target,
     String key,
   ) async {
+    // `_service.translate` preserves `@mention` tokens verbatim (it never sends
+    // them upstream), so user nicknames are never translated — only the prose
+    // between mentions is.
     try {
-      final res = await _service.translate(source, target);
-      final translated = res.translatedText.trim();
-      // "Already in the target language" — detected == target, or the upstream
-      // returned the input unchanged. Treated as a silent no-op (no icon, no
-      // error), so the proxy result for a same-language message just renders
-      // the original.
-      final noop = translated.isEmpty ||
-          translated == source.trim() ||
-          (res.detectedLanguage != 'auto' && res.detectedLanguage == target);
-      _set(
-        messageId,
-        AutoTranslateEntry(
-          status: noop ? AutoTranslateStatus.noop : AutoTranslateStatus.ready,
-          source: source,
-          target: target,
-          translated: res.translatedText,
-          detected: res.detectedLanguage,
-        ),
-      );
-    } catch (_) {
+      for (var attempt = 0; attempt < _attempts; attempt++) {
+        try {
+          final res = await _translateQuoteAware(source, target);
+          final translated = res.translatedText.trim();
+          // "Already in the target language" — detected == target, or the
+          // upstream returned the input unchanged. Treated as a silent no-op
+          // (no icon, no error), so a same-language message just renders as-is.
+          final noop = translated.isEmpty ||
+              translated == source.trim() ||
+              (res.detectedLanguage != 'auto' &&
+                  res.detectedLanguage == target);
+          _set(
+            messageId,
+            AutoTranslateEntry(
+              status:
+                  noop ? AutoTranslateStatus.noop : AutoTranslateStatus.ready,
+              source: source,
+              target: target,
+              translated: res.translatedText,
+              detected: res.detectedLanguage,
+            ),
+          );
+          return;
+        } catch (_) {
+          if (attempt + 1 < _attempts) {
+            await Future<void>.delayed(
+                Duration(milliseconds: 400 * (1 << attempt)));
+          }
+        }
+      }
+      // Every attempt failed — fall back to the original silently.
       _set(
         messageId,
         AutoTranslateEntry(
@@ -146,6 +208,58 @@ class AutoTranslateNotifier
     } finally {
       _inflight.remove(key);
     }
+  }
+
+  /// Translates [source] into [target] while keeping quoted lines (those the
+  /// message parser treats as a blockquote — i.e. starting with `>` at column
+  /// 0) **verbatim**, translating only the non-quote reply text.
+  ///
+  /// A quote reply's header line is `> @author: …`. Sending it through the proxy
+  /// can drop/shift the leading `>` or reflow the line, after which the parser
+  /// no longer sees a blockquote and renders `@author` as a bare @mention (the
+  /// reported bug). Preserving quote lines byte-for-byte keeps the blockquote —
+  /// and the author mention inside it — intact. Each contiguous run of reply
+  /// lines is translated as one call (usually just one), so this stays cheap.
+  Future<TranslationResult> _translateQuoteAware(
+    String source,
+    String target,
+  ) async {
+    final lines = source.split('\n');
+    // Fast path: no quote lines → translate the whole thing in one call.
+    if (!lines.any((l) => l.startsWith('>'))) {
+      return _service.translate(source, target);
+    }
+    final out = <String>[];
+    var detected = 'auto';
+    var i = 0;
+    while (i < lines.length) {
+      if (lines[i].startsWith('>')) {
+        out.add(lines[i]); // quote line: keep exactly as authored
+        i++;
+        continue;
+      }
+      final seg = <String>[];
+      while (i < lines.length && !lines[i].startsWith('>')) {
+        seg.add(lines[i]);
+        i++;
+      }
+      final segText = seg.join('\n');
+      if (segText.trim().isEmpty) {
+        out.add(segText); // blank separators between quote and reply
+      } else {
+        final res = await _service.translate(segText, target);
+        if (detected == 'auto' &&
+            res.detectedLanguage.isNotEmpty &&
+            res.detectedLanguage != 'auto') {
+          detected = res.detectedLanguage;
+        }
+        out.add(res.translatedText);
+      }
+    }
+    return TranslationResult(
+      translatedText: out.join('\n'),
+      detectedLanguage: detected,
+    );
   }
 
   /// Commits an entry only if it still reflects the latest requested input —
@@ -162,15 +276,38 @@ class AutoTranslateNotifier
   }
 }
 
+/// A queued message-translation job (see [AutoTranslateNotifier._pump]).
+class _Job {
+  const _Job(this.id, this.source, this.target, this.key);
+  final String id;
+  final String source;
+  final String target;
+  final String key;
+}
+
 final autoTranslateProvider =
     StateNotifierProvider<AutoTranslateNotifier, Map<String, AutoTranslateEntry>>(
   (ref) => AutoTranslateNotifier(),
 );
 
+/// The language auto-translate should translate incoming messages INTO.
+///
+/// Prefers the explicit message-translation target ([Settings.translateLanguage],
+/// shared with the manual "Translate" action); when that's unset it falls back
+/// to the app's UI language ([Settings.uiLanguage]) so a user who chose an app
+/// language but never set a separate translation language still gets messages
+/// auto-translated into the language they're using the app in. Empty ⇒ no
+/// target (English/unset) ⇒ auto-translate stays off.
+String autoTranslateTargetFor(Settings settings) {
+  if (settings.translateLanguage.isNotEmpty) return settings.translateLanguage;
+  final ui = settings.uiLanguage;
+  return (ui.isNotEmpty && ui != 'en') ? ui : '';
+}
+
 /// Whether auto-translate is enabled AND gated in for [message]'s conversation
 /// type (public channel / PM / group), per [settings]. Own messages and
 /// system/action rows are never auto-translated. Callers must still check that
-/// a target language is set.
+/// a target language is set (see [autoTranslateTargetFor]).
 bool autoTranslateAppliesTo(Message message, Settings settings) {
   if (!settings.autoTranslate) return false;
   if (message.isOwn) return false;

@@ -8,6 +8,7 @@ import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../state/settings_provider.dart';
 import '../translate/translate_languages.dart';
+import 'app_strings_catalog.dart';
 import 'i18n.dart';
 import 'localization_service.dart';
 
@@ -71,6 +72,11 @@ Future<void> applyUiLanguage(
 
   if (dialogOpen) navigator.pop();
   progress.dispose();
+
+  // With the on-screen strings translated, sweep the REST of the app's UI in
+  // the background so every screen is pre-populated in the cache — no on-demand
+  // flashes as the user navigates later. Non-blocking; runs in chunks.
+  svc.sweep(kAppStringsCatalog);
 }
 
 /// First-run, full-screen language chooser shown at the very start of
