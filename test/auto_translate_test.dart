@@ -124,6 +124,64 @@ void main() {
     });
   });
 
+  group('autoTranslateTargetFor', () {
+    test('prefers translateLanguage, falls back to the app UI language', () {
+      expect(
+        autoTranslateTargetFor(
+            const Settings(translateLanguage: 'es', uiLanguage: 'fr')),
+        'es',
+      );
+      expect(
+        autoTranslateTargetFor(
+            const Settings(translateLanguage: '', uiLanguage: 'fr')),
+        'fr',
+      );
+    });
+
+    test('is empty when neither a translation nor a non-English UI lang is set',
+        () {
+      expect(autoTranslateTargetFor(const Settings()), '');
+      expect(
+        autoTranslateTargetFor(const Settings(uiLanguage: 'en')),
+        '',
+      );
+    });
+  });
+
+  group('AutoTranslateNotifier.ensureForView', () {
+    test('queues only eligible messages (skips own + system rows)', () async {
+      final n = AutoTranslateNotifier(
+        service: _FakeTranslate(const TranslationResult(
+            translatedText: 'X', detectedLanguage: 'es')),
+      );
+      final msgs = [
+        _msg(id: 'own', content: 'a', isOwn: true),
+        _msg(id: 'sys', content: 'b', kind: MessageKind.system),
+        _msg(id: 'c1', content: 'hello'),
+        _msg(id: 'c2', content: 'world'),
+      ];
+      n.ensureForView(msgs, 'en', const Settings(autoTranslate: true));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(n.state.containsKey('own'), isFalse);
+      expect(n.state.containsKey('sys'), isFalse);
+      expect(n.state['c1']?.isReady, isTrue);
+      expect(n.state['c2']?.isReady, isTrue);
+    });
+
+    test('no-ops without a target or when auto-translate is disabled', () {
+      final n = AutoTranslateNotifier(
+        service: _FakeTranslate(const TranslationResult(
+            translatedText: 'X', detectedLanguage: 'es')),
+      );
+      n.ensureForView(
+          [_msg(content: 'hi')], '', const Settings(autoTranslate: true));
+      expect(n.state, isEmpty);
+      n.ensureForView(
+          [_msg(content: 'hi')], 'en', const Settings(autoTranslate: false));
+      expect(n.state, isEmpty);
+    });
+  });
+
   group('AutoTranslateNotifier', () {
     test('does nothing without a target language', () {
       final n = AutoTranslateNotifier(

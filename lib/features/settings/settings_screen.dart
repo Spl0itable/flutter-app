@@ -30,6 +30,7 @@ import '../../widgets/wallpaper/wallpaper_layer.dart';
 import '../emoji/emoji_picker.dart';
 import '../i18n/i18n.dart';
 import '../i18n/language_select.dart';
+import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
@@ -1856,11 +1857,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             'not already in your translation language.'),
         child: FormGroup(
           label: tr('Auto-translate Messages'),
-          hint: s.translateLanguage.isEmpty
-              ? tr('Set a translation language above to use auto-translate.')
+          hint: autoTranslateTargetFor(s).isEmpty
+              ? tr('Set a translation language above (or choose an app '
+                  'language) to use auto-translate.')
               : tr('Automatically translate messages in the conversation you '
-                  'are viewing that are not already in your translation '
-                  'language. The original is one tap away on each message.'),
+                  'are viewing that are not already in your language. The '
+                  'original is one tap away on each message.'),
           child: FormSelect<bool>(
             value: s.autoTranslate,
             items: [

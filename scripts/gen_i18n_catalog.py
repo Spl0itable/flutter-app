@@ -19,6 +19,21 @@ RX_FN = re.compile(r"(?<![\w.$])tr\s*\(\s*(%s)" % RUN)
 # <literal run> .tr(      — extension form.
 RX_EXT = re.compile(r"(%s)\s*\.tr\s*\(" % RUN)
 
+# Display-oriented named arguments whose STRING-LITERAL values are shown to the
+# user — captured so strings that reach tr() indirectly (via tr(variable), e.g.
+# the tutorial steps `TutorialStep(title:…, body:…)` and option-record
+# `label:`s displayed through tr(label)) are also swept. Values already written
+# as `arg: tr('…')` are NOT matched (a `tr(` follows the colon, not a quote), so
+# this only adds the plain-literal ones. A named arg guarantees UI intent, so
+# over-capture is negligible; any spurious entry just caches an unused
+# translation.
+_NAMED = (
+    r"label|title|body|hint|hintText|tooltip|message|okLabel|cancelLabel|"
+    r"placeholder|helperText|errorText|semanticLabel|subtitle|heading|"
+    r"buttonLabel|emptyText|warning|amberHint|confirmLabel|actionLabel"
+)
+RX_NAMED = re.compile(r"(?<![\w.$])(?:%s)\s*:\s*(%s)" % (_NAMED, RUN))
+
 # Individual literal within a run.
 RX_ONE = re.compile(STR)
 
@@ -98,7 +113,7 @@ def collect():
             if os.path.abspath(path) == os.path.abspath(OUT):
                 continue
             src = open(path, encoding='utf-8').read()
-            for rx in (RX_FN, RX_EXT):
+            for rx in (RX_FN, RX_EXT, RX_NAMED):
                 for m in rx.finditer(src):
                     s = joined(m.group(1))
                     if s and s.strip():

@@ -72,6 +72,12 @@ class AutoTranslateNotifier
   /// the same row don't fire duplicate proxy calls.
   final Set<String> _inflight = {};
 
+  /// At most this many message translations run at once, so entering a channel
+  /// (or a backfill) with many messages doesn't fire a burst of proxy calls.
+  static const int _maxConcurrent = 5;
+  int _active = 0;
+  final List<_Job> _queue = [];
+
   /// The cached entry for [messageId], but only if it still matches the current
   /// [target] language and [source] content; otherwise null (stale → re-fetch).
   AutoTranslateEntry? entryFor(String messageId, String target, String source) {
@@ -105,7 +111,45 @@ class AutoTranslateNotifier
         target: target,
       ),
     };
-    _run(message.id, source, target, key);
+    _queue.add(_Job(message.id, source, target, key));
+    _pump();
+  }
+
+  /// Ensures auto-translation for the loaded messages of the conversation being
+  /// viewed — called on channel/PM/group entry, on backfill/reload, and as new
+  /// messages arrive — so visible messages localize without waiting for each row
+  /// to scroll into view. Only eligible messages ([autoTranslateAppliesTo]) are
+  /// queued, capped to the most recent [max] (the visible/backfilled window) to
+  /// bound proxy load; already-cached messages are skipped.
+  void ensureForView(
+    List<Message> messages,
+    String target,
+    Settings settings, {
+    int max = 60,
+  }) {
+    if (target.isEmpty || !settings.autoTranslate) return;
+    final eligible = <Message>[
+      for (final m in messages)
+        if (autoTranslateAppliesTo(m, settings)) m,
+    ];
+    // messagesForCurrentViewProvider is oldest-first, so the tail is the most
+    // recent (what the user sees at the bottom on entry).
+    final start = eligible.length > max ? eligible.length - max : 0;
+    for (var i = start; i < eligible.length; i++) {
+      ensure(eligible[i], target);
+    }
+  }
+
+  /// Starts queued jobs up to the [_maxConcurrent] limit.
+  void _pump() {
+    while (_active < _maxConcurrent && _queue.isNotEmpty) {
+      final job = _queue.removeAt(0);
+      _active++;
+      _run(job.id, job.source, job.target, job.key).whenComplete(() {
+        _active--;
+        _pump();
+      });
+    }
   }
 
   /// In-line attempts (with backoff) before a message translation is marked
@@ -180,15 +224,38 @@ class AutoTranslateNotifier
   }
 }
 
+/// A queued message-translation job (see [AutoTranslateNotifier._pump]).
+class _Job {
+  const _Job(this.id, this.source, this.target, this.key);
+  final String id;
+  final String source;
+  final String target;
+  final String key;
+}
+
 final autoTranslateProvider =
     StateNotifierProvider<AutoTranslateNotifier, Map<String, AutoTranslateEntry>>(
   (ref) => AutoTranslateNotifier(),
 );
 
+/// The language auto-translate should translate incoming messages INTO.
+///
+/// Prefers the explicit message-translation target ([Settings.translateLanguage],
+/// shared with the manual "Translate" action); when that's unset it falls back
+/// to the app's UI language ([Settings.uiLanguage]) so a user who chose an app
+/// language but never set a separate translation language still gets messages
+/// auto-translated into the language they're using the app in. Empty ⇒ no
+/// target (English/unset) ⇒ auto-translate stays off.
+String autoTranslateTargetFor(Settings settings) {
+  if (settings.translateLanguage.isNotEmpty) return settings.translateLanguage;
+  final ui = settings.uiLanguage;
+  return (ui.isNotEmpty && ui != 'en') ? ui : '';
+}
+
 /// Whether auto-translate is enabled AND gated in for [message]'s conversation
 /// type (public channel / PM / group), per [settings]. Own messages and
 /// system/action rows are never auto-translated. Callers must still check that
-/// a target language is set.
+/// a target language is set (see [autoTranslateTargetFor]).
 bool autoTranslateAppliesTo(Message message, Settings settings) {
   if (!settings.autoTranslate) return false;
   if (message.isOwn) return false;
