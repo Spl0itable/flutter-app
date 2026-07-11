@@ -4577,8 +4577,18 @@ final pmListProvider = Provider<List<PMConversation>>((ref) {
 });
 
 /// Groups (also surfaced under PRIVATE MESSAGES).
+///
+/// Returns a FRESH `UnmodifiableListView` on every emit so this provider's value
+/// IDENTITY changes even though `state.groups` is the SAME `List<Group>` instance
+/// across `copyWith` (the store mutates a `Group` IN PLACE — avatar/banner via a
+/// metadata apply, `lastMessageTime` on a new message — and reuses the list). A
+/// widget that watches ONLY this provider (the columns deck, columns_deck.dart:
+/// 1356) compares old vs new with `==`; returning the raw `state.groups` made
+/// Riverpod treat the value as unchanged, so a group's custom avatar/banner never
+/// repainted and group columns never repositioned. Mirrors the same fix applied
+/// to [usersProvider] for in-place profile mutations.
 final groupsProvider = Provider<List<Group>>((ref) {
-  return ref.watch(appStateProvider).groups;
+  return UnmodifiableListView(ref.watch(appStateProvider).groups);
 });
 
 /// Users keyed by pubkey (sidebar ONLINE NYMS source). Blocked users and
