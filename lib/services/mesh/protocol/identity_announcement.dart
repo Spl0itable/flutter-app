@@ -20,6 +20,7 @@ class IdentityAnnouncement {
     required this.noisePublicKey,
     required this.signingPublicKey,
     this.capabilities,
+    this.nostrLink,
     this.unknownTlvs = const [],
   });
 
@@ -27,12 +28,23 @@ class IdentityAnnouncement {
   final Uint8List noisePublicKey; // 32 bytes
   final Uint8List signingPublicKey; // 32 bytes
   final Uint8List? capabilities;
+
+  /// Nymchat-specific link binding this peer to a Nostr identity (see
+  /// [NostrLink]): `nostrPubkey(32) ‖ schnorr signature(64)`. Null for bitchat
+  /// peers and Nymchat peers signing remotely (no local key). bitchat treats
+  /// this as an unknown TLV and preserves/ignores it.
+  final Uint8List? nostrLink;
+
   final List<AnnouncementTlv> unknownTlvs;
 
   static const int _tlvNickname = 0x01;
   static const int _tlvNoisePublicKey = 0x02;
   static const int _tlvSigningPublicKey = 0x03;
   static const int _tlvCapabilities = 0x05;
+
+  /// Nymchat extension TLV — a Nostr-identity link. Chosen above bitchat's
+  /// assigned range (0x01–0x05) so it never collides.
+  static const int _tlvNostrLink = 0x50;
 
   /// Encodes to the TLV byte stream. Returns null if any value exceeds the
   /// single-byte length field (255), matching bitchat's guard.
@@ -58,6 +70,10 @@ class IdentityAnnouncement {
     if (caps != null && caps.length <= 255) {
       tlv(_tlvCapabilities, caps);
     }
+    final link = nostrLink;
+    if (link != null && link.length <= 255) {
+      tlv(_tlvNostrLink, link);
+    }
     for (final t in unknownTlvs) {
       tlv(t.type, t.value);
     }
@@ -70,6 +86,7 @@ class IdentityAnnouncement {
     Uint8List? noisePublicKey;
     Uint8List? signingPublicKey;
     Uint8List? capabilities;
+    Uint8List? nostrLink;
     final unknown = <AnnouncementTlv>[];
 
     while (offset + 2 <= data.length) {
@@ -93,6 +110,9 @@ class IdentityAnnouncement {
         case _tlvCapabilities:
           capabilities = value;
           break;
+        case _tlvNostrLink:
+          nostrLink = value;
+          break;
         default:
           unknown.add(AnnouncementTlv(type, value));
       }
@@ -106,6 +126,7 @@ class IdentityAnnouncement {
       noisePublicKey: noisePublicKey,
       signingPublicKey: signingPublicKey,
       capabilities: capabilities,
+      nostrLink: nostrLink,
       unknownTlvs: unknown,
     );
   }

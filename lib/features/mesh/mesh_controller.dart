@@ -3,13 +3,16 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/crypto/schnorr.dart' show signId;
 import '../../services/mesh/mesh_events.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/mesh_service.dart';
 import '../../services/mesh/noise/noise_identity.dart';
+import '../../services/mesh/noise/nostr_link.dart';
 import '../../services/mesh/transport/ble_mesh_transport.dart';
 import '../../services/mesh/transport/mesh_transport.dart';
 import '../../state/app_state.dart';
+import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 
 /// A single message in a mesh private conversation, including our own sent
@@ -93,11 +96,28 @@ class MeshUiState {
 /// Owns the [MeshService] lifecycle and bridges its events into an observable
 /// [MeshUiState]. Reacts to the `meshEnabled` setting to power the radio on/off.
 class MeshController extends StateNotifier<MeshUiState> {
-  MeshController({required String Function() nickname})
-      : _nickname = nickname,
+  MeshController({
+    required String Function() nickname,
+    String? Function()? nostrPubkey,
+    String? Function(String messageHex)? signSchnorr,
+    String? Function(String pubkey)? avatarUrlOf,
+    String? Function(String pubkey)? bannerUrlOf,
+  })  : _nickname = nickname,
+        _nostrPubkey = nostrPubkey,
+        _signSchnorr = signSchnorr,
+        _avatarUrlOf = avatarUrlOf,
+        _bannerUrlOf = bannerUrlOf,
         super(const MeshUiState());
 
   final String Function() _nickname;
+  final String? Function()? _nostrPubkey;
+  final String? Function(String messageHex)? _signSchnorr;
+  final String? Function(String pubkey)? _avatarUrlOf;
+  final String? Function(String pubkey)? _bannerUrlOf;
+
+  /// Our precomputed Nostr-identity link (stable per session), advertised in
+  /// announcements. Null when there is no local Nostr key to sign it.
+  Uint8List? _nostrLink;
 
   MeshService? _service;
   final List<StreamSubscription<dynamic>> _subs = [];
@@ -131,15 +151,24 @@ class MeshController extends StateNotifier<MeshUiState> {
         return;
       }
       final identity = await NoiseIdentity.loadOrCreate();
+      _nostrLink = _computeNostrLink(identity);
       final transport = BleMeshTransport(identity.peerID);
       final service = MeshService(
         identity: identity,
         transport: transport,
         nicknameProvider: _nickname,
+        nostrLinkProvider: () => _nostrLink,
       );
       _service = service;
 
       _subs.add(service.peersStream.listen((peers) {
+        for (final p in peers) {
+          final pubkey = p.nostrPubkey;
+          if (pubkey != null) {
+            p.avatarUrl ??= _avatarUrlOf?.call(pubkey);
+            p.bannerUrl ??= _bannerUrlOf?.call(pubkey);
+          }
+        }
         state = state.copyWith(
           peers: List.of(peers),
           linkCount: service.connectedLinkCount,
@@ -162,6 +191,17 @@ class MeshController extends StateNotifier<MeshUiState> {
     } finally {
       _busy = false;
     }
+  }
+
+  /// Builds our signed Nostr-identity link, or null when we have no local Nostr
+  /// key (e.g. NIP-46 remote signer) to bind the mesh key with.
+  Uint8List? _computeNostrLink(NoiseIdentity identity) {
+    final pubkey = _nostrPubkey?.call();
+    final signer = _signSchnorr;
+    if (pubkey == null || pubkey.length != 64 || signer == null) return null;
+    final sigHex = signer(NostrLink.messageHex(identity.staticPublic));
+    if (sigHex == null || sigHex.isEmpty) return null;
+    return NostrLink.build(pubkey, sigHex);
   }
 
   Future<void> _stop() async {
@@ -291,6 +331,17 @@ final meshControllerProvider =
       final nym = ref.read(appStateProvider).selfNym;
       return nym.isNotEmpty ? nym : 'nym';
     },
+    nostrPubkey: () => ref.read(nostrControllerProvider).identity?.pubkey,
+    // Sign the mesh↔Nostr binding with the local key, when there is one. NIP-46
+    // remote signers have no local privkey → returns null → no link advertised.
+    signSchnorr: (messageHex) {
+      final priv = ref.read(nostrControllerProvider).identity?.privkey;
+      return priv == null ? null : signId(messageHex, priv);
+    },
+    avatarUrlOf: (pubkey) =>
+        ref.read(appStateProvider).users[pubkey]?.profile?.picture,
+    bannerUrlOf: (pubkey) =>
+        ref.read(appStateProvider).users[pubkey]?.profile?.banner,
   );
   ref.listen<bool>(
     settingsProvider.select((s) => s.meshEnabled),

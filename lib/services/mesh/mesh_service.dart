@@ -11,6 +11,7 @@ import 'mesh_events.dart';
 import 'mesh_peer.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
+import 'noise/nostr_link.dart';
 import 'protocol/bitchat_message.dart';
 import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
@@ -31,12 +32,18 @@ class MeshService {
     required this.identity,
     required MeshTransport transport,
     required String Function() nicknameProvider,
+    Uint8List? Function()? nostrLinkProvider,
   })  : _transport = transport,
-        _nicknameProvider = nicknameProvider;
+        _nicknameProvider = nicknameProvider,
+        _nostrLinkProvider = nostrLinkProvider;
 
   final NoiseIdentity identity;
   final MeshTransport _transport;
   final String Function() _nicknameProvider;
+
+  /// Supplies our Nostr-identity link ([NostrLink]) to advertise, or null when
+  /// we have no local Nostr key to sign it with.
+  final Uint8List? Function()? _nostrLinkProvider;
 
   late final NoiseSessionManager _noise = NoiseSessionManager(identity);
   final SeenPackets _seen = SeenPackets();
@@ -266,6 +273,18 @@ class MeshService {
     peer.signingPublicKey = announcement.signingPublicKey;
     peer.isVerified = verified;
     peer.rssi = rssi;
+
+    // Resolve a Nostr-identity link, if the peer advertised one and the schnorr
+    // signature binds it to the Noise key they just announced.
+    final link = announcement.nostrLink;
+    if (link != null) {
+      final linkedPubkey = NostrLink.verify(link, announcement.noisePublicKey);
+      if (linkedPubkey != null) {
+        peer.nostrPubkey = linkedPubkey;
+        peer.nostrLinkVerified = true;
+      }
+    }
+
     peer.touch();
     _emitPeers();
   }
@@ -428,6 +447,7 @@ class MeshService {
       nickname: _nicknameProvider(),
       noisePublicKey: identity.staticPublic,
       signingPublicKey: identity.signingPublic,
+      nostrLink: _nostrLinkProvider?.call(),
     );
     final payload = announcement.encode();
     if (payload == null) return;
