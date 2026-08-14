@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/crypto/schnorr.dart' show signId;
+import '../../services/mesh/mesh_avatar_registry.dart';
 import '../../services/mesh/mesh_events.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/mesh_service.dart';
@@ -173,7 +174,7 @@ class MeshController extends StateNotifier<MeshUiState> {
             p.avatarUrl ??= _avatarUrlOf?.call(pubkey);
             p.bannerUrl ??= _bannerUrlOf?.call(pubkey);
           }
-          _maybeRequestProfile(service, p);
+          unawaited(_hydratePeerAvatar(service, p));
         }
         state = state.copyWith(
           peers: List.of(peers),
@@ -253,22 +254,13 @@ class MeshController extends StateNotifier<MeshUiState> {
     }
   }
 
-  /// Requests a peer's profile once when we have no avatar for them yet.
-  void _maybeRequestProfile(MeshService service, MeshPeer peer) {
-    if (peer.avatarUrl != null ||
-        peer.avatarFilePath != null ||
-        _profileAsked.contains(peer.peerID)) {
-      return;
-    }
-    _profileAsked.add(peer.peerID);
-    unawaited(service.requestProfile(peer.peerID));
-  }
-
-  /// Caches a transferred avatar to disk and points the peer at it.
+  /// Caches a transferred avatar to disk, registers its bytes so it renders in
+  /// canonical message rows, and points the peer at it.
   Future<void> _onProfile(MeshProfileReceived event) async {
     final profile = event.profile;
     final avatar = profile.avatar;
     if (avatar == null || avatar.isEmpty) return;
+    _publishAvatar(event.peerID, avatar);
     try {
       final dir = Directory('${(await getApplicationDocumentsDirectory()).path}'
           '/mesh_avatars');
@@ -281,8 +273,50 @@ class MeshController extends StateNotifier<MeshUiState> {
       }
       state = state.copyWith(peers: peers);
     } catch (_) {
-      // Non-fatal: fall back to the identicon.
+      // Non-fatal: the registry still holds the in-memory bytes.
     }
+  }
+
+  /// Registers avatar [bytes] under every seed a message row / avatar might use
+  /// for this peer: its mesh peerID always, and its Nostr pubkey only when the
+  /// pubkey↔mesh-key link is cryptographically verified (never for an
+  /// unverified claim, to prevent avatar spoofing of a Nostr identity).
+  void _publishAvatar(String peerID, Uint8List bytes) {
+    final seeds = <String>[peerID];
+    final peer = state.peerById(peerID);
+    if (peer != null && peer.nostrLinkVerified && peer.nostrPubkey != null) {
+      seeds.add(peer.nostrPubkey!);
+    }
+    MeshAvatarRegistry.instance.register(seeds, bytes);
+  }
+
+  /// On first sight of a peer, reload a previously-cached avatar from disk (so
+  /// it survives restarts) or, if none, request one over the mesh.
+  Future<void> _hydratePeerAvatar(MeshService service, MeshPeer peer) async {
+    if (peer.avatarUrl != null ||
+        peer.avatarFilePath != null ||
+        _profileAsked.contains(peer.peerID)) {
+      return;
+    }
+    _profileAsked.add(peer.peerID);
+    try {
+      final path = '${(await getApplicationDocumentsDirectory()).path}'
+          '/mesh_avatars/${peer.peerID}.img';
+      final file = File(path);
+      if (file.existsSync()) {
+        final bytes = await file.readAsBytes();
+        _publishAvatar(peer.peerID, bytes);
+        final peers = List.of(state.peers);
+        for (final p in peers) {
+          if (p.peerID == peer.peerID) p.avatarFilePath = path;
+        }
+        state = state.copyWith(peers: peers);
+        return;
+      }
+    } catch (_) {
+      // fall through to a fresh request
+    }
+    unawaited(service.requestProfile(peer.peerID));
   }
 
   Future<void> _stop() async {

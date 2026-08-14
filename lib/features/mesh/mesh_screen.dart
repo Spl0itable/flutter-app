@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -203,7 +201,12 @@ class _PeersTab extends StatelessWidget {
         final peer = peers[i];
         final seed = peer.nostrPubkey ?? peer.peerID;
         return ListTile(
-          leading: _PeerAvatar(peer: peer, seed: seed, size: 38),
+          leading: NymAvatar(
+            seed: seed,
+            size: 38,
+            imageUrl: peer.avatarUrl,
+            label: peer.displayName,
+          ),
           title: Row(
             children: [
               Flexible(
@@ -438,38 +441,6 @@ class _ComposerState extends State<_Composer> {
           ),
         ],
       ),
-    );
-  }
-}
-
-/// A peer avatar that prefers a mesh-transferred image file, then a cached
-/// Nostr avatar URL, then the identicon.
-class _PeerAvatar extends StatelessWidget {
-  const _PeerAvatar({required this.peer, required this.seed, required this.size});
-  final MeshPeer peer;
-  final String seed;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final path = peer.avatarFilePath;
-    if (path != null && path.isNotEmpty) {
-      return ClipOval(
-        child: Image.file(
-          File(path),
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              NymAvatar(seed: seed, size: size, label: peer.displayName),
-        ),
-      );
-    }
-    return NymAvatar(
-      seed: seed,
-      size: size,
-      imageUrl: peer.avatarUrl,
-      label: peer.displayName,
     );
   }
 }

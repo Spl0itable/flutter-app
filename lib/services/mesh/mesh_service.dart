@@ -439,7 +439,10 @@ class MeshService {
     final peer = _peers[senderPeerID];
     if (peer != null) {
       if (profile.nickname.isNotEmpty) peer.nickname = profile.nickname;
-      peer.nostrPubkey ??= profile.nostrPubkey;
+      // NOTE: a profile response is NOT a signed identity link, so its claimed
+      // nostrPubkey is deliberately NOT adopted here — only a verified NostrLink
+      // (from the announcement) may set peer.nostrPubkey. This prevents a peer
+      // from claiming (and skinning messages as) another Nostr identity.
       peer.touch();
       _emitPeers();
     }
