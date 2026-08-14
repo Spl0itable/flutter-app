@@ -1326,7 +1326,7 @@ class _ComposerState extends ConsumerState<Composer> {
     // media over the mesh as a file (rendered inline on the far side) instead.
     final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
     final view = ref.read(appStateProvider).view;
-    if (meshBridge != null && meshBridge.isMeshView(view)) {
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
       for (final f in picked) {
         try {
           final bytes = await f.readAsBytes();
@@ -1426,7 +1426,7 @@ class _ComposerState extends ConsumerState<Composer> {
     // Bluetooth-mesh view: send the file directly over the mesh (no P2P/relay).
     final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
     final view = ref.read(appStateProvider).view;
-    if (meshBridge != null && meshBridge.isMeshView(view)) {
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
       if (bytes.length > 10 * 1024 * 1024) {
         _onSystemMessage(tr('Files must be under 50MB.'));
         return;
@@ -1984,7 +1984,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // every keystroke is safe. (`messages.js` typing emit on input.)
         final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
         final view = ref.read(appStateProvider).view;
-        if (meshBridge != null && meshBridge.isMeshView(view)) {
+        if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
           // Throttle mesh typing to ~1/s so we don't flood the radio.
           final now = DateTime.now().millisecondsSinceEpoch;
           if (now - _lastMeshTypingMs >= 1000) {

@@ -9,6 +9,7 @@ import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
 import '../i18n/i18n.dart';
+import 'mesh_bridge.dart' show kMeshNearbyChannel;
 import 'mesh_controller.dart';
 
 /// Bluetooth-mesh status + discovery surface. Conversations themselves live in
@@ -40,6 +41,36 @@ class MeshScreen extends ConsumerWidget {
       body: Column(
         children: [
           _StatusBar(mesh: mesh, colors: c),
+          // The public #mesh channel — opens in the normal chat view, where it
+          // weaves together Nostr (kind-20000) and Bluetooth-mesh messages.
+          ListTile(
+            leading: Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: c.primary.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: Text('#',
+                  style: TextStyle(
+                      color: c.primary,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 18)),
+            ),
+            title: Text('#mesh', style: TextStyle(color: c.text)),
+            subtitle: Text(tr('Public channel · everyone in range'),
+                style: TextStyle(color: c.textDim, fontSize: 12)),
+            trailing:
+                NymSvgIcon(NymIcons.bluetooth, size: 16, color: c.primary),
+            onTap: () {
+              ref
+                  .read(appStateProvider.notifier)
+                  .switchChannel(kMeshNearbyChannel);
+              Navigator.of(context).maybePop();
+            },
+          ),
+          Divider(height: 1, color: c.border),
           Expanded(child: _PeersList(mesh: mesh, colors: c)),
         ],
       ),

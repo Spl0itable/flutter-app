@@ -51,7 +51,12 @@ class BitchatPacket {
 
   /// Deterministic bytes used for Ed25519 signing/verification: the packet with
   /// no signature and a fixed TTL of 0 (TTL mutates during relay, so it must be
-  /// excluded), never padded. Matches bitchat's `toBinaryDataForSigning`.
+  /// excluded), then PKCS#7-padded to the optimal block size. This byte-for-byte
+  /// matches bitchat's `toBinaryDataForSigning`, which calls `encode(...)` with
+  /// its default `padding = true` — so cross-client signatures verify. (Signing
+  /// the UNpadded form silently breaks interop: bitchat rejects our signed
+  /// announce as "unknown" and drops our signed public/#mesh messages, and we
+  /// would reject theirs.)
   Uint8List? toBytesForSigning() => BinaryProtocol.encode(
         BitchatPacket(
           version: version,
@@ -64,7 +69,7 @@ class BitchatPacket {
           ttl: 0,
           route: route,
         ),
-        padding: false,
+        padding: true,
       );
 
   BitchatPacket copyWith({int? ttl, Uint8List? signature}) => BitchatPacket(

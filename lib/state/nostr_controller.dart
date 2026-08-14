@@ -4002,10 +4002,11 @@ class NostrController {
     final view = state.view;
     _markDirty(view.storageKey);
 
-    // Bluetooth-mesh routing: when the active conversation is mesh-backed, the
-    // send goes out over BLE (with an optimistic echo) instead of to relays.
+    // Transport routing: with no internet, an outgoing message goes over the
+    // Bluetooth mesh instead of Nostr relays (and a DM to a mesh-only peer
+    // always does). When online, everything — including #mesh — goes to Nostr.
     final meshBridge = _ref.read(meshControllerProvider.notifier).bridge;
-    if (meshBridge != null && meshBridge.isMeshView(view)) {
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(view)) {
       await meshBridge.sendFromComposer(view, trimmed);
       return;
     }
@@ -6018,7 +6019,7 @@ class NostrController {
     // Bluetooth-mesh routing: a reaction in a mesh conversation goes out over
     // BLE (broadcast for a channel, encrypted for a DM) instead of to relays.
     final meshBridge = _ref.read(meshControllerProvider.notifier).bridge;
-    if (meshBridge != null && meshBridge.isMeshView(state.view)) {
+    if (meshBridge != null && meshBridge.shouldSendOverMesh(state.view)) {
       final wireId = (kind == '1059' || kind == '14')
           ? (appState.messageById(messageId)?.nymMessageId ?? messageId)
           : messageId;

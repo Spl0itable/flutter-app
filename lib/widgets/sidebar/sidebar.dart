@@ -13,6 +13,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/mesh/mesh_controller.dart';
+import '../../features/mesh/mesh_screen.dart';
 import '../../features/groups/group_logic.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
@@ -891,6 +892,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
           // `margin-top:10px` is the gap below the nym box.
           const SizedBox(height: 10),
           _ConnectionStatusIndicator(connectedCount: connectedRelays),
+          const _MeshStatusIndicator(),
         ],
       ),
     );
@@ -1127,6 +1129,55 @@ class _ConnectionStatusIndicator extends StatelessWidget {
               style: TextStyle(color: c.textDim, fontSize: 11),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A Bluetooth-mesh status line under the connected-relays indicator: a glyph +
+/// peer/link count when active. Tapping opens the mesh view (peers + the #mesh
+/// public channel). Renders nothing on platforms without mesh support.
+class _MeshStatusIndicator extends ConsumerWidget {
+  const _MeshStatusIndicator();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final mesh = ref.watch(meshControllerProvider);
+    if (!MeshController.isSupportedPlatform) return const SizedBox.shrink();
+
+    final active = mesh.running;
+    final peerCount = mesh.peers.length;
+    final label = !active
+        ? tr('Mesh off')
+        : (peerCount == 0
+            ? tr('Mesh · no peers')
+            : tr('Mesh · {count} peer(s)', {'count': peerCount}));
+    final color = active ? c.primary : c.textDim;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              NymSvgIcon(NymIcons.bluetooth, size: 12, color: color),
+              const SizedBox(width: 5),
+              Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+              if (active && mesh.linkCount > 0) ...[
+                const SizedBox(width: 6),
+                Text('${mesh.linkCount} link(s)',
+                    style: TextStyle(
+                        color: c.textDim.withValues(alpha: 0.7), fontSize: 10)),
+              ],
+            ],
+          ),
         ),
       ),
     );
