@@ -1,7 +1,7 @@
 name: nym_bar
 description: "Experience the future of decentralized communication with Nymchat, a sleek and secure shell app that wraps around our powerful PWA, delivering instant notifications and seamless external browsing for an uncompromised user experience."
 publish_to: "none"
-version: 1.0.1+169
+version: 1.0.1+170
 
 environment:
   sdk: ^3.6.0
@@ -96,6 +96,15 @@ dependencies:
   webview_flutter_wkwebview: ^3.0.0
   webview_flutter_web: any
   bluetooth_low_energy: ^6.2.1
+
+dependency_overrides:
+  # record 5.2.1 pins record_linux <1.0.0, but the newest 0.x (0.7.2) never
+  # implemented startStream from record_platform_interface 1.6.0 — so record's
+  # Linux Dart fails to compile even for Android/iOS builds (Flutter compiles
+  # every endorsed platform implementation). Force a record_linux that DOES
+  # implement the current interface. (This app never targets Linux desktop; the
+  # override only needs to make the endorsed Dart compile.)
+  record_linux: ^1.1.1
 
 dev_dependencies:
   flutter_test:
