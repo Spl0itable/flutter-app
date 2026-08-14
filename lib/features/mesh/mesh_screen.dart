@@ -1,30 +1,21 @@
-import 'dart:typed_data';
-
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:image_picker/image_picker.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../../models/message.dart';
-import '../../models/settings.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/transport/mesh_transport.dart';
+import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
-import '../../widgets/chat/message_row.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
+import '../i18n/i18n.dart';
 import 'mesh_controller.dart';
-import 'mesh_sticker_picker.dart';
 
-/// The Bluetooth-mesh surface: radio status, an enable toggle, the nearby
-/// (public broadcast) feed, and the list of discovered peers. Tapping a peer
-/// opens an end-to-end-encrypted mesh direct message thread.
-///
-/// Chat renders through the app's canonical [MessageGroup]/[MessageRow], so mesh
-/// messages are visually identical to a normal channel or PM — same bubbles,
-/// avatars, author colours, grouping, emoji/mention formatting, delivery
-/// receipts and theme.
+/// Bluetooth-mesh status + discovery surface. Conversations themselves live in
+/// the normal Channels / Private Messages lists and open in the canonical
+/// ChatPane — this screen only shows radio status and the peers in range, and
+/// lets you start (or jump into) a mesh DM with a nearby peer or the public
+/// `#mesh` channel.
 class MeshScreen extends ConsumerWidget {
   const MeshScreen({super.key});
 
@@ -33,50 +24,24 @@ class MeshScreen extends ConsumerWidget {
     final c = context.nym;
     final mesh = ref.watch(meshControllerProvider);
 
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        backgroundColor: c.bg,
-        appBar: AppBar(
-          backgroundColor: c.bgSecondary,
-          foregroundColor: c.text,
-          title: Row(
-            children: [
-              NymSvgIcon(NymIcons.bluetooth, size: 18, color: c.primary),
-              const SizedBox(width: 8),
-              const Text('Bluetooth Mesh'),
-            ],
-          ),
-          actions: [
-            IconButton(
-              tooltip: 'Join a group',
-              icon: NymSvgIcon(NymIcons.groupGlyph, size: 18, color: c.primary),
-              onPressed: () => showJoinMeshGroupDialog(context, ref),
-            ),
-          ],
-          bottom: TabBar(
-            labelColor: c.primary,
-            unselectedLabelColor: c.textDim,
-            indicatorColor: c.primary,
-            tabs: [
-              const Tab(text: 'Nearby'),
-              Tab(text: 'Peers (${mesh.peers.length})'),
-            ],
-          ),
-        ),
-        body: Column(
+    return Scaffold(
+      backgroundColor: c.bg,
+      appBar: AppBar(
+        backgroundColor: c.bgSecondary,
+        foregroundColor: c.text,
+        title: Row(
           children: [
-            _StatusBar(mesh: mesh, colors: c),
-            Expanded(
-              child: TabBarView(
-                children: [
-                  _NearbyTab(mesh: mesh, colors: c),
-                  _PeersTab(mesh: mesh, colors: c),
-                ],
-              ),
-            ),
+            NymSvgIcon(NymIcons.bluetooth, size: 18, color: c.primary),
+            const SizedBox(width: 8),
+            Text(tr('Bluetooth Mesh')),
           ],
         ),
+      ),
+      body: Column(
+        children: [
+          _StatusBar(mesh: mesh, colors: c),
+          Expanded(child: _PeersList(mesh: mesh, colors: c)),
+        ],
       ),
     );
   }
@@ -110,11 +75,15 @@ class _StatusBar extends ConsumerWidget {
               children: [
                 Text(_statusLabel(enabled),
                     style: TextStyle(
-                        color: colors.text, fontWeight: FontWeight.w600, fontSize: 13)),
+                        color: colors.text,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13)),
                 if (mesh.myPeerID != null)
                   Text('You: ${mesh.myPeerID}  •  ${mesh.linkCount} link(s)',
                       style: TextStyle(
-                          color: colors.textDim, fontSize: 11, fontFamily: 'monospace')),
+                          color: colors.textDim,
+                          fontSize: 11,
+                          fontFamily: 'monospace')),
               ],
             ),
           ),
@@ -122,7 +91,7 @@ class _StatusBar extends ConsumerWidget {
             TextButton(
               onPressed: () =>
                   ref.read(meshControllerProvider.notifier).openSystemSettings(),
-              child: Text('Enable', style: TextStyle(color: colors.primary)),
+              child: Text(tr('Enable'), style: TextStyle(color: colors.primary)),
             ),
           Switch(
             value: enabled,
@@ -136,90 +105,52 @@ class _StatusBar extends ConsumerWidget {
   }
 
   String _statusLabel(bool enabled) {
-    if (!enabled) return 'Mesh off';
-    if (mesh.error != null) return 'Mesh error';
+    if (!enabled) return tr('Mesh off');
+    if (mesh.error != null) return tr('Mesh error');
     switch (mesh.availability) {
       case MeshTransportAvailability.ready:
-        return mesh.running ? 'Mesh active' : 'Starting…';
+        return mesh.running ? tr('Mesh active') : tr('Starting…');
       case MeshTransportAvailability.poweredOff:
-        return 'Turn on Bluetooth';
+        return tr('Turn on Bluetooth');
       case MeshTransportAvailability.unauthorized:
-        return 'Bluetooth permission needed';
+        return tr('Bluetooth permission needed');
       case MeshTransportAvailability.unsupported:
-        return 'Mesh not supported on this device';
+        return tr('Mesh not supported on this device');
       case MeshTransportAvailability.unknown:
-        return 'Starting…';
+        return tr('Starting…');
     }
   }
 }
 
-class _NearbyTab extends ConsumerWidget {
-  const _NearbyTab({required this.mesh, required this.colors});
+class _PeersList extends ConsumerWidget {
+  const _PeersList({required this.mesh, required this.colors});
   final MeshUiState mesh;
   final NymColors colors;
+
+  void _openPeer(BuildContext context, WidgetRef ref, MeshPeer peer) {
+    final pubkey =
+        ref.read(meshControllerProvider.notifier).bridge?.openPeerDm(peer);
+    if (pubkey == null) return;
+    ref.read(appStateProvider.notifier).switchView(ChatView.pm(pubkey));
+    Navigator.of(context).maybePop();
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(settingsProvider);
-    final messages = [
-      for (final m in mesh.nearby)
-        Message(
-          id: m.messageId,
-          author: m.senderNickname,
-          pubkey: mesh.peerById(m.senderPeerID)?.nostrPubkey ?? m.senderPeerID,
-          content: m.content,
-          createdAt: m.timestampMs ~/ 1000,
-          ms: m.timestampMs,
-          isOwn: m.senderPeerID == mesh.myPeerID,
-          channel: '#mesh',
-          eventKind: 20000,
-          deliveryStatus: DeliveryStatus.sent,
-          localMediaPath: m.filePath,
-          localMediaMime: m.fileMime,
-          localMediaName: m.fileName,
-        ),
-    ];
-    return Column(
-      children: [
-        Expanded(
-          child: messages.isEmpty
-              ? _empty(colors, 'No nearby messages yet.\nSay hi to everyone in range.')
-              : _CanonicalMessageList(messages: messages, settings: settings),
-        ),
-        _Composer(
-          colors: colors,
-          enabled: mesh.running,
-          hint: 'Message everyone nearby',
-          onSend: (text) =>
-              ref.read(meshControllerProvider.notifier).sendNearby(text),
-          onSendFile: (name, mime, bytes) => ref
-              .read(meshControllerProvider.notifier)
-              .sendFileBroadcast(name, mime, bytes),
-          onOpenStickers: (gifs) => showMeshStickerPicker(
-            context,
-            ref,
-            startWithGifs: gifs,
-            onSend: (name, mime, bytes) => ref
-                .read(meshControllerProvider.notifier)
-                .sendFileBroadcast(name, mime, bytes),
+    if (mesh.peers.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+            tr('No peers discovered yet.\nMake sure Bluetooth is on.'),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: colors.textDim, height: 1.5),
           ),
         ),
-      ],
-    );
-  }
-}
-
-class _PeersTab extends StatelessWidget {
-  const _PeersTab({required this.mesh, required this.colors});
-  final MeshUiState mesh;
-  final NymColors colors;
-
-  @override
-  Widget build(BuildContext context) {
-    if (mesh.peers.isEmpty) {
-      return _empty(colors, 'No peers discovered yet.\nMake sure Bluetooth is on.');
+      );
     }
-    final peers = [...mesh.peers]..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+    final peers = [...mesh.peers]
+      ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
     return ListView.separated(
       itemCount: peers.length,
       separatorBuilder: (_, __) => Divider(height: 1, color: colors.border),
@@ -248,514 +179,13 @@ class _PeersTab extends StatelessWidget {
           ),
           subtitle: Text(
             peer.peerID + (peer.nostrLinkVerified ? '  • linked' : ''),
-            style: TextStyle(color: colors.textDim, fontSize: 11, fontFamily: 'monospace'),
+            style: TextStyle(
+                color: colors.textDim, fontSize: 11, fontFamily: 'monospace'),
           ),
           trailing: NymSvgIcon(NymIcons.lock, size: 16, color: colors.purple),
-          onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
-            builder: (_) => MeshPmScreen(peer: peer),
-          )),
+          onTap: () => _openPeer(context, ref, peer),
         );
       },
     );
   }
 }
-
-/// A mesh group channel — an open or password-encrypted broadcast room. Renders
-/// through the same canonical message list as Nearby/DMs.
-class MeshChannelScreen extends ConsumerWidget {
-  const MeshChannelScreen({super.key, required this.channel, this.encrypted = false});
-  final String channel;
-  final bool encrypted;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.nym;
-    final settings = ref.watch(settingsProvider);
-    final mesh = ref.watch(meshControllerProvider);
-    final msgs = mesh.channelMessages[channel] ?? const [];
-    final messages = [
-      for (final m in msgs)
-        Message(
-          id: m.messageId,
-          author: m.senderNickname,
-          pubkey: mesh.peerById(m.senderPeerID)?.nostrPubkey ?? m.senderPeerID,
-          content: m.content,
-          createdAt: m.timestampMs ~/ 1000,
-          ms: m.timestampMs,
-          isOwn: m.senderPeerID == mesh.myPeerID,
-          channel: channel,
-          eventKind: 20000,
-          deliveryStatus: DeliveryStatus.sent,
-          localMediaPath: m.filePath,
-          localMediaMime: m.fileMime,
-          localMediaName: m.fileName,
-        ),
-    ];
-    return Scaffold(
-      backgroundColor: c.bg,
-      appBar: AppBar(
-        backgroundColor: c.bgSecondary,
-        foregroundColor: c.text,
-        title: Row(
-          children: [
-            if (encrypted) ...[
-              NymSvgIcon(NymIcons.lock, size: 15, color: c.purple),
-              const SizedBox(width: 8),
-            ],
-            Expanded(child: Text(channel, overflow: TextOverflow.ellipsis)),
-          ],
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Leave group',
-            icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
-            onPressed: () {
-              ref.read(meshControllerProvider.notifier).leaveChannel(channel);
-              Navigator.of(context).maybePop();
-            },
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: messages.isEmpty
-                ? _empty(
-                    c,
-                    encrypted
-                        ? 'Encrypted group.\nMessages are sealed with the shared password.'
-                        : 'Open mesh group.\nEveryone in range with this channel can read it.')
-                : _CanonicalMessageList(messages: messages, settings: settings),
-          ),
-          _Composer(
-            colors: c,
-            enabled: mesh.running,
-            hint: encrypted ? 'Encrypted group message' : 'Message $channel',
-            onSend: (text) => ref
-                .read(meshControllerProvider.notifier)
-                .sendChannelMessage(channel, text),
-            onSendFile: (name, mime, bytes) => ref
-                .read(meshControllerProvider.notifier)
-                .sendFileBroadcast(name, mime, bytes, channel: channel),
-            onOpenStickers: (gifs) => showMeshStickerPicker(
-              context,
-              ref,
-              startWithGifs: gifs,
-              onSend: (name, mime, bytes) => ref
-                  .read(meshControllerProvider.notifier)
-                  .sendFileBroadcast(name, mime, bytes, channel: channel),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Prompts for a mesh group name + optional password, joins it, and opens it.
-Future<void> showJoinMeshGroupDialog(BuildContext context, WidgetRef ref) async {
-  final c = context.nym;
-  final nameCtrl = TextEditingController();
-  final passCtrl = TextEditingController();
-  final joined = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: c.bgSecondary,
-      title: Text('Join a mesh group', style: TextStyle(color: c.text)),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: nameCtrl,
-            autofocus: true,
-            style: TextStyle(color: c.text),
-            decoration: InputDecoration(
-              labelText: 'Group name (e.g. crew)',
-              labelStyle: TextStyle(color: c.textDim),
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: passCtrl,
-            obscureText: true,
-            style: TextStyle(color: c.text),
-            decoration: InputDecoration(
-              labelText: 'Password (optional — encrypts the group)',
-              labelStyle: TextStyle(color: c.textDim),
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: Text('Cancel', style: TextStyle(color: c.textDim)),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: Text('Join', style: TextStyle(color: c.primary)),
-        ),
-      ],
-    ),
-  );
-  final name = nameCtrl.text.trim();
-  final pass = passCtrl.text;
-  nameCtrl.dispose();
-  passCtrl.dispose();
-  if (joined != true || name.isEmpty || !context.mounted) return;
-  await ref.read(meshControllerProvider.notifier).joinChannel(name, password: pass);
-  final channel = name.startsWith('#') ? name : '#$name';
-  if (!context.mounted) return;
-  Navigator.of(context).push(MaterialPageRoute<void>(
-    builder: (_) => MeshChannelScreen(channel: channel, encrypted: pass.isNotEmpty),
-  ));
-}
-
-/// An end-to-end-encrypted mesh DM thread with one [peer].
-class MeshPmScreen extends ConsumerStatefulWidget {
-  const MeshPmScreen({super.key, required this.peer});
-  final MeshPeer peer;
-
-  @override
-  ConsumerState<MeshPmScreen> createState() => _MeshPmScreenState();
-}
-
-class _MeshPmScreenState extends ConsumerState<MeshPmScreen> {
-  @override
-  Widget build(BuildContext context) {
-    final c = context.nym;
-    final settings = ref.watch(settingsProvider);
-    final mesh = ref.watch(meshControllerProvider);
-    final thread = mesh.threads[widget.peer.peerID] ?? const [];
-    // Mark unread inbound as read (fires read receipts back over the session).
-    // Deferred to after the frame so it never mutates provider state mid-build.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        ref.read(meshControllerProvider.notifier).markThreadRead(widget.peer.peerID);
-      }
-    });
-
-    final pubkey = widget.peer.nostrPubkey ?? widget.peer.peerID;
-    final messages = [
-      for (final m in thread)
-        Message(
-          id: m.messageId,
-          author: widget.peer.displayName,
-          pubkey: pubkey,
-          content: m.content,
-          createdAt: m.timestampMs ~/ 1000,
-          ms: m.timestampMs,
-          isOwn: m.fromMe,
-          isPM: true,
-          conversationKey: 'mesh:${widget.peer.peerID}',
-          conversationPubkey: pubkey,
-          eventKind: 14,
-          senderVerified: m.fromMe ? null : (widget.peer.isVerified ? true : null),
-          deliveryStatus: _mapStatus(m.status),
-          localMediaPath: m.filePath,
-          localMediaMime: m.fileMime,
-          localMediaName: m.fileName,
-        ),
-    ];
-
-    return Scaffold(
-      backgroundColor: c.bg,
-      appBar: AppBar(
-        backgroundColor: c.bgSecondary,
-        foregroundColor: c.text,
-        title: Row(
-          children: [
-            NymSvgIcon(NymIcons.lock, size: 15, color: c.purple),
-            const SizedBox(width: 8),
-            Expanded(child: Text(widget.peer.displayName, overflow: TextOverflow.ellipsis)),
-          ],
-        ),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: messages.isEmpty
-                ? _empty(c, 'Encrypted mesh chat.\nMessages are sealed with Noise (XX).')
-                : _CanonicalMessageList(messages: messages, settings: settings),
-          ),
-          _Composer(
-            colors: c,
-            enabled: mesh.running,
-            hint: 'Encrypted message',
-            onSend: (text) => ref
-                .read(meshControllerProvider.notifier)
-                .sendPrivate(widget.peer.peerID, text),
-            onSendFile: (name, mime, bytes) => ref
-                .read(meshControllerProvider.notifier)
-                .sendFileToPeer(widget.peer.peerID, name, mime, bytes),
-            onOpenStickers: (gifs) => showMeshStickerPicker(
-              context,
-              ref,
-              startWithGifs: gifs,
-              onSend: (name, mime, bytes) => ref
-                  .read(meshControllerProvider.notifier)
-                  .sendFileToPeer(widget.peer.peerID, name, mime, bytes),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  DeliveryStatus _mapStatus(MeshDeliveryStatus s) {
-    switch (s) {
-      case MeshDeliveryStatus.sending:
-        return DeliveryStatus.sending;
-      case MeshDeliveryStatus.delivered:
-        return DeliveryStatus.delivered;
-      case MeshDeliveryStatus.read:
-        return DeliveryStatus.read;
-    }
-  }
-}
-
-/// Renders a list of [Message]s through the app's canonical [MessageGroup],
-/// folding consecutive same-author messages into groups exactly like the main
-/// chat list — so mesh chat is visually identical to a channel/PM.
-class _CanonicalMessageList extends ConsumerWidget {
-  const _CanonicalMessageList({required this.messages, required this.settings});
-  final List<Message> messages;
-  final Settings settings;
-
-  static const int _groupWindowSec = 300;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final units = <List<MessageGroupEntry>>[];
-    for (final m in messages) {
-      final entry =
-          MessageGroupEntry(message: m, reactions: const [], mentioned: false);
-      if (settings.useBubbles &&
-          units.isNotEmpty &&
-          _groupsWith(units.last.last.message, m)) {
-        units.last.add(entry);
-      } else {
-        units.add([entry]);
-      }
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-      itemCount: units.length,
-      itemBuilder: (_, i) => MessageGroup(
-        key: ValueKey('meshgroup_${units[i].first.message.id}'),
-        entries: units[i],
-        settings: settings,
-      ),
-    );
-  }
-
-  bool _groupsWith(Message prev, Message cur) =>
-      !prev.isSystemRow &&
-      !cur.isSystemRow &&
-      !prev.isMeAction &&
-      !cur.isMeAction &&
-      prev.pubkey == cur.pubkey &&
-      (cur.createdAt - prev.createdAt).abs() <= _groupWindowSec;
-}
-
-class _Composer extends StatefulWidget {
-  const _Composer({
-    required this.colors,
-    required this.enabled,
-    required this.hint,
-    required this.onSend,
-    this.onSendFile,
-    this.onOpenStickers,
-  });
-
-  final NymColors colors;
-  final bool enabled;
-  final String hint;
-  final void Function(String text) onSend;
-
-  /// Sends a picked attachment (image/video via the image button, any file via
-  /// the file button). Null hides the attachment buttons.
-  final Future<void> Function(String name, String mime, Uint8List bytes)?
-      onSendFile;
-
-  /// Opens the locally-cached emoji/GIF picker for the given section (true =
-  /// GIFs, false = emoji). Null hides the emoji/GIF buttons.
-  final void Function(bool gifs)? onOpenStickers;
-
-  @override
-  State<_Composer> createState() => _ComposerState();
-}
-
-class _ComposerState extends State<_Composer> {
-  final _controller = TextEditingController();
-  bool _sending = false;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _submit() {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-    widget.onSend(text);
-    _controller.clear();
-  }
-
-  /// Reuses the app's image/video picker for mesh media. Sends each picked item
-  /// as a mesh file transfer (10 MB cap keeps BLE fragmentation bounded).
-  Future<void> _pickImage() async {
-    final onFile = widget.onSendFile;
-    if (onFile == null || _sending) return;
-    List<XFile> picked;
-    try {
-      picked = await ImagePicker().pickMultipleMedia();
-    } catch (_) {
-      return;
-    }
-    if (picked.isEmpty) return;
-    setState(() => _sending = true);
-    try {
-      for (final f in picked) {
-        final bytes = await f.readAsBytes();
-        if (bytes.isEmpty || bytes.length > _maxMeshFile) continue;
-        await onFile(f.name, f.mimeType ?? _guessMime(f.name), bytes);
-      }
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  /// Reuses the app's file picker for arbitrary mesh files.
-  Future<void> _pickFile() async {
-    final onFile = widget.onSendFile;
-    if (onFile == null || _sending) return;
-    FilePickerResult? result;
-    try {
-      result = await FilePicker.platform.pickFiles(withData: true);
-    } catch (_) {
-      return;
-    }
-    if (result == null || result.files.isEmpty) return;
-    final file = result.files.first;
-    final bytes = file.bytes;
-    if (bytes == null || bytes.isEmpty) return;
-    if (bytes.length > _maxMeshFile) return;
-    setState(() => _sending = true);
-    try {
-      await onFile(file.name, _guessMime(file.name), bytes);
-    } finally {
-      if (mounted) setState(() => _sending = false);
-    }
-  }
-
-  static const int _maxMeshFile = 10 * 1024 * 1024;
-
-  static String _guessMime(String name) {
-    final lower = name.toLowerCase();
-    if (lower.endsWith('.png')) return 'image/png';
-    if (lower.endsWith('.gif')) return 'image/gif';
-    if (lower.endsWith('.webp')) return 'image/webp';
-    if (lower.endsWith('.mp4')) return 'video/mp4';
-    if (lower.endsWith('.webm')) return 'video/webm';
-    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-    return 'application/octet-stream';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = widget.colors;
-    final showAttach = widget.onSendFile != null;
-    final canAttach = widget.enabled && !_sending;
-    return Container(
-      color: colors.bgSecondary,
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-      child: Row(
-        children: [
-          if (showAttach) ...[
-            IconButton(
-              tooltip: 'Send image or video',
-              visualDensity: VisualDensity.compact,
-              icon: NymSvgIcon(NymIcons.composerImage,
-                  size: 20, color: canAttach ? colors.textDim : colors.border),
-              onPressed: canAttach ? _pickImage : null,
-            ),
-            IconButton(
-              tooltip: 'Send a file',
-              visualDensity: VisualDensity.compact,
-              icon: NymSvgIcon(NymIcons.composerFile,
-                  size: 20, color: canAttach ? colors.textDim : colors.border),
-              onPressed: canAttach ? _pickFile : null,
-            ),
-          ],
-          if (widget.onOpenStickers != null) ...[
-            IconButton(
-              tooltip: 'Emoji',
-              visualDensity: VisualDensity.compact,
-              icon: NymSvgIcon(NymIcons.composerEmoji,
-                  size: 20, color: canAttach ? colors.textDim : colors.border),
-              onPressed: canAttach
-                  ? () => widget.onOpenStickers!(false)
-                  : null,
-            ),
-            IconButton(
-              tooltip: 'GIF',
-              visualDensity: VisualDensity.compact,
-              onPressed: canAttach
-                  ? () => widget.onOpenStickers!(true)
-                  : null,
-              icon: Text('GIF',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: canAttach ? colors.textDim : colors.border)),
-            ),
-          ],
-          Expanded(
-            child: TextField(
-              controller: _controller,
-              enabled: widget.enabled,
-              style: TextStyle(color: colors.text),
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: widget.enabled ? widget.hint : 'Mesh is off',
-                hintStyle: TextStyle(color: colors.textDim),
-                filled: true,
-                fillColor: colors.bg,
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide(color: colors.border),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide(color: colors.border),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: NymSvgIcon(NymIcons.send,
-                size: 20, color: widget.enabled ? colors.primary : colors.textDim),
-            onPressed: widget.enabled ? _submit : null,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-Widget _empty(NymColors c, String text) => Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Text(
-          text,
-          textAlign: TextAlign.center,
-          style: TextStyle(color: c.textDim, height: 1.5),
-        ),
-      ),
-    );

@@ -2570,6 +2570,66 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return true;
   }
 
+  /// Ingests a pre-built channel [m] (used by the Bluetooth-mesh bridge, which
+  /// has no NostrEvent — the message arrives over BLE). Mirrors the core of
+  /// [_ingestChannelMessage] for the Message path: dedup, sorted insert, channel
+  /// registration, seen-user tracking, activity + unread bookkeeping. [channelKey]
+  /// is the `#…` storage key; the bare channel name is [m.channel]. Returns true
+  /// when the message landed (false on dedup).
+  bool ingestMeshChannelMessage(Message m, {required String channelKey}) {
+    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return false;
+    if (suppressDeletedMessage(m)) return false;
+    m.seq = _ingestSeq++;
+    final list = state.messages.putIfAbsent(channelKey, () => <Message>[]);
+
+    // Reconcile our own optimistic echo (same pubkey + content within a small
+    // window) so a self-send that round-trips back isn't shown twice.
+    if (!m.isOwn) {
+      for (var i = 0; i < list.length; i++) {
+        final ex = list[i];
+        if ((ex.optimistic || ex.id.startsWith('_optim_')) &&
+            ex.pubkey == m.pubkey &&
+            ex.content == m.content &&
+            (ex.createdAt - m.createdAt).abs() < 60) {
+          return false; // our echo already represents it
+        }
+      }
+    }
+
+    _insertMessageSorted(channelKey, list, m);
+    _capChannelHistory(list);
+
+    if (!m.isOwn) {
+      final u = state.users.putIfAbsent(
+        m.pubkey,
+        () => User(pubkey: m.pubkey, nym: m.author),
+      );
+      if (m.author.isNotEmpty) u.nym = m.author;
+      u.lastSeen = m.timestamp;
+      final memberKey = (m.channel ?? '').toLowerCase();
+      if (memberKey.isNotEmpty) u.channels.add(memberKey);
+    }
+
+    if (m.timestamp > (state.channelLastActivity[channelKey] ?? 0)) {
+      state.channelLastActivity[channelKey] = m.timestamp;
+    }
+
+    final regKey = (m.channel ?? '').toLowerCase();
+    if (regKey.isNotEmpty && !state.channels.any((c) => c.key == regKey)) {
+      state.channels.add(ChannelEntry(channel: m.channel!));
+    }
+
+    final seen = _isConversationSeen(channelKey);
+    if (!seen &&
+        state.countsTowardUnread(m) &&
+        _isUnreadByWatermark(channelKey, m)) {
+      state.unreadCounts[channelKey] =
+          (state.unreadCounts[channelKey] ?? 0) + 1;
+    }
+    _scheduleEmit();
+    return true;
+  }
+
   /// Registers/updates a [Group] in the store (on create or on receiving a
   /// `group-invite`). Replaces any existing entry with the same id.
   void upsertGroup(Group group) {

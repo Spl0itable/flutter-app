@@ -17,6 +17,7 @@ import '../core/theme/nym_colors.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
+import '../features/mesh/mesh_controller.dart';
 import '../features/commands/command_handler.dart';
 import '../features/commands/command_registry.dart';
 import '../features/emoji/custom_emoji.dart';
@@ -1923,6 +1924,36 @@ class NostrController {
     } catch (_) {
       // History store may be unavailable in teardown; alerting still happened.
     }
+  }
+
+  /// Public entry for the Bluetooth-mesh bridge to surface a mesh PM or channel
+  /// @-mention through the SAME notification pipeline (bell history + loud
+  /// alert) as internet-delivered events — so mesh notifications appear in the
+  /// notifications modal exactly like Nostr ones.
+  void dispatchMeshNotification({
+    required String title,
+    required String body,
+    required String senderPubkey,
+    required bool isMention,
+    String historyType = 'pm',
+    String? route,
+    int? tsMs,
+    String? eventId,
+    String? contextLabel,
+  }) {
+    final isFriend = _ref.read(appStateProvider).friends.contains(senderPubkey);
+    _dispatchNotification(
+      title: title,
+      body: body,
+      senderPubkey: senderPubkey,
+      isFriend: isFriend,
+      isMention: isMention,
+      historyType: historyType,
+      route: route,
+      eventId: eventId,
+      tsMs: tsMs,
+      contextLabel: contextLabel,
+    );
   }
 
   /// Notifies + records history when someone reacts to OUR message (reactions.js
@@ -3970,6 +4001,14 @@ class NostrController {
     final identity = _identity;
     final view = state.view;
     _markDirty(view.storageKey);
+
+    // Bluetooth-mesh routing: when the active conversation is mesh-backed, the
+    // send goes out over BLE (with an optimistic echo) instead of to relays.
+    final meshBridge = _ref.read(meshControllerProvider.notifier).bridge;
+    if (meshBridge != null && meshBridge.isMeshView(view)) {
+      await meshBridge.sendFromComposer(view, trimmed);
+      return;
+    }
 
     if (view.kind == ViewKind.channel) {
       // Optimistic local echo with a temp `_optim_*` id (messages.js sendMessage).

@@ -12,8 +12,8 @@ import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
+import '../../features/mesh/mesh_controller.dart';
 import '../../features/groups/group_logic.dart';
-import '../../features/mesh/mesh_sidebar_section.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
@@ -316,6 +316,13 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final users = ref.watch(usersProvider);
     final unread = ref.watch(unreadCountsProvider);
 
+    // Bluetooth-mesh markers: which channels/PMs are mesh-backed (for the small
+    // Bluetooth glyph on those rows).
+    final meshChannelKeys =
+        ref.watch(meshControllerProvider.select((s) => s.meshChannelKeys));
+    final meshPmPubkeys =
+        ref.watch(meshControllerProvider.select((s) => s.meshPmPubkeys));
+
     // Groups + 1:1 PMs share the PRIVATE MESSAGES list, ordered newest-first by
     // last-message time (PWA `insertPMInOrder` keys both off `lastMessageTime`).
     final pmEntries = <_PmEntry>[
@@ -466,6 +473,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   // public-channel unread pills actually surface.
                   unread: unread[ch.storageKey] ?? 0,
                   textSize: textSize,
+                  mesh: meshChannelKeys.contains(ch.key),
                   onTap: () => select(ChatView.channel(ch.key)),
                 ),
               // `.ssk-channel` ×4 (index.html:503-506; widths w3/w1/w4/w2).
@@ -588,6 +596,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                     active: view.kind == ViewKind.pm && view.id == e.pm!.pubkey,
                     unread: unread[e.pm!.pubkey] ?? 0,
                     textSize: textSize,
+                    mesh: meshPmPubkeys.contains(e.pm!.pubkey.toLowerCase()),
                     onTap: () => select(ChatView.pm(e.pm!.pubkey)),
                   ),
               if (r.more > 0)
@@ -736,10 +745,6 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 _header(context, app.selfNym),
                 if (widget.compact)
                   _SidebarActions(onItemSelected: widget.onItemSelected),
-                // The Bluetooth-mesh section (Nearby + encrypted peer DMs) sits
-                // above the Nostr-backed sections. It renders nothing when the
-                // mesh isn't running, so it never affects them.
-                MeshSidebarSection(onItemSelected: widget.onItemSelected),
                 // PM/group-only mode hides the whole PUBLIC CHANNELS section
                 // (`applyGroupChatPMOnlyMode` sets `display:none` on the
                 // `#channelList` `.nav-section`, pms.js:3862-3866).
