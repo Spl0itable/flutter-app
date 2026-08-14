@@ -72,6 +72,13 @@ class MeshBridge {
   /// Pubkeys whose PM conversation is mesh-backed.
   final Set<String> _meshPmPubkeys = {};
 
+  /// Pubkeys that are mesh-ONLY — an unlinked peer whose pubkey is a Noise-key
+  /// pseudo-pubkey that Nostr can't address, so their DM must always go over the
+  /// mesh regardless of internet connectivity. (A verified-linked peer uses its
+  /// real Nostr pubkey and is dual-transport: internet when online, mesh when
+  /// offline.)
+  final Set<String> _meshOnlyPmPubkeys = {};
+
   AppStateNotifier get _app => _ref.read(appStateProvider.notifier);
   AppState get _appState => _ref.read(appStateProvider);
 
@@ -83,11 +90,28 @@ class MeshBridge {
   Set<String> get meshChannelKeys => _meshChannelKeys;
   Set<String> get meshPmPubkeys => _meshPmPubkeys;
 
-  /// True when [view] is a conversation this bridge should send over the mesh.
-  bool isMeshView(ChatView view) {
-    if (view.kind == ViewKind.channel) return isMeshChannelKey(view.id);
-    if (view.kind == ViewKind.pm) return isMeshPmPubkey(view.id);
+  bool get _online => _appState.connectedRelays > 0;
+
+  /// Whether the mesh CAN carry a send for [view] right now: any channel can be
+  /// broadcast; a DM only if the peer is currently in radio range.
+  bool _canSendToView(ChatView view) {
+    if (view.kind == ViewKind.channel) return true;
+    if (view.kind == ViewKind.pm) return peerIdForPubkey(view.id) != null;
     return false;
+  }
+
+  /// The transport decision for an outgoing send: use the mesh when there's no
+  /// internet (send over Bluetooth instead of Nostr), OR when the DM peer is
+  /// mesh-only (a pseudo-pubkey Nostr can't reach). Online sends to real Nostr
+  /// identities always go over the internet — so `#mesh` and every other channel
+  /// reach the Nostr network when connected, and fall back to Bluetooth when not.
+  bool shouldSendOverMesh(ChatView view) {
+    if (!_canSendToView(view)) return false;
+    if (view.kind == ViewKind.pm &&
+        _meshOnlyPmPubkeys.contains(view.id.toLowerCase())) {
+      return true;
+    }
+    return !_online;
   }
 
   // ---- Lifecycle -----------------------------------------------------------
@@ -183,6 +207,7 @@ class MeshBridge {
     _pubkeyByPeerId[peer.peerID] = pubkey;
     _peerIdByPubkey[pubkey] = peer.peerID;
     _nymByPubkey[pubkey] = peer.displayName;
+    _classifyPeer(peer, pubkey);
     if (_meshPmPubkeys.add(pubkey)) _refreshMarkers();
     _app.ensurePMConversation(pubkey, nym: peer.displayName);
     return pubkey;
@@ -196,6 +221,20 @@ class MeshBridge {
       _pubkeyByPeerId[p.peerID] = pubkey;
       _peerIdByPubkey[pubkey] = p.peerID;
       _nymByPubkey[pubkey] = p.displayName;
+      _classifyPeer(p, pubkey);
+    }
+  }
+
+  /// A peer with a verified Nostr link is dual-transport (its real pubkey works
+  /// over the internet); an unlinked peer is mesh-only.
+  void _classifyPeer(MeshPeer p, String pubkey) {
+    final linked = p.nostrLinkVerified &&
+        p.nostrPubkey != null &&
+        p.nostrPubkey!.length == 64;
+    if (linked) {
+      _meshOnlyPmPubkeys.remove(pubkey);
+    } else {
+      _meshOnlyPmPubkeys.add(pubkey);
     }
   }
 
@@ -230,6 +269,12 @@ class MeshBridge {
 
   void _onPrivate(MeshPrivateMessage msg) {
     final pubkey = _pubkeyForPeerId(msg.senderPeerID);
+    // An unknown sender (no announcement processed yet) is addressed only by a
+    // pseudo-pubkey, so its DM is mesh-only until a linked announcement upgrades
+    // it in [_classifyPeer].
+    if (!_pubkeyByPeerId.containsKey(msg.senderPeerID)) {
+      _meshOnlyPmPubkeys.add(pubkey);
+    }
     if (_meshPmPubkeys.add(pubkey)) _refreshMarkers();
     final nym = _nymByPubkey[pubkey] ?? 'nym';
     _app.ensurePMConversation(pubkey, nym: nym);
