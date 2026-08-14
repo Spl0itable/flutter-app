@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/crypto/keys.dart' show randomBytes;
 import 'package:nym_bar/services/mesh/mesh_service.dart';
 import 'package:nym_bar/services/mesh/noise/noise_identity.dart';
+import 'package:nym_bar/services/mesh/protocol/mesh_profile.dart';
 import 'package:nym_bar/services/mesh/transport/mesh_transport.dart';
 
 /// An in-memory radio bus: every [FakeMeshTransport] attached to it delivers its
@@ -98,6 +99,13 @@ void main() {
       identity: bobId,
       transport: FakeMeshTransport(bus, 'bob'),
       nicknameProvider: () => 'bob',
+      profileProvider: (request) async => MeshProfile(
+        nickname: 'bob',
+        avatar: request.wantAvatar
+            ? Uint8List.fromList(List.generate(3000, (i) => i & 0xFF))
+            : null,
+        avatarMime: 'image/webp',
+      ),
     );
   });
 
@@ -174,5 +182,24 @@ void main() {
     await done.future.timeout(const Duration(seconds: 5));
     await sub.cancel();
     expect(chunks.join(), long);
+  });
+
+  test('profile request transfers a fragmented avatar back to the requester',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final received = _firstEvent(alice.onProfile);
+    await alice.requestProfile(bob.myPeerID);
+
+    final event = await received;
+    expect(event.peerID, bob.myPeerID);
+    expect(event.profile.nickname, 'bob');
+    // 3000-byte avatar exceeds the 512-byte fragment threshold, so this also
+    // proves fragmentation + reassembly end to end.
+    expect(event.profile.avatar, isNotNull);
+    expect(event.profile.avatar!.length, 3000);
+    expect(event.profile.avatarMime, 'image/webp');
   });
 }

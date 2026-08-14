@@ -34,6 +34,14 @@ class MeshMessageType {
   /// Ephemeral live push-to-talk audio frame (never gossip-synced).
   static const int voiceFrame = 0x29;
 
+  // --- Nymchat extensions (unknown to bitchat, which ignores them) ----------
+
+  /// Request a peer's rich profile (avatar/banner) over the mesh.
+  static const int nymProfileRequest = 0x50;
+
+  /// Deliver a rich profile in response to [nymProfileRequest].
+  static const int nymProfileResponse = 0x51;
+
   /// True when [type] is a value this client knows how to handle.
   static bool isKnown(int type) => const {
         announce,

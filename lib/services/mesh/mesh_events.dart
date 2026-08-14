@@ -1,5 +1,7 @@
 // High-level events emitted by MeshService for the app layer to consume.
 
+import 'protocol/mesh_profile.dart';
+
 /// A public broadcast message received over the mesh (nearby / channel chat).
 class MeshPublicMessage {
   MeshPublicMessage({
@@ -36,6 +38,13 @@ class MeshPrivateMessage {
   final String messageId;
   final String content;
   final int timestampMs;
+}
+
+/// A rich profile transferred to us over the mesh (avatar/banner bytes).
+class MeshProfileReceived {
+  MeshProfileReceived({required this.peerID, required this.profile});
+  final String peerID;
+  final MeshProfile profile;
 }
 
 /// A delivery/read acknowledgement received for one of our sent messages.

@@ -17,6 +17,7 @@ import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
 import 'protocol/identity_announcement.dart';
 import 'protocol/mesh_message_type.dart';
+import 'protocol/mesh_profile.dart';
 import 'protocol/noise_payload.dart';
 import 'transport/mesh_transport.dart';
 
@@ -33,9 +34,11 @@ class MeshService {
     required MeshTransport transport,
     required String Function() nicknameProvider,
     Uint8List? Function()? nostrLinkProvider,
+    Future<MeshProfile?> Function(MeshProfileRequest request)? profileProvider,
   })  : _transport = transport,
         _nicknameProvider = nicknameProvider,
-        _nostrLinkProvider = nostrLinkProvider;
+        _nostrLinkProvider = nostrLinkProvider,
+        _profileProvider = profileProvider;
 
   final NoiseIdentity identity;
   final MeshTransport _transport;
@@ -44,6 +47,11 @@ class MeshService {
   /// Supplies our Nostr-identity link ([NostrLink]) to advertise, or null when
   /// we have no local Nostr key to sign it with.
   final Uint8List? Function()? _nostrLinkProvider;
+
+  /// Builds our own [MeshProfile] (avatar/banner bytes) to answer an inbound
+  /// profile request. Null when we have no shareable profile.
+  final Future<MeshProfile?> Function(MeshProfileRequest request)?
+      _profileProvider;
 
   late final NoiseSessionManager _noise = NoiseSessionManager(identity);
   final SeenPackets _seen = SeenPackets();
@@ -64,7 +72,12 @@ class MeshService {
   final _publicMessages = StreamController<MeshPublicMessage>.broadcast();
   final _privateMessages = StreamController<MeshPrivateMessage>.broadcast();
   final _receipts = StreamController<MeshReceipt>.broadcast();
+  final _profiles = StreamController<MeshProfileReceived>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
+
+  /// Peers we've already asked for a profile (avoids re-requesting on every
+  /// announce beacon).
+  final Set<String> _profileRequested = {};
 
   StreamSubscription<MeshInboundFrame>? _inboundSub;
   StreamSubscription<MeshLinkEvent>? _linkSub;
@@ -87,6 +100,7 @@ class MeshService {
   Stream<MeshPublicMessage> get onPublicMessage => _publicMessages.stream;
   Stream<MeshPrivateMessage> get onPrivateMessage => _privateMessages.stream;
   Stream<MeshReceipt> get onReceipt => _receipts.stream;
+  Stream<MeshProfileReceived> get onProfile => _profiles.stream;
 
   /// Powers up the radio and joins the mesh. Returns radio availability.
   Future<MeshTransportAvailability> start() async {
@@ -124,6 +138,7 @@ class MeshService {
     _peers.clear();
     _pendingPlaintext.clear();
     _pendingEncrypted.clear();
+    _profileRequested.clear();
   }
 
   /// Broadcasts a public [content] message (optionally to a [channel]).
@@ -182,6 +197,7 @@ class MeshService {
     _publicMessages.close();
     _privateMessages.close();
     _receipts.close();
+    _profiles.close();
     _peersChanged.close();
   }
 
@@ -230,6 +246,12 @@ class MeshService {
         break;
       case MeshMessageType.fragment:
         await _handleFragment(packet, linkId, rssi);
+        break;
+      case MeshMessageType.nymProfileRequest:
+        if (forUs) await _handleProfileRequest(senderPeerID, packet.payload);
+        break;
+      case MeshMessageType.nymProfileResponse:
+        if (forUs) _handleProfileResponse(senderPeerID, packet.payload);
         break;
       default:
         break;
@@ -384,6 +406,44 @@ class MeshService {
     if (inner != null) {
       await _processPacket(inner, linkId, rssi);
     }
+  }
+
+  /// Asks [peerID] for their rich profile (avatar/banner) over the mesh, once.
+  Future<void> requestProfile(String peerID,
+      {bool avatar = true, bool banner = false}) async {
+    if (!_running || _profileRequested.contains(peerID)) return;
+    _profileRequested.add(peerID);
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.nymProfileRequest,
+      payload: MeshProfileRequest(wantAvatar: avatar, wantBanner: banner).encode(),
+      recipientID: _peerIdBytes(peerID),
+    ));
+  }
+
+  Future<void> _handleProfileRequest(String senderPeerID, Uint8List payload) async {
+    final provider = _profileProvider;
+    if (provider == null) return;
+    final request = MeshProfileRequest.decode(payload);
+    final profile = await provider(request);
+    if (profile == null) return;
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.nymProfileResponse,
+      payload: profile.encode(),
+      recipientID: _peerIdBytes(senderPeerID),
+    ));
+  }
+
+  void _handleProfileResponse(String senderPeerID, Uint8List payload) {
+    final profile = MeshProfile.decode(payload);
+    if (profile == null) return;
+    final peer = _peers[senderPeerID];
+    if (peer != null) {
+      if (profile.nickname.isNotEmpty) peer.nickname = profile.nickname;
+      peer.nostrPubkey ??= profile.nostrPubkey;
+      peer.touch();
+      _emitPeers();
+    }
+    _profiles.add(MeshProfileReceived(peerID: senderPeerID, profile: profile));
   }
 
   void _onLink(MeshLinkEvent event) {

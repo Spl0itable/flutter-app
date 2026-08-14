@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../../core/crypto/schnorr.dart' show signId;
 import '../../services/mesh/mesh_events.dart';
@@ -9,6 +12,7 @@ import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/mesh_service.dart';
 import '../../services/mesh/noise/noise_identity.dart';
 import '../../services/mesh/noise/nostr_link.dart';
+import '../../services/mesh/protocol/mesh_profile.dart';
 import '../../services/mesh/transport/ble_mesh_transport.dart';
 import '../../services/mesh/transport/mesh_transport.dart';
 import '../../state/app_state.dart';
@@ -158,6 +162,7 @@ class MeshController extends StateNotifier<MeshUiState> {
         transport: transport,
         nicknameProvider: _nickname,
         nostrLinkProvider: () => _nostrLink,
+        profileProvider: _buildMyProfile,
       );
       _service = service;
 
@@ -168,6 +173,7 @@ class MeshController extends StateNotifier<MeshUiState> {
             p.avatarUrl ??= _avatarUrlOf?.call(pubkey);
             p.bannerUrl ??= _bannerUrlOf?.call(pubkey);
           }
+          _maybeRequestProfile(service, p);
         }
         state = state.copyWith(
           peers: List.of(peers),
@@ -177,6 +183,7 @@ class MeshController extends StateNotifier<MeshUiState> {
       _subs.add(service.onPublicMessage.listen(_onPublic));
       _subs.add(service.onPrivateMessage.listen(_onPrivate));
       _subs.add(service.onReceipt.listen(_onReceipt));
+      _subs.add(service.onProfile.listen(_onProfile));
 
       final availability = await service.start();
       state = state.copyWith(
@@ -204,6 +211,80 @@ class MeshController extends StateNotifier<MeshUiState> {
     return NostrLink.build(pubkey, sigHex);
   }
 
+  // ---- Mesh profile (avatar/banner) transfer --------------------------------
+
+  static const int _maxAvatarBytes = 96 * 1024;
+  static const int _maxBannerBytes = 384 * 1024;
+
+  final Set<String> _profileAsked = {};
+
+  /// Answers an inbound profile request with our own avatar/banner bytes,
+  /// fetched (and size-capped) from our Nostr profile image URLs.
+  Future<MeshProfile?> _buildMyProfile(MeshProfileRequest request) async {
+    final pubkey = _nostrPubkey?.call();
+    (Uint8List, String?)? avatar;
+    (Uint8List, String?)? banner;
+    if (request.wantAvatar && pubkey != null) {
+      avatar = await _fetchCapped(_avatarUrlOf?.call(pubkey), _maxAvatarBytes);
+    }
+    if (request.wantBanner && pubkey != null) {
+      banner = await _fetchCapped(_bannerUrlOf?.call(pubkey), _maxBannerBytes);
+    }
+    return MeshProfile(
+      nickname: _nickname(),
+      nostrPubkey: pubkey,
+      avatar: avatar?.$1,
+      avatarMime: avatar?.$2,
+      banner: banner?.$1,
+      bannerMime: banner?.$2,
+    );
+  }
+
+  /// GETs [url] and returns its bytes + content-type, or null when missing,
+  /// unreachable, or larger than [maxBytes] (we never ship oversized images).
+  Future<(Uint8List, String?)?> _fetchCapped(String? url, int maxBytes) async {
+    if (url == null || url.isEmpty) return null;
+    try {
+      final resp = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200 || resp.bodyBytes.length > maxBytes) return null;
+      return (resp.bodyBytes, resp.headers['content-type']);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Requests a peer's profile once when we have no avatar for them yet.
+  void _maybeRequestProfile(MeshService service, MeshPeer peer) {
+    if (peer.avatarUrl != null ||
+        peer.avatarFilePath != null ||
+        _profileAsked.contains(peer.peerID)) {
+      return;
+    }
+    _profileAsked.add(peer.peerID);
+    unawaited(service.requestProfile(peer.peerID));
+  }
+
+  /// Caches a transferred avatar to disk and points the peer at it.
+  Future<void> _onProfile(MeshProfileReceived event) async {
+    final profile = event.profile;
+    final avatar = profile.avatar;
+    if (avatar == null || avatar.isEmpty) return;
+    try {
+      final dir = Directory('${(await getApplicationDocumentsDirectory()).path}'
+          '/mesh_avatars');
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final file = File('${dir.path}/${event.peerID}.img');
+      await file.writeAsBytes(avatar, flush: true);
+      final peers = List.of(state.peers);
+      for (final p in peers) {
+        if (p.peerID == event.peerID) p.avatarFilePath = file.path;
+      }
+      state = state.copyWith(peers: peers);
+    } catch (_) {
+      // Non-fatal: fall back to the identicon.
+    }
+  }
+
   Future<void> _stop() async {
     if (_busy) return;
     _busy = true;
@@ -222,6 +303,7 @@ class MeshController extends StateNotifier<MeshUiState> {
     _subs.clear();
     final service = _service;
     _service = null;
+    _profileAsked.clear();
     if (service != null) {
       await service.stop();
       service.dispose();

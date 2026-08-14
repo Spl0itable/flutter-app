@@ -121,6 +121,31 @@ Requires on-device validation (this container has no Bluetooth radios):
   to bitchat's source, but only a live cross-device test confirms it end to end).
 - Background execution limits and power/duty-cycling tuning.
 
+## Identity & profile parity (avatars, banners, cosmetics)
+
+The mesh shows peers with their **real Nymchat identity**, not just a nickname:
+
+1. **Canonical rendering.** The Nearby feed and mesh DM threads build real
+   `Message` objects and render through the app's own `MessageGroup`/
+   `MessageRow` — so mesh chat is visually identical to a channel/PM (same
+   bubbles, avatars, author colours, grouping, emoji/mention formatting,
+   delivery receipts, IRC/bubbles layout and theme). All chrome uses `NymSvgIcon`.
+
+2. **Signed Nostr link (cached avatars).** A peer can advertise a
+   Nymchat-only announcement TLV (`0x50`) binding its mesh Noise key to a Nostr
+   pubkey with a BIP340 schnorr signature (`NostrLink`). Once verified, the app
+   reuses the avatar/banner it already cached for that pubkey — so a peer you've
+   seen on Nostr shows their real picture with zero internet. bitchat ignores
+   the TLV, so interop is unaffected. Devices signing remotely (NIP-46) simply
+   omit the link.
+
+3. **On-demand transfer (never-seen peers).** For a peer whose avatar isn't
+   cached, the app requests it over the mesh — Nymchat-only packet types
+   `0x50`/`0x51` (bitchat ignores unknown types) carry a `MeshProfile` TLV
+   (nickname, npub, avatar/banner bytes) that rides the normal fragmentation
+   path. Received avatars are size-capped, cached to disk, and shown. So even a
+   brand-new peer renders their real avatar offline.
+
 ## Possible next steps
 
 - Unify mesh DMs/threads into the main conversation store (currently a dedicated
