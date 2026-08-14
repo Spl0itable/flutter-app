@@ -137,14 +137,23 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
       appBar: _header(context, c, state),
       body: Column(
         children: [
-          _TierSwitch(
+          _BotControlBar(
             isPro: state.isPro,
-            proLabel: state.proModel?.label,
+            // Pinned Pro model → its brand label; otherwise the "Auto-routed"
+            // UI copy (pms.js `_refreshBotControlBar`, model chip).
+            modelLabel: state.proModel?.label ?? tr('Auto-routed'),
+            // Git chip → connected repo's short name, else the "Git" fallback.
+            gitConnected: state.git?.hasRepo ?? false,
+            gitLabel: _gitChipLabel(state),
             colors: c,
             onTapStandard: () => ref
                 .read(botChatControllerProvider.notifier)
                 .setModelDirect(null),
-            onTapPro: () => _showModelPicker(context),
+            // Both the Pro pill and the model chip open the picker (botSetTier
+            // 'pro' + openBotModelModal, pms.js:2419/2438).
+            onTapModel: () => _showModelPicker(context),
+            onTapGit: () => _showGitConnect(context),
+            onTapBuy: () => _showBuy(context),
           ),
           Expanded(
             // Tap on the messages region drops focus (dismisses the keyboard)
@@ -316,20 +325,22 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
           ),
         ],
       ),
-      actions: [
-        IconButton(
-          tooltip: tr('Balance'),
-          icon: Icon(Icons.account_balance_wallet_outlined, color: c.text),
-          onPressed: () => _showBalance(context),
-        ),
-        IconButton(
-          tooltip: tr('Connect git repo'),
-          icon: Icon(Icons.source_outlined,
-              color: (state.git?.hasRepo ?? false) ? c.primary : c.text),
-          onPressed: () => _showGitConnect(context),
-        ),
-      ],
+      // No per-bot header action icons: every premium control (tier, model,
+      // git, buy) now lives in the `.bot-control-bar` below the header, so the
+      // bot PM header stays the plain `_renderPMHeader` (pms.js:2905-2941).
+      // Balance is surfaced in the `#channelMeta` line and the Buy/credits
+      // modal, exactly like the PWA.
     );
+  }
+
+  /// The Git chip label: a connected repo's short name (last path segment),
+  /// else the localizable "Git" fallback — `_refreshBotControlBar`'s
+  /// `git.repo.split('/').pop()` (pms.js:2404).
+  String _gitChipLabel(BotChatState state) {
+    final repo = state.git?.repo;
+    if (repo == null || repo.isEmpty) return tr('Git');
+    final tail = repo.split('/').last;
+    return tail.isEmpty ? tr('Git') : tail;
   }
 
   /// The `#botCreditMeta` text (`_renderBotCreditMeta`, pms.js:2361-2380):
@@ -497,86 +508,6 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
   // Modals (premium surfaces kept on top of the canonical chat)
   // ---------------------------------------------------------------------------
 
-  void _showBalance(BuildContext context) {
-    final c = _colors(context);
-    final b = ref.read(botChatControllerProvider).balance;
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: c.bgSecondary,
-      builder: (_) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(tr('Credit balance'),
-                style: TextStyle(
-                    color: c.textBright,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600)),
-            const SizedBox(height: 16),
-            _balanceRow(tr('Standard'), b.balance, tr('10 sats each'), c),
-            const SizedBox(height: 8),
-            _balanceRow(tr('Pro'), b.proBalance, tr('100 sats each'), c,
-                accent: c.primary),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: () {
-                  Navigator.pop(context);
-                  _showBuy(context);
-                },
-                child: Text(tr('Buy credits')),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _balanceRow(String label, int value, String hint, NymColors c,
-      {Color? accent}) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: c.bgTertiary,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: c.border),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-                color: accent ?? c.blue, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label,
-                    style: TextStyle(
-                        color: c.textBright, fontWeight: FontWeight.w600)),
-                Text(hint, style: TextStyle(color: c.textDim, fontSize: 11)),
-              ],
-            ),
-          ),
-          Text('$value',
-              style: TextStyle(
-                  color: c.textBright,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700)),
-          const SizedBox(width: 4),
-          Text(tr('cr'), style: TextStyle(color: c.textDim, fontSize: 11)),
-        ],
-      ),
-    );
-  }
-
   void _showBuy(BuildContext context) {
     // Buy mode of the shared credits modal (PWA: same modal as gift, no
     // recipient). Pro tier preselected when a Pro model is pinned.
@@ -736,82 +667,271 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton> {
 }
 
 // =============================================================================
-// Tier switch (Standard / Pro) — intentional premium addition
+// Premium Nymbot control bar (`.bot-control-bar`, styles-chat.css:1270-1382 /
+// index.html:680-697). A single glass strip under the header holding the tier
+// switch (Standard / Pro), the auto-routed/model chip, the git chip and the
+// buy chip — the PWA's unified control row that replaced the old header action
+// icons. Labels + active states track `_refreshBotControlBar` (pms.js:2381).
 // =============================================================================
 
-class _TierSwitch extends StatelessWidget {
-  const _TierSwitch({
+/// Feather sparkle glyph for the model chip (index.html:684 `#botModelBtn`).
+const String _kSvgSparkle =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21'
+    'l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>';
+
+/// Feather git-branch glyph for the git chip (index.html:688 `#botGitBtn`).
+const String _kSvgGitBranch =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<line x1="6" y1="3" x2="6" y2="15"/>'
+    '<circle cx="18" cy="6" r="3"/>'
+    '<circle cx="6" cy="18" r="3"/>'
+    '<path d="M18 9a9 9 0 0 1-9 9"/></svg>';
+
+/// Feather lightning-bolt polygon for the buy chip (index.html:692 `#botBuyBtn`).
+const String _kSvgBolt =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
+
+class _BotControlBar extends StatelessWidget {
+  const _BotControlBar({
     required this.isPro,
-    required this.proLabel,
+    required this.modelLabel,
+    required this.gitConnected,
+    required this.gitLabel,
     required this.colors,
     required this.onTapStandard,
-    required this.onTapPro,
+    required this.onTapModel,
+    required this.onTapGit,
+    required this.onTapBuy,
   });
 
   final bool isPro;
-  final String? proLabel;
+  final String modelLabel;
+  final bool gitConnected;
+  final String gitLabel;
   final NymColors colors;
   final VoidCallback onTapStandard;
-  final VoidCallback onTapPro;
+  final VoidCallback onTapModel;
+  final VoidCallback onTapGit;
+  final VoidCallback onTapBuy;
 
   @override
   Widget build(BuildContext context) {
     final c = colors;
+    // `@media (max-width: 600px)`: tighter gaps/padding + a shorter label clamp.
+    final compact = MediaQuery.sizeOf(context).width <= 600;
+    final gap = compact ? 6.0 : 8.0;
+    final labelMax = compact ? 96.0 : 150.0;
+
+    // The left cluster (tier switch + model + git) scrolls horizontally when it
+    // can't fit — the PWA's `overflow-x: auto` — while the Buy chip stays pinned
+    // to the trailing edge (its `margin-left: auto`), the premium CTA always in
+    // reach even on the narrowest phone.
+    final left = SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      physics: const ClampingScrollPhysics(),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _tierSwitch(c),
+          SizedBox(width: gap),
+          _CtrlButton(
+            svg: _kSvgSparkle,
+            label: modelLabel,
+            active: isPro,
+            labelMaxWidth: labelMax,
+            colors: c,
+            compact: compact,
+            onTap: onTapModel,
+          ),
+          SizedBox(width: gap),
+          _CtrlButton(
+            svg: _kSvgGitBranch,
+            label: gitLabel,
+            active: gitConnected,
+            labelMaxWidth: labelMax,
+            colors: c,
+            compact: compact,
+            onTap: onTapGit,
+          ),
+        ],
+      ),
+    );
+
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-      padding: const EdgeInsets.all(3),
+      // `.bot-control-bar`: glass fill + a bottom hairline, 8px 16px padding.
+      padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 16, vertical: compact ? 7 : 8),
       decoration: BoxDecoration(
-        color: c.bgTertiary,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: c.border),
+        color: c.glassBg,
+        border: Border(bottom: BorderSide(color: c.glassBorder)),
       ),
       child: Row(
         children: [
-          // PWA `.bot-credit-tier-btn.active`: both segments use the lightning
-          // accent (orange) — fill @0.12, border @0.5, text --lightning bold.
-          _segment(tr('Standard'), !isPro, onTapStandard, c),
-          _segment(
-            isPro && proLabel != null
-                ? tr('Pro · {label}', {'label': proLabel})
-                : tr('Pro'),
-            isPro,
-            onTapPro,
-            c,
+          Expanded(child: left),
+          SizedBox(width: gap),
+          // `.bot-ctrl-buy`: the lightning-accented purchase chip.
+          _CtrlButton(
+            svg: _kSvgBolt,
+            label: tr('Buy'),
+            active: false,
+            buy: true,
+            labelMaxWidth: labelMax,
+            colors: c,
+            compact: compact,
+            onTap: onTapBuy,
           ),
         ],
       ),
     );
   }
 
-  Widget _segment(String label, bool active, VoidCallback onTap, NymColors c) {
-    return Expanded(
+  /// `.bot-tier-switch`: a 2-segment pill group. The active segment lights up in
+  /// the lightning accent (fill @0.14, text --lightning, inset 1px ring @0.4);
+  /// tapping Standard drops back to auto-routing, Pro opens the model picker.
+  Widget _tierSwitch(NymColors c) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: c.bgTertiary,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.glassBorder),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _tierBtn(tr('Standard'), !isPro, onTapStandard, c),
+          const SizedBox(width: 3),
+          _tierBtn(tr('Pro'), isPro, onTapModel, c),
+        ],
+      ),
+    );
+  }
+
+  Widget _tierBtn(String label, bool active, VoidCallback onTap, NymColors c) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+        decoration: BoxDecoration(
+          color: active ? c.lightning.withValues(alpha: 0.14) : Colors.transparent,
+          borderRadius: BorderRadius.circular(7),
+          // `.bot-tier-btn.active`: `box-shadow: inset 0 0 0 1px lightning@0.4`.
+          border: Border.all(
+            color: active ? c.lightning.withValues(alpha: 0.4) : Colors.transparent,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active ? c.lightning : c.textDim,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// `.bot-ctrl-btn` / `.bot-ctrl-buy`: an icon + label chip with a hover-lit
+/// border (desktop) and an `.active` state that switches to the primary accent.
+class _CtrlButton extends StatefulWidget {
+  const _CtrlButton({
+    required this.svg,
+    required this.label,
+    required this.active,
+    required this.labelMaxWidth,
+    required this.colors,
+    required this.compact,
+    required this.onTap,
+    this.buy = false,
+  });
+
+  final String svg;
+  final String label;
+  final bool active;
+  final bool buy;
+  final double labelMaxWidth;
+  final NymColors colors;
+  final bool compact;
+  final VoidCallback onTap;
+
+  @override
+  State<_CtrlButton> createState() => _CtrlButtonState();
+}
+
+class _CtrlButtonState extends State<_CtrlButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    // Resolve fill / border / foreground across the three states, buy chip
+    // first (lightning), then active (primary), then the neutral resting chip.
+    final Color fill;
+    final Color border;
+    final Color fg;
+    if (widget.buy) {
+      // `.bot-ctrl-buy`: lightning text + fill @0.1 / border @0.4 (@0.6 hover).
+      fill = c.lightning.withValues(alpha: _hover ? 0.16 : 0.1);
+      border = c.lightning.withValues(alpha: _hover ? 0.6 : 0.4);
+      fg = c.lightning;
+    } else if (widget.active) {
+      // `.bot-ctrl-btn.active`: primary text + fill @0.1 / border @0.5.
+      fill = c.primary.withValues(alpha: 0.1);
+      border = c.primary.withValues(alpha: 0.5);
+      fg = c.primary;
+    } else {
+      // Resting chip: mode-aware inset fill (white@0.05 in the PWA) + the glass
+      // hairline; hover lifts the text to --text and the border to primary@0.4.
+      fill = c.insetFill;
+      border = _hover ? c.primary.withValues(alpha: 0.4) : c.glassBorder;
+      fg = _hover ? c.text : c.textDim;
+    }
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
       child: GestureDetector(
-        onTap: onTap,
+        onTap: widget.onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: EdgeInsets.symmetric(
+              horizontal: widget.compact ? 10 : 12, vertical: 6),
           decoration: BoxDecoration(
-            color: active
-                ? c.lightning.withValues(alpha: 0.12)
-                // Inactive fill: white@0.04 dark / black@0.04 light. `insetFill`
-                // is mode-aware so the pill stays visible in light mode.
-                : c.insetFill,
-            // `.bot-credit-tier-btn`: radius --radius-sm (12).
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: active ? c.lightning.withValues(alpha: 0.5) : c.border,
-              width: 1,
-            ),
+            color: fill,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: border),
           ),
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: active ? c.lightning : c.textDim,
-              fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-              fontSize: 13,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              NymSvgIcon(widget.svg, size: 15, color: fg),
+              const SizedBox(width: 6),
+              // `.bot-ctrl-label`: clamp + ellipsis so a long model / repo name
+              // can't blow out the bar.
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: widget.labelMaxWidth),
+                child: Text(
+                  widget.label,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 12,
+                    // Buy is the standalone CTA (w500 like the PWA); the neutral
+                    // chips also sit at w500 per `.bot-ctrl-btn`.
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

@@ -1025,15 +1025,27 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     // favorite/share (or audio/video) beneath. A `Wrap` would keep them on one
     // row whenever the header is wide enough, so stack explicit 2-up Rows in a
     // Column instead to force the 2×2 grid at every width.
+    // Each grid cell is a FIXED 28px column (the action buttons' footprint, and
+    // the widest a nav button ever gets) with the button CENTERED inside it.
+    // This is what the PWA's `grid-template-columns: auto auto` yields: the two
+    // columns share a width, so column 1 (back / favorite・audio) and column 2
+    // (forward / share・video) line up vertically. Without the fixed cell the
+    // top row collapses to the nav buttons' 24px phone width while the bottom
+    // row stays 28px, and the forward arrow drifts left of the share/call icon
+    // beneath it (the reported off-centre glyph).
+    const cell = 28.0;
+    Widget gridCell(Widget child) =>
+        SizedBox(width: cell, child: Center(child: child));
+
     final rows = <Widget>[
       for (var i = 0; i < buttons.length; i += 2)
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            buttons[i],
+            gridCell(buttons[i]),
             if (i + 1 < buttons.length) ...[
               const SizedBox(width: 2), // column-gap
-              buttons[i + 1],
+              gridCell(buttons[i + 1]),
             ],
           ],
         ),
