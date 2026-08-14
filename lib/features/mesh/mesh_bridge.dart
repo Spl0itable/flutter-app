@@ -92,21 +92,56 @@ class MeshBridge {
 
   // ---- Lifecycle -----------------------------------------------------------
 
+  ProviderSubscription<ChatView>? _viewSub;
+
   void start() {
     _subs.add(_service.peersStream.listen(_onPeers));
     _subs.add(_service.onPublicMessage.listen(_onPublic));
     _subs.add(_service.onPrivateMessage.listen(_onPrivate));
     _subs.add(_service.onReceipt.listen(_onReceipt));
     _subs.add(_service.onFile.listen(_onFile));
+    _subs.add(_service.onTyping.listen(_onTyping));
     // Register the always-present Nearby channel so it appears immediately.
     _app.addChannel(kMeshNearbyChannel);
+    // Send read receipts over the mesh whenever a mesh DM becomes the active
+    // conversation (the canonical read-on-open behaviour, restored for mesh).
+    _viewSub = _ref.listen<ChatView>(
+      appStateProvider.select((s) => s.view),
+      (_, view) {
+        if (view.kind == ViewKind.pm && isMeshPmPubkey(view.id)) {
+          markMeshPmRead(view.id);
+        }
+      },
+      fireImmediately: true,
+    );
   }
 
   Future<void> dispose() async {
+    _viewSub?.close();
+    _viewSub = null;
     for (final s in _subs) {
       await s.cancel();
     }
     _subs.clear();
+  }
+
+  /// Read receipts we've already sent, keyed by the message id, so we ack each
+  /// inbound mesh DM exactly once.
+  final Set<String> _readAcked = {};
+
+  /// Sends a read receipt over the mesh for every not-yet-acked inbound message
+  /// in [pubkey]'s thread. Idempotent — safe to call on every open/new message.
+  void markMeshPmRead(String pubkey) {
+    final peerId = peerIdForPubkey(pubkey);
+    if (peerId == null) return;
+    final list = _appState.messages['pm-${pubkey.toLowerCase()}'];
+    if (list == null) return;
+    for (final m in list) {
+      if (m.isOwn) continue;
+      final id = m.nymMessageId ?? m.id;
+      if (id.isEmpty || !_readAcked.add(id)) continue;
+      unawaited(_service.sendReadReceipt(peerId, id));
+    }
   }
 
   /// Registers a joined mesh group [channel] (e.g. `#crew`) as an app channel.
@@ -207,6 +242,11 @@ class MeshBridge {
     );
     _app.ingestPMMessage(m);
     _notifyPm(pubkey: pubkey, nym: nym, body: msg.content, ts: msg.timestampMs);
+    // If this thread is already on-screen, ack it immediately.
+    final view = _appState.view;
+    if (view.kind == ViewKind.pm && view.id.toLowerCase() == pubkey) {
+      markMeshPmRead(pubkey);
+    }
   }
 
   void _onReceipt(MeshReceipt receipt) {
@@ -214,6 +254,44 @@ class MeshBridge {
       messageId: receipt.messageId,
       receiptType: receipt.isRead ? 'read' : 'delivered',
     ));
+  }
+
+  void _onTyping(MeshTypingEvent e) {
+    final pubkey = _pubkeyForPeerId(e.senderPeerID);
+    final String storageKey;
+    if (e.isDirect) {
+      storageKey = 'pm-$pubkey';
+    } else {
+      final ch = (e.channel == null || e.channel!.isEmpty)
+          ? kMeshNearbyChannel
+          : (e.channel!.startsWith('#')
+              ? e.channel!.substring(1)
+              : e.channel!);
+      storageKey = '#${ch.toLowerCase()}';
+    }
+    _app.setTyping(
+      storageKey: storageKey,
+      pubkey: pubkey,
+      typing: e.isStart,
+      nym: e.nickname,
+    );
+  }
+
+  /// Sends a typing indicator for the active mesh [view] (throttled by the
+  /// composer, and auto-expiring after ~5s on the receiver).
+  void sendTyping(ChatView view, bool start) {
+    if (view.kind == ViewKind.channel) {
+      final ch = view.id.toLowerCase();
+      unawaited(_service.sendTyping(
+        channel: ch == kMeshNearbyChannel ? null : '#$ch',
+        start: start,
+      ));
+    } else if (view.kind == ViewKind.pm) {
+      final peerId = peerIdForPubkey(view.id);
+      if (peerId != null) {
+        unawaited(_service.sendTyping(toPeerID: peerId, start: start));
+      }
+    }
   }
 
   Future<void> _onFile(MeshFileReceived event) async {

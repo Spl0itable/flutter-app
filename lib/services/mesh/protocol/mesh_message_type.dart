@@ -42,6 +42,10 @@ class MeshMessageType {
   /// Deliver a rich profile in response to [nymProfileRequest].
   static const int nymProfileResponse = 0x51;
 
+  /// Ephemeral typing indicator (Nymchat-only; bitchat ignores it). Broadcast
+  /// for a channel, directed for a 1:1 DM.
+  static const int nymTyping = 0x52;
+
   /// True when [type] is a value this client knows how to handle.
   static bool isKnown(int type) => const {
         announce,

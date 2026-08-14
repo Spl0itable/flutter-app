@@ -210,6 +210,9 @@ class _ComposerState extends ConsumerState<Composer> {
   /// (PWA expands when content exceeds ~1.5 lines, ui-context.js:1738).
   bool _popout = false;
 
+  /// Last time we emitted a mesh typing indicator (ms), for ~1/s throttling.
+  int _lastMeshTypingMs = 0;
+
   /// Drives the `.composer-popout` floating field. When [_popout] is on, the
   /// in-flow slot is a fixed `--composer-row-base` placeholder (so the toolbar
   /// stays put) and the tall field floats UP over the messages via this portal
@@ -1979,7 +1982,18 @@ class _ComposerState extends ConsumerState<Composer> {
         // 'start' on input). `sendTypingStart` self-throttles to ~1/s, gates on
         // the typing-scope setting, and no-ops in channel views, so calling it
         // every keystroke is safe. (`messages.js` typing emit on input.)
-        ref.read(nostrControllerProvider).sendTypingStart();
+        final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+        final view = ref.read(appStateProvider).view;
+        if (meshBridge != null && meshBridge.isMeshView(view)) {
+          // Throttle mesh typing to ~1/s so we don't flood the radio.
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - _lastMeshTypingMs >= 1000) {
+            _lastMeshTypingMs = now;
+            meshBridge.sendTyping(view, true);
+          }
+        } else {
+          ref.read(nostrControllerProvider).sendTypingStart();
+        }
       },
       style: TextStyle(
         // `.message-input` text is forced pure white (dark) / pure black (light)

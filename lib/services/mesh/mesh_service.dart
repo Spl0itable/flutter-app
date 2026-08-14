@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -77,6 +78,7 @@ class MeshService {
   final _receipts = StreamController<MeshReceipt>.broadcast();
   final _profiles = StreamController<MeshProfileReceived>.broadcast();
   final _files = StreamController<MeshFileReceived>.broadcast();
+  final _typing = StreamController<MeshTypingEvent>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
 
   /// Peers we've already asked for a profile (avoids re-requesting on every
@@ -106,6 +108,64 @@ class MeshService {
   Stream<MeshReceipt> get onReceipt => _receipts.stream;
   Stream<MeshProfileReceived> get onProfile => _profiles.stream;
   Stream<MeshFileReceived> get onFile => _files.stream;
+  Stream<MeshTypingEvent> get onTyping => _typing.stream;
+
+  /// Broadcasts (or directs) an ephemeral typing indicator. [channel] tags a
+  /// channel indicator (null = nearby); [toPeerID] directs it to a single peer
+  /// for a 1:1 DM. Nymchat-only — bitchat ignores the unknown packet type.
+  Future<void> sendTyping({
+    String? channel,
+    String? toPeerID,
+    bool start = true,
+  }) async {
+    final out = BytesBuilder();
+    out.addByte((start ? 0x01 : 0) | (channel != null ? 0x02 : 0));
+    void lenPrefixed(String s) {
+      var b = Uint8List.fromList(utf8.encode(s));
+      if (b.length > 255) b = b.sublist(0, 255);
+      out.addByte(b.length);
+      out.add(b);
+    }
+
+    lenPrefixed(_nicknameProvider());
+    if (channel != null) lenPrefixed(channel);
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.nymTyping,
+      payload: out.toBytes(),
+      recipientID: toPeerID != null ? _peerIdBytes(toPeerID) : null,
+    ));
+  }
+
+  void _handleTyping(BitchatPacket packet, String senderPeerID) {
+    final data = packet.payload;
+    if (data.isEmpty) return;
+    var offset = 0;
+    final flags = data[offset++];
+    final isStart = (flags & 0x01) != 0;
+    final hasChannel = (flags & 0x02) != 0;
+    String readStr() {
+      if (offset >= data.length) return '';
+      final len = data[offset++];
+      if (offset + len > data.length) {
+        offset = data.length;
+        return '';
+      }
+      final s = utf8.decode(data.sublist(offset, offset + len),
+          allowMalformed: true);
+      offset += len;
+      return s;
+    }
+
+    final nickname = readStr();
+    final channel = hasChannel ? readStr() : null;
+    _typing.add(MeshTypingEvent(
+      senderPeerID: senderPeerID,
+      nickname: nickname,
+      isStart: isStart,
+      isDirect: !packet.isBroadcast,
+      channel: channel,
+    ));
+  }
 
   /// Powers up the radio and joins the mesh. Returns radio availability.
   Future<MeshTransportAvailability> start() async {
@@ -255,6 +315,7 @@ class MeshService {
     _receipts.close();
     _profiles.close();
     _files.close();
+    _typing.close();
     _peersChanged.close();
   }
 
@@ -312,6 +373,9 @@ class MeshService {
         break;
       case MeshMessageType.nymProfileResponse:
         if (forUs) _handleProfileResponse(senderPeerID, packet.payload);
+        break;
+      case MeshMessageType.nymTyping:
+        if (forUs) _handleTyping(packet, senderPeerID);
         break;
       default:
         break;

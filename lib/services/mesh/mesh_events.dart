@@ -87,6 +87,27 @@ class MeshFileReceived {
   bool get isImage => mimeType.startsWith('image/');
 }
 
+/// An ephemeral typing indicator received over the mesh (Nymchat-only).
+class MeshTypingEvent {
+  MeshTypingEvent({
+    required this.senderPeerID,
+    required this.nickname,
+    required this.isStart,
+    required this.isDirect,
+    this.channel,
+  });
+
+  final String senderPeerID;
+  final String nickname;
+  final bool isStart;
+
+  /// True for a 1:1 DM typing indicator; false for a channel/nearby one.
+  final bool isDirect;
+
+  /// Channel name for a channel typing indicator (null for nearby/DM).
+  final String? channel;
+}
+
 /// A delivery/read acknowledgement received for one of our sent messages.
 class MeshReceipt {
   MeshReceipt({
