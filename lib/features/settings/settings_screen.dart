@@ -34,6 +34,7 @@ import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
+import '../mesh/mesh_screen.dart';
 import 'settings_helpers.dart';
 import 'settings_widgets.dart';
 
@@ -2463,6 +2464,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<_GroupSpec> _data(Settings s, SettingsController ctrl) {
     final transfers = ref.watch(pendingUserSettingsTransfersProvider);
     return [
+      _GroupSpec(
+        text: tr('Bluetooth Mesh Chat and send encrypted direct messages to '
+            'nearby devices over Bluetooth with no internet or relays. '
+            'Interoperates with the bitchat app.'),
+        child: FormGroup(
+          label: tr('Bluetooth Mesh'),
+          hint: tr('Chat and send encrypted direct messages to nearby devices '
+              'over Bluetooth — no internet or relays needed. Interoperates '
+              'with the bitchat app.'),
+          child: NymOutlineButton(
+            label: s.meshEnabled
+                ? tr('Open Bluetooth Mesh (On)')
+                : tr('Open Bluetooth Mesh'),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
+            ),
+          ),
+        ),
+      ),
       _GroupSpec(
         text: tr('Low Data Mode Disabled Enabled Reduces bandwidth by '
             'connecting to only 5 default relays and loading geo relays '
