@@ -3372,6 +3372,30 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _scheduleEmit();
   }
 
+  /// Seeds or updates a user's display nym. Used by the Bluetooth-mesh bridge so
+  /// a peer's announced nickname drives the PM header, sidebar row, and message
+  /// author even before any message is exchanged (otherwise the header falls
+  /// back to a bare "PM"). Also refreshes the PM conversation row's nym.
+  void upsertUserNym(String pubkey, String nym) {
+    if (pubkey.isEmpty || nym.isEmpty) return;
+    var changed = false;
+    final u = state.users[pubkey];
+    if (u == null) {
+      state.users[pubkey] = User(pubkey: pubkey, nym: nym);
+      changed = true;
+    } else if (u.nym != nym) {
+      u.nym = nym;
+      changed = true;
+    }
+    for (final c in state.pmConversations) {
+      if (c.pubkey == pubkey && c.nym != nym) {
+        c.nym = nym;
+        changed = true;
+      }
+    }
+    if (changed) _scheduleEmit();
+  }
+
   /// Opens (or creates) a PM conversation entry for [peerPubkey] without a
   /// message — used when starting a fresh thread from the UI.
   void ensurePMConversation(String peerPubkey, {String? nym}) {

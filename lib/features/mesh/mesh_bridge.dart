@@ -209,6 +209,9 @@ class MeshBridge {
     _nymByPubkey[pubkey] = peer.displayName;
     _classifyPeer(peer, pubkey);
     if (_meshPmPubkeys.add(pubkey)) _refreshMarkers();
+    if (peer.nickname != null && peer.nickname!.isNotEmpty) {
+      _app.upsertUserNym(pubkey, peer.nickname!);
+    }
     _app.ensurePMConversation(pubkey, nym: peer.displayName);
     return pubkey;
   }
@@ -222,6 +225,11 @@ class MeshBridge {
       _peerIdByPubkey[pubkey] = p.peerID;
       _nymByPubkey[pubkey] = p.displayName;
       _classifyPeer(p, pubkey);
+      // Seed the user's nym so the PM header/rows show the peer's nickname
+      // (not a bare "PM") even before any message is exchanged.
+      if (p.nickname != null && p.nickname!.isNotEmpty) {
+        _app.upsertUserNym(pubkey, p.nickname!);
+      }
     }
   }
 
@@ -277,6 +285,7 @@ class MeshBridge {
     }
     if (_meshPmPubkeys.add(pubkey)) _refreshMarkers();
     final nym = _nymByPubkey[pubkey] ?? 'nym';
+    if (nym.isNotEmpty && nym != 'nym') _app.upsertUserNym(pubkey, nym);
     _app.ensurePMConversation(pubkey, nym: nym);
     final m = _pmMessage(
       id: msg.messageId,
