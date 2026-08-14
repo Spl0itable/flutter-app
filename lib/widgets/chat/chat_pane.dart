@@ -11,6 +11,8 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/emoji/emoji_prefetch.dart';
 import '../../features/i18n/i18n.dart';
+import '../../features/mesh/mesh_controller.dart';
+import '../../features/mesh/mesh_voice_overlay.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/nymbot/bot_chat_screen.dart' show BotChatScreen;
 import '../../features/nymbot/nymbot_providers.dart'
@@ -997,6 +999,16 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     final controller = ref.read(nostrControllerProvider);
     final isCall = view.kind == ViewKind.pm || view.kind == ViewKind.group;
 
+    // Bluetooth-mesh push-to-talk: available on a channel or an in-range mesh
+    // DM while the mesh radio is running (walkie-talkie voice over BLE).
+    final mesh = ref.watch(meshControllerProvider);
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final canMeshVoice = mesh.running &&
+        meshBridge != null &&
+        (view.kind == ViewKind.channel ||
+            (view.kind == ViewKind.pm &&
+                meshBridge.peerIdForPubkey(view.id) != null));
+
     final buttons = <Widget>[
       // `.channel-nav-buttons` — boxed (28×28, radius 4, hover bg), dimmed.
       _NavBtn(
@@ -1044,6 +1056,13 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           onTap: () => _startCall(view, video: true),
         ),
       ],
+      if (canMeshVoice)
+        _ActionBtn(
+          svg: NymIcons.callMic,
+          tooltip: tr('Push to talk (Bluetooth)'),
+          onTap: () => showMeshPttOverlay(
+            context, ref, view, _titleFor(ref.read(appStateProvider), view)),
+        ),
     ];
 
     // `.channel-header-controls` is a FIXED 2-column CSS grid

@@ -131,6 +131,32 @@ class MeshReactionEvent {
   final bool isDirect;
 }
 
+/// A live push-to-talk voice frame received over the mesh (ephemeral µ-law
+/// audio). Not stored — fed straight to the streaming player.
+class MeshVoiceFrameEvent {
+  MeshVoiceFrameEvent({
+    required this.senderPeerID,
+    required this.seq,
+    required this.mulaw,
+    required this.isDirect,
+    this.channel,
+  });
+
+  final String senderPeerID;
+
+  /// Monotonic frame sequence for jitter/reorder handling.
+  final int seq;
+
+  /// µ-law (8-bit) audio payload for this frame.
+  final Uint8List mulaw;
+
+  /// True for a directed 1:1 voice frame; false for a channel/nearby one.
+  final bool isDirect;
+
+  /// Channel name for a channel voice frame (null for nearby/DM).
+  final String? channel;
+}
+
 /// A delivery/read acknowledgement received for one of our sent messages.
 class MeshReceipt {
   MeshReceipt({

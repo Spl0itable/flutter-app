@@ -178,6 +178,25 @@ Attachments ride the mesh with no server in the loop:
    path populates). Picking one ships those cached bytes as a mesh file, so the
    recipient renders it inline like any other image — no internet required.
 
+## Push-to-talk voice
+
+There is no IP connectivity offline, so WebRTC audio/video calls can't traverse
+the mesh (and video is far beyond BLE's bandwidth). Instead the mesh offers
+**half-duplex push-to-talk voice**, matching bitchat's live PTT:
+
+- The mic is captured as an 8 kHz mono PCM16 stream (`record`), companded to
+  8-bit **µ-law** in pure Dart (`MuLaw`, ~8 KB/s — inside BLE's budget), and
+  sent as ephemeral `voiceFrame` (0x29) packets: broadcast for a channel,
+  directed for a DM, with `TTL = 1` so voice stays on direct links and never
+  floods the relay mesh.
+- Inbound frames are µ-law-decoded and fed to a low-latency streaming PCM
+  player (`flutter_pcm_sound`) with a small jitter buffer.
+- The chat header shows a mic (push-to-talk) button on any channel or in-range
+  mesh DM while the radio is running; holding it transmits, releasing listens,
+  and a "… is speaking" line names the current talker.
+
+Video calls remain internet-only (the existing WebRTC path).
+
 ## Possible next steps
 
 - Unify mesh DMs/threads into the main conversation store (currently a dedicated
