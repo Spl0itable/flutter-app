@@ -29,6 +29,9 @@ class MeshPrivateEntry {
     required this.fromMe,
     required this.timestampMs,
     this.status = MeshDeliveryStatus.sending,
+    this.filePath,
+    this.fileMime,
+    this.fileName,
   });
 
   final String messageId;
@@ -36,9 +39,25 @@ class MeshPrivateEntry {
   final bool fromMe;
   final int timestampMs;
   MeshDeliveryStatus status;
+
+  /// On-disk path of an attached file/media, when this entry carries one.
+  final String? filePath;
+  final String? fileMime;
+  final String? fileName;
+
+  bool get hasFile => filePath != null;
+  bool get isImage => fileMime?.startsWith('image/') ?? false;
 }
 
 enum MeshDeliveryStatus { sending, delivered, read }
+
+/// A mesh group channel the user has joined. [encrypted] is true for a
+/// password-protected (AES-GCM) group; false for an open named channel.
+class MeshChannel {
+  const MeshChannel({required this.name, required this.encrypted});
+  final String name;
+  final bool encrypted;
+}
 
 /// Immutable UI snapshot of the mesh for widgets to render.
 @immutable
@@ -52,6 +71,8 @@ class MeshUiState {
     this.peers = const [],
     this.nearby = const [],
     this.threads = const {},
+    this.channels = const [],
+    this.channelMessages = const {},
     this.error,
   });
 
@@ -63,6 +84,13 @@ class MeshUiState {
   final List<MeshPeer> peers;
   final List<MeshPublicMessage> nearby;
   final Map<String, List<MeshPrivateEntry>> threads;
+
+  /// Joined mesh group channels.
+  final List<MeshChannel> channels;
+
+  /// Messages per joined group channel (keyed by channel name).
+  final Map<String, List<MeshPublicMessage>> channelMessages;
+
   final String? error;
 
   MeshUiState copyWith({
@@ -74,6 +102,8 @@ class MeshUiState {
     List<MeshPeer>? peers,
     List<MeshPublicMessage>? nearby,
     Map<String, List<MeshPrivateEntry>>? threads,
+    List<MeshChannel>? channels,
+    Map<String, List<MeshPublicMessage>>? channelMessages,
     String? error,
     bool clearError = false,
   }) {
@@ -86,6 +116,8 @@ class MeshUiState {
       peers: peers ?? this.peers,
       nearby: nearby ?? this.nearby,
       threads: threads ?? this.threads,
+      channels: channels ?? this.channels,
+      channelMessages: channelMessages ?? this.channelMessages,
       error: clearError ? null : (error ?? this.error),
     );
   }
@@ -185,6 +217,7 @@ class MeshController extends StateNotifier<MeshUiState> {
       _subs.add(service.onPrivateMessage.listen(_onPrivate));
       _subs.add(service.onReceipt.listen(_onReceipt));
       _subs.add(service.onProfile.listen(_onProfile));
+      _subs.add(service.onFile.listen(_onFile));
 
       final availability = await service.start();
       state = state.copyWith(
@@ -361,6 +394,41 @@ class MeshController extends StateNotifier<MeshUiState> {
     ));
   }
 
+  /// Joins/creates a mesh group [name]. A non-empty [password] makes it an
+  /// encrypted group (only members with the same password can read it).
+  Future<void> joinChannel(String name, {String password = ''}) async {
+    final channel = name.startsWith('#') ? name : '#$name';
+    if (password.isNotEmpty) {
+      await _service?.setChannelPassword(channel, password);
+    }
+    if (state.channels.any((c) => c.name == channel)) return;
+    final channels = [...state.channels,
+      MeshChannel(name: channel, encrypted: password.isNotEmpty)];
+    state = state.copyWith(channels: channels);
+  }
+
+  void leaveChannel(String name) {
+    _service?.leaveChannel(name);
+    final channels = state.channels.where((c) => c.name != name).toList();
+    final msgs = Map<String, List<MeshPublicMessage>>.of(state.channelMessages)
+      ..remove(name);
+    state = state.copyWith(channels: channels, channelMessages: msgs);
+  }
+
+  Future<void> sendChannelMessage(String channel, String content) async {
+    final service = _service;
+    if (service == null || content.trim().isEmpty) return;
+    await service.sendPublicMessage(content, channel: channel);
+    _appendChannel(MeshPublicMessage(
+      senderPeerID: service.myPeerID,
+      senderNickname: _nickname(),
+      content: content,
+      messageId: 'self-${DateTime.now().microsecondsSinceEpoch}',
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      channel: channel,
+    ));
+  }
+
   Future<void> sendPrivate(String peerID, String content) async {
     final service = _service;
     if (service == null || content.trim().isEmpty) return;
@@ -372,6 +440,108 @@ class MeshController extends StateNotifier<MeshUiState> {
       timestampMs: DateTime.now().millisecondsSinceEpoch,
     );
     _appendThread(peerID, entry);
+  }
+
+  // ---- File / media transfer ------------------------------------------------
+
+  /// Persists received/sent mesh media under the app documents dir so it renders
+  /// from disk (and survives restarts), returning the saved path.
+  Future<String?> _saveMeshFile(String fileName, Uint8List bytes) async {
+    try {
+      final dir = Directory('${(await getApplicationDocumentsDirectory()).path}'
+          '/mesh_files');
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final stamp = DateTime.now().microsecondsSinceEpoch;
+      final safe = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final path = '${dir.path}/${stamp}_$safe';
+      await File(path).writeAsBytes(bytes, flush: true);
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Sends a file/media attachment as an encrypted DM to [peerID].
+  Future<void> sendFileToPeer(
+    String peerID,
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final service = _service;
+    if (service == null || bytes.isEmpty) return;
+    final path = await _saveMeshFile(fileName, bytes);
+    await service.sendFileToPeer(peerID, fileName, mimeType, bytes);
+    _appendThread(
+      peerID,
+      MeshPrivateEntry(
+        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+        content: '',
+        fromMe: true,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        status: MeshDeliveryStatus.delivered,
+        filePath: path,
+        fileMime: mimeType,
+        fileName: fileName,
+      ),
+    );
+  }
+
+  /// Broadcasts a file/media attachment to the mesh — the open Nearby feed, or a
+  /// joined group [channel].
+  Future<void> sendFileBroadcast(
+    String fileName,
+    String mimeType,
+    Uint8List bytes, {
+    String? channel,
+  }) async {
+    final service = _service;
+    if (service == null || bytes.isEmpty) return;
+    final path = await _saveMeshFile(fileName, bytes);
+    await service.sendFileBroadcast(fileName, mimeType, bytes);
+    _onPublic(MeshPublicMessage(
+      senderPeerID: service.myPeerID,
+      senderNickname: _nickname(),
+      content: '',
+      messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      channel: channel,
+      filePath: path,
+      fileMime: mimeType,
+      fileName: fileName,
+    ));
+  }
+
+  Future<void> _onFile(MeshFileReceived event) async {
+    final path = await _saveMeshFile(event.fileName, event.bytes);
+    if (path == null) return;
+    if (event.isDirect) {
+      _appendThread(
+        event.fromPeerID,
+        MeshPrivateEntry(
+          messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+          content: '',
+          fromMe: false,
+          timestampMs: DateTime.now().millisecondsSinceEpoch,
+          status: MeshDeliveryStatus.delivered,
+          filePath: path,
+          fileMime: event.mimeType,
+          fileName: event.fileName,
+        ),
+      );
+    } else {
+      _onPublic(MeshPublicMessage(
+        senderPeerID: event.fromPeerID,
+        senderNickname: event.senderNickname,
+        content: '',
+        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        channel: event.channel,
+        filePath: path,
+        fileMime: event.mimeType,
+        fileName: event.fileName,
+      ));
+    }
   }
 
   final Set<String> _readAcked = {};
@@ -397,9 +567,26 @@ class MeshController extends StateNotifier<MeshUiState> {
   // ---- Event bridges --------------------------------------------------------
 
   void _onPublic(MeshPublicMessage msg) {
+    // A message tagged with a group we've joined goes to that group's thread;
+    // everything else is the open Nearby feed.
+    final channel = msg.channel;
+    if (channel != null && state.channels.any((c) => c.name == channel)) {
+      _appendChannel(msg);
+      return;
+    }
     final nearby = List.of(state.nearby)..add(msg);
     if (nearby.length > 500) nearby.removeRange(0, nearby.length - 500);
     state = state.copyWith(nearby: nearby);
+  }
+
+  void _appendChannel(MeshPublicMessage msg) {
+    final channel = msg.channel;
+    if (channel == null) return;
+    final map = Map<String, List<MeshPublicMessage>>.of(state.channelMessages);
+    final list = List.of(map[channel] ?? const <MeshPublicMessage>[])..add(msg);
+    if (list.length > 500) list.removeRange(0, list.length - 500);
+    map[channel] = list;
+    state = state.copyWith(channelMessages: map);
   }
 
   void _onPrivate(MeshPrivateMessage msg) {

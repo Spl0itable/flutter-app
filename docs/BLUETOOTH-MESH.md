@@ -146,6 +146,38 @@ The mesh shows peers with their **real Nymchat identity**, not just a nickname:
    path. Received avatars are size-capped, cached to disk, and shown. So even a
    brand-new peer renders their real avatar offline.
 
+## Media, files, emoji & GIFs over the mesh
+
+Attachments ride the mesh with no server in the loop:
+
+1. **Wire format.** A file is encoded as a `BitchatFilePacket` — a TLV with
+   name (`0x01`), size (`0x02`, u64), mime (`0x03`) and the content chunked into
+   `0x04` CONTENT TLVs (≤65535 each, rejoined on decode; unknown TLVs skipped).
+   A **1:1 DM attachment** is sealed inside a Noise-encrypted packet with the
+   `fileTransfer` (`0x20`) payload discriminator (same session as text DMs); a
+   **public/channel attachment** rides a `FILE_TRANSFER` (`0x22`) packet. Both
+   go through the normal fragmentation/reassembly path, so arbitrarily large
+   media survive the BLE MTU.
+
+2. **Sending.** The mesh composer reuses the app's own image/video picker
+   (`image_picker`) and file picker (`file_picker`), 10 MB-capped to keep
+   fragmentation bounded. DMs call `sendFileToPeer` (encrypted); Nearby/group
+   sends call `sendFileBroadcast`.
+
+3. **Rendering.** Received bytes are written under `mesh_files/` and shown
+   inline through the **canonical** `MessageRow`: a new local-attachment body
+   (`Message.localMediaPath`) renders an image inline (tappable → fullscreen,
+   pinch-zoom, share) or a tappable file card — keeping every other row chrome
+   (avatar, author, grouping, bubble, meta, verified badge) identical to a
+   normal message.
+
+4. **Emoji & GIFs offline.** The mesh composer keeps its emoji and GIF buttons,
+   but over the mesh they offer only what is **already cached locally** — custom
+   emoji rasters from `InlineNetworkImage`'s in-memory decode cache, favourite
+   GIFs from `flutter_cache_manager`'s disk cache (the exact caches the display
+   path populates). Picking one ships those cached bytes as a mesh file, so the
+   recipient renders it inline like any other image — no internet required.
+
 ## Possible next steps
 
 - Unify mesh DMs/threads into the main conversation store (currently a dedicated

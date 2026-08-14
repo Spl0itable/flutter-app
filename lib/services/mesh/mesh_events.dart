@@ -1,5 +1,7 @@
 // High-level events emitted by MeshService for the app layer to consume.
 
+import 'dart:typed_data';
+
 import 'protocol/mesh_profile.dart';
 
 /// A public broadcast message received over the mesh (nearby / channel chat).
@@ -13,6 +15,9 @@ class MeshPublicMessage {
     this.channel,
     this.mentions = const [],
     this.isRelay = false,
+    this.filePath,
+    this.fileMime,
+    this.fileName,
   });
 
   final String senderPeerID;
@@ -23,6 +28,14 @@ class MeshPublicMessage {
   final String? channel;
   final List<String> mentions;
   final bool isRelay;
+
+  /// On-disk path of an attached file/media, when this message carries one.
+  final String? filePath;
+  final String? fileMime;
+  final String? fileName;
+
+  bool get hasFile => filePath != null;
+  bool get isImage => fileMime?.startsWith('image/') ?? false;
 }
 
 /// A private (Noise-encrypted) message received over the mesh.
@@ -45,6 +58,33 @@ class MeshProfileReceived {
   MeshProfileReceived({required this.peerID, required this.profile});
   final String peerID;
   final MeshProfile profile;
+}
+
+/// A file/media received over the mesh (from a DM or a public/channel send).
+class MeshFileReceived {
+  MeshFileReceived({
+    required this.fromPeerID,
+    required this.fileName,
+    required this.mimeType,
+    required this.bytes,
+    this.isDirect = true,
+    this.channel,
+    this.senderNickname = '',
+  });
+
+  final String fromPeerID;
+  final String fileName;
+  final String mimeType;
+  final Uint8List bytes;
+
+  /// True for an encrypted 1:1 DM file; false for a public/broadcast file.
+  final bool isDirect;
+
+  /// Null for a 1:1 DM file; set for a public/channel file.
+  final String? channel;
+  final String senderNickname;
+
+  bool get isImage => mimeType.startsWith('image/');
 }
 
 /// A delivery/read acknowledgement received for one of our sent messages.

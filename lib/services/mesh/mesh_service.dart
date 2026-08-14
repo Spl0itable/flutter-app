@@ -9,9 +9,11 @@ import 'fragmentation.dart';
 import 'mesh_constants.dart';
 import 'mesh_events.dart';
 import 'mesh_peer.dart';
+import 'noise/channel_encryption.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
 import 'noise/nostr_link.dart';
+import 'protocol/bitchat_file_packet.dart';
 import 'protocol/bitchat_message.dart';
 import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
@@ -54,6 +56,7 @@ class MeshService {
       _profileProvider;
 
   late final NoiseSessionManager _noise = NoiseSessionManager(identity);
+  final MeshChannelEncryption _channelCrypto = MeshChannelEncryption();
   final SeenPackets _seen = SeenPackets();
   final FragmentReassembler _reassembler = FragmentReassembler();
   final _uuid = const Uuid();
@@ -73,6 +76,7 @@ class MeshService {
   final _privateMessages = StreamController<MeshPrivateMessage>.broadcast();
   final _receipts = StreamController<MeshReceipt>.broadcast();
   final _profiles = StreamController<MeshProfileReceived>.broadcast();
+  final _files = StreamController<MeshFileReceived>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
 
   /// Peers we've already asked for a profile (avoids re-requesting on every
@@ -101,6 +105,7 @@ class MeshService {
   Stream<MeshPrivateMessage> get onPrivateMessage => _privateMessages.stream;
   Stream<MeshReceipt> get onReceipt => _receipts.stream;
   Stream<MeshProfileReceived> get onProfile => _profiles.stream;
+  Stream<MeshFileReceived> get onFile => _files.stream;
 
   /// Powers up the radio and joins the mesh. Returns radio availability.
   Future<MeshTransportAvailability> start() async {
@@ -149,14 +154,21 @@ class MeshService {
     List<String>? mentions,
   }) async {
     final messageId = _uuid.v4();
+    // A password-protected channel is a mesh group chat: seal the content with
+    // the shared AES key so only members can read it.
+    final encrypted =
+        channel != null && _channelCrypto.hasKey(channel);
     final msg = BitchatMessage(
       id: messageId,
       sender: _nicknameProvider(),
-      content: content,
+      content: encrypted ? '' : content,
       timestampMs: DateTime.now().millisecondsSinceEpoch,
       senderPeerID: identity.peerID,
       channel: channel,
       mentions: mentions,
+      isEncrypted: encrypted,
+      encryptedContent:
+          encrypted ? await _channelCrypto.encrypt(channel, content) : null,
     );
     final packet = await _buildPacket(
       type: MeshMessageType.message,
@@ -166,6 +178,16 @@ class MeshService {
     await _sendPacket(packet);
     return messageId;
   }
+
+  /// Joins/creates an encrypted mesh group [channel] with a shared [password]
+  /// (bitchat password channels). Members who set the same password can read it.
+  Future<void> setChannelPassword(String channel, String password) =>
+      _channelCrypto.setChannelPassword(channel, password);
+
+  /// True when we hold the key for an encrypted [channel].
+  bool hasChannelKey(String channel) => _channelCrypto.hasKey(channel);
+
+  void leaveChannel(String channel) => _channelCrypto.removeChannel(channel);
 
   /// Sends a private [content] message to [peerID], performing a Noise handshake
   /// first if needed (the message is queued and flushed on establishment).
@@ -187,6 +209,40 @@ class MeshService {
     return firstId ?? '';
   }
 
+  /// Sends a file/media [bytes] to [peerID] as an encrypted DM attachment
+  /// (Noise-sealed, fragmented). Reuses the same session as text DMs.
+  Future<void> sendFileToPeer(
+    String peerID,
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final file = BitchatFilePacket(
+      fileName: fileName, mimeType: mimeType, content: bytes);
+    final encoded = file.encode();
+    if (encoded == null) return;
+    final plaintext =
+        NoisePayload(NoisePayloadType.fileTransfer, encoded).encode();
+    await _sendOrQueueEncrypted(peerID, plaintext);
+  }
+
+  /// Broadcasts a file/media [bytes] to the mesh (Nearby or a public group),
+  /// as a fragmented FILE_TRANSFER packet.
+  Future<void> sendFileBroadcast(
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final file = BitchatFilePacket(
+      fileName: fileName, mimeType: mimeType, content: bytes);
+    final encoded = file.encode();
+    if (encoded == null) return;
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.fileTransfer,
+      payload: encoded,
+    ));
+  }
+
   /// Sends a read receipt for [messageId] to [peerID].
   Future<void> sendReadReceipt(String peerID, String messageId) async {
     await _sendOrQueueEncrypted(
@@ -198,6 +254,7 @@ class MeshService {
     _privateMessages.close();
     _receipts.close();
     _profiles.close();
+    _files.close();
     _peersChanged.close();
   }
 
@@ -233,7 +290,7 @@ class MeshService {
         await _handleAnnounce(packet, senderPeerID, rssi);
         break;
       case MeshMessageType.message:
-        _handlePublicMessage(packet, senderPeerID);
+        await _handlePublicMessage(packet, senderPeerID);
         break;
       case MeshMessageType.leave:
         _removePeer(senderPeerID);
@@ -246,6 +303,9 @@ class MeshService {
         break;
       case MeshMessageType.fragment:
         await _handleFragment(packet, linkId, rssi);
+        break;
+      case MeshMessageType.fileTransfer:
+        _handleFileBroadcast(packet, senderPeerID);
         break;
       case MeshMessageType.nymProfileRequest:
         if (forUs) await _handleProfileRequest(senderPeerID, packet.payload);
@@ -311,14 +371,29 @@ class MeshService {
     _emitPeers();
   }
 
-  void _handlePublicMessage(BitchatPacket packet, String senderPeerID) {
+  Future<void> _handlePublicMessage(
+      BitchatPacket packet, String senderPeerID) async {
     final msg = BitchatMessage.fromBinaryPayload(packet.payload);
-    if (msg == null || msg.isEncrypted) return;
+    if (msg == null) return;
+    var content = msg.content;
+    if (msg.isEncrypted) {
+      // Encrypted group message: readable only if we hold the channel key.
+      final channel = msg.channel;
+      final enc = msg.encryptedContent;
+      if (channel == null || enc == null || !_channelCrypto.hasKey(channel)) {
+        return;
+      }
+      try {
+        content = await _channelCrypto.decrypt(channel, enc);
+      } catch (_) {
+        return;
+      }
+    }
     _touchPeer(senderPeerID, nickname: msg.sender);
     _publicMessages.add(MeshPublicMessage(
       senderPeerID: msg.senderPeerID ?? senderPeerID,
       senderNickname: msg.sender,
-      content: msg.content,
+      content: content,
       messageId: msg.id,
       timestampMs: msg.timestampMs,
       channel: msg.channel,
@@ -391,9 +466,35 @@ class MeshService {
           isRead: true,
         ));
         break;
+      case NoisePayloadType.fileTransfer:
+        final file = BitchatFilePacket.decode(noisePayload.data);
+        if (file != null) {
+          _touchPeer(senderPeerID);
+          _files.add(MeshFileReceived(
+            fromPeerID: senderPeerID,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            bytes: file.content,
+          ));
+        }
+        break;
       default:
         break;
     }
+  }
+
+  void _handleFileBroadcast(BitchatPacket packet, String senderPeerID) {
+    final file = BitchatFilePacket.decode(packet.payload);
+    if (file == null) return;
+    final peer = _peers[senderPeerID];
+    _files.add(MeshFileReceived(
+      fromPeerID: senderPeerID,
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      bytes: file.content,
+      isDirect: false,
+      senderNickname: peer?.nickname ?? '',
+    ));
   }
 
   Future<void> _handleFragment(

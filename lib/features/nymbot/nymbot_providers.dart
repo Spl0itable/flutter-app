@@ -841,7 +841,10 @@ class BotChatController extends StateNotifier<BotChatState> {
       }
       final signer = _signer;
       if (signer != null) {
-        return giftwrap.nip59WrapAsync(
+        // Awaited (not just returned) so a failure in the remote-signer seal is
+        // caught by this try/catch rather than escaping as an unhandled async
+        // error.
+        return await giftwrap.nip59WrapAsync(
           rumor: rumor,
           senderSigner: signer,
           recipientPubkey: recipientPubkey,
