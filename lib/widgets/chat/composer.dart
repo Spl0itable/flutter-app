@@ -17,6 +17,7 @@ import '../common/css_focus_ring.dart';
 import '../common/nym_avatar.dart';
 import '../nym_icons.dart';
 import '../../features/autocomplete/autocomplete_dropdown.dart';
+import '../../features/mesh/mesh_controller.dart';
 import '../../features/autocomplete/autocomplete_queries.dart';
 import '../../features/autocomplete/autocomplete_triggers.dart';
 import '../../features/autocomplete/pending_edit.dart';
@@ -208,6 +209,9 @@ class _ComposerState extends ConsumerState<Composer> {
   /// Whether the draft is tall enough to float into the `.composer-popout` box
   /// (PWA expands when content exceeds ~1.5 lines, ui-context.js:1738).
   bool _popout = false;
+
+  /// Last time we emitted a mesh typing indicator (ms), for ~1/s throttling.
+  int _lastMeshTypingMs = 0;
 
   /// Drives the `.composer-popout` floating field. When [_popout] is on, the
   /// in-flow slot is a fixed `--composer-row-base` placeholder (so the toolbar
@@ -1317,6 +1321,24 @@ class _ComposerState extends ConsumerState<Composer> {
       return; // picker unavailable (tests/desktop)
     }
     if (picked.isEmpty) return;
+
+    // Bluetooth-mesh view: there's no Blossom server to upload to, so ship the
+    // media over the mesh as a file (rendered inline on the far side) instead.
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final view = ref.read(appStateProvider).view;
+    if (meshBridge != null && meshBridge.isMeshView(view)) {
+      for (final f in picked) {
+        try {
+          final bytes = await f.readAsBytes();
+          if (bytes.isEmpty || bytes.length > 10 * 1024 * 1024) continue;
+          await meshBridge.sendFileFromComposer(
+              view, f.name, f.mimeType ?? _guessImageMime(f.name), bytes);
+        } catch (_) {
+          // skip an unreadable pick
+        }
+      }
+      return;
+    }
     const maxUpload = 50 * 1024 * 1024; // 50 MB cap (users.js:977)
 
     if (!mounted) return;
@@ -1399,6 +1421,18 @@ class _ComposerState extends ConsumerState<Composer> {
     final bytes = file.bytes;
     if (bytes == null) {
       _onSystemMessage(tr('Could not read the selected file.'));
+      return;
+    }
+    // Bluetooth-mesh view: send the file directly over the mesh (no P2P/relay).
+    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+    final view = ref.read(appStateProvider).view;
+    if (meshBridge != null && meshBridge.isMeshView(view)) {
+      if (bytes.length > 10 * 1024 * 1024) {
+        _onSystemMessage(tr('Files must be under 50MB.'));
+        return;
+      }
+      await meshBridge.sendFileFromComposer(
+          view, file.name, _guessImageMime(file.name), bytes);
       return;
     }
     await ref.read(nostrControllerProvider).shareP2PFile(
@@ -1948,7 +1982,18 @@ class _ComposerState extends ConsumerState<Composer> {
         // 'start' on input). `sendTypingStart` self-throttles to ~1/s, gates on
         // the typing-scope setting, and no-ops in channel views, so calling it
         // every keystroke is safe. (`messages.js` typing emit on input.)
-        ref.read(nostrControllerProvider).sendTypingStart();
+        final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
+        final view = ref.read(appStateProvider).view;
+        if (meshBridge != null && meshBridge.isMeshView(view)) {
+          // Throttle mesh typing to ~1/s so we don't flood the radio.
+          final now = DateTime.now().millisecondsSinceEpoch;
+          if (now - _lastMeshTypingMs >= 1000) {
+            _lastMeshTypingMs = now;
+            meshBridge.sendTyping(view, true);
+          }
+        } else {
+          ref.read(nostrControllerProvider).sendTypingStart();
+        }
       },
       style: TextStyle(
         // `.message-input` text is forced pure white (dark) / pure black (light)

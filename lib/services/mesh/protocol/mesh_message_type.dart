@@ -42,6 +42,14 @@ class MeshMessageType {
   /// Deliver a rich profile in response to [nymProfileRequest].
   static const int nymProfileResponse = 0x51;
 
+  /// Ephemeral typing indicator (Nymchat-only; bitchat ignores it). Broadcast
+  /// for a channel, directed for a 1:1 DM.
+  static const int nymTyping = 0x52;
+
+  /// A public/channel emoji reaction (Nymchat-only; bitchat ignores it). A 1:1
+  /// reaction rides an encrypted [NoisePayloadType.reaction] instead.
+  static const int nymReaction = 0x53;
+
   /// True when [type] is a value this client knows how to handle.
   static bool isKnown(int type) => const {
         announce,
@@ -100,4 +108,7 @@ class NoisePayloadType {
 
   /// A file/media transfer (payload is a [BitchatFilePacket]).
   static const int fileTransfer = 0x20;
+
+  /// An emoji reaction to a 1:1 message (Nymchat-only).
+  static const int reaction = 0x21;
 }

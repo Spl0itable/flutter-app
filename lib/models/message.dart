@@ -100,6 +100,7 @@ class Message {
     this.localMediaPath,
     this.localMediaMime,
     this.localMediaName,
+    this.viaMesh = false,
     this.isBot = false,
     this.thinking,
     this.optimistic = false,
@@ -174,6 +175,11 @@ class Message {
   bool get hasLocalMedia =>
       localMediaPath != null && localMediaPath!.isNotEmpty;
   bool get isLocalImage => localMediaMime?.startsWith('image/') ?? false;
+
+  /// True when this message was delivered over the Bluetooth mesh rather than
+  /// the internet (Nostr relays). Drives the small Bluetooth glyph shown beside
+  /// the padlock on mesh PMs/group messages. Session-local — not serialised.
+  bool viaMesh;
 
   bool isBot;
 

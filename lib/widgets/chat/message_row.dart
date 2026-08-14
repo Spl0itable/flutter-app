@@ -1242,6 +1242,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                 // `.message-time` after the clock (PM/group only).
                 if (_cryptoState != null)
                   CryptoVerifiedBadge(state: _cryptoState!),
+                if (message.viaMesh) _MeshBadge(color: context.nym.primary),
               ],
             ),
           )
@@ -1748,6 +1749,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         // `.crypto-lock-bubble`: the verification lock follows the in-bubble
         // time (PM/group only).
         if (_cryptoState != null) CryptoVerifiedBadge(state: _cryptoState!),
+        if (message.viaMesh) _MeshBadge(color: context.nym.primary),
       ],
     );
     // `.bubble-time-inner { display:block; width:fit-content; margin-left:
@@ -5169,6 +5171,21 @@ class _TightLongPressGestureRecognizer extends LongPressGestureRecognizer {
       return;
     }
     super.handleEvent(event);
+  }
+}
+
+/// A small Bluetooth glyph shown beside the crypto padlock on a message that
+/// was delivered over the mesh rather than the internet ([Message.viaMesh]).
+class _MeshBadge extends StatelessWidget {
+  const _MeshBadge({required this.color});
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 3),
+      child: NymSvgIcon(NymIcons.bluetooth, size: 11, color: color),
+    );
   }
 }
 

@@ -19,47 +19,12 @@ import '../../services/mesh/transport/mesh_transport.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
+import 'mesh_bridge.dart';
 
-/// A single message in a mesh private conversation, including our own sent
-/// messages and their delivery state.
-class MeshPrivateEntry {
-  MeshPrivateEntry({
-    required this.messageId,
-    required this.content,
-    required this.fromMe,
-    required this.timestampMs,
-    this.status = MeshDeliveryStatus.sending,
-    this.filePath,
-    this.fileMime,
-    this.fileName,
-  });
-
-  final String messageId;
-  final String content;
-  final bool fromMe;
-  final int timestampMs;
-  MeshDeliveryStatus status;
-
-  /// On-disk path of an attached file/media, when this entry carries one.
-  final String? filePath;
-  final String? fileMime;
-  final String? fileName;
-
-  bool get hasFile => filePath != null;
-  bool get isImage => fileMime?.startsWith('image/') ?? false;
-}
-
-enum MeshDeliveryStatus { sending, delivered, read }
-
-/// A mesh group channel the user has joined. [encrypted] is true for a
-/// password-protected (AES-GCM) group; false for an open named channel.
-class MeshChannel {
-  const MeshChannel({required this.name, required this.encrypted});
-  final String name;
-  final bool encrypted;
-}
-
-/// Immutable UI snapshot of the mesh for widgets to render.
+/// Immutable UI snapshot of the mesh radio status. Conversations themselves live
+/// in the normal [AppState] stores (channels/PMs) and render through the
+/// canonical ChatPane — this only carries radio/discovery status and the mesh
+/// markers the sidebar uses to badge which conversations are Bluetooth-backed.
 @immutable
 class MeshUiState {
   const MeshUiState({
@@ -69,10 +34,8 @@ class MeshUiState {
     this.myPeerID,
     this.linkCount = 0,
     this.peers = const [],
-    this.nearby = const [],
-    this.threads = const {},
-    this.channels = const [],
-    this.channelMessages = const {},
+    this.meshChannelKeys = const {},
+    this.meshPmPubkeys = const {},
     this.error,
   });
 
@@ -82,16 +45,19 @@ class MeshUiState {
   final String? myPeerID;
   final int linkCount;
   final List<MeshPeer> peers;
-  final List<MeshPublicMessage> nearby;
-  final Map<String, List<MeshPrivateEntry>> threads;
 
-  /// Joined mesh group channels.
-  final List<MeshChannel> channels;
+  /// Bare channel keys (lowercase) that are mesh-backed.
+  final Set<String> meshChannelKeys;
 
-  /// Messages per joined group channel (keyed by channel name).
-  final Map<String, List<MeshPublicMessage>> channelMessages;
+  /// PM peer pubkeys that are mesh-backed.
+  final Set<String> meshPmPubkeys;
 
   final String? error;
+
+  bool isMeshChannelKey(String key) =>
+      meshChannelKeys.contains(key.toLowerCase());
+  bool isMeshPmPubkey(String pubkey) =>
+      meshPmPubkeys.contains(pubkey.toLowerCase());
 
   MeshUiState copyWith({
     bool? enabled,
@@ -100,10 +66,8 @@ class MeshUiState {
     String? myPeerID,
     int? linkCount,
     List<MeshPeer>? peers,
-    List<MeshPublicMessage>? nearby,
-    Map<String, List<MeshPrivateEntry>>? threads,
-    List<MeshChannel>? channels,
-    Map<String, List<MeshPublicMessage>>? channelMessages,
+    Set<String>? meshChannelKeys,
+    Set<String>? meshPmPubkeys,
     String? error,
     bool clearError = false,
   }) {
@@ -114,10 +78,8 @@ class MeshUiState {
       myPeerID: myPeerID ?? this.myPeerID,
       linkCount: linkCount ?? this.linkCount,
       peers: peers ?? this.peers,
-      nearby: nearby ?? this.nearby,
-      threads: threads ?? this.threads,
-      channels: channels ?? this.channels,
-      channelMessages: channelMessages ?? this.channelMessages,
+      meshChannelKeys: meshChannelKeys ?? this.meshChannelKeys,
+      meshPmPubkeys: meshPmPubkeys ?? this.meshPmPubkeys,
       error: clearError ? null : (error ?? this.error),
     );
   }
@@ -130,35 +92,42 @@ class MeshUiState {
   }
 }
 
-/// Owns the [MeshService] lifecycle and bridges its events into an observable
-/// [MeshUiState]. Reacts to the `meshEnabled` setting to power the radio on/off.
+/// Owns the [MeshService] lifecycle and the [MeshBridge] that feeds mesh traffic
+/// into the app's normal chat stores. Reacts to the `meshEnabled` setting to
+/// power the radio on/off.
 class MeshController extends StateNotifier<MeshUiState> {
   MeshController({
+    required Ref ref,
     required String Function() nickname,
     String? Function()? nostrPubkey,
     String? Function(String messageHex)? signSchnorr,
     String? Function(String pubkey)? avatarUrlOf,
     String? Function(String pubkey)? bannerUrlOf,
-  })  : _nickname = nickname,
+  })  : _ref = ref,
+        _nickname = nickname,
         _nostrPubkey = nostrPubkey,
         _signSchnorr = signSchnorr,
         _avatarUrlOf = avatarUrlOf,
         _bannerUrlOf = bannerUrlOf,
         super(const MeshUiState());
 
+  final Ref _ref;
   final String Function() _nickname;
   final String? Function()? _nostrPubkey;
   final String? Function(String messageHex)? _signSchnorr;
   final String? Function(String pubkey)? _avatarUrlOf;
   final String? Function(String pubkey)? _bannerUrlOf;
 
-  /// Our precomputed Nostr-identity link (stable per session), advertised in
-  /// announcements. Null when there is no local Nostr key to sign it.
   Uint8List? _nostrLink;
 
   MeshService? _service;
+  MeshBridge? _bridge;
   final List<StreamSubscription<dynamic>> _subs = [];
   bool _busy = false;
+
+  /// The active bridge, used by [NostrController] to route mesh sends and by the
+  /// sidebar to badge mesh conversations. Null while the mesh is off.
+  MeshBridge? get bridge => _bridge;
 
   /// Mesh runs only where BLE central+peripheral are available.
   static bool get isSupportedPlatform =>
@@ -199,6 +168,15 @@ class MeshController extends StateNotifier<MeshUiState> {
       );
       _service = service;
 
+      final bridge = MeshBridge(
+        ref: _ref,
+        service: service,
+        selfNym: _nickname,
+      );
+      _bridge = bridge;
+
+      // Peer discovery drives avatar hydration + the marker refresh; the bridge
+      // owns the actual message/receipt/file ingest.
       _subs.add(service.peersStream.listen((peers) {
         for (final p in peers) {
           final pubkey = p.nostrPubkey;
@@ -211,19 +189,20 @@ class MeshController extends StateNotifier<MeshUiState> {
         state = state.copyWith(
           peers: List.of(peers),
           linkCount: service.connectedLinkCount,
+          meshChannelKeys: Set.of(bridge.meshChannelKeys),
+          meshPmPubkeys: Set.of(bridge.meshPmPubkeys),
         );
       }));
-      _subs.add(service.onPublicMessage.listen(_onPublic));
-      _subs.add(service.onPrivateMessage.listen(_onPrivate));
-      _subs.add(service.onReceipt.listen(_onReceipt));
       _subs.add(service.onProfile.listen(_onProfile));
-      _subs.add(service.onFile.listen(_onFile));
+
+      bridge.start();
 
       final availability = await service.start();
       state = state.copyWith(
         running: true,
         availability: availability,
         myPeerID: service.myPeerID,
+        meshChannelKeys: Set.of(bridge.meshChannelKeys),
         clearError: true,
       );
     } catch (e) {
@@ -234,8 +213,32 @@ class MeshController extends StateNotifier<MeshUiState> {
     }
   }
 
-  /// Builds our signed Nostr-identity link, or null when we have no local Nostr
-  /// key (e.g. NIP-46 remote signer) to bind the mesh key with.
+  /// Joins/creates a mesh group [name]. A non-empty [password] makes it an
+  /// encrypted group (only members with the same password can read it). The
+  /// channel is registered as an app channel; the caller opens it via
+  /// `switchView(ChatView.channel(name))`.
+  Future<void> joinChannel(String name, {String password = ''}) async {
+    final channel = name.startsWith('#') ? name : '#$name';
+    if (password.isNotEmpty) {
+      await _service?.setChannelPassword(channel, password);
+    }
+    _bridge?.registerChannel(channel);
+    refreshMarkers();
+  }
+
+  bool hasChannelKey(String channel) => _service?.hasChannelKey(channel) ?? false;
+
+  /// Re-copies the bridge's mesh markers into the UI state so the sidebar can
+  /// badge newly-seen mesh channels/PMs. Called by the bridge as traffic lands.
+  void refreshMarkers() {
+    final b = _bridge;
+    if (b == null) return;
+    state = state.copyWith(
+      meshChannelKeys: Set.of(b.meshChannelKeys),
+      meshPmPubkeys: Set.of(b.meshPmPubkeys),
+    );
+  }
+
   Uint8List? _computeNostrLink(NoiseIdentity identity) {
     final pubkey = _nostrPubkey?.call();
     final signer = _signSchnorr;
@@ -252,8 +255,6 @@ class MeshController extends StateNotifier<MeshUiState> {
 
   final Set<String> _profileAsked = {};
 
-  /// Answers an inbound profile request with our own avatar/banner bytes,
-  /// fetched (and size-capped) from our Nostr profile image URLs.
   Future<MeshProfile?> _buildMyProfile(MeshProfileRequest request) async {
     final pubkey = _nostrPubkey?.call();
     (Uint8List, String?)? avatar;
@@ -274,21 +275,20 @@ class MeshController extends StateNotifier<MeshUiState> {
     );
   }
 
-  /// GETs [url] and returns its bytes + content-type, or null when missing,
-  /// unreachable, or larger than [maxBytes] (we never ship oversized images).
   Future<(Uint8List, String?)?> _fetchCapped(String? url, int maxBytes) async {
     if (url == null || url.isEmpty) return null;
     try {
-      final resp = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
-      if (resp.statusCode != 200 || resp.bodyBytes.length > maxBytes) return null;
+      final resp =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 10));
+      if (resp.statusCode != 200 || resp.bodyBytes.length > maxBytes) {
+        return null;
+      }
       return (resp.bodyBytes, resp.headers['content-type']);
     } catch (_) {
       return null;
     }
   }
 
-  /// Caches a transferred avatar to disk, registers its bytes so it renders in
-  /// canonical message rows, and points the peer at it.
   Future<void> _onProfile(MeshProfileReceived event) async {
     final profile = event.profile;
     final avatar = profile.avatar;
@@ -310,10 +310,6 @@ class MeshController extends StateNotifier<MeshUiState> {
     }
   }
 
-  /// Registers avatar [bytes] under every seed a message row / avatar might use
-  /// for this peer: its mesh peerID always, and its Nostr pubkey only when the
-  /// pubkey↔mesh-key link is cryptographically verified (never for an
-  /// unverified claim, to prevent avatar spoofing of a Nostr identity).
   void _publishAvatar(String peerID, Uint8List bytes) {
     final seeds = <String>[peerID];
     final peer = state.peerById(peerID);
@@ -323,8 +319,6 @@ class MeshController extends StateNotifier<MeshUiState> {
     MeshAvatarRegistry.instance.register(seeds, bytes);
   }
 
-  /// On first sight of a peer, reload a previously-cached avatar from disk (so
-  /// it survives restarts) or, if none, request one over the mesh.
   Future<void> _hydratePeerAvatar(MeshService service, MeshPeer peer) async {
     if (peer.avatarUrl != null ||
         peer.avatarFilePath != null ||
@@ -368,6 +362,8 @@ class MeshController extends StateNotifier<MeshUiState> {
       await s.cancel();
     }
     _subs.clear();
+    await _bridge?.dispose();
+    _bridge = null;
     final service = _service;
     _service = null;
     _profileAsked.clear();
@@ -377,251 +373,8 @@ class MeshController extends StateNotifier<MeshUiState> {
     }
   }
 
-  // ---- Sending --------------------------------------------------------------
-
-  Future<void> sendNearby(String content, {String? channel}) async {
-    final service = _service;
-    if (service == null || content.trim().isEmpty) return;
-    await service.sendPublicMessage(content, channel: channel);
-    // Echo our own message into the nearby feed.
-    _onPublic(MeshPublicMessage(
-      senderPeerID: service.myPeerID,
-      senderNickname: _nickname(),
-      content: content,
-      messageId: 'self-${DateTime.now().microsecondsSinceEpoch}',
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      channel: channel,
-    ));
-  }
-
-  /// Joins/creates a mesh group [name]. A non-empty [password] makes it an
-  /// encrypted group (only members with the same password can read it).
-  Future<void> joinChannel(String name, {String password = ''}) async {
-    final channel = name.startsWith('#') ? name : '#$name';
-    if (password.isNotEmpty) {
-      await _service?.setChannelPassword(channel, password);
-    }
-    if (state.channels.any((c) => c.name == channel)) return;
-    final channels = [...state.channels,
-      MeshChannel(name: channel, encrypted: password.isNotEmpty)];
-    state = state.copyWith(channels: channels);
-  }
-
-  void leaveChannel(String name) {
-    _service?.leaveChannel(name);
-    final channels = state.channels.where((c) => c.name != name).toList();
-    final msgs = Map<String, List<MeshPublicMessage>>.of(state.channelMessages)
-      ..remove(name);
-    state = state.copyWith(channels: channels, channelMessages: msgs);
-  }
-
-  Future<void> sendChannelMessage(String channel, String content) async {
-    final service = _service;
-    if (service == null || content.trim().isEmpty) return;
-    await service.sendPublicMessage(content, channel: channel);
-    _appendChannel(MeshPublicMessage(
-      senderPeerID: service.myPeerID,
-      senderNickname: _nickname(),
-      content: content,
-      messageId: 'self-${DateTime.now().microsecondsSinceEpoch}',
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      channel: channel,
-    ));
-  }
-
-  Future<void> sendPrivate(String peerID, String content) async {
-    final service = _service;
-    if (service == null || content.trim().isEmpty) return;
-    final messageId = await service.sendPrivateMessage(peerID, content);
-    final entry = MeshPrivateEntry(
-      messageId: messageId,
-      content: content,
-      fromMe: true,
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-    );
-    _appendThread(peerID, entry);
-  }
-
-  // ---- File / media transfer ------------------------------------------------
-
-  /// Persists received/sent mesh media under the app documents dir so it renders
-  /// from disk (and survives restarts), returning the saved path.
-  Future<String?> _saveMeshFile(String fileName, Uint8List bytes) async {
-    try {
-      final dir = Directory('${(await getApplicationDocumentsDirectory()).path}'
-          '/mesh_files');
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      final stamp = DateTime.now().microsecondsSinceEpoch;
-      final safe = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-      final path = '${dir.path}/${stamp}_$safe';
-      await File(path).writeAsBytes(bytes, flush: true);
-      return path;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Sends a file/media attachment as an encrypted DM to [peerID].
-  Future<void> sendFileToPeer(
-    String peerID,
-    String fileName,
-    String mimeType,
-    Uint8List bytes,
-  ) async {
-    final service = _service;
-    if (service == null || bytes.isEmpty) return;
-    final path = await _saveMeshFile(fileName, bytes);
-    await service.sendFileToPeer(peerID, fileName, mimeType, bytes);
-    _appendThread(
-      peerID,
-      MeshPrivateEntry(
-        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
-        content: '',
-        fromMe: true,
-        timestampMs: DateTime.now().millisecondsSinceEpoch,
-        status: MeshDeliveryStatus.delivered,
-        filePath: path,
-        fileMime: mimeType,
-        fileName: fileName,
-      ),
-    );
-  }
-
-  /// Broadcasts a file/media attachment to the mesh — the open Nearby feed, or a
-  /// joined group [channel].
-  Future<void> sendFileBroadcast(
-    String fileName,
-    String mimeType,
-    Uint8List bytes, {
-    String? channel,
-  }) async {
-    final service = _service;
-    if (service == null || bytes.isEmpty) return;
-    final path = await _saveMeshFile(fileName, bytes);
-    await service.sendFileBroadcast(fileName, mimeType, bytes);
-    _onPublic(MeshPublicMessage(
-      senderPeerID: service.myPeerID,
-      senderNickname: _nickname(),
-      content: '',
-      messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      channel: channel,
-      filePath: path,
-      fileMime: mimeType,
-      fileName: fileName,
-    ));
-  }
-
-  Future<void> _onFile(MeshFileReceived event) async {
-    final path = await _saveMeshFile(event.fileName, event.bytes);
-    if (path == null) return;
-    if (event.isDirect) {
-      _appendThread(
-        event.fromPeerID,
-        MeshPrivateEntry(
-          messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
-          content: '',
-          fromMe: false,
-          timestampMs: DateTime.now().millisecondsSinceEpoch,
-          status: MeshDeliveryStatus.delivered,
-          filePath: path,
-          fileMime: event.mimeType,
-          fileName: event.fileName,
-        ),
-      );
-    } else {
-      _onPublic(MeshPublicMessage(
-        senderPeerID: event.fromPeerID,
-        senderNickname: event.senderNickname,
-        content: '',
-        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
-        timestampMs: DateTime.now().millisecondsSinceEpoch,
-        channel: event.channel,
-        filePath: path,
-        fileMime: event.mimeType,
-        fileName: event.fileName,
-      ));
-    }
-  }
-
-  final Set<String> _readAcked = {};
-
-  /// Sends read receipts for any inbound messages in [peerID]'s thread we
-  /// haven't acked yet. Idempotent — safe to call on every open/rebuild.
-  Future<void> markThreadRead(String peerID) async {
-    final service = _service;
-    if (service == null) return;
-    final thread = state.threads[peerID];
-    if (thread == null) return;
-    for (final entry in thread) {
-      if (entry.fromMe || _readAcked.contains(entry.messageId)) continue;
-      _readAcked.add(entry.messageId);
-      await service.sendReadReceipt(peerID, entry.messageId);
-    }
-  }
-
-  /// Opens the OS settings page so the user can grant Bluetooth permission
-  /// after denying it.
+  /// Opens the OS settings page so the user can grant Bluetooth permission.
   Future<void> openSystemSettings() async => _service?.openSystemSettings();
-
-  // ---- Event bridges --------------------------------------------------------
-
-  void _onPublic(MeshPublicMessage msg) {
-    // A message tagged with a group we've joined goes to that group's thread;
-    // everything else is the open Nearby feed.
-    final channel = msg.channel;
-    if (channel != null && state.channels.any((c) => c.name == channel)) {
-      _appendChannel(msg);
-      return;
-    }
-    final nearby = List.of(state.nearby)..add(msg);
-    if (nearby.length > 500) nearby.removeRange(0, nearby.length - 500);
-    state = state.copyWith(nearby: nearby);
-  }
-
-  void _appendChannel(MeshPublicMessage msg) {
-    final channel = msg.channel;
-    if (channel == null) return;
-    final map = Map<String, List<MeshPublicMessage>>.of(state.channelMessages);
-    final list = List.of(map[channel] ?? const <MeshPublicMessage>[])..add(msg);
-    if (list.length > 500) list.removeRange(0, list.length - 500);
-    map[channel] = list;
-    state = state.copyWith(channelMessages: map);
-  }
-
-  void _onPrivate(MeshPrivateMessage msg) {
-    _appendThread(
-      msg.senderPeerID,
-      MeshPrivateEntry(
-        messageId: msg.messageId,
-        content: msg.content,
-        fromMe: false,
-        timestampMs: msg.timestampMs,
-      ),
-    );
-  }
-
-  void _onReceipt(MeshReceipt receipt) {
-    final thread = state.threads[receipt.fromPeerID];
-    if (thread == null) return;
-    final updated = List.of(thread);
-    for (var i = 0; i < updated.length; i++) {
-      if (updated[i].messageId == receipt.messageId && updated[i].fromMe) {
-        updated[i].status =
-            receipt.isRead ? MeshDeliveryStatus.read : MeshDeliveryStatus.delivered;
-      }
-    }
-    final threads = Map<String, List<MeshPrivateEntry>>.of(state.threads);
-    threads[receipt.fromPeerID] = updated;
-    state = state.copyWith(threads: threads);
-  }
-
-  void _appendThread(String peerID, MeshPrivateEntry entry) {
-    final threads = Map<String, List<MeshPrivateEntry>>.of(state.threads);
-    final list = List.of(threads[peerID] ?? const <MeshPrivateEntry>[])..add(entry);
-    threads[peerID] = list;
-    state = state.copyWith(threads: threads);
-  }
 
   Future<void> shutdown() async => _teardown();
 }
@@ -630,13 +383,12 @@ class MeshController extends StateNotifier<MeshUiState> {
 final meshControllerProvider =
     StateNotifierProvider<MeshController, MeshUiState>((ref) {
   final controller = MeshController(
+    ref: ref,
     nickname: () {
       final nym = ref.read(appStateProvider).selfNym;
       return nym.isNotEmpty ? nym : 'nym';
     },
     nostrPubkey: () => ref.read(nostrControllerProvider).identity?.pubkey,
-    // Sign the mesh↔Nostr binding with the local key, when there is one. NIP-46
-    // remote signers have no local privkey → returns null → no link advertised.
     signSchnorr: (messageHex) {
       final priv = ref.read(nostrControllerProvider).identity?.privkey;
       return priv == null ? null : signId(messageHex, priv);
