@@ -316,9 +316,13 @@ Widget commandItemRow(
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // The command token (`?ask`, `/help`) is syntax — never localized,
-            // and never wrapped (ellipsis if somehow huge).
-            Flexible(
+            // The command token (`?ask`, `/help`) is syntax — never localized.
+            // It sizes to its CONTENT (capped so a long alias list ellipsizes
+            // rather than starving the description) so the description gets ALL
+            // the remaining width — not just half, which is what an equal-flex
+            // Flexible/Expanded pair would force.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 175),
               child: Text(
                 name,
                 softWrap: false,
@@ -330,10 +334,10 @@ Widget commandItemRow(
               ),
             ),
             const SizedBox(width: 12),
-            // The description fills the rest and is right-anchored like the
-            // PWA's space-between `.command-desc`, but WRAPS so the whole,
-            // localized text shows instead of being truncated. Localized via
-            // `tr()` here (both palettes' catalogues store English source).
+            // The description fills ALL remaining width and is right-anchored
+            // like the PWA's space-between `.command-desc`, wrapping so the
+            // whole localized text shows. Localized via `tr()` here (both
+            // palettes' catalogues store English source).
             Expanded(
               child: Text(
                 tr(desc),
