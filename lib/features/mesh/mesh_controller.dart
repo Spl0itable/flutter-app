@@ -81,6 +81,13 @@ class MeshUiState {
       error: clearError ? null : (error ?? this.error),
     );
   }
+
+  MeshPeer? peerById(String peerID) {
+    for (final p in peers) {
+      if (p.peerID == peerID) return p;
+    }
+    return null;
+  }
 }
 
 /// Owns the [MeshService] lifecycle and bridges its events into an observable
@@ -211,9 +218,25 @@ class MeshController extends StateNotifier<MeshUiState> {
     _appendThread(peerID, entry);
   }
 
-  Future<void> markRead(String peerID, String messageId) async {
-    await _service?.sendReadReceipt(peerID, messageId);
+  final Set<String> _readAcked = {};
+
+  /// Sends read receipts for any inbound messages in [peerID]'s thread we
+  /// haven't acked yet. Idempotent — safe to call on every open/rebuild.
+  Future<void> markThreadRead(String peerID) async {
+    final service = _service;
+    if (service == null) return;
+    final thread = state.threads[peerID];
+    if (thread == null) return;
+    for (final entry in thread) {
+      if (entry.fromMe || _readAcked.contains(entry.messageId)) continue;
+      _readAcked.add(entry.messageId);
+      await service.sendReadReceipt(peerID, entry.messageId);
+    }
   }
+
+  /// Opens the OS settings page so the user can grant Bluetooth permission
+  /// after denying it.
+  Future<void> openSystemSettings() async => _service?.openSystemSettings();
 
   // ---- Event bridges --------------------------------------------------------
 

@@ -65,4 +65,8 @@ abstract class MeshTransport {
 
   /// The number of currently-connected direct links.
   int get connectedLinkCount;
+
+  /// Opens the OS app-settings page so the user can grant Bluetooth permission
+  /// after a denial. No-op where unsupported.
+  Future<void> openSystemSettings();
 }

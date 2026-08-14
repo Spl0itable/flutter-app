@@ -13,6 +13,11 @@ class MeshPeer {
     this.rssi = 0,
     this.isDirectLink = false,
     this.isVerified = false,
+    this.nostrPubkey,
+    this.nostrLinkVerified = false,
+    this.avatarUrl,
+    this.bannerUrl,
+    this.avatarFilePath,
     DateTime? lastSeen,
   }) : lastSeen = lastSeen ?? DateTime.now();
 
@@ -35,6 +40,24 @@ class MeshPeer {
   /// True once the announcement signature verified and the peerID matched the
   /// announced Noise key.
   bool isVerified;
+
+  /// The peer's linked Nostr pubkey (64-hex), when they advertised a signed
+  /// npub-link TLV in their announcement. Lets the UI reuse the peer's real
+  /// Nostr profile (avatar/banner/cosmetics) offline.
+  String? nostrPubkey;
+
+  /// True when the schnorr signature binding [nostrPubkey] to this peer's mesh
+  /// Noise key verified — i.e. the Nostr identity really vouches for this peer.
+  bool nostrLinkVerified;
+
+  /// Remote avatar/banner URL resolved from the linked Nostr profile (served
+  /// from the app's image cache when offline).
+  String? avatarUrl;
+  String? bannerUrl;
+
+  /// Local file path of an avatar transferred directly over the mesh (used when
+  /// no cached Nostr avatar is available — see the mesh profile transfer).
+  String? avatarFilePath;
 
   DateTime lastSeen;
 

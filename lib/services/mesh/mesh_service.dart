@@ -72,6 +72,9 @@ class MeshService {
   int get connectedLinkCount => _transport.connectedLinkCount;
   MeshTransportAvailability get availability => _transport.availability;
 
+  /// Opens the OS settings page so the user can grant Bluetooth permission.
+  Future<void> openSystemSettings() => _transport.openSystemSettings();
+
   List<MeshPeer> get peers => _peers.values.toList(growable: false);
   Stream<List<MeshPeer>> get peersStream => _peersChanged.stream;
   Stream<MeshPublicMessage> get onPublicMessage => _publicMessages.stream;

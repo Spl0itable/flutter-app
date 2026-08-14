@@ -69,6 +69,8 @@ class FakeMeshTransport implements MeshTransport {
   }
   @override
   Future<void> stop() async {}
+  @override
+  Future<void> openSystemSettings() async {}
 }
 
 Future<T> _firstEvent<T>(Stream<T> stream,

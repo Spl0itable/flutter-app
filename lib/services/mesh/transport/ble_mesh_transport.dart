@@ -293,6 +293,17 @@ class BleMeshTransport implements MeshTransport {
     } catch (_) {}
   }
 
+  @override
+  Future<void> openSystemSettings() async {
+    try {
+      await _central.showAppSettings();
+    } catch (_) {
+      try {
+        await _peripheral.showAppSettings();
+      } catch (_) {}
+    }
+  }
+
   MeshTransportAvailability _mapState(BluetoothLowEnergyState state) {
     switch (state) {
       case BluetoothLowEnergyState.poweredOn:
