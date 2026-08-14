@@ -199,6 +199,33 @@ class MeshBridge {
   /// Resolves the radio peerID for an outgoing DM to [pubkey].
   String? peerIdForPubkey(String pubkey) => _peerIdByPubkey[pubkey.toLowerCase()];
 
+  /// The 64-hex pubkey a peerID maps to (public accessor for the voice session).
+  String pubkeyForPeerId(String peerID) => _pubkeyForPeerId(peerID);
+
+  /// A display nym for a peerID (announced nickname, else a short id).
+  String nymForPeerId(String peerID) =>
+      _nymByPubkey[_pubkeyForPeerId(peerID)] ?? peerID;
+
+  // ---- Push-to-talk voice --------------------------------------------------
+
+  /// Inbound live voice frames (µ-law PTT), fed to the streaming player.
+  Stream<MeshVoiceFrameEvent> get onVoiceFrame => _service.onVoiceFrame;
+
+  /// Sends one PTT voice frame for the active [view] (channel broadcast, or a
+  /// directed 1:1 frame when the peer is in range).
+  void sendVoiceFrame(ChatView view, Uint8List mulaw, int seq) {
+    if (view.kind == ViewKind.channel) {
+      final ch = view.id.toLowerCase();
+      unawaited(_service.sendVoiceFrame(mulaw, seq,
+          channel: ch == kMeshNearbyChannel ? null : '#$ch'));
+    } else if (view.kind == ViewKind.pm) {
+      final peerId = peerIdForPubkey(view.id);
+      if (peerId != null) {
+        unawaited(_service.sendVoiceFrame(mulaw, seq, toPeerID: peerId));
+      }
+    }
+  }
+
   /// Proactively opens a mesh DM with [peer] (from the peers list): registers
   /// the routing, marks the conversation mesh-backed, and ensures the PM row
   /// exists. Returns the pubkey to `switchView(ChatView.pm(pubkey))` to.

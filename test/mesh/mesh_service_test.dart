@@ -267,6 +267,38 @@ void main() {
     expect(r.isDirect, isTrue); // arrived over the Noise session
   });
 
+  test('a push-to-talk voice frame is delivered to nearby peers', () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGets = _firstEvent(bob.onVoiceFrame);
+    final mulaw = Uint8List.fromList(List.generate(160, (i) => i & 0xFF));
+    await alice.sendVoiceFrame(mulaw, 42, channel: '#mesh');
+
+    final v = await bobGets;
+    expect(v.senderPeerID, alice.myPeerID);
+    expect(v.seq, 42);
+    expect(v.channel, '#mesh');
+    expect(v.isDirect, isFalse);
+    expect(v.mulaw, equals(mulaw));
+  });
+
+  test('a directed 1:1 voice frame reaches only the addressed peer', () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGets = _firstEvent(bob.onVoiceFrame);
+    final mulaw = Uint8List.fromList(List.generate(80, (i) => (i * 2) & 0xFF));
+    await alice.sendVoiceFrame(mulaw, 7, toPeerID: bob.myPeerID);
+
+    final v = await bobGets;
+    expect(v.isDirect, isTrue);
+    expect(v.seq, 7);
+    expect(v.mulaw, equals(mulaw));
+  });
+
   test('a broadcast file is delivered to nearby peers as a public attachment',
       () async {
     await alice.start();
