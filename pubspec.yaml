@@ -89,6 +89,7 @@ dependencies:
   webview_flutter_android: ^4.0.0
   webview_flutter_wkwebview: ^3.0.0
   webview_flutter_web: any
+  bluetooth_low_energy: ^6.2.1
 
 dev_dependencies:
   flutter_test:
