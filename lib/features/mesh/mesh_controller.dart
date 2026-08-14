@@ -40,6 +40,14 @@ class MeshPrivateEntry {
 
 enum MeshDeliveryStatus { sending, delivered, read }
 
+/// A mesh group channel the user has joined. [encrypted] is true for a
+/// password-protected (AES-GCM) group; false for an open named channel.
+class MeshChannel {
+  const MeshChannel({required this.name, required this.encrypted});
+  final String name;
+  final bool encrypted;
+}
+
 /// Immutable UI snapshot of the mesh for widgets to render.
 @immutable
 class MeshUiState {
@@ -52,6 +60,8 @@ class MeshUiState {
     this.peers = const [],
     this.nearby = const [],
     this.threads = const {},
+    this.channels = const [],
+    this.channelMessages = const {},
     this.error,
   });
 
@@ -63,6 +73,13 @@ class MeshUiState {
   final List<MeshPeer> peers;
   final List<MeshPublicMessage> nearby;
   final Map<String, List<MeshPrivateEntry>> threads;
+
+  /// Joined mesh group channels.
+  final List<MeshChannel> channels;
+
+  /// Messages per joined group channel (keyed by channel name).
+  final Map<String, List<MeshPublicMessage>> channelMessages;
+
   final String? error;
 
   MeshUiState copyWith({
@@ -74,6 +91,8 @@ class MeshUiState {
     List<MeshPeer>? peers,
     List<MeshPublicMessage>? nearby,
     Map<String, List<MeshPrivateEntry>>? threads,
+    List<MeshChannel>? channels,
+    Map<String, List<MeshPublicMessage>>? channelMessages,
     String? error,
     bool clearError = false,
   }) {
@@ -86,6 +105,8 @@ class MeshUiState {
       peers: peers ?? this.peers,
       nearby: nearby ?? this.nearby,
       threads: threads ?? this.threads,
+      channels: channels ?? this.channels,
+      channelMessages: channelMessages ?? this.channelMessages,
       error: clearError ? null : (error ?? this.error),
     );
   }
@@ -361,6 +382,41 @@ class MeshController extends StateNotifier<MeshUiState> {
     ));
   }
 
+  /// Joins/creates a mesh group [name]. A non-empty [password] makes it an
+  /// encrypted group (only members with the same password can read it).
+  Future<void> joinChannel(String name, {String password = ''}) async {
+    final channel = name.startsWith('#') ? name : '#$name';
+    if (password.isNotEmpty) {
+      await _service?.setChannelPassword(channel, password);
+    }
+    if (state.channels.any((c) => c.name == channel)) return;
+    final channels = [...state.channels,
+      MeshChannel(name: channel, encrypted: password.isNotEmpty)];
+    state = state.copyWith(channels: channels);
+  }
+
+  void leaveChannel(String name) {
+    _service?.leaveChannel(name);
+    final channels = state.channels.where((c) => c.name != name).toList();
+    final msgs = Map<String, List<MeshPublicMessage>>.of(state.channelMessages)
+      ..remove(name);
+    state = state.copyWith(channels: channels, channelMessages: msgs);
+  }
+
+  Future<void> sendChannelMessage(String channel, String content) async {
+    final service = _service;
+    if (service == null || content.trim().isEmpty) return;
+    await service.sendPublicMessage(content, channel: channel);
+    _appendChannel(MeshPublicMessage(
+      senderPeerID: service.myPeerID,
+      senderNickname: _nickname(),
+      content: content,
+      messageId: 'self-${DateTime.now().microsecondsSinceEpoch}',
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      channel: channel,
+    ));
+  }
+
   Future<void> sendPrivate(String peerID, String content) async {
     final service = _service;
     if (service == null || content.trim().isEmpty) return;
@@ -397,9 +453,26 @@ class MeshController extends StateNotifier<MeshUiState> {
   // ---- Event bridges --------------------------------------------------------
 
   void _onPublic(MeshPublicMessage msg) {
+    // A message tagged with a group we've joined goes to that group's thread;
+    // everything else is the open Nearby feed.
+    final channel = msg.channel;
+    if (channel != null && state.channels.any((c) => c.name == channel)) {
+      _appendChannel(msg);
+      return;
+    }
     final nearby = List.of(state.nearby)..add(msg);
     if (nearby.length > 500) nearby.removeRange(0, nearby.length - 500);
     state = state.copyWith(nearby: nearby);
+  }
+
+  void _appendChannel(MeshPublicMessage msg) {
+    final channel = msg.channel;
+    if (channel == null) return;
+    final map = Map<String, List<MeshPublicMessage>>.of(state.channelMessages);
+    final list = List.of(map[channel] ?? const <MeshPublicMessage>[])..add(msg);
+    if (list.length > 500) list.removeRange(0, list.length - 500);
+    map[channel] = list;
+    state = state.copyWith(channelMessages: map);
   }
 
   void _onPrivate(MeshPrivateMessage msg) {

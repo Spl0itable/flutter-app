@@ -93,6 +93,17 @@ class MeshSidebarSection extends ConsumerWidget {
             subtitle: tr('public · everyone in range'),
             onTap: () => open(const MeshScreen()),
           ),
+          // Joined mesh group channels.
+          for (final ch in mesh.channels)
+            _MeshRow(
+              colors: c,
+              textSize: textSize,
+              leading: _HashAvatar(colors: c),
+              label: ch.name,
+              locked: ch.encrypted,
+              onTap: () => open(MeshChannelScreen(
+                  channel: ch.name, encrypted: ch.encrypted)),
+            ),
           // Encrypted DMs, one per peer.
           for (final peer in peers)
             _MeshRow(
@@ -132,6 +143,7 @@ class _MeshRow extends StatelessWidget {
     required this.onTap,
     this.subtitle,
     this.verified = false,
+    this.locked = false,
   });
 
   final NymColors colors;
@@ -140,6 +152,7 @@ class _MeshRow extends StatelessWidget {
   final String label;
   final String? subtitle;
   final bool verified;
+  final bool locked;
   final VoidCallback onTap;
 
   @override
@@ -181,6 +194,10 @@ class _MeshRow extends StatelessWidget {
                             const SizedBox(width: 4),
                             NymSvgIcon(NymIcons.friendBadge,
                                 size: 12, color: colors.primary),
+                          ],
+                          if (locked) ...[
+                            const SizedBox(width: 4),
+                            NymSvgIcon(NymIcons.lock, size: 11, color: colors.purple),
                           ],
                         ],
                       ),

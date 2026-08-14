@@ -42,6 +42,13 @@ class MeshScreen extends ConsumerWidget {
               const Text('Bluetooth Mesh'),
             ],
           ),
+          actions: [
+            IconButton(
+              tooltip: 'Join a group',
+              icon: NymSvgIcon(NymIcons.groupGlyph, size: 18, color: c.primary),
+              onPressed: () => showJoinMeshGroupDialog(context, ref),
+            ),
+          ],
           bottom: TabBar(
             labelColor: c.primary,
             unselectedLabelColor: c.textDim,
@@ -232,6 +239,143 @@ class _PeersTab extends StatelessWidget {
       },
     );
   }
+}
+
+/// A mesh group channel — an open or password-encrypted broadcast room. Renders
+/// through the same canonical message list as Nearby/DMs.
+class MeshChannelScreen extends ConsumerWidget {
+  const MeshChannelScreen({super.key, required this.channel, this.encrypted = false});
+  final String channel;
+  final bool encrypted;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.nym;
+    final settings = ref.watch(settingsProvider);
+    final mesh = ref.watch(meshControllerProvider);
+    final msgs = mesh.channelMessages[channel] ?? const [];
+    final messages = [
+      for (final m in msgs)
+        Message(
+          id: m.messageId,
+          author: m.senderNickname,
+          pubkey: mesh.peerById(m.senderPeerID)?.nostrPubkey ?? m.senderPeerID,
+          content: m.content,
+          createdAt: m.timestampMs ~/ 1000,
+          ms: m.timestampMs,
+          isOwn: m.senderPeerID == mesh.myPeerID,
+          channel: channel,
+          eventKind: 20000,
+          deliveryStatus: DeliveryStatus.sent,
+        ),
+    ];
+    return Scaffold(
+      backgroundColor: c.bg,
+      appBar: AppBar(
+        backgroundColor: c.bgSecondary,
+        foregroundColor: c.text,
+        title: Row(
+          children: [
+            if (encrypted) ...[
+              NymSvgIcon(NymIcons.lock, size: 15, color: c.purple),
+              const SizedBox(width: 8),
+            ],
+            Expanded(child: Text(channel, overflow: TextOverflow.ellipsis)),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Leave group',
+            icon: NymSvgIcon(NymIcons.close, size: 16, color: c.textDim),
+            onPressed: () {
+              ref.read(meshControllerProvider.notifier).leaveChannel(channel);
+              Navigator.of(context).maybePop();
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty
+                ? _empty(
+                    c,
+                    encrypted
+                        ? 'Encrypted group.\nMessages are sealed with the shared password.'
+                        : 'Open mesh group.\nEveryone in range with this channel can read it.')
+                : _CanonicalMessageList(messages: messages, settings: settings),
+          ),
+          _Composer(
+            colors: c,
+            enabled: mesh.running,
+            hint: encrypted ? 'Encrypted group message' : 'Message $channel',
+            onSend: (text) => ref
+                .read(meshControllerProvider.notifier)
+                .sendChannelMessage(channel, text),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Prompts for a mesh group name + optional password, joins it, and opens it.
+Future<void> showJoinMeshGroupDialog(BuildContext context, WidgetRef ref) async {
+  final c = context.nym;
+  final nameCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  final joined = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: c.bgSecondary,
+      title: Text('Join a mesh group', style: TextStyle(color: c.text)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: nameCtrl,
+            autofocus: true,
+            style: TextStyle(color: c.text),
+            decoration: InputDecoration(
+              labelText: 'Group name (e.g. crew)',
+              labelStyle: TextStyle(color: c.textDim),
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: passCtrl,
+            obscureText: true,
+            style: TextStyle(color: c.text),
+            decoration: InputDecoration(
+              labelText: 'Password (optional — encrypts the group)',
+              labelStyle: TextStyle(color: c.textDim),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: Text('Cancel', style: TextStyle(color: c.textDim)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text('Join', style: TextStyle(color: c.primary)),
+        ),
+      ],
+    ),
+  );
+  final name = nameCtrl.text.trim();
+  final pass = passCtrl.text;
+  nameCtrl.dispose();
+  passCtrl.dispose();
+  if (joined != true || name.isEmpty || !context.mounted) return;
+  await ref.read(meshControllerProvider.notifier).joinChannel(name, password: pass);
+  final channel = name.startsWith('#') ? name : '#$name';
+  if (!context.mounted) return;
+  Navigator.of(context).push(MaterialPageRoute<void>(
+    builder: (_) => MeshChannelScreen(channel: channel, encrypted: pass.isNotEmpty),
+  ));
 }
 
 /// An end-to-end-encrypted mesh DM thread with one [peer].

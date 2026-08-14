@@ -184,6 +184,39 @@ void main() {
     expect(chunks.join(), long);
   });
 
+  test('encrypted group message is readable only by members with the password',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    await alice.setChannelPassword('#crew', 'sharedpass');
+    await bob.setChannelPassword('#crew', 'sharedpass');
+
+    final bobGets = _firstEvent(bob.onPublicMessage);
+    await alice.sendPublicMessage('meet at 8', channel: '#crew');
+
+    final msg = await bobGets;
+    expect(msg.channel, '#crew');
+    expect(msg.content, 'meet at 8'); // decrypted with the shared key
+    expect(msg.senderPeerID, alice.myPeerID);
+  });
+
+  test('encrypted group message is dropped by a non-member', () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // Only alice has the key; bob never joins the channel.
+    await alice.setChannelPassword('#secret', 'pw');
+    var received = false;
+    final sub = bob.onPublicMessage.listen((_) => received = true);
+    await alice.sendPublicMessage('classified', channel: '#secret');
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    await sub.cancel();
+    expect(received, isFalse); // undecryptable → not surfaced
+  });
+
   test('profile request transfers a fragmented avatar back to the requester',
       () async {
     await alice.start();

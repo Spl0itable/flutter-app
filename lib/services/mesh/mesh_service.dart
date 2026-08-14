@@ -9,6 +9,7 @@ import 'fragmentation.dart';
 import 'mesh_constants.dart';
 import 'mesh_events.dart';
 import 'mesh_peer.dart';
+import 'noise/channel_encryption.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
 import 'noise/nostr_link.dart';
@@ -54,6 +55,7 @@ class MeshService {
       _profileProvider;
 
   late final NoiseSessionManager _noise = NoiseSessionManager(identity);
+  final MeshChannelEncryption _channelCrypto = MeshChannelEncryption();
   final SeenPackets _seen = SeenPackets();
   final FragmentReassembler _reassembler = FragmentReassembler();
   final _uuid = const Uuid();
@@ -149,14 +151,21 @@ class MeshService {
     List<String>? mentions,
   }) async {
     final messageId = _uuid.v4();
+    // A password-protected channel is a mesh group chat: seal the content with
+    // the shared AES key so only members can read it.
+    final encrypted =
+        channel != null && _channelCrypto.hasKey(channel);
     final msg = BitchatMessage(
       id: messageId,
       sender: _nicknameProvider(),
-      content: content,
+      content: encrypted ? '' : content,
       timestampMs: DateTime.now().millisecondsSinceEpoch,
       senderPeerID: identity.peerID,
       channel: channel,
       mentions: mentions,
+      isEncrypted: encrypted,
+      encryptedContent:
+          encrypted ? await _channelCrypto.encrypt(channel, content) : null,
     );
     final packet = await _buildPacket(
       type: MeshMessageType.message,
@@ -166,6 +175,16 @@ class MeshService {
     await _sendPacket(packet);
     return messageId;
   }
+
+  /// Joins/creates an encrypted mesh group [channel] with a shared [password]
+  /// (bitchat password channels). Members who set the same password can read it.
+  Future<void> setChannelPassword(String channel, String password) =>
+      _channelCrypto.setChannelPassword(channel, password);
+
+  /// True when we hold the key for an encrypted [channel].
+  bool hasChannelKey(String channel) => _channelCrypto.hasKey(channel);
+
+  void leaveChannel(String channel) => _channelCrypto.removeChannel(channel);
 
   /// Sends a private [content] message to [peerID], performing a Noise handshake
   /// first if needed (the message is queued and flushed on establishment).
@@ -233,7 +252,7 @@ class MeshService {
         await _handleAnnounce(packet, senderPeerID, rssi);
         break;
       case MeshMessageType.message:
-        _handlePublicMessage(packet, senderPeerID);
+        await _handlePublicMessage(packet, senderPeerID);
         break;
       case MeshMessageType.leave:
         _removePeer(senderPeerID);
@@ -311,14 +330,29 @@ class MeshService {
     _emitPeers();
   }
 
-  void _handlePublicMessage(BitchatPacket packet, String senderPeerID) {
+  Future<void> _handlePublicMessage(
+      BitchatPacket packet, String senderPeerID) async {
     final msg = BitchatMessage.fromBinaryPayload(packet.payload);
-    if (msg == null || msg.isEncrypted) return;
+    if (msg == null) return;
+    var content = msg.content;
+    if (msg.isEncrypted) {
+      // Encrypted group message: readable only if we hold the channel key.
+      final channel = msg.channel;
+      final enc = msg.encryptedContent;
+      if (channel == null || enc == null || !_channelCrypto.hasKey(channel)) {
+        return;
+      }
+      try {
+        content = await _channelCrypto.decrypt(channel, enc);
+      } catch (_) {
+        return;
+      }
+    }
     _touchPeer(senderPeerID, nickname: msg.sender);
     _publicMessages.add(MeshPublicMessage(
       senderPeerID: msg.senderPeerID ?? senderPeerID,
       senderNickname: msg.sender,
-      content: msg.content,
+      content: content,
       messageId: msg.id,
       timestampMs: msg.timestampMs,
       channel: msg.channel,
