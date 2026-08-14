@@ -79,6 +79,7 @@ class MeshService {
   final _profiles = StreamController<MeshProfileReceived>.broadcast();
   final _files = StreamController<MeshFileReceived>.broadcast();
   final _typing = StreamController<MeshTypingEvent>.broadcast();
+  final _reactions = StreamController<MeshReactionEvent>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
 
   /// Peers we've already asked for a profile (avoids re-requesting on every
@@ -109,6 +110,65 @@ class MeshService {
   Stream<MeshProfileReceived> get onProfile => _profiles.stream;
   Stream<MeshFileReceived> get onFile => _files.stream;
   Stream<MeshTypingEvent> get onTyping => _typing.stream;
+  Stream<MeshReactionEvent> get onReaction => _reactions.stream;
+
+  /// Broadcasts an emoji reaction to a public/channel message [targetId].
+  Future<void> sendChannelReaction(
+      String targetId, String emoji, bool remove) async {
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.nymReaction,
+      payload: _encodeReaction(targetId, emoji, remove),
+    ));
+  }
+
+  /// Sends an encrypted emoji reaction to a 1:1 message [targetId] over the
+  /// Noise session with [peerID] (handshaking first if needed).
+  Future<void> sendPrivateReaction(
+      String peerID, String targetId, String emoji, bool remove) async {
+    final plaintext = NoisePayload(
+      NoisePayloadType.reaction,
+      _encodeReaction(targetId, emoji, remove),
+    ).encode();
+    await _sendOrQueueEncrypted(peerID, plaintext);
+  }
+
+  Uint8List _encodeReaction(String targetId, String emoji, bool remove) {
+    final out = BytesBuilder();
+    out.addByte(remove ? 0x01 : 0);
+    void lp(String s) {
+      var b = Uint8List.fromList(utf8.encode(s));
+      if (b.length > 255) b = b.sublist(0, 255);
+      out.addByte(b.length);
+      out.add(b);
+    }
+
+    lp(targetId);
+    lp(emoji);
+    lp(_nicknameProvider());
+    return out.toBytes();
+  }
+
+  static _ReactionData? _decodeReaction(Uint8List data) {
+    if (data.isEmpty) return null;
+    var off = 0;
+    final remove = (data[off++] & 0x01) != 0;
+    String? read() {
+      if (off >= data.length) return null;
+      final len = data[off++];
+      if (off + len > data.length) return null;
+      final s = utf8.decode(data.sublist(off, off + len), allowMalformed: true);
+      off += len;
+      return s;
+    }
+
+    final targetId = read();
+    final emoji = read();
+    final nick = read() ?? '';
+    if (targetId == null || emoji == null || targetId.isEmpty || emoji.isEmpty) {
+      return null;
+    }
+    return _ReactionData(targetId, emoji, remove, nick);
+  }
 
   /// Broadcasts (or directs) an ephemeral typing indicator. [channel] tags a
   /// channel indicator (null = nearby); [toPeerID] directs it to a single peer
@@ -316,6 +376,7 @@ class MeshService {
     _profiles.close();
     _files.close();
     _typing.close();
+    _reactions.close();
     _peersChanged.close();
   }
 
@@ -376,6 +437,9 @@ class MeshService {
         break;
       case MeshMessageType.nymTyping:
         if (forUs) _handleTyping(packet, senderPeerID);
+        break;
+      case MeshMessageType.nymReaction:
+        _handleReactionBroadcast(packet, senderPeerID);
         break;
       default:
         break;
@@ -542,9 +606,38 @@ class MeshService {
           ));
         }
         break;
+      case NoisePayloadType.reaction:
+        final r = _decodeReaction(noisePayload.data);
+        if (r != null) {
+          _touchPeer(senderPeerID);
+          _reactions.add(MeshReactionEvent(
+            senderPeerID: senderPeerID,
+            targetId: r.targetId,
+            emoji: r.emoji,
+            isRemove: r.isRemove,
+            reactorNick: r.reactorNick,
+            isDirect: true,
+          ));
+        }
+        break;
       default:
         break;
     }
+  }
+
+  void _handleReactionBroadcast(BitchatPacket packet, String senderPeerID) {
+    final r = _decodeReaction(packet.payload);
+    if (r == null) return;
+    _reactions.add(MeshReactionEvent(
+      senderPeerID: senderPeerID,
+      targetId: r.targetId,
+      emoji: r.emoji,
+      isRemove: r.isRemove,
+      reactorNick: r.reactorNick.isNotEmpty
+          ? r.reactorNick
+          : (_peers[senderPeerID]?.nickname ?? ''),
+      isDirect: false,
+    ));
   }
 
   void _handleFileBroadcast(BitchatPacket packet, String senderPeerID) {
@@ -804,4 +897,13 @@ class MeshService {
 
   String _hex(Uint8List bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+}
+
+/// Decoded mesh reaction payload (target message id + emoji + add/remove).
+class _ReactionData {
+  _ReactionData(this.targetId, this.emoji, this.isRemove, this.reactorNick);
+  final String targetId;
+  final String emoji;
+  final bool isRemove;
+  final String reactorNick;
 }

@@ -236,6 +236,37 @@ void main() {
     expect(file.bytes, equals(bytes)); // encrypted + fragmented, then rejoined
   });
 
+  test('a channel emoji reaction is broadcast to peers', () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGets = _firstEvent(bob.onReaction);
+    await alice.sendChannelReaction('msg-123', '👍', false);
+
+    final r = await bobGets;
+    expect(r.senderPeerID, alice.myPeerID);
+    expect(r.targetId, 'msg-123');
+    expect(r.emoji, '👍');
+    expect(r.isRemove, isFalse);
+    expect(r.isDirect, isFalse);
+  });
+
+  test('a 1:1 emoji reaction is delivered encrypted to the peer', () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGets = _firstEvent(bob.onReaction);
+    await alice.sendPrivateReaction(bob.myPeerID, 'dm-77', '❤️', false);
+
+    final r = await bobGets;
+    expect(r.senderPeerID, alice.myPeerID);
+    expect(r.targetId, 'dm-77');
+    expect(r.emoji, '❤️');
+    expect(r.isDirect, isTrue); // arrived over the Noise session
+  });
+
   test('a broadcast file is delivered to nearby peers as a public attachment',
       () async {
     await alice.start();

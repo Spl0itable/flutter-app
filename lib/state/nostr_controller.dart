@@ -6015,6 +6015,17 @@ class NostrController {
       reactorNym: state.selfNym,
     );
 
+    // Bluetooth-mesh routing: a reaction in a mesh conversation goes out over
+    // BLE (broadcast for a channel, encrypted for a DM) instead of to relays.
+    final meshBridge = _ref.read(meshControllerProvider.notifier).bridge;
+    if (meshBridge != null && meshBridge.isMeshView(state.view)) {
+      final wireId = (kind == '1059' || kind == '14')
+          ? (appState.messageById(messageId)?.nymMessageId ?? messageId)
+          : messageId;
+      meshBridge.sendReaction(state.view, wireId, emoji, remove: remove);
+      return true;
+    }
+
     final service = _service;
     if (service == null || !service.canSign) return false;
 

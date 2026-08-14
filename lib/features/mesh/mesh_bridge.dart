@@ -101,6 +101,7 @@ class MeshBridge {
     _subs.add(_service.onReceipt.listen(_onReceipt));
     _subs.add(_service.onFile.listen(_onFile));
     _subs.add(_service.onTyping.listen(_onTyping));
+    _subs.add(_service.onReaction.listen(_onReaction));
     // Register the always-present Nearby channel so it appears immediately.
     _app.addChannel(kMeshNearbyChannel);
     // Send read receipts over the mesh whenever a mesh DM becomes the active
@@ -275,6 +276,33 @@ class MeshBridge {
       typing: e.isStart,
       nym: e.nickname,
     );
+  }
+
+  void _onReaction(MeshReactionEvent e) {
+    final pubkey = _pubkeyForPeerId(e.senderPeerID);
+    // Canonicalize the target to the stored Message.id (a DM reaction targets
+    // the shared id, which is indexed as the message's nymMessageId).
+    final target = _app.messageById(e.targetId)?.id ?? e.targetId;
+    _app.applyReaction(
+      messageId: target,
+      emoji: e.emoji,
+      reactor: pubkey,
+      removed: e.isRemove,
+      reactorNym: e.reactorNick,
+    );
+  }
+
+  /// Sends an emoji reaction to [targetId] over the mesh for the active [view].
+  void sendReaction(ChatView view, String targetId, String emoji,
+      {required bool remove}) {
+    if (view.kind == ViewKind.channel) {
+      unawaited(_service.sendChannelReaction(targetId, emoji, remove));
+    } else if (view.kind == ViewKind.pm) {
+      final peerId = peerIdForPubkey(view.id);
+      if (peerId != null) {
+        unawaited(_service.sendPrivateReaction(peerId, targetId, emoji, remove));
+      }
+    }
   }
 
   /// Sends a typing indicator for the active mesh [view] (throttled by the
