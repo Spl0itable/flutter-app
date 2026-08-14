@@ -13,6 +13,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/mesh/mesh_sidebar_section.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
@@ -735,6 +736,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 _header(context, app.selfNym),
                 if (widget.compact)
                   _SidebarActions(onItemSelected: widget.onItemSelected),
+                // The Bluetooth-mesh section (Nearby + encrypted peer DMs) sits
+                // above the Nostr-backed sections. It renders nothing when the
+                // mesh isn't running, so it never affects them.
+                MeshSidebarSection(onItemSelected: widget.onItemSelected),
                 // PM/group-only mode hides the whole PUBLIC CHANNELS section
                 // (`applyGroupChatPMOnlyMode` sets `display:none` on the
                 // `#channelList` `.nav-section`, pms.js:3862-3866).

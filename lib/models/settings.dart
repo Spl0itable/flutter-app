@@ -33,7 +33,7 @@ class Settings {
     this.chatViewMode = 'single',
     this.columnsWallpaper = false,
     this.lowDataMode = false,
-    this.meshEnabled = false,
+    this.meshEnabled = true,
     this.textSize = 15,
     this.transparencyEnabled = false,
     this.groupChatPMOnlyMode = false,
@@ -310,7 +310,9 @@ class Settings {
       columnsWallpaper:
           kv.getBool(StorageKeys.columnsWallpaper, defaultValue: false),
       lowDataMode: kv.getBool(StorageKeys.lowDataMode, defaultValue: false),
-      meshEnabled: kv.getBool(StorageKeys.meshEnabled, defaultValue: false),
+      // Mesh runs by default; the radio only actually starts once Bluetooth
+      // permission is granted. Users who explicitly turn it off keep it off.
+      meshEnabled: kv.getBool(StorageKeys.meshEnabled, defaultValue: true),
       textSize: kv.getInt(StorageKeys.textSize, defaultValue: 15),
       transparencyEnabled:
           kv.getBool(StorageKeys.transparencyEnabled, defaultValue: false),
