@@ -13,6 +13,7 @@ import 'noise/channel_encryption.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
 import 'noise/nostr_link.dart';
+import 'protocol/bitchat_file_packet.dart';
 import 'protocol/bitchat_message.dart';
 import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
@@ -75,6 +76,7 @@ class MeshService {
   final _privateMessages = StreamController<MeshPrivateMessage>.broadcast();
   final _receipts = StreamController<MeshReceipt>.broadcast();
   final _profiles = StreamController<MeshProfileReceived>.broadcast();
+  final _files = StreamController<MeshFileReceived>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
 
   /// Peers we've already asked for a profile (avoids re-requesting on every
@@ -103,6 +105,7 @@ class MeshService {
   Stream<MeshPrivateMessage> get onPrivateMessage => _privateMessages.stream;
   Stream<MeshReceipt> get onReceipt => _receipts.stream;
   Stream<MeshProfileReceived> get onProfile => _profiles.stream;
+  Stream<MeshFileReceived> get onFile => _files.stream;
 
   /// Powers up the radio and joins the mesh. Returns radio availability.
   Future<MeshTransportAvailability> start() async {
@@ -206,6 +209,40 @@ class MeshService {
     return firstId ?? '';
   }
 
+  /// Sends a file/media [bytes] to [peerID] as an encrypted DM attachment
+  /// (Noise-sealed, fragmented). Reuses the same session as text DMs.
+  Future<void> sendFileToPeer(
+    String peerID,
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final file = BitchatFilePacket(
+      fileName: fileName, mimeType: mimeType, content: bytes);
+    final encoded = file.encode();
+    if (encoded == null) return;
+    final plaintext =
+        NoisePayload(NoisePayloadType.fileTransfer, encoded).encode();
+    await _sendOrQueueEncrypted(peerID, plaintext);
+  }
+
+  /// Broadcasts a file/media [bytes] to the mesh (Nearby or a public group),
+  /// as a fragmented FILE_TRANSFER packet.
+  Future<void> sendFileBroadcast(
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final file = BitchatFilePacket(
+      fileName: fileName, mimeType: mimeType, content: bytes);
+    final encoded = file.encode();
+    if (encoded == null) return;
+    await _sendPacket(await _buildPacket(
+      type: MeshMessageType.fileTransfer,
+      payload: encoded,
+    ));
+  }
+
   /// Sends a read receipt for [messageId] to [peerID].
   Future<void> sendReadReceipt(String peerID, String messageId) async {
     await _sendOrQueueEncrypted(
@@ -217,6 +254,7 @@ class MeshService {
     _privateMessages.close();
     _receipts.close();
     _profiles.close();
+    _files.close();
     _peersChanged.close();
   }
 
@@ -265,6 +303,9 @@ class MeshService {
         break;
       case MeshMessageType.fragment:
         await _handleFragment(packet, linkId, rssi);
+        break;
+      case MeshMessageType.fileTransfer:
+        _handleFileBroadcast(packet, senderPeerID);
         break;
       case MeshMessageType.nymProfileRequest:
         if (forUs) await _handleProfileRequest(senderPeerID, packet.payload);
@@ -425,9 +466,35 @@ class MeshService {
           isRead: true,
         ));
         break;
+      case NoisePayloadType.fileTransfer:
+        final file = BitchatFilePacket.decode(noisePayload.data);
+        if (file != null) {
+          _touchPeer(senderPeerID);
+          _files.add(MeshFileReceived(
+            fromPeerID: senderPeerID,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            bytes: file.content,
+          ));
+        }
+        break;
       default:
         break;
     }
+  }
+
+  void _handleFileBroadcast(BitchatPacket packet, String senderPeerID) {
+    final file = BitchatFilePacket.decode(packet.payload);
+    if (file == null) return;
+    final peer = _peers[senderPeerID];
+    _files.add(MeshFileReceived(
+      fromPeerID: senderPeerID,
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      bytes: file.content,
+      isDirect: false,
+      senderNickname: peer?.nickname ?? '',
+    ));
   }
 
   Future<void> _handleFragment(

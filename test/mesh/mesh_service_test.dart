@@ -217,6 +217,44 @@ void main() {
     expect(received, isFalse); // undecryptable → not surfaced
   });
 
+  test('a file/media DM transfers encrypted and fragmented to the peer',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGetsFile = _firstEvent(bob.onFile);
+    final bytes =
+        Uint8List.fromList(List.generate(5000, (i) => (i * 3) & 0xFF));
+    await alice.sendFileToPeer(bob.myPeerID, 'photo.webp', 'image/webp', bytes);
+
+    final file = await bobGetsFile;
+    expect(file.fromPeerID, alice.myPeerID);
+    expect(file.fileName, 'photo.webp');
+    expect(file.mimeType, 'image/webp');
+    expect(file.isImage, isTrue);
+    expect(file.bytes, equals(bytes)); // encrypted + fragmented, then rejoined
+  });
+
+  test('a broadcast file is delivered to nearby peers as a public attachment',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobGetsFile = _firstEvent(bob.onFile);
+    final bytes =
+        Uint8List.fromList(List.generate(4096, (i) => (i * 7) & 0xFF));
+    await alice.sendFileBroadcast('meme.gif', 'image/gif', bytes);
+
+    final file = await bobGetsFile;
+    expect(file.fromPeerID, alice.myPeerID);
+    expect(file.fileName, 'meme.gif');
+    expect(file.mimeType, 'image/gif');
+    expect(file.isDirect, isFalse); // public/broadcast, not a DM
+    expect(file.bytes, equals(bytes));
+  });
+
   test('profile request transfers a fragmented avatar back to the requester',
       () async {
     await alice.start();

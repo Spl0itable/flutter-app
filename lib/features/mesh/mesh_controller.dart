@@ -29,6 +29,9 @@ class MeshPrivateEntry {
     required this.fromMe,
     required this.timestampMs,
     this.status = MeshDeliveryStatus.sending,
+    this.filePath,
+    this.fileMime,
+    this.fileName,
   });
 
   final String messageId;
@@ -36,6 +39,14 @@ class MeshPrivateEntry {
   final bool fromMe;
   final int timestampMs;
   MeshDeliveryStatus status;
+
+  /// On-disk path of an attached file/media, when this entry carries one.
+  final String? filePath;
+  final String? fileMime;
+  final String? fileName;
+
+  bool get hasFile => filePath != null;
+  bool get isImage => fileMime?.startsWith('image/') ?? false;
 }
 
 enum MeshDeliveryStatus { sending, delivered, read }
@@ -206,6 +217,7 @@ class MeshController extends StateNotifier<MeshUiState> {
       _subs.add(service.onPrivateMessage.listen(_onPrivate));
       _subs.add(service.onReceipt.listen(_onReceipt));
       _subs.add(service.onProfile.listen(_onProfile));
+      _subs.add(service.onFile.listen(_onFile));
 
       final availability = await service.start();
       state = state.copyWith(
@@ -428,6 +440,108 @@ class MeshController extends StateNotifier<MeshUiState> {
       timestampMs: DateTime.now().millisecondsSinceEpoch,
     );
     _appendThread(peerID, entry);
+  }
+
+  // ---- File / media transfer ------------------------------------------------
+
+  /// Persists received/sent mesh media under the app documents dir so it renders
+  /// from disk (and survives restarts), returning the saved path.
+  Future<String?> _saveMeshFile(String fileName, Uint8List bytes) async {
+    try {
+      final dir = Directory('${(await getApplicationDocumentsDirectory()).path}'
+          '/mesh_files');
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      final stamp = DateTime.now().microsecondsSinceEpoch;
+      final safe = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+      final path = '${dir.path}/${stamp}_$safe';
+      await File(path).writeAsBytes(bytes, flush: true);
+      return path;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Sends a file/media attachment as an encrypted DM to [peerID].
+  Future<void> sendFileToPeer(
+    String peerID,
+    String fileName,
+    String mimeType,
+    Uint8List bytes,
+  ) async {
+    final service = _service;
+    if (service == null || bytes.isEmpty) return;
+    final path = await _saveMeshFile(fileName, bytes);
+    await service.sendFileToPeer(peerID, fileName, mimeType, bytes);
+    _appendThread(
+      peerID,
+      MeshPrivateEntry(
+        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+        content: '',
+        fromMe: true,
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        status: MeshDeliveryStatus.delivered,
+        filePath: path,
+        fileMime: mimeType,
+        fileName: fileName,
+      ),
+    );
+  }
+
+  /// Broadcasts a file/media attachment to the mesh — the open Nearby feed, or a
+  /// joined group [channel].
+  Future<void> sendFileBroadcast(
+    String fileName,
+    String mimeType,
+    Uint8List bytes, {
+    String? channel,
+  }) async {
+    final service = _service;
+    if (service == null || bytes.isEmpty) return;
+    final path = await _saveMeshFile(fileName, bytes);
+    await service.sendFileBroadcast(fileName, mimeType, bytes);
+    _onPublic(MeshPublicMessage(
+      senderPeerID: service.myPeerID,
+      senderNickname: _nickname(),
+      content: '',
+      messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      channel: channel,
+      filePath: path,
+      fileMime: mimeType,
+      fileName: fileName,
+    ));
+  }
+
+  Future<void> _onFile(MeshFileReceived event) async {
+    final path = await _saveMeshFile(event.fileName, event.bytes);
+    if (path == null) return;
+    if (event.isDirect) {
+      _appendThread(
+        event.fromPeerID,
+        MeshPrivateEntry(
+          messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+          content: '',
+          fromMe: false,
+          timestampMs: DateTime.now().millisecondsSinceEpoch,
+          status: MeshDeliveryStatus.delivered,
+          filePath: path,
+          fileMime: event.mimeType,
+          fileName: event.fileName,
+        ),
+      );
+    } else {
+      _onPublic(MeshPublicMessage(
+        senderPeerID: event.fromPeerID,
+        senderNickname: event.senderNickname,
+        content: '',
+        messageId: 'file-${DateTime.now().microsecondsSinceEpoch}',
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        channel: event.channel,
+        filePath: path,
+        fileMime: event.mimeType,
+        fileName: event.fileName,
+      ));
+    }
   }
 
   final Set<String> _readAcked = {};
