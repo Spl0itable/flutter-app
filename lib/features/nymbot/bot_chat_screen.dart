@@ -17,13 +17,10 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/chat/composer.dart'
     show ComposerDrafts, EmojiSentinelController;
-import '../../widgets/chat/message_row.dart' show MessageGroup, MessageGroupEntry;
+import '../../widgets/chat/message_row.dart'
+    show MessageGroup, MessageGroupEntry;
 import '../../widgets/chat/typing_indicator.dart';
-import '../../widgets/common/nym_avatar.dart';
-import '../../widgets/context_menu/context_menu_actions.dart';
-import '../../widgets/context_menu/context_menu_panel.dart';
 import '../../widgets/context_menu/interaction_hooks.dart';
-import '../../widgets/context_menu/profile_badges.dart' show VerifiedBadge;
 import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_data.dart';
 import '../emoji/emoji_picker.dart';
@@ -125,211 +122,58 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     // always-mounted listeners in home_shell.dart — no second listener here,
     // or the modal would open twice.
 
-    return Scaffold(
-      // Transparent so the shell's fixed `#wallpaperLayer` (mounted behind the
-      // pane in home_shell) shows through the bot chat exactly like the canonical
-      // ChatPane, which is itself transparent. The opaque base still comes from
-      // the shell Scaffold (`c.bg`); the AppBar/composer paint their own glass
-      // surfaces and the messages area only a translucent wash, so the wallpaper
-      // (default pattern or custom upload) reads through the bot thread too.
-      // Painting an opaque `c.bg` here covered the wallpaper for the whole view.
-      backgroundColor: Colors.transparent,
-      appBar: _header(context, c, state),
-      body: Column(
-        children: [
-          _BotControlBar(
-            isPro: state.isPro,
-            // Pinned Pro model → its brand label; otherwise the "Auto-routed"
-            // UI copy (pms.js `_refreshBotControlBar`, model chip).
-            modelLabel: state.proModel?.label ?? tr('Auto-routed'),
-            // Git chip → connected repo's short name, else the "Git" fallback.
-            gitConnected: state.git?.hasRepo ?? false,
-            gitLabel: _gitChipLabel(state),
-            colors: c,
-            onTapStandard: () => ref
-                .read(botChatControllerProvider.notifier)
-                .setModelDirect(null),
-            // Both the Pro pill and the model chip open the picker (botSetTier
-            // 'pro' + openBotModelModal, pms.js:2419/2438).
-            onTapModel: () => _showModelPicker(context),
-            onTapGit: () => _showGitConnect(context),
-            onTapBuy: () => _showBuy(context),
+    // ChatPane renders the SHARED `_ChatHeader` above this widget (back/forward
+    // nav, audio/video call buttons, notification bell + hamburger, presence +
+    // `E2E encrypted · <credits>` meta, verified badge) — the exact header the
+    // PWA uses for the bot PM. This widget renders only the paid surface BELOW
+    // that header: the premium control bar, the thread, the typing strip and
+    // the bot composer. (No Scaffold/AppBar of its own — the shell Scaffold
+    // supplies the opaque base and keyboard insets, and the region stays
+    // transparent so the `#wallpaperLayer` reads through, like the canonical
+    // ChatPane body.)
+    return Column(
+      children: [
+        _BotControlBar(
+          isPro: state.isPro,
+          // Pinned Pro model → its brand label; otherwise the "Auto-routed"
+          // UI copy (pms.js `_refreshBotControlBar`, model chip).
+          modelLabel: state.proModel?.label ?? tr('Auto-routed'),
+          // Git chip → connected repo's short name, else the "Git" fallback.
+          gitConnected: state.git?.hasRepo ?? false,
+          gitLabel: _gitChipLabel(state),
+          colors: c,
+          onTapStandard: () =>
+              ref.read(botChatControllerProvider.notifier).setModelDirect(null),
+          // Both the Pro pill and the model chip open the picker (botSetTier
+          // 'pro' + openBotModelModal, pms.js:2419/2438).
+          onTapModel: () => _showModelPicker(context),
+          onTapGit: () => _showGitConnect(context),
+          onTapBuy: () => _showBuy(context),
+        ),
+        Expanded(
+          // Tap on the messages region drops focus (dismisses the keyboard)
+          // when no interactive child consumes it — same wiring as the
+          // canonical ChatPane; the browser gives the PWA this for free.
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () => FocusScope.of(context).unfocus(),
+            child: _buildMessagesArea(c),
           ),
-          Expanded(
-            // Tap on the messages region drops focus (dismisses the keyboard)
-            // when no interactive child consumes it — same wiring as the
-            // canonical ChatPane; the browser gives the PWA this for free.
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: () => FocusScope.of(context).unfocus(),
-              child: _buildMessagesArea(c),
-            ),
-          ),
-          // The shared `.typing-indicator` strip pinned above the composer —
-          // "Nymbot is thinking" with the 18px avatar + bouncing dots
-          // (pms.js `_setBotTyping` → `_renderTypingInto`).
-          const TypingIndicatorRow(
-              storageKey: 'pm-$kNymbotPubkey'),
-          _BotComposer(
-            colors: c,
-            onSubmit: (content) {
-              ref
-                  .read(botChatControllerProvider.notifier)
-                  .sendUserBotPM(content);
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) _scrollToBottom();
-              });
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Header (`_renderPMHeader`, pms.js:2905-2941)
-  // ---------------------------------------------------------------------------
-
-  PreferredSizeWidget _header(
-      BuildContext context, NymColors c, BotChatState state) {
-    final botUser = ref.watch(usersProvider)[kNymbotPubkey];
-    return AppBar(
-      // `.chat-header`: bg --glass-bg + a bottom hairline (chat_pane.dart:
-      // 330-334), NOT --bg-secondary (an opaque surface that reads differently
-      // from the rest of the app's headers in both themes). Kill Material's
-      // elevation/scroll tint so the header stays flat glass in light AND dark.
-      backgroundColor: c.glassBg,
-      surfaceTintColor: Colors.transparent,
-      elevation: 0,
-      scrolledUnderElevation: 0,
-      shape: Border(bottom: BorderSide(color: c.glassBorder)),
-      foregroundColor: c.textBright,
-      titleSpacing: 0,
-      toolbarHeight: 68,
-      automaticallyImplyLeading: false,
-      // Compact layouts keep the hamburger so the off-canvas sidebar stays
-      // reachable from the bot PM (the shared `.mobile-menu-toggle`).
-      leading: widget.onOpenSidebar == null
-          ? null
-          : IconButton(
-              tooltip: tr('Menu'),
-              icon: NymSvgIcon(NymIcons.menu, size: 20, color: c.primary),
-              onPressed: widget.onOpenSidebar,
-            ),
-      title: Row(
-        children: [
-          // `.pm-header-avatar`: 26px avatar with a 7px status dot — the bot is
-          // always online (pms.js `getEffectiveUserStatus` bot override).
-          SizedBox(
-            width: 30,
-            height: 30,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                NymAvatar(
-                  seed: kNymbotPubkey,
-                  size: 26,
-                  imageUrl: botUser?.profile?.picture,
-                ),
-                Positioned(
-                  // `.pm-header-avatar .user-status-dot`: 7px, bottom/right -2.
-                  right: 2,
-                  bottom: 2,
-                  child: Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      // `.status-online` #22c55e ringed by 2px --bg.
-                      color: const Color(0xFF22C55E),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: c.bg, width: 2),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // `.pm-header-row` is `header-clickable`: tapping the name opens
-                // the bot's profile context menu (pms.js:2929-2932).
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => _openHeaderMenu(context),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Flexible(
-                        child: Text.rich(
-                          TextSpan(children: [
-                            const TextSpan(text: 'Nymbot'),
-                            TextSpan(
-                              text: '#${getPubkeySuffix(kNymbotPubkey)}',
-                              // `.nym-suffix`: opacity 0.7 / 0.9em / weight 100.
-                              // Tinted from `--primary` like every other 1:1 PM
-                              // header nym (chat_pane.dart `_titleLine` pm case),
-                              // NOT `--text-bright` (which read as a different
-                              // colour from every other PM header).
-                              style: TextStyle(
-                                color: c.primary.withValues(alpha: 0.7),
-                                fontSize: 16 * 0.9,
-                                fontWeight: FontWeight.w100,
-                              ),
-                            ),
-                          ]),
-                          overflow: TextOverflow.ellipsis,
-                          // Base nym in `--primary` to match the canonical PM
-                          // header (chat_pane.dart:445), not `--text-bright`.
-                          style: TextStyle(
-                              color: c.primary,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.2),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      const VerifiedBadge(size: 16),
-                    ],
-                  ),
-                ),
-                // `.pm-last-seen` presence line — the bot's is the fixed
-                // 'Always at your service' (pms.js:37).
-                Text(
-                  tr('Always at your service'),
-                  style: TextStyle(color: c.textDim, fontSize: 12, height: 1.2),
-                  overflow: TextOverflow.ellipsis,
-                ),
-                // `#channelMeta` for the bot PM: 12px lock +
-                // 'E2E encrypted · <botCreditMeta>' (pms.js:2934-2938).
-                Row(
-                  children: [
-                    NymSvgIcon(NymIcons.lock, size: 12, color: c.textDim),
-                    const SizedBox(width: 4),
-                    Flexible(
-                      child: Text(
-                        tr('E2E encrypted · {meta}',
-                            {'meta': _botCreditMeta(state)}),
-                        style: TextStyle(
-                            color: c.textDim, fontSize: 11, height: 1.2),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      // No per-bot header action icons: every premium control (tier, model,
-      // git, buy) now lives in the `.bot-control-bar` below the header, so the
-      // bot PM header stays the plain `_renderPMHeader` (pms.js:2905-2941).
-      // Balance is surfaced in the `#channelMeta` line and the Buy/credits
-      // modal, exactly like the PWA.
+        ),
+        // The shared `.typing-indicator` strip pinned above the composer —
+        // "Nymbot is thinking" with the 18px avatar + bouncing dots
+        // (pms.js `_setBotTyping` → `_renderTypingInto`).
+        const TypingIndicatorRow(storageKey: 'pm-$kNymbotPubkey'),
+        _BotComposer(
+          colors: c,
+          onSubmit: (content) {
+            ref.read(botChatControllerProvider.notifier).sendUserBotPM(content);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _scrollToBottom();
+            });
+          },
+        ),
+      ],
     );
   }
 
@@ -341,58 +185,6 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
     if (repo == null || repo.isEmpty) return tr('Git');
     final tail = repo.split('/').last;
     return tail.isEmpty ? tr('Git') : tail;
-  }
-
-  /// The `#botCreditMeta` text (`_renderBotCreditMeta`, pms.js:2361-2380):
-  /// Pro pinned → `'<n> Pro credit(s) · <model> [· <repoName>]'`; otherwise the
-  /// standard count (`'<n> credit(s) left'`, or both pools when Pro credits
-  /// exist). 'checking credits…' until the first balance lands.
-  String _botCreditMeta(BotChatState state) {
-    final proModel = state.proModel;
-    if (proModel != null) {
-      final pro = state.balance.proBalance;
-      final proText = state.balanceKnown ? '$pro' : '…';
-      var meta = pro == 1
-          ? tr('{n} Pro credit · {model}',
-              {'n': proText, 'model': proModel.label})
-          : tr('{n} Pro credits · {model}',
-              {'n': proText, 'model': proModel.label});
-      final git = state.git;
-      if (git != null && git.hasRepo) {
-        meta += ' · ${git.repo.split('/').last}';
-      }
-      return meta;
-    }
-    if (!state.balanceKnown) {
-      // A failed check with no cached count settles on 'credits unavailable'
-      // (`_refreshBotCreditMeta`, pms.js:2382-2389).
-      return state.balanceUnavailable
-          ? tr('credits unavailable')
-          : tr('checking credits…');
-    }
-    final std = state.balance.balance;
-    final pro = state.balance.proBalance;
-    return pro > 0
-        ? tr('{std} standard · {pro} Pro credits left',
-            {'std': std, 'pro': pro})
-        : std == 1
-            ? tr('{n} credit left', {'n': std})
-            : tr('{n} credits left', {'n': std});
-  }
-
-  /// Header name tap → the bot's profile context menu (the PWA's
-  /// `showContextMenu(e, nym, pubkey, null, null, true)` — profile mode).
-  void _openHeaderMenu(BuildContext context) {
-    ContextMenuPanel.show(
-      context,
-      target: const CtxTarget(
-        pubkey: kNymbotPubkey,
-        nym: 'Nymbot',
-        isSelf: false,
-        isBot: true,
-        profileOnly: true,
-      ),
-    );
   }
 
   // ---------------------------------------------------------------------------
@@ -550,11 +342,12 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
                   style: TextStyle(color: c.text)),
               subtitle: Text(tr('Best model per task · 10 sats each'),
                   style: TextStyle(color: c.textDim, fontSize: 11)),
-              trailing: current == null
-                  ? Icon(Icons.check, color: c.primary)
-                  : null,
+              trailing:
+                  current == null ? Icon(Icons.check, color: c.primary) : null,
               onTap: () {
-                ref.read(botChatControllerProvider.notifier).setModelDirect(null);
+                ref
+                    .read(botChatControllerProvider.notifier)
+                    .setModelDirect(null);
                 Navigator.pop(context);
               },
             ),
@@ -564,8 +357,7 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
                 leading: Icon(Icons.bolt, color: c.primary),
                 title: Text(m.label, style: TextStyle(color: c.text)),
                 // PWA `?model` list: the human price-range phrase, not the id.
-                subtitle: Text(
-                    m.priceLabel,
+                subtitle: Text(m.priceLabel,
                     style: TextStyle(color: c.textDim, fontSize: 11)),
                 trailing: current?.key == m.key
                     ? Icon(Icons.check, color: c.primary)
@@ -624,9 +416,8 @@ class _ScrollToBottomButtonState extends State<_ScrollToBottomButton> {
     final fill = _hover
         ? c.primaryA(0.15)
         : (light ? const Color(0xD9FFFFFF) /* white @ 0.85 */ : c.glassBg);
-    final border = _hover
-        ? c.primaryA(0.30)
-        : (light ? c.primaryA(0.20) : c.glassBorder);
+    final border =
+        _hover ? c.primaryA(0.30) : (light ? c.primaryA(0.20) : c.glassBorder);
     final shadow = light
         ? const BoxShadow(
             color: Color(0x26000000), // black @ 0.15
@@ -764,7 +555,8 @@ class _BotControlBar extends StatelessWidget {
 
     return Container(
       // `.bot-control-bar`: glass fill + a bottom hairline, 8px 16px padding.
-      padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 16, vertical: compact ? 7 : 8),
+      padding: EdgeInsets.symmetric(
+          horizontal: compact ? 12 : 16, vertical: compact ? 7 : 8),
       decoration: BoxDecoration(
         color: c.glassBg,
         border: Border(bottom: BorderSide(color: c.glassBorder)),
@@ -818,11 +610,14 @@ class _BotControlBar extends StatelessWidget {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
         decoration: BoxDecoration(
-          color: active ? c.lightning.withValues(alpha: 0.14) : Colors.transparent,
+          color:
+              active ? c.lightning.withValues(alpha: 0.14) : Colors.transparent,
           borderRadius: BorderRadius.circular(7),
           // `.bot-tier-btn.active`: `box-shadow: inset 0 0 0 1px lightning@0.4`.
           border: Border.all(
-            color: active ? c.lightning.withValues(alpha: 0.4) : Colors.transparent,
+            color: active
+                ? c.lightning.withValues(alpha: 0.4)
+                : Colors.transparent,
           ),
         ),
         child: Text(
@@ -1189,10 +984,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     for (final line in text.split('\n')) {
       if (!line.startsWith('>')) kept.add(line);
     }
-    return kept
-        .join('\n')
-        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
-        .trim();
+    return kept.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
   }
 
   /// The chip's cleaned preview text: strip HTML/markdown punctuation, cap 120
@@ -1492,8 +1284,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     final c = widget.colors;
     final isVideo = (_uploadMime ?? '').startsWith('video/');
     final label = _uploadTotal > 1
-        ? tr('Uploading {i} of {n}...',
-            {'i': _uploadIndex, 'n': _uploadTotal})
+        ? tr('Uploading {i} of {n}...', {'i': _uploadIndex, 'n': _uploadTotal})
         : isVideo
             ? tr('Uploading video...')
             : tr('Uploading image...');
@@ -1750,8 +1541,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                             )
                           : ListView.builder(
                               shrinkWrap: true,
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 4),
+                              padding: const EdgeInsets.symmetric(vertical: 4),
                               itemCount: langs.length,
                               itemBuilder: (_, i) {
                                 final e = langs[i];
@@ -1957,8 +1747,8 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         // The shared input placeholder (index.html `data-placeholder`).
         hintText: tr('Message, / for commands, ? for Nymbot...'),
         hintStyle: TextStyle(
-            color:
-                (c.isLight ? Colors.black : Colors.white).withValues(alpha: 0.4),
+            color: (c.isLight ? Colors.black : Colors.white)
+                .withValues(alpha: 0.4),
             fontSize: phone ? 16 : 15),
         filled: true,
         fillColor: flatFill,
@@ -2194,8 +1984,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                 color: selected ? c.hoverOverlay : null,
                 borderRadius: BorderRadius.circular(8),
               ),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -2258,7 +2047,8 @@ class _QuotePreviewChip extends StatelessWidget {
             const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
         // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
         boxShadow: const [
-          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+          BoxShadow(
+              color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: Row(
@@ -2415,9 +2205,7 @@ class _BotIconBtnState extends State<_BotIconBtn> {
                     ? [BoxShadow(color: c.primaryA(0.10), blurRadius: 15)]
                     : null,
               ),
-              child: widget.expand
-                  ? Center(child: child)
-                  : child,
+              child: widget.expand ? Center(child: child) : child,
             ),
           ),
         ),
@@ -2784,8 +2572,9 @@ class _GitConnectModalState extends State<_GitConnectModal> {
             const SizedBox(height: 14),
             _field(_host, tr('Host'), 'github.com', c),
             const SizedBox(height: 10),
-            _field(_token, tr('Personal access token (PAT)'), 'ghp_… / glpat-… ',
-                c, obscure: true),
+            _field(_token, tr('Personal access token (PAT)'),
+                'ghp_… / glpat-… ', c,
+                obscure: true),
             const SizedBox(height: 10),
             _field(_repo, tr('Repository'), 'owner/repo', c),
             const SizedBox(height: 10),
@@ -2839,7 +2628,8 @@ class _GitConnectModalState extends State<_GitConnectModal> {
   void _connect() {
     widget.onConnect(GitConfig(
       provider: _provider,
-      host: _host.text.trim().isEmpty ? _provider.defaultHost : _host.text.trim(),
+      host:
+          _host.text.trim().isEmpty ? _provider.defaultHost : _host.text.trim(),
       token: _token.text.trim(),
       repo: _repo.text.trim(),
       branch: _branch.text.trim().isEmpty ? null : _branch.text.trim(),
@@ -2848,8 +2638,8 @@ class _GitConnectModalState extends State<_GitConnectModal> {
     Navigator.pop(context);
   }
 
-  Widget _field(TextEditingController ctrl, String label, String hint,
-      NymColors c,
+  Widget _field(
+      TextEditingController ctrl, String label, String hint, NymColors c,
       {bool obscure = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
