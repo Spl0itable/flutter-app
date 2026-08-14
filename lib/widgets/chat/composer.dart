@@ -258,6 +258,12 @@ class _ComposerState extends ConsumerState<Composer> {
   // PWA's single-active-dropdown model (only one of @/#/:/\\/`/` is open).
   final _acAnchor = LayerLink();
   final _acPortal = OverlayPortalController();
+
+  /// Shared TapRegion group tying the input field to its autocomplete dropdown
+  /// so a tap on EITHER is "inside", but a tap anywhere else dismisses the
+  /// dropdown (like every other modal in the app). Per-instance so stacked
+  /// columns composers don't cross-dismiss.
+  final Object _acGroupId = Object();
   TriggerMatch _trigger = const TriggerMatch.none();
   AutocompleteView? _acView;
   List<PaletteRow> _paletteRows = const [];
@@ -1814,9 +1820,14 @@ class _ComposerState extends ConsumerState<Composer> {
         alignment: Alignment.bottomLeft,
         child: Material(
           type: MaterialType.transparency,
-          child: SizedBox(
-            width: _anchorWidth(context),
-            child: body,
+          // Same group as the field so tapping a dropdown row isn't treated as
+          // an outside tap (which would dismiss before the tap registers).
+          child: TapRegion(
+            groupId: _acGroupId,
+            child: SizedBox(
+              width: _anchorWidth(context),
+              child: body,
+            ),
           ),
         ),
       ),
@@ -1915,6 +1926,13 @@ class _ComposerState extends ConsumerState<Composer> {
       key: _fieldKey,
       controller: _controller,
       focusNode: _focus,
+      // Tie the field to its autocomplete dropdown so a tap outside BOTH closes
+      // the dropdown (matching the app's other dismiss-on-outside modals),
+      // while a tap on the dropdown still selects a row.
+      groupId: _acGroupId,
+      onTapOutside: (_) {
+        if (_overlayActive) _hideOverlay();
+      },
       // `#messageInput` starts `disabled` and the PWA flips it to enabled ONLY
       // once relays/identity connect (relays.js:1039/1168/1275 set
       // `messageInput.disabled=false` in the exact same spots as `sendBtn`). Gate

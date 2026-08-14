@@ -25,6 +25,7 @@ import '../../widgets/nym_icons.dart';
 import '../emoji/emoji_data.dart';
 import '../emoji/emoji_picker.dart';
 import '../emoji/gif_picker.dart';
+import '../commands/command_palette.dart' show commandItemRow;
 import '../i18n/i18n.dart';
 import '../reactions/reaction_picker.dart';
 import '../translate/translate_languages.dart';
@@ -779,6 +780,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
   /// the conversation above the input container, never growing it).
   final _acAnchor = LayerLink();
   final _acPortal = OverlayPortalController();
+
+  /// Groups the input field with its `?` palette so a tap outside both dismisses
+  /// it (like the app's other modals), while a tap on a row still selects it.
+  final Object _acGroupId = Object();
   final _inputKey = GlobalKey();
 
   /// Aligns the portal's visibility with the palette state. Deferred to a
@@ -812,7 +817,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         alignment: Alignment.bottomLeft,
         child: Material(
           type: MaterialType.transparency,
-          child: SizedBox(width: width, child: _palette(widget.colors)),
+          child: TapRegion(
+            groupId: _acGroupId,
+            child: SizedBox(width: width, child: _palette(widget.colors)),
+          ),
         ),
       ),
     );
@@ -1734,6 +1742,12 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     final field = TextField(
       controller: _controller,
       focusNode: _focus,
+      groupId: _acGroupId,
+      onTapOutside: (_) {
+        if (_suggestions.isNotEmpty && !_suppressPalette) {
+          setState(() => _suppressPalette = true);
+        }
+      },
       maxLines: 5,
       minLines: 1,
       textInputAction: TextInputAction.newline,
@@ -1973,44 +1987,16 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
         itemCount: _suggestions.length,
         itemBuilder: (_, i) {
           final cmd = _suggestions[i];
-          final selected = i == _paletteIndex;
-          return InkWell(
+          // Reuse the shared `.command-item` row (same chrome as the `/` and
+          // main `?` palettes): the command name sizes to content, the
+          // description fills the full remaining width, wraps, and is localized
+          // via `tr()` — fixing the previously cramped/untranslated rows here.
+          return commandItemRow(
+            c,
+            name: cmd.name,
+            desc: cmd.desc,
+            selected: i == _paletteIndex,
             onTap: () => _pick(cmd),
-            child: Container(
-              decoration: BoxDecoration(
-                // `.command-item.selected`: background white@0.08 dark, flipped to
-                // black@0.06 in light mode — `hoverOverlay` is mode-aware. Radius
-                // xs (8).
-                color: selected ? c.hoverOverlay : null,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  // `.command-name`: --primary, bold (not monospace).
-                  Flexible(
-                    child: Text(cmd.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            color: c.primary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.bold)),
-                  ),
-                  const SizedBox(width: 10),
-                  // `.command-desc`: 12px; brightens to --text when selected.
-                  Flexible(
-                    child: Text(
-                      cmd.desc,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.right,
-                      style: TextStyle(
-                          color: selected ? c.text : c.textDim, fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           );
         },
       ),
