@@ -203,21 +203,39 @@ class MeshBridge {
     }
     final k = peer.noisePublicKey;
     if (k != null && k.length == 32) return _hex(k);
-    return meshPeerIdPseudoPubkey(peer.peerID);
+    // Fall back to the session-resolved key (the SAME source _pubkeyForPeerId
+    // uses) before the pseudo, so the open-DM path and the inbound path never
+    // diverge even if this peer record hasn't captured the announced key yet.
+    return _service.noiseKeyHexForPeer(peer.peerID) ??
+        meshPeerIdPseudoPubkey(peer.peerID);
   }
 
-  /// Resolves a peerID to its conversation pubkey using the SAME identity the
-  /// peers list uses, so an inbound message and a proactively-opened DM ALWAYS
-  /// key the identical `pm-<pubkey>` thread. When the peer record isn't present
-  /// yet (a DM can arrive before its announce is processed) the Noise static
-  /// key is pulled from the established session — an encrypted PM guarantees
-  /// one exists — so the real key is used even then. Refreshes routing maps.
+  /// Resolves a peerID to its conversation pubkey, keying the identical
+  /// `pm-<pubkey>` thread an inbound message and a proactively-opened DM both
+  /// use. A verified Nostr link wins (dual-transport); otherwise the peer's
+  /// real Noise static key, resolved via [MeshService.noiseKeyHexForPeer],
+  /// which reads the peer record OR the established Noise session.
+  ///
+  /// The session fallback is load-bearing: an encrypted PM can arrive BEFORE the
+  /// sender's announce is processed, so the peer record exists (created by the
+  /// handshake) but its `noisePublicKey` is still null. Routing through
+  /// [pubkeyForPeer] there would return the padded pseudo-pubkey and key a
+  /// `pm-<pseudo>` thread that the later, announce-time open-DM (keyed by the
+  /// real Noise key) never reads — the exact "PM shows in the notification but
+  /// not the chat" + `#0000`-header bug. The session always holds alice's real
+  /// static key by the time her PM decrypts, so we use it unconditionally.
   String _pubkeyForPeerId(String peerID) {
     final peer = _service.peerById(peerID);
-    final pubkey = peer != null
-        ? pubkeyForPeer(peer)
-        : (_service.noiseKeyHexForPeer(peerID) ??
-            meshPeerIdPseudoPubkey(peerID));
+    final String pubkey;
+    if (peer != null &&
+        peer.nostrLinkVerified &&
+        peer.nostrPubkey != null &&
+        peer.nostrPubkey!.length == 64) {
+      pubkey = peer.nostrPubkey!.toLowerCase();
+    } else {
+      pubkey = _service.noiseKeyHexForPeer(peerID) ??
+          meshPeerIdPseudoPubkey(peerID);
+    }
     _pubkeyByPeerId[peerID] = pubkey;
     _peerIdByPubkey[pubkey] = peerID;
     if (peer != null) _nymByPubkey[pubkey] = peer.displayName;

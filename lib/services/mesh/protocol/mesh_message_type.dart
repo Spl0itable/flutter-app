@@ -112,9 +112,17 @@ class NoisePayloadType {
   /// A delivery acknowledgement (payload identifies the original message id).
   static const int delivered = 0x03;
 
-  /// A file/media transfer (payload is a [BitchatFilePacket]).
+  /// A file/media transfer (payload is a [BitchatFilePacket]). Matches bitchat's
+  /// `privateFile = 0x20`.
   static const int fileTransfer = 0x20;
 
   /// An emoji reaction to a 1:1 message (Nymchat-only).
-  static const int reaction = 0x21;
+  ///
+  /// MUST stay out of bitchat's assigned range: bitchat uses `0x21` for
+  /// `authenticatedPeerState`, which it sends routinely over the Noise session
+  /// right after a handshake. Sharing `0x21` made us decode that peer-state
+  /// frame as a reaction and stamp a spurious emoji (the phantom ❤️ on a
+  /// just-sent message). `0x70` is well clear of every bitchat NoisePayloadType
+  /// (all ≤ 0x21), so their frames now fall through to our default-ignore.
+  static const int reaction = 0x70;
 }

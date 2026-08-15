@@ -277,6 +277,20 @@ void main() {
     expect(chunks.join(), long);
   });
 
+  test('reaction NoisePayloadType does not collide with bitchat 0x21', () {
+    // bitchat uses NoisePayloadType 0x21 for authenticatedPeerState, which it
+    // emits over the Noise session right after a handshake. Our reaction type
+    // MUST NOT share it, or we decode that peer-state frame as a reaction and
+    // stamp a phantom emoji on a just-sent message.
+    expect(NoisePayloadType.reaction, isNot(0x21));
+    expect(NoisePayloadType.reaction, 0x70);
+    // Types intentionally shared with bitchat stay aligned.
+    expect(NoisePayloadType.privateMessage, 0x01);
+    expect(NoisePayloadType.readReceipt, 0x02);
+    expect(NoisePayloadType.delivered, 0x03);
+    expect(NoisePayloadType.fileTransfer, 0x20);
+  });
+
   test('encrypted group message is readable only by members with the password',
       () async {
     await alice.start();
