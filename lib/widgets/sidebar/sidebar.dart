@@ -889,7 +889,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
           // `margin-top:10px` is the gap below the nym box.
           const SizedBox(height: 10),
           _ConnectionStatusIndicator(connectedCount: connectedRelays),
-          const _MeshStatusIndicator(),
+          _MeshStatusIndicator(onItemSelected: widget.onItemSelected),
         ],
       ),
     );
@@ -1136,7 +1136,13 @@ class _ConnectionStatusIndicator extends StatelessWidget {
 /// peer/link count when active. Tapping opens the mesh view (peers + the #mesh
 /// public channel). Renders nothing on platforms without mesh support.
 class _MeshStatusIndicator extends ConsumerWidget {
-  const _MeshStatusIndicator();
+  const _MeshStatusIndicator({this.onItemSelected});
+
+  /// Closes the mobile off-canvas drawer this row lives in *before* the mesh
+  /// screen is pushed — otherwise the drawer stays open behind it and is
+  /// revealed (looking like it re-opened) when the mesh screen pops back to a
+  /// conversation.
+  final VoidCallback? onItemSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1159,9 +1165,12 @@ class _MeshStatusIndicator extends ConsumerWidget {
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
-          onTap: () => Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
-          ),
+          onTap: () {
+            onItemSelected?.call();
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
+            );
+          },
           // A generous, full-width tap target (like the connected-relays row),
           // so the mesh status line is easy to hit instead of a thin text strip.
           child: Padding(
