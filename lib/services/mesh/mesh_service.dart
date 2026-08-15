@@ -296,27 +296,29 @@ class MeshService {
     List<String>? mentions,
   }) async {
     final timestampMs = DateTime.now().millisecondsSinceEpoch;
-    // A password-protected channel is a mesh GROUP chat (Nymchat-only): seal the
-    // content with the shared AES key and carry it in the legacy BitchatMessage
-    // TLV so members can decrypt it. bitchat has no such channel over the BLE
-    // mesh, so this path is Nymchat↔Nymchat only.
-    final encrypted = channel != null && _channelCrypto.hasKey(channel);
-    if (encrypted) {
+    // A NAMED channel (anything other than the default #mesh public chat) is
+    // Nymchat-only: bitchat has no named channels over the BLE mesh (its
+    // hashtag / geohash channels ride Nostr, not Bluetooth). Carry the channel
+    // name in a BitchatMessage TLV under the Nymchat-only nymChannelMessage
+    // type so it routes to the RIGHT channel on other Nymchat devices instead
+    // of collapsing into #mesh — and so bitchat (which ignores 0x54) never
+    // mis-renders it. The body is AES-sealed when we hold a password key for
+    // the channel, otherwise sent as plaintext in the TLV.
+    if (channel != null) {
+      final encrypted = _channelCrypto.hasKey(channel);
       final msg = BitchatMessage(
         id: _uuid.v4(),
         sender: _nicknameProvider(),
-        content: '',
+        content: encrypted ? '' : content,
         timestampMs: timestampMs,
         senderPeerID: identity.peerID,
         channel: channel,
         mentions: mentions,
-        isEncrypted: true,
-        encryptedContent: await _channelCrypto.encrypt(channel, content),
+        isEncrypted: encrypted,
+        encryptedContent:
+            encrypted ? await _channelCrypto.encrypt(channel, content) : null,
       );
       final packet = await _buildPacket(
-        // Nymchat-only type so bitchat's raw-UTF-8 [message] path stays
-        // unambiguous — a non-member must never render this ciphertext TLV as
-        // a garbled public message.
         type: MeshMessageType.nymChannelMessage,
         payload: msg.toBinaryPayload(),
         recipientID: kBroadcastRecipient,
@@ -326,7 +328,8 @@ class MeshService {
       return msg.id;
     }
 
-    // Public mesh chat (bitchat's "Mesh"): the wire payload is the RAW UTF-8
+    // Public mesh chat (bitchat's "Mesh", channel == null): the wire payload is
+    // the RAW UTF-8
     // content — NOT a TLV. bitchat-iOS/android both read a broadcast MESSAGE's
     // payload straight back as a UTF-8 string (`String(data: payload)`), derive
     // the message id from the signed fields, and take the sender nickname from
@@ -593,28 +596,31 @@ class MeshService {
     ));
   }
 
-  /// Nymchat encrypted group-channel broadcast ([MeshMessageType.nymChannelMessage]):
-  /// the legacy [BitchatMessage] TLV, readable only if we hold the channel key.
-  /// Non-members simply can't decrypt and drop it.
+  /// Nymchat NAMED-channel broadcast ([MeshMessageType.nymChannelMessage]): a
+  /// [BitchatMessage] TLV carrying the channel name and either plaintext content
+  /// or, for a password channel, AES-sealed content we can read only if we hold
+  /// the key (non-members drop it). Routes to the named channel — NOT #mesh.
   Future<void> _handleChannelMessage(
       BitchatPacket packet, String senderPeerID) async {
     final tlv = BitchatMessage.fromBinaryPayload(packet.payload);
     if (tlv == null || tlv.channel == null) return;
-    final enc = tlv.encryptedContent;
-    if (!tlv.isEncrypted || enc == null || !_channelCrypto.hasKey(tlv.channel!)) {
-      return;
-    }
-    String decrypted;
-    try {
-      decrypted = await _channelCrypto.decrypt(tlv.channel!, enc);
-    } catch (_) {
-      return;
+    String content;
+    if (tlv.isEncrypted) {
+      final enc = tlv.encryptedContent;
+      if (enc == null || !_channelCrypto.hasKey(tlv.channel!)) return;
+      try {
+        content = await _channelCrypto.decrypt(tlv.channel!, enc);
+      } catch (_) {
+        return;
+      }
+    } else {
+      content = tlv.content;
     }
     _touchPeer(senderPeerID, nickname: tlv.sender);
     _publicMessages.add(MeshPublicMessage(
       senderPeerID: tlv.senderPeerID ?? senderPeerID,
       senderNickname: tlv.sender,
-      content: decrypted,
+      content: content,
       messageId: tlv.id,
       timestampMs: tlv.timestampMs,
       channel: tlv.channel,

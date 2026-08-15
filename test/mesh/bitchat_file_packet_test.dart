@@ -47,5 +47,42 @@ void main() {
     test('decode fails without required fields', () {
       expect(BitchatFilePacket.decode(Uint8List(0)), isNull);
     });
+
+    test('decodes a bitchat-canonical packet (4-byte CONTENT length)', () {
+      // Hand-build the exact bytes bitchat emits: fileName(2-byte len),
+      // fileSize(2-byte len=4, 4-byte value), mimeType(2-byte len), then
+      // content with a FOUR-byte length. The old 2-byte-length reader
+      // mis-parsed this and dropped every inbound image.
+      final img = _bytes(20000, 7);
+      final b = BytesBuilder();
+      void u16(int v) => b
+        ..addByte((v >> 8) & 0xFF)
+        ..addByte(v & 0xFF);
+      void u32(int v) => b
+        ..addByte((v >> 24) & 0xFF)
+        ..addByte((v >> 16) & 0xFF)
+        ..addByte((v >> 8) & 0xFF)
+        ..addByte(v & 0xFF);
+      final name = 'pic.jpg'.codeUnits;
+      final mime = 'image/jpeg'.codeUnits;
+      b.addByte(0x01);
+      u16(name.length);
+      b.add(name);
+      b.addByte(0x02);
+      u16(4);
+      u32(img.length);
+      b.addByte(0x03);
+      u16(mime.length);
+      b.add(mime);
+      b.addByte(0x04);
+      u32(img.length); // 4-byte content length (canonical)
+      b.add(img);
+
+      final decoded = BitchatFilePacket.decode(b.toBytes())!;
+      expect(decoded.fileName, 'pic.jpg');
+      expect(decoded.mimeType, 'image/jpeg');
+      expect(decoded.content.length, 20000);
+      expect(decoded.content, equals(img));
+    });
   });
 }

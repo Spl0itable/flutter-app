@@ -289,6 +289,23 @@ void main() {
     expect(received, isFalse); // undecryptable → not surfaced
   });
 
+  test('a plaintext NAMED channel message keeps its channel (not folded to #mesh)',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // A named channel with NO password: content rides plaintext in the
+    // nymChannelMessage TLV, and the channel name must survive so it routes to
+    // #r1 on the receiver instead of collapsing into the #mesh public chat.
+    final bobGets = _firstEvent(bob.onPublicMessage);
+    await alice.sendPublicMessage('room one', channel: '#r1');
+    final msg = await bobGets;
+    expect(msg.content, 'room one');
+    expect(msg.channel, '#r1');
+    expect(msg.senderPeerID, alice.myPeerID);
+  });
+
   test('a file/media DM transfers encrypted and fragmented to the peer',
       () async {
     await alice.start();
