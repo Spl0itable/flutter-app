@@ -58,12 +58,29 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
         elevation: 0,
         scrolledUnderElevation: 0,
         shape: Border(bottom: BorderSide(color: c.glassBorder)),
-        titleSpacing: 16,
+        titleSpacing: 8,
         // No back arrow — the hamburger in the actions opens the sidebar,
-        // matching the rest of the app's headers.
+        // matching the rest of the app's headers. Back/forward chevrons sit to
+        // the left of the title (like the channel header's nav buttons).
         automaticallyImplyLeading: false,
         title: Row(
           children: [
+            _MeshNavBtn(
+              svg: NymIcons.chevronLeft,
+              tooltip: tr('Go back'),
+              onTap: Navigator.of(context).canPop()
+                  ? () => Navigator.of(context).maybePop()
+                  : null,
+            ),
+            _MeshNavBtn(
+              svg: NymIcons.chevronRight,
+              tooltip: tr('Go forward'),
+              // A pushed leaf route has nothing ahead of it — the forward
+              // chevron rests disabled, exactly as the chat header's does until
+              // you've navigated back.
+              onTap: null,
+            ),
+            const SizedBox(width: 4),
             NymSvgIcon(NymIcons.bluetooth, size: 18, color: c.primary),
             const SizedBox(width: 8),
             Text(tr('Bluetooth Mesh'),
@@ -215,6 +232,37 @@ class _MeshRxDiagnostics extends StatelessWidget {
   }
 }
 
+/// A small boxed back/forward chevron matching the channel header's
+/// `.channel-nav-btn` (28×28, radius 4, dimmed; disabled rests faint and
+/// ignores taps).
+class _MeshNavBtn extends StatelessWidget {
+  const _MeshNavBtn({required this.svg, this.onTap, this.tooltip});
+  final String svg;
+  final VoidCallback? onTap;
+  final String? tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final disabled = onTap == null;
+    final btn = InkWell(
+      onTap: onTap,
+      borderRadius: const BorderRadius.all(Radius.circular(4)),
+      child: Container(
+        width: 28,
+        height: 28,
+        alignment: Alignment.center,
+        child: NymSvgIcon(
+          svg,
+          size: 18,
+          color: disabled ? c.textDim.withValues(alpha: 0.3) : c.textDim,
+        ),
+      ),
+    );
+    return tooltip != null ? Tooltip(message: tooltip!, child: btn) : btn;
+  }
+}
+
 /// A boxed header icon button matching the main chat header's mobile toggles
 /// (`.icon-btn`, 40×40, glass fill) with an optional unread-count badge. Used
 /// for the notification bell and the sidebar hamburger in the mesh header.
@@ -298,7 +346,6 @@ class _StatusBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final enabled = ref.watch(settingsProvider.select((s) => s.meshEnabled));
-    final active = enabled && mesh.running;
     final needsPermission =
         enabled && mesh.availability == MeshTransportAvailability.unauthorized;
     return Container(
@@ -306,12 +353,6 @@ class _StatusBar extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       child: Row(
         children: [
-          Opacity(
-            opacity: active ? 1 : 0.5,
-            child: NymSvgIcon(NymIcons.bluetooth,
-                size: 20, color: active ? colors.primary : colors.textDim),
-          ),
-          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,

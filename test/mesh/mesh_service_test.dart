@@ -242,6 +242,24 @@ void main() {
     expect(chunks.join(), long);
   });
 
+  test('a completed handshake authenticates private-media in both directions',
+      () async {
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // Establish a Noise session (any encrypted send triggers the handshake).
+    await alice.sendPrivateMessage(bob.myPeerID, 'hi');
+    // Let the handshake complete and the authenticatedPeerState (0x21) proofs
+    // cross in both directions.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    // Each side now knows the other advertises the privateMedia capability, so
+    // bitchat would stop warning that our client can't receive encrypted media.
+    expect(bob.peerById(alice.myPeerID)?.supportsPrivateMedia, isTrue);
+    expect(alice.peerById(bob.myPeerID)?.supportsPrivateMedia, isTrue);
+  });
+
   test('reaction NoisePayloadType does not collide with bitchat 0x21', () {
     // bitchat uses NoisePayloadType 0x21 for authenticatedPeerState, which it
     // emits over the Noise session right after a handshake. Our reaction type

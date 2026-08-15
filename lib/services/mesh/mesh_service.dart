@@ -14,6 +14,7 @@ import 'noise/channel_encryption.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
 import 'noise/nostr_link.dart';
+import 'protocol/authenticated_peer_state.dart';
 import 'protocol/bitchat_file_packet.dart';
 import 'protocol/bitchat_message.dart';
 import 'protocol/bitchat_packet.dart';
@@ -645,6 +646,11 @@ class MeshService {
 
   Future<void> _handleHandshake(String senderPeerID, Uint8List payload) async {
     try {
+      // A fresh/in-progress handshake supersedes any prior session, so the
+      // once-per-session peer-state proof must be re-sent on the new session.
+      if (!_noise.isEstablished(senderPeerID)) {
+        _peerStateSentTo.remove(senderPeerID);
+      }
       final response = await _noise.handleHandshake(senderPeerID, payload);
       if (response != null) {
         await _sendPacket(await _buildPacket(
@@ -654,12 +660,37 @@ class MeshService {
         ));
       }
       if (_noise.isEstablished(senderPeerID)) {
+        // Announce our capabilities inside the session BEFORE flushing queued
+        // media, so bitchat has authenticated us as private-media-capable by
+        // the time our encrypted attachments arrive.
+        await _sendAuthenticatedPeerState(senderPeerID);
         await _flushPending(senderPeerID);
         await _drainPendingEncrypted(senderPeerID);
       }
     } catch (_) {
       // Handshake failed or peerID binding rejected; drop silently.
     }
+  }
+
+  /// Peers we've already sent the current session's [AuthenticatedPeerStatePacket]
+  /// to. Cleared per peer when a new handshake begins so each session re-proves.
+  final Set<String> _peerStateSentTo = {};
+
+  /// Sends the session-authenticated capability proof (Noise `0x21`) so the far
+  /// side treats us as private-media-capable — bitchat then stops warning that
+  /// our client can't receive encrypted private media and accepts our
+  /// Noise-sealed attachments. Sent at most once per established session.
+  Future<void> _sendAuthenticatedPeerState(String peerID) async {
+    if (!_peerStateSentTo.add(peerID)) return;
+    final encoded = AuthenticatedPeerStatePacket(
+      capabilities: _capabilities,
+      signingPublicKey: identity.signingPublic,
+    ).encode();
+    if (encoded == null) return;
+    await _sendOrQueueEncrypted(
+        peerID,
+        NoisePayload(NoisePayloadType.authenticatedPeerState, encoded)
+            .encode());
   }
 
   Future<void> _handleEncrypted(String senderPeerID, Uint8List payload) async {
@@ -717,6 +748,20 @@ class MeshService {
             mimeType: file.mimeType,
             bytes: file.content,
           ));
+        }
+        break;
+      case NoisePayloadType.authenticatedPeerState:
+        final state = AuthenticatedPeerStatePacket.decode(noisePayload.data);
+        if (state != null) {
+          final peer = _peers[senderPeerID];
+          if (peer != null) {
+            peer.supportsPrivateMedia = state.supportsPrivateMedia;
+          }
+          // Echo our own proof back once (bitchat echoes at most once when the
+          // remote state arrives), so the session is authenticated in both
+          // directions even if the peer's state beat our handshake-completion
+          // send.
+          await _sendAuthenticatedPeerState(senderPeerID);
         }
         break;
       case NoisePayloadType.reaction:
@@ -843,6 +888,8 @@ class MeshService {
     }
     _pendingPlaintext.putIfAbsent(peerID, () => []).add(plaintext);
     if (!_noise.isHandshaking(peerID)) {
+      // New session ⇒ the peer-state proof must be re-sent once it establishes.
+      _peerStateSentTo.remove(peerID);
       final msg1 = await _noise.initiateHandshake(peerID);
       await _sendPacket(await _buildPacket(
         type: MeshMessageType.noiseHandshake,
