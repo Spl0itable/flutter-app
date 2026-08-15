@@ -876,12 +876,22 @@ class MeshService {
     }
   }
 
+  /// Capability bitfield advertised in the announce (bitchat `PeerCapabilities`,
+  /// little-endian, trailing zero bytes dropped). We set bit 8 = `privateMedia`
+  /// (encrypted direct-message media as Noise payload 0x20) — which we DO
+  /// support ([_handleEncrypted]'s fileTransfer case) — so bitchat stops
+  /// warning that our client can't receive encrypted private media and sends it
+  /// Noise-sealed instead of as a signed-but-plaintext directed file. 0x100
+  /// little-endian is [0x00, 0x01].
+  static final Uint8List _capabilities = Uint8List.fromList([0x00, 0x01]);
+
   Future<void> _broadcastAnnounce() async {
     if (!_running) return;
     final announcement = IdentityAnnouncement(
       nickname: _nicknameProvider(),
       noisePublicKey: identity.staticPublic,
       signingPublicKey: identity.signingPublic,
+      capabilities: _capabilities,
       nostrLink: _nostrLinkProvider?.call(),
     );
     final payload = announcement.encode();
