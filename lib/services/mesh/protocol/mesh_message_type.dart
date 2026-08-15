@@ -116,6 +116,14 @@ class NoisePayloadType {
   /// `privateFile = 0x20`.
   static const int fileTransfer = 0x20;
 
+  /// Session-authenticated capability proof (payload is an
+  /// [AuthenticatedPeerStatePacket]). Matches bitchat's
+  /// `authenticatedPeerState = 0x21`, emitted after every completed/rekeyed
+  /// Noise handshake. Advertising the `privateMedia` bit here — not just in the
+  /// public announce — is what lets bitchat accept our encrypted private media
+  /// and stop warning that our client can't receive it.
+  static const int authenticatedPeerState = 0x21;
+
   /// An emoji reaction to a 1:1 message (Nymchat-only).
   ///
   /// MUST stay out of bitchat's assigned range: bitchat uses `0x21` for

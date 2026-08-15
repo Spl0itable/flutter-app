@@ -18,6 +18,7 @@ class MeshPeer {
     this.avatarUrl,
     this.bannerUrl,
     this.avatarFilePath,
+    this.supportsPrivateMedia = false,
     DateTime? lastSeen,
   }) : lastSeen = lastSeen ?? DateTime.now();
 
@@ -58,6 +59,11 @@ class MeshPeer {
   /// Local file path of an avatar transferred directly over the mesh (used when
   /// no cached Nostr avatar is available — see the mesh profile transfer).
   String? avatarFilePath;
+
+  /// True once this peer sent us a session-authenticated peer-state
+  /// ([AuthenticatedPeerStatePacket]) advertising the `privateMedia` bit — i.e.
+  /// it can receive encrypted private media over the Noise session.
+  bool supportsPrivateMedia;
 
   DateTime lastSeen;
 
