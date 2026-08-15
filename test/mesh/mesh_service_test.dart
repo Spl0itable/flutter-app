@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/crypto/keys.dart' show randomBytes;
 import 'package:nym_bar/services/mesh/mesh_service.dart';
 import 'package:nym_bar/services/mesh/noise/noise_identity.dart';
+import 'package:nym_bar/services/mesh/protocol/bitchat_packet.dart';
+import 'package:nym_bar/services/mesh/protocol/mesh_message_type.dart';
 import 'package:nym_bar/services/mesh/protocol/mesh_profile.dart';
 import 'package:nym_bar/services/mesh/transport/mesh_transport.dart';
 
@@ -45,6 +47,10 @@ class FakeMeshTransport implements MeshTransport {
   final _inbound = StreamController<MeshInboundFrame>.broadcast();
   final _links = StreamController<MeshLinkEvent>.broadcast();
 
+  /// Every raw frame this node put on the air — lets a test decode exactly what
+  /// went out on the wire (recipient, flags, signature) as a peer would see it.
+  final List<Uint8List> sentFrames = [];
+
   void _deliver(Uint8List frame, String fromId) {
     _inbound.add(MeshInboundFrame(data: frame, linkId: fromId));
   }
@@ -62,7 +68,10 @@ class FakeMeshTransport implements MeshTransport {
   @override
   Stream<MeshLinkEvent> get links => _links.stream;
   @override
-  Future<void> broadcast(Uint8List frame) async => bus.broadcastFrom(this, frame);
+  Future<void> broadcast(Uint8List frame) async {
+    sentFrames.add(Uint8List.fromList(frame));
+    bus.broadcastFrom(this, frame);
+  }
   @override
   Future<MeshTransportAvailability> start() async {
     bus.markStarted(this);
@@ -83,6 +92,7 @@ void main() {
   late RadioBus bus;
   late MeshService alice;
   late MeshService bob;
+  late FakeMeshTransport aliceTransport;
 
   setUp(() async {
     bus = RadioBus();
@@ -90,9 +100,10 @@ void main() {
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
     final bobId = await NoiseIdentity.fromSeeds(
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
+    aliceTransport = FakeMeshTransport(bus, 'alice');
     alice = MeshService(
       identity: aliceId,
-      transport: FakeMeshTransport(bus, 'alice'),
+      transport: aliceTransport,
       nicknameProvider: () => 'alice',
     );
     bob = MeshService(
@@ -136,6 +147,36 @@ void main() {
     expect(msg.content, 'gm mesh');
     expect(msg.channel, '#bitchat');
     expect(msg.senderPeerID, alice.myPeerID);
+  });
+
+  test('public message is addressed to the BROADCAST recipient (bitchat interop)',
+      () async {
+    await alice.start();
+    await bob.start();
+    aliceTransport.sentFrames.clear();
+
+    await alice.sendPublicMessage('gm', channel: null);
+
+    // Find the MESSAGE frame among what alice put on the air (announces also
+    // flow). It MUST carry an explicit broadcast recipient (0xFF×8) with
+    // HAS_RECIPIENT set — bitchat signs the recipient into the packet, so a
+    // null-recipient public message produces a signature bitchat rejects.
+    BitchatPacket? messagePacket;
+    for (final frame in aliceTransport.sentFrames) {
+      final p = BinaryProtocol.decode(frame);
+      if (p != null && p.type == MeshMessageType.message) {
+        messagePacket = p;
+        break;
+      }
+    }
+    expect(messagePacket, isNotNull,
+        reason: 'a public MESSAGE frame must have been broadcast');
+    expect(messagePacket!.recipientID, isNotNull,
+        reason: 'HAS_RECIPIENT must be set (not a null recipient)');
+    expect(messagePacket.recipientID, equals(kBroadcastRecipient));
+    expect(messagePacket.isBroadcast, isTrue);
+    expect(messagePacket.signature, isNotNull,
+        reason: 'bitchat broadcast messages are signed');
   });
 
   test('private message completes a Noise handshake and delivers + acks',
@@ -265,38 +306,6 @@ void main() {
     expect(r.targetId, 'dm-77');
     expect(r.emoji, '❤️');
     expect(r.isDirect, isTrue); // arrived over the Noise session
-  });
-
-  test('a push-to-talk voice frame is delivered to nearby peers', () async {
-    await alice.start();
-    await bob.start();
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-
-    final bobGets = _firstEvent(bob.onVoiceFrame);
-    final mulaw = Uint8List.fromList(List.generate(160, (i) => i & 0xFF));
-    await alice.sendVoiceFrame(mulaw, 42, channel: '#mesh');
-
-    final v = await bobGets;
-    expect(v.senderPeerID, alice.myPeerID);
-    expect(v.seq, 42);
-    expect(v.channel, '#mesh');
-    expect(v.isDirect, isFalse);
-    expect(v.mulaw, equals(mulaw));
-  });
-
-  test('a directed 1:1 voice frame reaches only the addressed peer', () async {
-    await alice.start();
-    await bob.start();
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-
-    final bobGets = _firstEvent(bob.onVoiceFrame);
-    final mulaw = Uint8List.fromList(List.generate(80, (i) => (i * 2) & 0xFF));
-    await alice.sendVoiceFrame(mulaw, 7, toPeerID: bob.myPeerID);
-
-    final v = await bobGets;
-    expect(v.isDirect, isTrue);
-    expect(v.seq, 7);
-    expect(v.mulaw, equals(mulaw));
   });
 
   test('a broadcast file is delivered to nearby peers as a public attachment',

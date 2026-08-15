@@ -11,8 +11,6 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/emoji/emoji_prefetch.dart';
 import '../../features/i18n/i18n.dart';
-import '../../features/mesh/mesh_controller.dart';
-import '../../features/mesh/mesh_voice_overlay.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/nymbot/bot_chat_screen.dart' show BotChatScreen;
 import '../../features/nymbot/nymbot_providers.dart'
@@ -999,20 +997,6 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     final controller = ref.read(nostrControllerProvider);
     final isCall = view.kind == ViewKind.pm || view.kind == ViewKind.group;
 
-    // Bluetooth-mesh push-to-talk: in mesh-only mode (radio up, no internet) the
-    // audio/video call buttons are replaced by a single PTT icon — WebRTC can't
-    // traverse the mesh, so it's walkie-talkie voice over BLE instead.
-    final mesh = ref.watch(meshControllerProvider);
-    final meshBridge = ref.read(meshControllerProvider.notifier).bridge;
-    final online =
-        ref.watch(appStateProvider.select((s) => s.connectedRelays)) > 0;
-    final meshOnly = mesh.running && !online;
-    final showPtt = meshOnly &&
-        meshBridge != null &&
-        (view.kind == ViewKind.channel ||
-            (view.kind == ViewKind.pm &&
-                meshBridge.peerIdForPubkey(view.id) != null));
-
     final buttons = <Widget>[
       // `.channel-nav-buttons` — boxed (28×28, radius 4, hover bg), dimmed.
       _NavBtn(
@@ -1047,8 +1031,8 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           tooltip: tr('Share channel URL'),
           onTap: () => ShareChannelModal.open(context, channelKey),
         ),
-      ] else if (isCall && !meshOnly) ...[
-        // PM/group only, ONLINE: audio + video (mirrors `_refreshCallButtons`).
+      ] else if (isCall) ...[
+        // PM/group only: audio + video (mirrors `_refreshCallButtons`).
         _ActionBtn(
           svg: NymIcons.phone,
           tooltip: tr('Start audio call'),
@@ -1060,15 +1044,6 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           onTap: () => _startCall(view, video: true),
         ),
       ],
-      // Mesh-only mode: a single push-to-talk icon in place of the call buttons
-      // (and available on channels too).
-      if (showPtt)
-        _ActionBtn(
-          svg: NymIcons.callMic,
-          tooltip: tr('Push to talk (Bluetooth)'),
-          onTap: () => showMeshPttOverlay(
-            context, ref, view, _titleFor(ref.read(appStateProvider), view)),
-        ),
     ];
 
     // `.channel-header-controls` is a FIXED 2-column CSS grid

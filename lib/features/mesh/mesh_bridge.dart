@@ -33,13 +33,16 @@ import 'mesh_controller.dart';
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
 const String kMeshNearbyChannel = 'mesh';
 
-String _hex(Uint8List b) {
-  final sb = StringBuffer();
-  for (final x in b) {
-    sb.write(x.toRadixString(16).padLeft(2, '0'));
-  }
-  return sb.toString();
-}
+/// The stable 64-hex conversation pubkey for a mesh peer, derived ONLY from its
+/// 16-hex peerID (which is present in every packet's senderID). Keying mesh DMs
+/// off the peerID — instead of the peer's Noise key or a Nostr link, which need
+/// the live peer record and can change with announcement/stream ordering —
+/// guarantees an inbound message and a proactively-opened DM resolve the
+/// IDENTICAL `pm-<pubkey>` thread. The peer's real avatar/nickname still ride
+/// the user store + avatar registry (keyed to this same value), so identity
+/// display is unaffected.
+String meshPubkeyForPeerId(String peerID) =>
+    peerID.toLowerCase().padRight(64, '0').substring(0, 64);
 
 class MeshBridge {
   MeshBridge({
@@ -179,65 +182,24 @@ class MeshBridge {
 
   // ---- Identity mapping ----------------------------------------------------
 
-  /// The 64-hex pubkey used to key [peer]'s PM conversation.
-  String pubkeyForPeer(MeshPeer peer) {
-    if (peer.nostrLinkVerified &&
-        peer.nostrPubkey != null &&
-        peer.nostrPubkey!.length == 64) {
-      return peer.nostrPubkey!.toLowerCase();
-    }
-    final k = peer.noisePublicKey;
-    if (k != null && k.length == 32) return _hex(k);
-    return peer.peerID.toLowerCase().padRight(64, '0').substring(0, 64);
-  }
+  /// The stable 64-hex pubkey used to key [peer]'s PM conversation (peerID
+  /// derived — see [meshPubkeyForPeerId]).
+  String pubkeyForPeer(MeshPeer peer) => meshPubkeyForPeerId(peer.peerID);
 
-  /// Resolves a peerID to its conversation pubkey using the SAME live peer
-  /// object [openPeerDm] uses — so an inbound message keys the identical thread
-  /// the user opened, regardless of peersStream ordering. Falls back to the
-  /// cached map (then a peerID-derived pseudo-pubkey) only when the peer isn't
-  /// currently known. Refreshes the routing maps as a side effect.
+  /// Resolves a peerID to its (stable, peerID-derived) conversation pubkey. An
+  /// inbound message and a proactively-opened DM therefore ALWAYS key the same
+  /// `pm-<pubkey>` thread. Refreshes the routing maps as a side effect.
   String _pubkeyForPeerId(String peerID) {
+    final pubkey = meshPubkeyForPeerId(peerID);
+    _pubkeyByPeerId[peerID] = pubkey;
+    _peerIdByPubkey[pubkey] = peerID;
     final peer = _service.peerById(peerID);
-    if (peer != null) {
-      final pubkey = pubkeyForPeer(peer);
-      _pubkeyByPeerId[peerID] = pubkey;
-      _peerIdByPubkey[pubkey] = peerID;
-      _nymByPubkey[pubkey] = peer.displayName;
-      return pubkey;
-    }
-    return _pubkeyByPeerId[peerID] ??
-        peerID.toLowerCase().padRight(64, '0').substring(0, 64);
+    if (peer != null) _nymByPubkey[pubkey] = peer.displayName;
+    return pubkey;
   }
 
   /// Resolves the radio peerID for an outgoing DM to [pubkey].
   String? peerIdForPubkey(String pubkey) => _peerIdByPubkey[pubkey.toLowerCase()];
-
-  /// The 64-hex pubkey a peerID maps to (public accessor for the voice session).
-  String pubkeyForPeerId(String peerID) => _pubkeyForPeerId(peerID);
-
-  /// A display nym for a peerID (announced nickname, else a short id).
-  String nymForPeerId(String peerID) =>
-      _nymByPubkey[_pubkeyForPeerId(peerID)] ?? peerID;
-
-  // ---- Push-to-talk voice --------------------------------------------------
-
-  /// Inbound live voice frames (µ-law PTT), fed to the streaming player.
-  Stream<MeshVoiceFrameEvent> get onVoiceFrame => _service.onVoiceFrame;
-
-  /// Sends one PTT voice frame for the active [view] (channel broadcast, or a
-  /// directed 1:1 frame when the peer is in range).
-  void sendVoiceFrame(ChatView view, Uint8List mulaw, int seq) {
-    if (view.kind == ViewKind.channel) {
-      final ch = view.id.toLowerCase();
-      unawaited(_service.sendVoiceFrame(mulaw, seq,
-          channel: ch == kMeshNearbyChannel ? null : '#$ch'));
-    } else if (view.kind == ViewKind.pm) {
-      final peerId = peerIdForPubkey(view.id);
-      if (peerId != null) {
-        unawaited(_service.sendVoiceFrame(mulaw, seq, toPeerID: peerId));
-      }
-    }
-  }
 
   /// Proactively opens a mesh DM with [peer] (from the peers list): registers
   /// the routing, marks the conversation mesh-backed, and ensures the PM row
@@ -273,17 +235,10 @@ class MeshBridge {
     }
   }
 
-  /// A peer with a verified Nostr link is dual-transport (its real pubkey works
-  /// over the internet); an unlinked peer is mesh-only.
+  /// Mesh DMs are keyed by a peerID-derived pubkey Nostr can't address, so they
+  /// are always mesh-only (delivered over Bluetooth regardless of connectivity).
   void _classifyPeer(MeshPeer p, String pubkey) {
-    final linked = p.nostrLinkVerified &&
-        p.nostrPubkey != null &&
-        p.nostrPubkey!.length == 64;
-    if (linked) {
-      _meshOnlyPmPubkeys.remove(pubkey);
-    } else {
-      _meshOnlyPmPubkeys.add(pubkey);
-    }
+    _meshOnlyPmPubkeys.add(pubkey);
   }
 
   void _onPublic(MeshPublicMessage msg) {
@@ -373,12 +328,19 @@ class MeshBridge {
   }
 
   void _onReaction(MeshReactionEvent e) {
+    if (e.emoji.isEmpty || e.targetId.isEmpty) return;
+    // Only apply a reaction to a message we actually hold — never conjure one on
+    // a phantom/empty id (guards the intermittent "a sent message auto-gains a
+    // reaction" report). The target is canonicalized to the stored Message.id (a
+    // DM reaction references the shared id, indexed as the message's
+    // nymMessageId).
+    final existing = _app.messageById(e.targetId);
+    if (existing == null) return;
     final pubkey = _pubkeyForPeerId(e.senderPeerID);
-    // Canonicalize the target to the stored Message.id (a DM reaction targets
-    // the shared id, which is indexed as the message's nymMessageId).
-    final target = _app.messageById(e.targetId)?.id ?? e.targetId;
+    // Never let an inbound frame apply a reaction as if it were us.
+    if (pubkey == _appState.selfPubkey) return;
     _app.applyReaction(
-      messageId: target,
+      messageId: existing.id,
       emoji: e.emoji,
       reactor: pubkey,
       removed: e.isRemove,
