@@ -11,6 +11,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../services/mesh/mesh_events.dart';
@@ -58,10 +59,18 @@ class MeshVoiceSession {
   Future<void> startTalk() async {
     if (transmitting.value || _disposed) return;
     try {
+      // Request the mic grant up front (awaits the OS prompt) so the first hold
+      // records instead of racing record's own async permission check.
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        error.value = 'Microphone permission needed';
+        return;
+      }
       if (!await _recorder.hasPermission()) {
         error.value = 'Microphone permission needed';
         return;
       }
+      error.value = null;
       final stream = await _recorder.startStream(const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: kVoiceSampleRate,

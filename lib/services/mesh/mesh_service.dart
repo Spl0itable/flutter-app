@@ -96,6 +96,11 @@ class MeshService {
   // ---- Public API -----------------------------------------------------------
 
   String get myPeerID => identity.peerID;
+
+  /// The live peer record for [peerID] (announced nickname + keys), or null if
+  /// not currently known. Lets the bridge resolve inbound identity from the same
+  /// object the peers list uses, independent of stream ordering.
+  MeshPeer? peerById(String peerID) => _peers[peerID];
   bool get isRunning => _running;
   int get connectedLinkCount => _transport.connectedLinkCount;
   MeshTransportAvailability get availability => _transport.availability;

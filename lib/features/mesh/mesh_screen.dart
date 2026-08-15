@@ -30,11 +30,19 @@ class MeshScreen extends ConsumerWidget {
       appBar: AppBar(
         backgroundColor: c.bgSecondary,
         foregroundColor: c.text,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        shape: Border(bottom: BorderSide(color: c.glassBorder)),
+        titleSpacing: 0,
         title: Row(
           children: [
             NymSvgIcon(NymIcons.bluetooth, size: 18, color: c.primary),
             const SizedBox(width: 8),
-            Text(tr('Bluetooth Mesh')),
+            Text(tr('Bluetooth Mesh'),
+                style: TextStyle(
+                    color: c.text,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600)),
           ],
         ),
       ),

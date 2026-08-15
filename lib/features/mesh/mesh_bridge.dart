@@ -191,7 +191,20 @@ class MeshBridge {
     return peer.peerID.toLowerCase().padRight(64, '0').substring(0, 64);
   }
 
+  /// Resolves a peerID to its conversation pubkey using the SAME live peer
+  /// object [openPeerDm] uses — so an inbound message keys the identical thread
+  /// the user opened, regardless of peersStream ordering. Falls back to the
+  /// cached map (then a peerID-derived pseudo-pubkey) only when the peer isn't
+  /// currently known. Refreshes the routing maps as a side effect.
   String _pubkeyForPeerId(String peerID) {
+    final peer = _service.peerById(peerID);
+    if (peer != null) {
+      final pubkey = pubkeyForPeer(peer);
+      _pubkeyByPeerId[peerID] = pubkey;
+      _peerIdByPubkey[pubkey] = peerID;
+      _nymByPubkey[pubkey] = peer.displayName;
+      return pubkey;
+    }
     return _pubkeyByPeerId[peerID] ??
         peerID.toLowerCase().padRight(64, '0').substring(0, 64);
   }
