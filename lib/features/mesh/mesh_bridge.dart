@@ -30,6 +30,7 @@ import '../../services/mesh/protocol/mesh_profile.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import 'mesh_controller.dart';
+import 'mesh_diagnostics.dart';
 
 /// The bare storage key of the mesh "Nearby" public channel (renders as
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
@@ -42,6 +43,8 @@ String _hex(Uint8List b) {
   }
   return sb.toString();
 }
+
+String _short(String s) => s.length <= 8 ? s : s.substring(0, 8);
 
 /// The stable 64-hex conversation pubkey for a mesh peer, derived purely from
 /// its 16-hex peerID — `SHA-256("mesh:" + peerID)`.
@@ -138,6 +141,7 @@ class MeshBridge {
   ProviderSubscription<ChatView>? _viewSub;
 
   void start() {
+    MeshService.debugLog = MeshDiagnostics.instance.log;
     _subs.add(_service.peersStream.listen(_onPeers));
     _subs.add(_service.onPublicMessage.listen(_onPublic));
     _subs.add(_service.onPrivateMessage.listen(_onPrivate));
@@ -311,7 +315,13 @@ class MeshBridge {
       deliveryStatus: DeliveryStatus.sent,
       viaMesh: true,
     );
+    final before = _appState.messages[storageKey]?.length ?? 0;
     final landed = _app.ingestMeshChannelMessage(m, channelKey: storageKey);
+    final after = _appState.messages[storageKey]?.length ?? 0;
+    MeshDiagnostics.instance.log(
+        '#chan rx peer=${msg.senderPeerID} key=$storageKey store=$before→$after '
+        'view=${_appState.view.storageKey} own=$isOwn '
+        '${landed ? 'LANDED' : 'DROPPED'}');
     if (landed && !isOwn) _maybeNotifyChannelMention(m, channelName);
   }
 
@@ -340,7 +350,15 @@ class MeshBridge {
       timestampMs: msg.timestampMs,
       isOwn: false,
     );
+    final storeKey = 'pm-$pubkey';
+    final before = _appState.messages[storeKey]?.length ?? 0;
     _app.ingestPMMessage(m);
+    final after = _appState.messages[storeKey]?.length ?? 0;
+    MeshDiagnostics.instance.log(
+        'PM rx peer=${msg.senderPeerID} id=${_short(msg.messageId)} '
+        'key=$storeKey store=$before→$after '
+        'view=${_appState.view.storageKey} '
+        '${after > before ? 'LANDED' : 'DROPPED'}');
     _notifyPm(pubkey: pubkey, nym: nym, body: msg.content, ts: msg.timestampMs);
     // If this thread is already on-screen, ack it immediately.
     final view = _appState.view;

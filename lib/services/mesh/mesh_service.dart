@@ -434,9 +434,16 @@ class MeshService {
 
   // ---- Inbound handling -----------------------------------------------------
 
+  /// Debug sink for the receive pipeline (wired to the in-app mesh diagnostics
+  /// panel by the bridge). Null in production/tests unless set.
+  static void Function(String line)? debugLog;
+
   Future<void> _onFrame(MeshInboundFrame frame) async {
     final packet = BinaryProtocol.decode(frame.data);
-    if (packet == null) return;
+    if (packet == null) {
+      debugLog?.call('frame ${frame.data.length}B — DECODE FAILED');
+      return;
+    }
     await _processPacket(packet, frame.linkId, frame.rssi);
   }
 
@@ -446,6 +453,11 @@ class MeshService {
     // Ignore our own echoes.
     if (senderPeerID == identity.peerID) return;
 
+    debugLog?.call('pkt type=0x${packet.type.toRadixString(16)} '
+        'from=$senderPeerID '
+        'rcpt=${packet.recipientID == null ? 'null' : (packet.isBroadcast ? 'bcast' : 'direct')} '
+        '${packet.payload.length}B');
+
     // Deduplicate the controlled flood.
     final key = SeenPackets.keyFor(
       type: packet.type,
@@ -453,7 +465,10 @@ class MeshService {
       timestamp: packet.timestamp,
       payload: packet.payload,
     );
-    if (!_seen.checkAndAdd(key)) return;
+    if (!_seen.checkAndAdd(key)) {
+      debugLog?.call('  ↳ deduped (seen) type=0x${packet.type.toRadixString(16)}');
+      return;
+    }
 
     final forUs = packet.recipientID == null ||
         packet.isBroadcast ||
