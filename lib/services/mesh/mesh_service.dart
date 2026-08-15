@@ -415,6 +415,11 @@ class MeshService {
     await _sendPacket(await _buildPacket(
       type: MeshMessageType.fileTransfer,
       payload: encoded,
+      // bitchat drops a raw (non-Noise) file transfer without a valid sender
+      // signature (BLEFileTransferHandler), so a broadcast image must be signed
+      // exactly like a public message or it never appears on the far side.
+      recipientID: kBroadcastRecipient,
+      sign: true,
     ));
   }
 
@@ -500,7 +505,16 @@ class MeshService {
         await _handleFragment(packet, linkId, rssi);
         break;
       case MeshMessageType.fileTransfer:
-        _handleFileBroadcast(packet, senderPeerID);
+        // bitchat sends a PM image as a DIRECTED (rcpt=our peerID) plaintext
+        // fileTransfer, and a #mesh image as a broadcast one. Route by the
+        // recipient so a directed file lands in the sender's DM, not #mesh.
+        _handleFile(
+          packet,
+          senderPeerID,
+          direct: packet.recipientID != null &&
+              !packet.isBroadcast &&
+              _hex(packet.recipientID!) == identity.peerID,
+        );
         break;
       case MeshMessageType.nymProfileRequest:
         if (forUs) await _handleProfileRequest(senderPeerID, packet.payload);
@@ -739,7 +753,8 @@ class MeshService {
     ));
   }
 
-  void _handleFileBroadcast(BitchatPacket packet, String senderPeerID) {
+  void _handleFile(BitchatPacket packet, String senderPeerID,
+      {required bool direct}) {
     final file = BitchatFilePacket.decode(packet.payload);
     if (file == null) return;
     final peer = _peers[senderPeerID];
@@ -748,7 +763,7 @@ class MeshService {
       fileName: file.fileName,
       mimeType: file.mimeType,
       bytes: file.content,
-      isDirect: false,
+      isDirect: direct,
       senderNickname: peer?.nickname ?? '',
     ));
   }

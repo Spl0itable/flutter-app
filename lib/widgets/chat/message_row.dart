@@ -5209,11 +5209,26 @@ class _LocalMediaBody extends StatelessWidget {
 
   bool get _isImage => mime?.startsWith('image/') ?? false;
 
+  /// Memoized file reads, keyed by path. Without this the [FutureBuilder] below
+  /// started a FRESH `readAsBytes()` on every rebuild — i.e. every scroll frame
+  /// — so the image reverted to the loading placeholder and flickered
+  /// constantly. Reusing the completed future keeps the decoded bytes stable
+  /// (and the [MemoryImage] cache warm), so the picture paints once and holds.
+  static final Map<String, Future<Uint8List>> _bytesCache = {};
+
+  static Future<Uint8List> _read(String path) {
+    final cached = _bytesCache[path];
+    if (cached != null) return cached;
+    // Soft cap so a long session can't grow the cache unbounded.
+    if (_bytesCache.length > 80) _bytesCache.clear();
+    return _bytesCache[path] = XFile(path).readAsBytes();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isImage) {
       return FutureBuilder<Uint8List>(
-        future: XFile(path).readAsBytes(),
+        future: _read(path),
         builder: (context, snap) {
           if (snap.connectionState != ConnectionState.done) {
             return _placeholder();
@@ -5227,7 +5242,8 @@ class _LocalMediaBody extends StatelessWidget {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(
                     maxWidth: 260, maxHeight: 320, minWidth: 80),
-                child: Image.memory(bytes, fit: BoxFit.cover),
+                child: Image.memory(bytes,
+                    fit: BoxFit.cover, gaplessPlayback: true),
               ),
             ),
           );
