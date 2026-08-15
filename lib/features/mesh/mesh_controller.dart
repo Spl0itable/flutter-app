@@ -311,7 +311,10 @@ class MeshController extends StateNotifier<MeshUiState> {
   }
 
   void _publishAvatar(String peerID, Uint8List bytes) {
-    final seeds = <String>[peerID];
+    // Register under BOTH the raw peerID and the peerID-derived conversation
+    // pubkey (the seed a mesh message/DM row actually uses), plus a verified
+    // Nostr pubkey when present, so the peer's real avatar renders everywhere.
+    final seeds = <String>[peerID, meshPubkeyForPeerId(peerID)];
     final peer = state.peerById(peerID);
     if (peer != null && peer.nostrLinkVerified && peer.nostrPubkey != null) {
       seeds.add(peer.nostrPubkey!);

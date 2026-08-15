@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nym_bar/features/mesh/mesh_bridge.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/state/app_state.dart';
 
@@ -51,5 +52,30 @@ void main() {
 
     // A conversation row must exist for the sidebar.
     expect(n.state.pmConversations.any((c) => c.pubkey == peer), isTrue);
+  });
+
+  // The root cause of "PM shows in the notification modal but not in the chat"
+  // was that the inbound-message path and the open-DM path resolved a peer to
+  // DIFFERENT conversation pubkeys (one via the Noise key, one peerID-derived),
+  // so they keyed two different pm-<pubkey> threads. Both paths now route
+  // through meshPubkeyForPeerId, which is a pure, deterministic function of the
+  // 16-hex peerID — guaranteeing they always agree.
+  group('meshPubkeyForPeerId — deterministic PM keying', () {
+    test('is a stable, lowercase, 64-hex key derived only from the peerID', () {
+      const peerId = 'A1B2C3D4E5F60718';
+      final k = meshPubkeyForPeerId(peerId);
+      expect(k.length, 64);
+      expect(k, equals(k.toLowerCase()));
+      expect(RegExp(r'^[0-9a-f]{64}$').hasMatch(k), isTrue);
+      // Same peerID → same key on every call (inbound == open-DM == notify).
+      expect(meshPubkeyForPeerId(peerId), equals(k));
+      // Case-insensitive on the peerID (senderID hex casing must not fork it).
+      expect(meshPubkeyForPeerId(peerId.toLowerCase()), equals(k));
+    });
+
+    test('distinct peers get distinct keys', () {
+      expect(meshPubkeyForPeerId('1111111111111111'),
+          isNot(equals(meshPubkeyForPeerId('2222222222222222'))));
+    });
   });
 }

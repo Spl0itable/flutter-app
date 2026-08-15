@@ -298,6 +298,13 @@ class MeshService {
     final packet = await _buildPacket(
       type: MeshMessageType.message,
       payload: msg.toBinaryPayload(),
+      // bitchat addresses public/broadcast chat to the BROADCAST recipient
+      // (0xFF×8) with HAS_RECIPIENT set — NOT a null recipient. The recipientID
+      // is part of the Ed25519-signed bytes, so signing a null-recipient packet
+      // produces a signature bitchat rejects (our #mesh messages silently
+      // dropped). Address it to broadcast so both the wire form and the signed
+      // bytes match bitchat.
+      recipientID: kBroadcastRecipient,
       sign: true,
     );
     await _sendPacket(packet);
