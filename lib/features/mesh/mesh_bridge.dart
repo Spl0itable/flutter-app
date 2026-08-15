@@ -212,33 +212,6 @@ class MeshBridge {
   /// Resolves the radio peerID for an outgoing DM to [pubkey].
   String? peerIdForPubkey(String pubkey) => _peerIdByPubkey[pubkey.toLowerCase()];
 
-  /// The 64-hex pubkey a peerID maps to (public accessor for the voice session).
-  String pubkeyForPeerId(String peerID) => _pubkeyForPeerId(peerID);
-
-  /// A display nym for a peerID (announced nickname, else a short id).
-  String nymForPeerId(String peerID) =>
-      _nymByPubkey[_pubkeyForPeerId(peerID)] ?? peerID;
-
-  // ---- Push-to-talk voice --------------------------------------------------
-
-  /// Inbound live voice frames (µ-law PTT), fed to the streaming player.
-  Stream<MeshVoiceFrameEvent> get onVoiceFrame => _service.onVoiceFrame;
-
-  /// Sends one PTT voice frame for the active [view] (channel broadcast, or a
-  /// directed 1:1 frame when the peer is in range).
-  void sendVoiceFrame(ChatView view, Uint8List mulaw, int seq) {
-    if (view.kind == ViewKind.channel) {
-      final ch = view.id.toLowerCase();
-      unawaited(_service.sendVoiceFrame(mulaw, seq,
-          channel: ch == kMeshNearbyChannel ? null : '#$ch'));
-    } else if (view.kind == ViewKind.pm) {
-      final peerId = peerIdForPubkey(view.id);
-      if (peerId != null) {
-        unawaited(_service.sendVoiceFrame(mulaw, seq, toPeerID: peerId));
-      }
-    }
-  }
-
   /// Proactively opens a mesh DM with [peer] (from the peers list): registers
   /// the routing, marks the conversation mesh-backed, and ensures the PM row
   /// exists. Returns the pubkey to `switchView(ChatView.pm(pubkey))` to.
@@ -373,12 +346,19 @@ class MeshBridge {
   }
 
   void _onReaction(MeshReactionEvent e) {
+    if (e.emoji.isEmpty || e.targetId.isEmpty) return;
+    // Only apply a reaction to a message we actually hold — never conjure one on
+    // a phantom/empty id (guards the intermittent "a sent message auto-gains a
+    // reaction" report). The target is canonicalized to the stored Message.id (a
+    // DM reaction references the shared id, indexed as the message's
+    // nymMessageId).
+    final existing = _app.messageById(e.targetId);
+    if (existing == null) return;
     final pubkey = _pubkeyForPeerId(e.senderPeerID);
-    // Canonicalize the target to the stored Message.id (a DM reaction targets
-    // the shared id, which is indexed as the message's nymMessageId).
-    final target = _app.messageById(e.targetId)?.id ?? e.targetId;
+    // Never let an inbound frame apply a reaction as if it were us.
+    if (pubkey == _appState.selfPubkey) return;
     _app.applyReaction(
-      messageId: target,
+      messageId: existing.id,
       emoji: e.emoji,
       reactor: pubkey,
       removed: e.isRemove,

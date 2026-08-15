@@ -80,7 +80,6 @@ class MeshService {
   final _files = StreamController<MeshFileReceived>.broadcast();
   final _typing = StreamController<MeshTypingEvent>.broadcast();
   final _reactions = StreamController<MeshReactionEvent>.broadcast();
-  final _voice = StreamController<MeshVoiceFrameEvent>.broadcast();
   final _peersChanged = StreamController<List<MeshPeer>>.broadcast();
 
   /// Peers we've already asked for a profile (avoids re-requesting on every
@@ -117,62 +116,6 @@ class MeshService {
   Stream<MeshFileReceived> get onFile => _files.stream;
   Stream<MeshTypingEvent> get onTyping => _typing.stream;
   Stream<MeshReactionEvent> get onReaction => _reactions.stream;
-  Stream<MeshVoiceFrameEvent> get onVoiceFrame => _voice.stream;
-
-  /// Sends a single live push-to-talk voice frame ([mulaw] = µ-law audio). A
-  /// channel PTT is broadcast; a 1:1 PTT is directed to [toPeerID]. TTL is 1 so
-  /// voice stays on direct links and never floods the relay mesh. Frames are
-  /// ephemeral (never gossip-synced), matching bitchat's voiceFrame semantics.
-  Future<void> sendVoiceFrame(
-    Uint8List mulaw,
-    int seq, {
-    String? channel,
-    String? toPeerID,
-  }) async {
-    final out = BytesBuilder();
-    out.addByte(channel != null ? 0x02 : 0);
-    out.addByte((seq >> 8) & 0xFF);
-    out.addByte(seq & 0xFF);
-    if (channel != null) {
-      var b = Uint8List.fromList(utf8.encode(channel));
-      if (b.length > 255) b = b.sublist(0, 255);
-      out.addByte(b.length);
-      out.add(b);
-    }
-    out.add(mulaw);
-    await _sendPacket(await _buildPacket(
-      type: MeshMessageType.voiceFrame,
-      payload: out.toBytes(),
-      recipientID: toPeerID != null ? _peerIdBytes(toPeerID) : null,
-      ttl: 1,
-    ));
-  }
-
-  void _handleVoiceFrame(BitchatPacket packet, String senderPeerID) {
-    final data = packet.payload;
-    if (data.length < 3) return;
-    var off = 0;
-    final flags = data[off++];
-    final hasChannel = (flags & 0x02) != 0;
-    final seq = (data[off] << 8) | data[off + 1];
-    off += 2;
-    String? channel;
-    if (hasChannel) {
-      if (off >= data.length) return;
-      final len = data[off++];
-      if (off + len > data.length) return;
-      channel = utf8.decode(data.sublist(off, off + len), allowMalformed: true);
-      off += len;
-    }
-    final mulaw = Uint8List.sublistView(data, off);
-    _voice.add(MeshVoiceFrameEvent(
-      senderPeerID: senderPeerID,
-      seq: seq,
-      mulaw: Uint8List.fromList(mulaw),
-      isDirect: !packet.isBroadcast,
-      channel: channel,
-    ));
-  }
 
   /// Broadcasts an emoji reaction to a public/channel message [targetId].
   Future<void> sendChannelReaction(
@@ -439,7 +382,6 @@ class MeshService {
     _files.close();
     _typing.close();
     _reactions.close();
-    _voice.close();
     _peersChanged.close();
   }
 
@@ -503,9 +445,6 @@ class MeshService {
         break;
       case MeshMessageType.nymReaction:
         _handleReactionBroadcast(packet, senderPeerID);
-        break;
-      case MeshMessageType.voiceFrame:
-        if (forUs) _handleVoiceFrame(packet, senderPeerID);
         break;
       default:
         break;
