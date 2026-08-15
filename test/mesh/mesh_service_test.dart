@@ -6,6 +6,7 @@ import 'package:nym_bar/core/crypto/keys.dart' show randomBytes;
 import 'package:nym_bar/services/mesh/mesh_service.dart';
 import 'package:nym_bar/services/mesh/noise/noise_identity.dart';
 import 'package:nym_bar/services/mesh/protocol/bitchat_packet.dart';
+import 'package:nym_bar/services/mesh/protocol/mesh_message_identity.dart';
 import 'package:nym_bar/services/mesh/protocol/mesh_message_type.dart';
 import 'package:nym_bar/services/mesh/protocol/mesh_profile.dart';
 import 'package:nym_bar/services/mesh/transport/mesh_transport.dart';
@@ -93,11 +94,13 @@ void main() {
   late MeshService alice;
   late MeshService bob;
   late FakeMeshTransport aliceTransport;
+  late NoiseIdentity aliceIdentity;
 
   setUp(() async {
     bus = RadioBus();
     final aliceId = await NoiseIdentity.fromSeeds(
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
+    aliceIdentity = aliceId;
     final bobId = await NoiseIdentity.fromSeeds(
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
     aliceTransport = FakeMeshTransport(bus, 'alice');
@@ -138,15 +141,31 @@ void main() {
         reason: 'signed announcement with matching peerID must verify');
   });
 
-  test('public broadcast message is delivered', () async {
+  test('public mesh message is delivered as raw UTF-8 (bitchat interop)',
+      () async {
     await alice.start();
     await bob.start();
     final received = _firstEvent(bob.onPublicMessage);
-    await alice.sendPublicMessage('gm mesh', channel: '#bitchat');
+    // The public mesh chat carries no channel on the wire — the payload is the
+    // raw content string (bitchat's format).
+    await alice.sendPublicMessage('gm mesh');
     final msg = await received;
     expect(msg.content, 'gm mesh');
-    expect(msg.channel, '#bitchat');
+    expect(msg.channel, isNull,
+        reason: 'bitchat public mesh messages have no channel field');
     expect(msg.senderPeerID, alice.myPeerID);
+    // The sender nickname is resolved from alice's announce (the wire carries
+    // none), not from the payload.
+    expect(msg.senderNickname, 'alice');
+    // The id is content-derived and identical on every device.
+    expect(
+      msg.messageId,
+      MeshMessageIdentity.stableId(
+        senderIdHex: alice.myPeerID,
+        timestampMs: msg.timestampMs,
+        content: 'gm mesh',
+      ),
+    );
   });
 
   test('public message is addressed to the BROADCAST recipient (bitchat interop)',
@@ -200,6 +219,39 @@ void main() {
     final ack = await aliceGetsAck;
     expect(ack.messageId, messageId);
     expect(ack.isRead, isFalse);
+  });
+
+  test('inbound PM and open-DM resolve the SAME noise-key pubkey', () async {
+    // Root cause of "received PM shows in notifications but not in the chat":
+    // the inbound-message path and the open-DM path keyed two DIFFERENT
+    // pm-<pubkey> threads. Both now resolve the peer's Noise static key from a
+    // single source (MeshService.noiseKeyHexForPeer, backed by the peer record
+    // AND the established session), so they can't disagree.
+    await alice.start();
+    await bob.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final bobReceives = _firstEvent(bob.onPrivateMessage);
+    await alice.sendPrivateMessage(bob.myPeerID, 'hi from alice');
+    final pm = await bobReceives;
+
+    String hex(Uint8List b) =>
+        b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+    final expected = hex(aliceIdentity.staticPublic);
+
+    // What the INBOUND path (_onPrivate → _pubkeyForPeerId) keys the thread by.
+    final inboundKey = bob.noiseKeyHexForPeer(pm.senderPeerID);
+    // What the OPEN-DM path (openPeerDm → pubkeyForPeer) keys it by.
+    final peer = bob.peerById(pm.senderPeerID);
+
+    expect(inboundKey, isNotNull);
+    expect(inboundKey, equals(expected),
+        reason: 'inbound key must be alice’s real 64-hex Noise static key');
+    expect(peer, isNotNull);
+    expect(hex(peer!.noisePublicKey!), equals(expected),
+        reason: 'open-DM key must resolve the identical Noise static key');
+    // A real key — never the padded-peerID pseudo-pubkey (the #0000 bug).
+    expect(inboundKey!.endsWith('0000000000'), isFalse);
   });
 
   test('long private message is chunked and fully reassembled in order',

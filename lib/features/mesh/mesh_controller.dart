@@ -311,15 +311,20 @@ class MeshController extends StateNotifier<MeshUiState> {
   }
 
   void _publishAvatar(String peerID, Uint8List bytes) {
-    // Register under BOTH the raw peerID and the peerID-derived conversation
-    // pubkey (the seed a mesh message/DM row actually uses), plus a verified
-    // Nostr pubkey when present, so the peer's real avatar renders everywhere.
-    final seeds = <String>[peerID, meshPubkeyForPeerId(peerID)];
+    // Register under every seed a message/DM row for this peer might use: the
+    // raw peerID, the canonical conversation pubkey (the bridge's Noise-key /
+    // Nostr-link resolution — the seed rows actually key on), and the transient
+    // padded-peerID pseudo-pubkey used before the Noise key is known, so the
+    // peer's real avatar renders in all cases.
+    final seeds = <String>{peerID, meshPeerIdPseudoPubkey(peerID)};
     final peer = state.peerById(peerID);
-    if (peer != null && peer.nostrLinkVerified && peer.nostrPubkey != null) {
-      seeds.add(peer.nostrPubkey!);
+    if (peer != null) {
+      seeds.add(_bridge?.pubkeyForPeer(peer) ?? meshPeerIdPseudoPubkey(peerID));
+      if (peer.nostrLinkVerified && peer.nostrPubkey != null) {
+        seeds.add(peer.nostrPubkey!);
+      }
     }
-    MeshAvatarRegistry.instance.register(seeds, bytes);
+    MeshAvatarRegistry.instance.register(seeds.toList(), bytes);
   }
 
   Future<void> _hydratePeerAvatar(MeshService service, MeshPeer peer) async {

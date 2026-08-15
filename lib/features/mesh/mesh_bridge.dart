@@ -33,15 +33,22 @@ import 'mesh_controller.dart';
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
 const String kMeshNearbyChannel = 'mesh';
 
-/// The stable 64-hex conversation pubkey for a mesh peer, derived ONLY from its
-/// 16-hex peerID (which is present in every packet's senderID). Keying mesh DMs
-/// off the peerID — instead of the peer's Noise key or a Nostr link, which need
-/// the live peer record and can change with announcement/stream ordering —
-/// guarantees an inbound message and a proactively-opened DM resolve the
-/// IDENTICAL `pm-<pubkey>` thread. The peer's real avatar/nickname still ride
-/// the user store + avatar registry (keyed to this same value), so identity
-/// display is unaffected.
-String meshPubkeyForPeerId(String peerID) =>
+String _hex(Uint8List b) {
+  final sb = StringBuffer();
+  for (final x in b) {
+    sb.write(x.toRadixString(16).padLeft(2, '0'));
+  }
+  return sb.toString();
+}
+
+/// Last-resort conversation pubkey for a peer whose real 32-byte Noise static
+/// key isn't known yet: the 16-hex peerID zero-padded to 64 hex. Used ONLY
+/// transiently, before the peer's announce/handshake lands — the real Noise
+/// key (a genuine 64-hex identity, see [MeshService.noiseKeyHexForPeer])
+/// replaces it as soon as it exists. Keying by the padded peerID as a
+/// PERMANENT identity is wrong: it renders as a `#0000` suffix in the PM
+/// header because the trailing zeros aren't real key bytes.
+String meshPeerIdPseudoPubkey(String peerID) =>
     peerID.toLowerCase().padRight(64, '0').substring(0, 64);
 
 class MeshBridge {
@@ -182,18 +189,37 @@ class MeshBridge {
 
   // ---- Identity mapping ----------------------------------------------------
 
-  /// The stable 64-hex pubkey used to key [peer]'s PM conversation (peerID
-  /// derived — see [meshPubkeyForPeerId]).
-  String pubkeyForPeer(MeshPeer peer) => meshPubkeyForPeerId(peer.peerID);
+  /// The 64-hex pubkey used to key [peer]'s PM conversation. A verified Nostr
+  /// link wins (the peer is dual-transport, weaving mesh + Nostr into one
+  /// thread under its real Nostr identity); otherwise the peer's 32-byte Noise
+  /// static key — its real, stable, displayable mesh identity (what bitchat
+  /// itself keys peers by). The padded-peerID pseudo-pubkey is a last resort
+  /// only while the Noise key is still unknown.
+  String pubkeyForPeer(MeshPeer peer) {
+    if (peer.nostrLinkVerified &&
+        peer.nostrPubkey != null &&
+        peer.nostrPubkey!.length == 64) {
+      return peer.nostrPubkey!.toLowerCase();
+    }
+    final k = peer.noisePublicKey;
+    if (k != null && k.length == 32) return _hex(k);
+    return meshPeerIdPseudoPubkey(peer.peerID);
+  }
 
-  /// Resolves a peerID to its (stable, peerID-derived) conversation pubkey. An
-  /// inbound message and a proactively-opened DM therefore ALWAYS key the same
-  /// `pm-<pubkey>` thread. Refreshes the routing maps as a side effect.
+  /// Resolves a peerID to its conversation pubkey using the SAME identity the
+  /// peers list uses, so an inbound message and a proactively-opened DM ALWAYS
+  /// key the identical `pm-<pubkey>` thread. When the peer record isn't present
+  /// yet (a DM can arrive before its announce is processed) the Noise static
+  /// key is pulled from the established session — an encrypted PM guarantees
+  /// one exists — so the real key is used even then. Refreshes routing maps.
   String _pubkeyForPeerId(String peerID) {
-    final pubkey = meshPubkeyForPeerId(peerID);
+    final peer = _service.peerById(peerID);
+    final pubkey = peer != null
+        ? pubkeyForPeer(peer)
+        : (_service.noiseKeyHexForPeer(peerID) ??
+            meshPeerIdPseudoPubkey(peerID));
     _pubkeyByPeerId[peerID] = pubkey;
     _peerIdByPubkey[pubkey] = peerID;
-    final peer = _service.peerById(peerID);
     if (peer != null) _nymByPubkey[pubkey] = peer.displayName;
     return pubkey;
   }
@@ -235,10 +261,19 @@ class MeshBridge {
     }
   }
 
-  /// Mesh DMs are keyed by a peerID-derived pubkey Nostr can't address, so they
-  /// are always mesh-only (delivered over Bluetooth regardless of connectivity).
+  /// A peer with a verified Nostr link is dual-transport — its DM is addressed
+  /// by a real Nostr pubkey, so it goes over the internet when online and falls
+  /// back to Bluetooth when not. An unlinked peer is keyed by its Noise key,
+  /// which Nostr can't address, so its DM is mesh-only.
   void _classifyPeer(MeshPeer p, String pubkey) {
-    _meshOnlyPmPubkeys.add(pubkey);
+    final linked = p.nostrLinkVerified &&
+        p.nostrPubkey != null &&
+        p.nostrPubkey!.length == 64;
+    if (linked) {
+      _meshOnlyPmPubkeys.remove(pubkey);
+    } else {
+      _meshOnlyPmPubkeys.add(pubkey);
+    }
   }
 
   void _onPublic(MeshPublicMessage msg) {
@@ -272,10 +307,15 @@ class MeshBridge {
 
   void _onPrivate(MeshPrivateMessage msg) {
     final pubkey = _pubkeyForPeerId(msg.senderPeerID);
-    // An unknown sender (no announcement processed yet) is addressed only by a
-    // pseudo-pubkey, so its DM is mesh-only until a linked announcement upgrades
-    // it in [_classifyPeer].
-    if (!_pubkeyByPeerId.containsKey(msg.senderPeerID)) {
+    // Classify transport off the live peer: a verified Nostr link makes the DM
+    // dual-transport, otherwise it is mesh-only (keyed by a Noise-key /
+    // pseudo-pubkey Nostr can't address). A DM can arrive before the sender's
+    // announce is processed — then the peer record is absent and it is
+    // mesh-only until a linked announce upgrades it.
+    final peer = _service.peerById(msg.senderPeerID);
+    if (peer != null) {
+      _classifyPeer(peer, pubkey);
+    } else {
       _meshOnlyPmPubkeys.add(pubkey);
     }
     if (_meshPmPubkeys.add(pubkey)) _refreshMarkers();

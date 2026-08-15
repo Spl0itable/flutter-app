@@ -19,6 +19,7 @@ import 'protocol/bitchat_message.dart';
 import 'protocol/bitchat_packet.dart';
 import 'protocol/fragment_payload.dart';
 import 'protocol/identity_announcement.dart';
+import 'protocol/mesh_message_identity.dart';
 import 'protocol/mesh_message_type.dart';
 import 'protocol/mesh_profile.dart';
 import 'protocol/noise_payload.dart';
@@ -100,6 +101,22 @@ class MeshService {
   /// not currently known. Lets the bridge resolve inbound identity from the same
   /// object the peers list uses, independent of stream ordering.
   MeshPeer? peerById(String peerID) => _peers[peerID];
+
+  /// The peer's 32-byte Noise static public key as 64-hex, or null if unknown.
+  /// Resolved from the announced peer record first, then the established Noise
+  /// session's remote static key — so an ENCRYPTED private message (which can
+  /// only arrive over a completed handshake) can ALWAYS resolve the sender's
+  /// stable, real identity, even if that peer's announce hasn't been processed
+  /// yet. This is the canonical mesh identity (bitchat keys peers by it, and the
+  /// 16-hex peerID is just its SHA-256 fingerprint prefix).
+  String? noiseKeyHexForPeer(String peerID) {
+    final fromPeer = _peers[peerID]?.noisePublicKey;
+    if (fromPeer != null && fromPeer.length == 32) return _hex(fromPeer);
+    final fromSession = _noise.remoteStaticKey(peerID);
+    if (fromSession != null && fromSession.length == 32) return _hex(fromSession);
+    return null;
+  }
+
   bool get isRunning => _running;
   int get connectedLinkCount => _transport.connectedLinkCount;
   MeshTransportAvailability get availability => _transport.availability;
@@ -278,37 +295,60 @@ class MeshService {
     String? channel,
     List<String>? mentions,
   }) async {
-    final messageId = _uuid.v4();
-    // A password-protected channel is a mesh group chat: seal the content with
-    // the shared AES key so only members can read it.
-    final encrypted =
-        channel != null && _channelCrypto.hasKey(channel);
-    final msg = BitchatMessage(
-      id: messageId,
-      sender: _nicknameProvider(),
-      content: encrypted ? '' : content,
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      senderPeerID: identity.peerID,
-      channel: channel,
-      mentions: mentions,
-      isEncrypted: encrypted,
-      encryptedContent:
-          encrypted ? await _channelCrypto.encrypt(channel, content) : null,
-    );
+    final timestampMs = DateTime.now().millisecondsSinceEpoch;
+    // A password-protected channel is a mesh GROUP chat (Nymchat-only): seal the
+    // content with the shared AES key and carry it in the legacy BitchatMessage
+    // TLV so members can decrypt it. bitchat has no such channel over the BLE
+    // mesh, so this path is Nymchat↔Nymchat only.
+    final encrypted = channel != null && _channelCrypto.hasKey(channel);
+    if (encrypted) {
+      final msg = BitchatMessage(
+        id: _uuid.v4(),
+        sender: _nicknameProvider(),
+        content: '',
+        timestampMs: timestampMs,
+        senderPeerID: identity.peerID,
+        channel: channel,
+        mentions: mentions,
+        isEncrypted: true,
+        encryptedContent: await _channelCrypto.encrypt(channel, content),
+      );
+      final packet = await _buildPacket(
+        // Nymchat-only type so bitchat's raw-UTF-8 [message] path stays
+        // unambiguous — a non-member must never render this ciphertext TLV as
+        // a garbled public message.
+        type: MeshMessageType.nymChannelMessage,
+        payload: msg.toBinaryPayload(),
+        recipientID: kBroadcastRecipient,
+        sign: true,
+      );
+      await _sendPacket(packet);
+      return msg.id;
+    }
+
+    // Public mesh chat (bitchat's "Mesh"): the wire payload is the RAW UTF-8
+    // content — NOT a TLV. bitchat-iOS/android both read a broadcast MESSAGE's
+    // payload straight back as a UTF-8 string (`String(data: payload)`), derive
+    // the message id from the signed fields, and take the sender nickname from
+    // the peer's announce. Sending a BitchatMessage TLV here makes bitchat show
+    // (and dedup) binary garbage — the reason #mesh never interoperated. The id
+    // is content-derived so a relayed copy dedups against the original.
+    final payload = Uint8List.fromList(utf8.encode(content));
     final packet = await _buildPacket(
       type: MeshMessageType.message,
-      payload: msg.toBinaryPayload(),
-      // bitchat addresses public/broadcast chat to the BROADCAST recipient
-      // (0xFF×8) with HAS_RECIPIENT set — NOT a null recipient. The recipientID
-      // is part of the Ed25519-signed bytes, so signing a null-recipient packet
-      // produces a signature bitchat rejects (our #mesh messages silently
-      // dropped). Address it to broadcast so both the wire form and the signed
-      // bytes match bitchat.
+      payload: payload,
+      // Broadcast recipient (0xFF×8) matches bitchat-android; bitchat-iOS sends
+      // a null recipient but accepts either, since each packet's signature is
+      // verified against the recipientID it actually carries.
       recipientID: kBroadcastRecipient,
       sign: true,
     );
     await _sendPacket(packet);
-    return messageId;
+    return MeshMessageIdentity.stableId(
+      senderIdHex: identity.peerID,
+      timestampMs: timestampMs,
+      content: content,
+    );
   }
 
   /// Joins/creates an encrypted mesh group [channel] with a shared [password]
@@ -424,7 +464,10 @@ class MeshService {
         await _handleAnnounce(packet, senderPeerID, rssi);
         break;
       case MeshMessageType.message:
-        await _handlePublicMessage(packet, senderPeerID);
+        _handlePublicMessage(packet, senderPeerID);
+        break;
+      case MeshMessageType.nymChannelMessage:
+        await _handleChannelMessage(packet, senderPeerID);
         break;
       case MeshMessageType.leave:
         _removePeer(senderPeerID);
@@ -511,34 +554,57 @@ class MeshService {
     _emitPeers();
   }
 
-  Future<void> _handlePublicMessage(
-      BitchatPacket packet, String senderPeerID) async {
-    final msg = BitchatMessage.fromBinaryPayload(packet.payload);
-    if (msg == null) return;
-    var content = msg.content;
-    if (msg.isEncrypted) {
-      // Encrypted group message: readable only if we hold the channel key.
-      final channel = msg.channel;
-      final enc = msg.encryptedContent;
-      if (channel == null || enc == null || !_channelCrypto.hasKey(channel)) {
-        return;
-      }
-      try {
-        content = await _channelCrypto.decrypt(channel, enc);
-      } catch (_) {
-        return;
-      }
-    }
-    _touchPeer(senderPeerID, nickname: msg.sender);
+  /// bitchat public mesh message ([MeshMessageType.message]): the payload is the
+  /// raw UTF-8 content — no TLV. The sender nickname comes from the peer's
+  /// announce (the wire carries none), the timestamp from the packet header, and
+  /// the id is content-derived so it matches across our own send/relay copies.
+  void _handlePublicMessage(BitchatPacket packet, String senderPeerID) {
+    final content = utf8.decode(packet.payload, allowMalformed: true);
+    if (content.isEmpty) return;
+    final peer = _peers[senderPeerID];
+    final nickname = peer?.displayName ?? senderPeerID;
+    _touchPeer(senderPeerID);
     _publicMessages.add(MeshPublicMessage(
-      senderPeerID: msg.senderPeerID ?? senderPeerID,
-      senderNickname: msg.sender,
+      senderPeerID: senderPeerID,
+      senderNickname: nickname,
       content: content,
-      messageId: msg.id,
-      timestampMs: msg.timestampMs,
-      channel: msg.channel,
-      mentions: msg.mentions ?? const [],
-      isRelay: msg.isRelay,
+      messageId: MeshMessageIdentity.stableId(
+        senderIdHex: senderPeerID,
+        timestampMs: packet.timestamp,
+        content: content,
+      ),
+      timestampMs: packet.timestamp,
+      channel: null,
+    ));
+  }
+
+  /// Nymchat encrypted group-channel broadcast ([MeshMessageType.nymChannelMessage]):
+  /// the legacy [BitchatMessage] TLV, readable only if we hold the channel key.
+  /// Non-members simply can't decrypt and drop it.
+  Future<void> _handleChannelMessage(
+      BitchatPacket packet, String senderPeerID) async {
+    final tlv = BitchatMessage.fromBinaryPayload(packet.payload);
+    if (tlv == null || tlv.channel == null) return;
+    final enc = tlv.encryptedContent;
+    if (!tlv.isEncrypted || enc == null || !_channelCrypto.hasKey(tlv.channel!)) {
+      return;
+    }
+    String decrypted;
+    try {
+      decrypted = await _channelCrypto.decrypt(tlv.channel!, enc);
+    } catch (_) {
+      return;
+    }
+    _touchPeer(senderPeerID, nickname: tlv.sender);
+    _publicMessages.add(MeshPublicMessage(
+      senderPeerID: tlv.senderPeerID ?? senderPeerID,
+      senderNickname: tlv.sender,
+      content: decrypted,
+      messageId: tlv.id,
+      timestampMs: tlv.timestampMs,
+      channel: tlv.channel,
+      mentions: tlv.mentions ?? const [],
+      isRelay: tlv.isRelay,
     ));
   }
 
