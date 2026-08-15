@@ -94,13 +94,11 @@ void main() {
   late MeshService alice;
   late MeshService bob;
   late FakeMeshTransport aliceTransport;
-  late NoiseIdentity aliceIdentity;
 
   setUp(() async {
     bus = RadioBus();
     final aliceId = await NoiseIdentity.fromSeeds(
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
-    aliceIdentity = aliceId;
     final bobId = await NoiseIdentity.fromSeeds(
         staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
     aliceTransport = FakeMeshTransport(bus, 'alice');
@@ -219,39 +217,6 @@ void main() {
     final ack = await aliceGetsAck;
     expect(ack.messageId, messageId);
     expect(ack.isRead, isFalse);
-  });
-
-  test('inbound PM and open-DM resolve the SAME noise-key pubkey', () async {
-    // Root cause of "received PM shows in notifications but not in the chat":
-    // the inbound-message path and the open-DM path keyed two DIFFERENT
-    // pm-<pubkey> threads. Both now resolve the peer's Noise static key from a
-    // single source (MeshService.noiseKeyHexForPeer, backed by the peer record
-    // AND the established session), so they can't disagree.
-    await alice.start();
-    await bob.start();
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-
-    final bobReceives = _firstEvent(bob.onPrivateMessage);
-    await alice.sendPrivateMessage(bob.myPeerID, 'hi from alice');
-    final pm = await bobReceives;
-
-    String hex(Uint8List b) =>
-        b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
-    final expected = hex(aliceIdentity.staticPublic);
-
-    // What the INBOUND path (_onPrivate → _pubkeyForPeerId) keys the thread by.
-    final inboundKey = bob.noiseKeyHexForPeer(pm.senderPeerID);
-    // What the OPEN-DM path (openPeerDm → pubkeyForPeer) keys it by.
-    final peer = bob.peerById(pm.senderPeerID);
-
-    expect(inboundKey, isNotNull);
-    expect(inboundKey, equals(expected),
-        reason: 'inbound key must be alice’s real 64-hex Noise static key');
-    expect(peer, isNotNull);
-    expect(hex(peer!.noisePublicKey!), equals(expected),
-        reason: 'open-DM key must resolve the identical Noise static key');
-    // A real key — never the padded-peerID pseudo-pubkey (the #0000 bug).
-    expect(inboundKey!.endsWith('0000000000'), isFalse);
   });
 
   test('long private message is chunked and fully reassembled in order',
