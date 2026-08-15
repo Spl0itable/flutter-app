@@ -13,6 +13,7 @@
 // uses its 32-byte Noise static key as a stable pseudo-pubkey.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -24,6 +25,7 @@ import '../../models/message.dart';
 import '../../services/mesh/mesh_events.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/mesh_service.dart';
+import '../../services/mesh/noise/noise_crypto.dart';
 import '../../services/mesh/protocol/mesh_profile.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -41,15 +43,22 @@ String _hex(Uint8List b) {
   return sb.toString();
 }
 
-/// Last-resort conversation pubkey for a peer whose real 32-byte Noise static
-/// key isn't known yet: the 16-hex peerID zero-padded to 64 hex. Used ONLY
-/// transiently, before the peer's announce/handshake lands — the real Noise
-/// key (a genuine 64-hex identity, see [MeshService.noiseKeyHexForPeer])
-/// replaces it as soon as it exists. Keying by the padded peerID as a
-/// PERMANENT identity is wrong: it renders as a `#0000` suffix in the PM
-/// header because the trailing zeros aren't real key bytes.
-String meshPeerIdPseudoPubkey(String peerID) =>
-    peerID.toLowerCase().padRight(64, '0').substring(0, 64);
+/// The stable 64-hex conversation pubkey for a mesh peer, derived purely from
+/// its 16-hex peerID — `SHA-256("mesh:" + peerID)`.
+///
+/// This is the ONLY value available AND unchanging across a peer's whole
+/// session: the peerID is present in every packet's senderID, known from first
+/// contact (before any handshake, announce, or Noise key). Keying off it — via
+/// the resolve-once cache in [MeshBridge._pubkeyForPeerId] — guarantees that
+/// opening a DM and receiving its reply land in the IDENTICAL `pm-<pubkey>`
+/// thread. (Keying off the Noise key split the thread: opening the DM before
+/// the handshake resolved a placeholder while the reply, after the session
+/// formed, resolved the real key — the "received but only in the notification"
+/// bug.) Hashing gives full 64-hex entropy, so the PM header shows a real
+/// `#abcd` suffix and a varied avatar colour instead of the `#0000` a
+/// zero-padded peerID produced.
+String meshStablePubkeyForPeerId(String peerID) => _hex(
+    NoiseCrypto.sha256(Uint8List.fromList(utf8.encode('mesh:${peerID.toLowerCase()}'))));
 
 class MeshBridge {
   MeshBridge({
@@ -189,53 +198,36 @@ class MeshBridge {
 
   // ---- Identity mapping ----------------------------------------------------
 
-  /// The 64-hex pubkey used to key [peer]'s PM conversation. A verified Nostr
-  /// link wins (the peer is dual-transport, weaving mesh + Nostr into one
-  /// thread under its real Nostr identity); otherwise the peer's 32-byte Noise
-  /// static key — its real, stable, displayable mesh identity (what bitchat
-  /// itself keys peers by). The padded-peerID pseudo-pubkey is a last resort
-  /// only while the Noise key is still unknown.
-  String pubkeyForPeer(MeshPeer peer) {
-    if (peer.nostrLinkVerified &&
-        peer.nostrPubkey != null &&
-        peer.nostrPubkey!.length == 64) {
-      return peer.nostrPubkey!.toLowerCase();
-    }
-    final k = peer.noisePublicKey;
-    if (k != null && k.length == 32) return _hex(k);
-    // Fall back to the session-resolved key (the SAME source _pubkeyForPeerId
-    // uses) before the pseudo, so the open-DM path and the inbound path never
-    // diverge even if this peer record hasn't captured the announced key yet.
-    return _service.noiseKeyHexForPeer(peer.peerID) ??
-        meshPeerIdPseudoPubkey(peer.peerID);
-  }
+  /// The 64-hex pubkey used to key [peer]'s PM conversation. Delegates to
+  /// [_pubkeyForPeerId] so the proactively-opened DM and an inbound message key
+  /// the IDENTICAL thread (same resolve-once cache).
+  String pubkeyForPeer(MeshPeer peer) => _pubkeyForPeerId(peer.peerID);
 
-  /// Resolves a peerID to its conversation pubkey, keying the identical
-  /// `pm-<pubkey>` thread an inbound message and a proactively-opened DM both
-  /// use. A verified Nostr link wins (dual-transport); otherwise the peer's
-  /// real Noise static key, resolved via [MeshService.noiseKeyHexForPeer],
-  /// which reads the peer record OR the established Noise session.
+  /// Resolves a peerID to its conversation pubkey — resolve-ONCE and cache.
   ///
-  /// The session fallback is load-bearing: an encrypted PM can arrive BEFORE the
-  /// sender's announce is processed, so the peer record exists (created by the
-  /// handshake) but its `noisePublicKey` is still null. Routing through
-  /// [pubkeyForPeer] there would return the padded pseudo-pubkey and key a
-  /// `pm-<pseudo>` thread that the later, announce-time open-DM (keyed by the
-  /// real Noise key) never reads — the exact "PM shows in the notification but
-  /// not the chat" + `#0000`-header bug. The session always holds alice's real
-  /// static key by the time her PM decrypts, so we use it unconditionally.
+  /// The first resolution for a peerID picks the key and the cache pins it for
+  /// the rest of the session, so opening a DM and later receiving its reply can
+  /// NEVER disagree (the thread-split that made a received message land in a
+  /// thread the open view didn't read — "received but only in the
+  /// notification"). A verified Nostr link wins at first resolution (the peer
+  /// is dual-transport under its real identity); otherwise the stable,
+  /// always-available peerID-derived pubkey ([meshStablePubkeyForPeerId]) —
+  /// NOT the Noise key, which binds late (after the handshake) and so isn't
+  /// known when a DM is opened first.
   String _pubkeyForPeerId(String peerID) {
     final peer = _service.peerById(peerID);
-    final String pubkey;
-    if (peer != null &&
-        peer.nostrLinkVerified &&
-        peer.nostrPubkey != null &&
-        peer.nostrPubkey!.length == 64) {
-      pubkey = peer.nostrPubkey!.toLowerCase();
-    } else {
-      pubkey = _service.noiseKeyHexForPeer(peerID) ??
-          meshPeerIdPseudoPubkey(peerID);
+    final cached = _pubkeyByPeerId[peerID];
+    if (cached != null) {
+      // Keep the display nym fresh, but NEVER re-key an existing conversation.
+      if (peer != null) _nymByPubkey[cached] = peer.displayName;
+      return cached;
     }
+    final pubkey = (peer != null &&
+            peer.nostrLinkVerified &&
+            peer.nostrPubkey != null &&
+            peer.nostrPubkey!.length == 64)
+        ? peer.nostrPubkey!.toLowerCase()
+        : meshStablePubkeyForPeerId(peerID);
     _pubkeyByPeerId[peerID] = pubkey;
     _peerIdByPubkey[pubkey] = peerID;
     if (peer != null) _nymByPubkey[pubkey] = peer.displayName;

@@ -210,21 +210,21 @@ void main() {
 
     await alice.sendPrivateMessage(bobService.myPeerID, 'secret from alice');
 
-    // alice's real Noise-key hex is the conversation pubkey both sides resolve.
-    String hex(Uint8List b) =>
-        b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
-    final pmKey = 'pm-${hex(aliceId.staticPublic)}';
+    // The conversation pubkey is derived purely from alice's peerID — the same
+    // value the inbound path and the open-DM path both resolve.
+    final convo = meshStablePubkeyForPeerId(alice.myPeerID);
+    final pmKey = 'pm-$convo';
 
     final landed = await _waitFor(() =>
         (container.read(appStateProvider).messages[pmKey] ?? const [])
             .any((m) => m.content == 'secret from alice'));
 
     expect(landed, isTrue,
-        reason: 'the mesh PM must be stored under pm-<alice-noise-key>');
+        reason: 'the mesh PM must be stored under pm-<peerID-derived-key>');
 
     // Open the DM the way openPeerDm → switchView does, and read the EXACT
     // provider the message list widget watches.
-    app.switchView(ChatView.pm(hex(aliceId.staticPublic)));
+    app.switchView(ChatView.pm(convo));
     final shown = container.read(messagesForCurrentViewProvider);
     expect(shown.map((e) => e.content), contains('secret from alice'),
         reason:
@@ -282,29 +282,91 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     // Force the pre-announce condition: the peer record exists (from the
-    // connection) but has NOT captured alice's announced Noise key yet, so the
-    // ONLY surviving identity source is the established Noise session.
+    // connection) but has NOT captured alice's announced Noise key yet.
     bobService.peerById(alice.myPeerID)!.noisePublicKey = null;
 
     await alice.sendPrivateMessage(bobService.myPeerID, 'early bird');
 
-    String hex(Uint8List b) =>
-        b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
-    final realKey = 'pm-${hex(aliceId.staticPublic)}';
-    final pseudoKey =
-        'pm-${alice.myPeerID.toLowerCase().padRight(64, '0').substring(0, 64)}';
+    // The key is peerID-derived, so it's identical regardless of announce /
+    // session state — no dependence on the (late-binding) Noise key.
+    final convo = 'pm-${meshStablePubkeyForPeerId(alice.myPeerID)}';
 
     final landed = await _waitFor(() =>
-        (container.read(appStateProvider).messages[realKey] ?? const [])
+        (container.read(appStateProvider).messages[convo] ?? const [])
             .any((m) => m.content == 'early bird'));
 
     expect(landed, isTrue,
-        reason: 'PM must key the REAL Noise-key thread even pre-announce');
-    expect(container.read(appStateProvider).messages[pseudoKey], isNull,
-        reason: 'must NOT land in a pm-<pseudo> (#0000) thread');
+        reason: 'PM must key the stable peerID-derived thread pre-announce');
+    // The header suffix (last 4 of the pubkey) must be real hex, never #0000.
+    expect(convo.endsWith('0000'), isFalse);
 
     // Let any in-flight delivery-ack / receipt async settle before teardown so
     // it can't complete against a disposed container and cross-fail a sibling.
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    await bridge.dispose();
+    await alice.stop();
+    await bobService.stop();
+  });
+
+  test('open DM BEFORE handshake, then receive reply — same thread (no split)',
+      () async {
+    // The exact user sequence: tap a peer to open a DM (no session yet, and we
+    // force no announced key), THEN the peer replies (handshake → session, so
+    // the reply resolves the REAL Noise key). If openPeerDm and the inbound
+    // path disagree, the opened view is empty while the message sits in another
+    // thread — "received but only in the notification". They MUST agree.
+    SharedPreferences.setMockInitialValues(
+        <String, Object>{'flutter.nym_notifications_enabled': 'false'});
+    final kv = await KeyValueStore.open();
+    final bus = RadioBus();
+    final aliceId = await NoiseIdentity.fromSeeds(
+        staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
+    final bobId = await NoiseIdentity.fromSeeds(
+        staticPrivate: randomBytes(32), signingSeed: randomBytes(32));
+
+    final alice = MeshService(
+      identity: aliceId,
+      transport: FakeMeshTransport(bus, 'alice'),
+      nicknameProvider: () => 'alice',
+    );
+    final bobService = MeshService(
+      identity: bobId,
+      transport: FakeMeshTransport(bus, 'bob'),
+      nicknameProvider: () => 'bob',
+    );
+
+    final container = ProviderContainer(overrides: [
+      keyValueStoreProvider.overrideWithValue(kv),
+      _bridgeServiceProvider.overrideWithValue(bobService),
+    ]);
+    addTearDown(container.dispose);
+
+    final app = container.read(appStateProvider.notifier);
+    app.goLive(bobId.fingerprint.padRight(64, '0').substring(0, 64), 'bob#0000');
+    final bridge = container.read(_bridgeProvider);
+    bridge.start();
+
+    await alice.start();
+    await bobService.start();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    // Simulate opening the DM before the handshake AND before the announce is
+    // captured: no session, no announced key.
+    bobService.peerById(alice.myPeerID)!.noisePublicKey = null;
+    final openedPubkey = bridge.openPeerDm(bobService.peerById(alice.myPeerID)!);
+    app.switchView(ChatView.pm(openedPubkey));
+
+    // Now the peer replies — this drives the handshake and resolves the real key.
+    await alice.sendPrivateMessage(bobService.myPeerID, 'reply text');
+
+    await _waitFor(() =>
+        container.read(messagesForCurrentViewProvider).isNotEmpty);
+
+    final shown = container.read(messagesForCurrentViewProvider);
+    expect(shown.map((e) => e.content), contains('reply text'),
+        reason:
+            'the reply must appear in the ALREADY-OPEN DM view — no thread split');
+
     await Future<void>.delayed(const Duration(milliseconds: 60));
     await bridge.dispose();
     await alice.stop();

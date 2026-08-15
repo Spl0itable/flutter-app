@@ -316,10 +316,10 @@ class MeshController extends StateNotifier<MeshUiState> {
     // Nostr-link resolution — the seed rows actually key on), and the transient
     // padded-peerID pseudo-pubkey used before the Noise key is known, so the
     // peer's real avatar renders in all cases.
-    final seeds = <String>{peerID, meshPeerIdPseudoPubkey(peerID)};
+    final seeds = <String>{peerID, meshStablePubkeyForPeerId(peerID)};
     final peer = state.peerById(peerID);
     if (peer != null) {
-      seeds.add(_bridge?.pubkeyForPeer(peer) ?? meshPeerIdPseudoPubkey(peerID));
+      seeds.add(_bridge?.pubkeyForPeer(peer) ?? meshStablePubkeyForPeerId(peerID));
       if (peer.nostrLinkVerified && peer.nostrPubkey != null) {
         seeds.add(peer.nostrPubkey!);
       }
