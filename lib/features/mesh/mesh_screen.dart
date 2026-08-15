@@ -448,19 +448,9 @@ class _PeersList extends ConsumerWidget {
             imageUrl: peer.avatarUrl,
             label: peer.displayName,
           ),
-          title: Row(
-            children: [
-              Flexible(
-                child: Text(peer.displayName,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: colors.text)),
-              ),
-              if (peer.isVerified) ...[
-                const SizedBox(width: 6),
-                NymSvgIcon(NymIcons.friendBadge, size: 13, color: colors.primary),
-              ],
-            ],
-          ),
+          title: Text(peer.displayName,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: colors.text)),
           subtitle: Text(
             peer.peerID + (peer.nostrLinkVerified ? '  • linked' : ''),
             style: TextStyle(
