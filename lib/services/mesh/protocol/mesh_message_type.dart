@@ -50,6 +50,12 @@ class MeshMessageType {
   /// reaction rides an encrypted [NoisePayloadType.reaction] instead.
   static const int nymReaction = 0x53;
 
+  /// An AES-encrypted mesh GROUP-channel broadcast (Nymchat password channels;
+  /// bitchat ignores it). Carries the legacy [BitchatMessage] TLV with the
+  /// isEncrypted flag. Kept OFF the plain [message] type so that type can be
+  /// decoded byte-for-byte like bitchat's public mesh chat: raw UTF-8, no TLV.
+  static const int nymChannelMessage = 0x54;
+
   /// True when [type] is a value this client knows how to handle.
   static bool isKnown(int type) => const {
         announce,

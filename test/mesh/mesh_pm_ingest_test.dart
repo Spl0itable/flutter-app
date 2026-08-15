@@ -54,28 +54,31 @@ void main() {
     expect(n.state.pmConversations.any((c) => c.pubkey == peer), isTrue);
   });
 
-  // The root cause of "PM shows in the notification modal but not in the chat"
-  // was that the inbound-message path and the open-DM path resolved a peer to
-  // DIFFERENT conversation pubkeys (one via the Noise key, one peerID-derived),
-  // so they keyed two different pm-<pubkey> threads. Both paths now route
-  // through meshPubkeyForPeerId, which is a pure, deterministic function of the
-  // 16-hex peerID — guaranteeing they always agree.
-  group('meshPubkeyForPeerId — deterministic PM keying', () {
+  // Mesh PMs are keyed by the peer's real 64-hex Noise static key (see
+  // MeshBridge.pubkeyForPeer / MeshService.noiseKeyHexForPeer), which both the
+  // inbound-message path and the open-DM path resolve from the SAME source, so
+  // they always key the identical pm-<pubkey> thread. The padded-peerID
+  // pseudo-pubkey is only a transient last resort before the Noise key is
+  // known; it must never be the permanent identity (it renders as a #0000
+  // suffix because the trailing zeros aren't real key bytes).
+  group('meshPeerIdPseudoPubkey — transient fallback keying', () {
     test('is a stable, lowercase, 64-hex key derived only from the peerID', () {
       const peerId = 'A1B2C3D4E5F60718';
-      final k = meshPubkeyForPeerId(peerId);
+      final k = meshPeerIdPseudoPubkey(peerId);
       expect(k.length, 64);
       expect(k, equals(k.toLowerCase()));
       expect(RegExp(r'^[0-9a-f]{64}$').hasMatch(k), isTrue);
-      // Same peerID → same key on every call (inbound == open-DM == notify).
-      expect(meshPubkeyForPeerId(peerId), equals(k));
+      // The real key bytes lead; the padding is trailing zeros.
+      expect(k.startsWith('a1b2c3d4e5f60718'), isTrue);
+      // Same peerID → same key on every call.
+      expect(meshPeerIdPseudoPubkey(peerId), equals(k));
       // Case-insensitive on the peerID (senderID hex casing must not fork it).
-      expect(meshPubkeyForPeerId(peerId.toLowerCase()), equals(k));
+      expect(meshPeerIdPseudoPubkey(peerId.toLowerCase()), equals(k));
     });
 
     test('distinct peers get distinct keys', () {
-      expect(meshPubkeyForPeerId('1111111111111111'),
-          isNot(equals(meshPubkeyForPeerId('2222222222222222'))));
+      expect(meshPeerIdPseudoPubkey('1111111111111111'),
+          isNot(equals(meshPeerIdPseudoPubkey('2222222222222222'))));
     });
   });
 }
