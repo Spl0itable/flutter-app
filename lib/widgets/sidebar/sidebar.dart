@@ -1153,27 +1153,34 @@ class _MeshStatusIndicator extends ConsumerWidget {
             : tr('Mesh · {count} peer(s)', {'count': peerCount}));
     final color = active ? c.primary : c.textDim;
     return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
+      padding: const EdgeInsets.only(top: 4),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
           onTap: () => Navigator.of(context).push(
             MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              NymSvgIcon(NymIcons.bluetooth, size: 12, color: color),
-              const SizedBox(width: 5),
-              Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
-              if (active && mesh.linkCount > 0) ...[
-                const SizedBox(width: 6),
-                Text('${mesh.linkCount} link(s)',
-                    style: TextStyle(
-                        color: c.textDim.withValues(alpha: 0.7), fontSize: 10)),
+          // A generous, full-width tap target (like the connected-relays row),
+          // so the mesh status line is easy to hit instead of a thin text strip.
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                NymSvgIcon(NymIcons.bluetooth, size: 12, color: color),
+                const SizedBox(width: 5),
+                Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+                if (active && mesh.linkCount > 0) ...[
+                  const SizedBox(width: 6),
+                  Text('${mesh.linkCount} link(s)',
+                      style: TextStyle(
+                          color: c.textDim.withValues(alpha: 0.7),
+                          fontSize: 10)),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),

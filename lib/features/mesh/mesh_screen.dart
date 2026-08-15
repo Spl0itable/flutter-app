@@ -3,12 +3,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/theme/nym_metrics.dart';
+import '../../features/notifications/notifications_panel.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/transport/mesh_transport.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
+import '../../widgets/sidebar/sidebar.dart';
 import '../i18n/i18n.dart';
 import 'mesh_bridge.dart' show kMeshNearbyChannel;
 import 'mesh_controller.dart';
@@ -19,23 +22,46 @@ import 'mesh_diagnostics.dart';
 /// ChatPane — this screen only shows radio status and the peers in range, and
 /// lets you start (or jump into) a mesh DM with a nearby peer or the public
 /// `#mesh` channel.
-class MeshScreen extends ConsumerWidget {
+class MeshScreen extends ConsumerStatefulWidget {
   const MeshScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MeshScreen> createState() => _MeshScreenState();
+}
+
+class _MeshScreenState extends ConsumerState<MeshScreen> {
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  @override
+  Widget build(BuildContext context) {
     final c = context.nym;
     final mesh = ref.watch(meshControllerProvider);
 
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: c.bg,
+      // The same off-canvas sidebar the rest of the app uses. Selecting a
+      // conversation from it pops the mesh screen so the chosen chat (which
+      // lives in the shell beneath this route) is revealed. Scaffold handles
+      // the left-edge swipe-to-open natively via [drawerEdgeDragWidth].
+      drawerEdgeDragWidth: 60,
+      drawer: SizedBox(
+        width: NymDimens.sidebarDrawerWidth,
+        child: Sidebar(
+          compact: true,
+          onItemSelected: () => Navigator.of(context).maybePop(),
+        ),
+      ),
       appBar: AppBar(
         backgroundColor: c.bgSecondary,
         foregroundColor: c.text,
         elevation: 0,
         scrolledUnderElevation: 0,
         shape: Border(bottom: BorderSide(color: c.glassBorder)),
-        titleSpacing: 0,
+        titleSpacing: 16,
+        // No back arrow — the hamburger in the actions opens the sidebar,
+        // matching the rest of the app's headers.
+        automaticallyImplyLeading: false,
         title: Row(
           children: [
             NymSvgIcon(NymIcons.bluetooth, size: 18, color: c.primary),
@@ -47,6 +73,25 @@ class MeshScreen extends ConsumerWidget {
                     fontWeight: FontWeight.w600)),
           ],
         ),
+        actions: [
+          _MeshHeaderToggle(
+            svg: NymIcons.bell,
+            tooltip: tr('Notifications'),
+            badge: ref.watch(settingsProvider
+                    .select((s) => s.notificationsEnabled))
+                ? ref.watch(
+                    notificationHistoryProvider.select((s) => s.unread))
+                : 0,
+            onTap: () => showNotificationsPanel(context),
+          ),
+          const SizedBox(width: 8),
+          _MeshHeaderToggle(
+            svg: NymIcons.menu,
+            tooltip: tr('Menu'),
+            onTap: () => _scaffoldKey.currentState?.openDrawer(),
+          ),
+          const SizedBox(width: 12),
+        ],
       ),
       body: Column(
         children: [
@@ -167,6 +212,81 @@ class _MeshRxDiagnostics extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// A boxed header icon button matching the main chat header's mobile toggles
+/// (`.icon-btn`, 40×40, glass fill) with an optional unread-count badge. Used
+/// for the notification bell and the sidebar hamburger in the mesh header.
+class _MeshHeaderToggle extends StatelessWidget {
+  const _MeshHeaderToggle({
+    required this.svg,
+    required this.onTap,
+    this.tooltip,
+    this.badge = 0,
+  });
+  final String svg;
+  final VoidCallback onTap;
+  final String? tooltip;
+  final int badge;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final box = Container(
+      width: 40,
+      height: 40,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: c.isLight
+            ? const Color(0xD9FFFFFF)
+            : const Color(0xCC141423),
+        borderRadius: NymRadius.rsm,
+        border: Border.all(
+          color:
+              c.isLight ? Colors.black.withValues(alpha: 0.08) : c.glassBorder,
+        ),
+      ),
+      child: NymSvgIcon(svg, size: 20, color: c.primary),
+    );
+    final child = InkWell(
+      onTap: onTap,
+      borderRadius: NymRadius.rsm,
+      child: badge > 0
+          ? Stack(
+              clipBehavior: Clip.none,
+              children: [
+                box,
+                Positioned(
+                  top: -4,
+                  right: -4,
+                  child: Container(
+                    constraints:
+                        const BoxConstraints(minWidth: 16, minHeight: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: c.danger,
+                      borderRadius:
+                          const BorderRadius.all(Radius.circular(8)),
+                    ),
+                    child: Text(
+                      badge > 99 ? '99+' : '$badge',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFFFFFFFF),
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : box,
+    );
+    return tooltip != null ? Tooltip(message: tooltip!, child: child) : child;
   }
 }
 
