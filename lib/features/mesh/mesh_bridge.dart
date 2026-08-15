@@ -318,9 +318,10 @@ class MeshBridge {
     final before = _appState.messages[storageKey]?.length ?? 0;
     final landed = _app.ingestMeshChannelMessage(m, channelKey: storageKey);
     final after = _appState.messages[storageKey]?.length ?? 0;
+    final vis = visibleMessagesFor(_appState, storageKey).length;
     MeshDiagnostics.instance.log(
         '#chan rx peer=${msg.senderPeerID} key=$storageKey store=$before→$after '
-        'view=${_appState.view.storageKey} own=$isOwn '
+        'vis=$vis view=${_appState.view.storageKey} own=$isOwn '
         '${landed ? 'LANDED' : 'DROPPED'}');
     if (landed && !isOwn) _maybeNotifyChannelMention(m, channelName);
   }
@@ -354,9 +355,10 @@ class MeshBridge {
     final before = _appState.messages[storeKey]?.length ?? 0;
     _app.ingestPMMessage(m);
     final after = _appState.messages[storeKey]?.length ?? 0;
+    final vis = visibleMessagesFor(_appState, storeKey).length;
     MeshDiagnostics.instance.log(
         'PM rx peer=${msg.senderPeerID} id=${_short(msg.messageId)} '
-        'key=$storeKey store=$before→$after '
+        'key=$storeKey store=$before→$after vis=$vis '
         'view=${_appState.view.storageKey} '
         '${after > before ? 'LANDED' : 'DROPPED'}');
     _notifyPm(pubkey: pubkey, nym: nym, body: msg.content, ts: msg.timestampMs);
