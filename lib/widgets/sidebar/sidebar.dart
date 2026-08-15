@@ -317,10 +317,8 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final users = ref.watch(usersProvider);
     final unread = ref.watch(unreadCountsProvider);
 
-    // Bluetooth-mesh markers: which channels/PMs are mesh-backed (for the small
-    // Bluetooth glyph on those rows).
-    final meshChannelKeys =
-        ref.watch(meshControllerProvider.select((s) => s.meshChannelKeys));
+    // Bluetooth-mesh markers: mesh-only DM peers get a small Bluetooth glyph on
+    // their PM row (channels are dual-transport, so they carry no glyph).
     final meshPmPubkeys =
         ref.watch(meshControllerProvider.select((s) => s.meshPmPubkeys));
 
@@ -474,7 +472,6 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   // public-channel unread pills actually surface.
                   unread: unread[ch.storageKey] ?? 0,
                   textSize: textSize,
-                  mesh: meshChannelKeys.contains(ch.key),
                   onTap: () => select(ChatView.channel(ch.key)),
                 ),
               // `.ssk-channel` ×4 (index.html:503-506; widths w3/w1/w4/w2).
