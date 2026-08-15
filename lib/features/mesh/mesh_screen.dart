@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
@@ -11,6 +12,7 @@ import '../../widgets/nym_icons.dart';
 import '../i18n/i18n.dart';
 import 'mesh_bridge.dart' show kMeshNearbyChannel;
 import 'mesh_controller.dart';
+import 'mesh_diagnostics.dart';
 
 /// Bluetooth-mesh status + discovery surface. Conversations themselves live in
 /// the normal Channels / Private Messages lists and open in the canonical
@@ -80,6 +82,88 @@ class MeshScreen extends ConsumerWidget {
           ),
           Divider(height: 1, color: c.border),
           Expanded(child: _PeersList(mesh: mesh, colors: c)),
+          Divider(height: 1, color: c.border),
+          _MeshRxDiagnostics(colors: c),
+        ],
+      ),
+    );
+  }
+}
+
+/// Live receive-pipeline log — shows, per inbound mesh packet/message, whether
+/// the bridge ran, the resolved conversation key, the open view, and whether it
+/// LANDED in the store the chat reads. A debugging aid to pinpoint why a
+/// received message might not appear in a chat on a real device.
+class _MeshRxDiagnostics extends StatelessWidget {
+  const _MeshRxDiagnostics({required this.colors});
+  final NymColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = colors;
+    return SizedBox(
+      height: 190,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 4, 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text('Receive diagnostics',
+                      style: TextStyle(
+                          color: c.textDim,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600)),
+                ),
+                TextButton(
+                  onPressed: () {
+                    final text =
+                        MeshDiagnostics.instance.entries.value.join('\n');
+                    Clipboard.setData(ClipboardData(text: text));
+                  },
+                  child: Text(tr('Copy'),
+                      style: TextStyle(color: c.primary, fontSize: 12)),
+                ),
+                TextButton(
+                  onPressed: MeshDiagnostics.instance.clear,
+                  child: Text(tr('Clear'),
+                      style: TextStyle(color: c.textDim, fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ValueListenableBuilder<List<String>>(
+              valueListenable: MeshDiagnostics.instance.entries,
+              builder: (context, entries, _) {
+                if (entries.isEmpty) {
+                  return Center(
+                    child: Text(tr('No mesh packets received yet'),
+                        style: TextStyle(color: c.textDim, fontSize: 12)),
+                  );
+                }
+                return ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  itemCount: entries.length,
+                  itemBuilder: (context, i) => Text(
+                    entries[i],
+                    style: TextStyle(
+                      color: entries[i].contains('DROPPED')
+                          ? const Color(0xFFE0736B)
+                          : (entries[i].contains('LANDED')
+                              ? const Color(0xFF6BCB77)
+                              : c.textDim),
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      height: 1.35,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
