@@ -431,6 +431,14 @@ class AppState {
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
     // own-message `return`, messages.js:640-641).
     if (hasBlockedKeyword(m.content, m.author)) return true;
+    // A Bluetooth-mesh message comes from a physically-nearby, deliberately
+    // paired peer — NOT the open Nostr relay network the heuristic spam filter
+    // and web-of-trust gate were built to police. Applying them here hid every
+    // received mesh message whose sender wasn't a friend / known nymchat
+    // identity (a mesh peer never is), which is exactly why received #mesh and
+    // PM messages landed in the store but never rendered. Explicit user
+    // blocks / blocked keywords (above) still apply; the automatic gates do not.
+    if (m.viaMesh) return false;
     // Heuristic content spam — incoming-only (own-message spam is surfaced as a
     // self-only system notice instead, see [sendLocal]). Mirrors the `spamHit`
     // term of the PWA's non-own hide branch (messages.js:636,648).

@@ -54,6 +54,74 @@ void main() {
     expect(n.state.pmConversations.any((c) => c.pubkey == peer), isTrue);
   });
 
+  test('a mesh message bypasses the spam heuristic AND the web-of-trust gate',
+      () {
+    // The confirmed root cause of "received but only in the notification": the
+    // heuristic spam filter / WoT gate (built for open Nostr relays) hid every
+    // received mesh message, because a Bluetooth peer is never a friend / known
+    // nymchat identity. A viaMesh message must be exempt from BOTH.
+    final prevGate = nymVouchSpamGateEnabled;
+    nymVouchSpamGateEnabled = true; // worst case: WoT gate ON
+    addTearDown(() => nymVouchSpamGateEnabled = prevGate);
+
+    final n = AppStateNotifier()
+      ..goLive(
+          '0000000000000000000000000000000000000000000000000000000000000001',
+          'me#0001');
+
+    const peer =
+        'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+    final key = 'pm-$peer';
+    // Content that also trips the heuristic spam scorer (a long random token),
+    // from a stranger the WoT gate would otherwise hide — both gates would fire.
+    const spammy = 'Xq7Zk9wPq2Vx8Jz4Kf6Lm3Np5Rt1Bd0Cg';
+
+    n.ingestPMMessage(Message(
+      id: 'mesh-spam-1',
+      author: 'stranger',
+      pubkey: peer,
+      content: spammy,
+      createdAt: 1700000000,
+      ms: 1700000000123,
+      isOwn: false,
+      isPM: true,
+      conversationKey: key,
+      conversationPubkey: peer,
+      nymMessageId: 'mesh-spam-1',
+      eventKind: 1059,
+      senderVerified: true,
+      deliveryStatus: DeliveryStatus.delivered,
+      viaMesh: true,
+    ));
+
+    expect(visibleMessagesFor(n.state, key).map((e) => e.content),
+        contains(spammy),
+        reason: 'a viaMesh message must never be spam/WoT filtered');
+
+    // Control: the SAME content NOT over mesh IS filtered (proves the exemption
+    // is what saved it, not lenient filters).
+    const nonMeshKey = 'pm-'
+        'abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca0';
+    n.ingestPMMessage(Message(
+      id: 'nostr-spam-1',
+      author: 'stranger',
+      pubkey: 'abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca0',
+      content: spammy,
+      createdAt: 1700000001,
+      ms: 1700000001123,
+      isOwn: false,
+      isPM: true,
+      conversationKey: nonMeshKey,
+      conversationPubkey:
+          'abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabca0',
+      nymMessageId: 'nostr-spam-1',
+      eventKind: 1059,
+      deliveryStatus: DeliveryStatus.delivered,
+    ));
+    expect(visibleMessagesFor(n.state, nonMeshKey), isEmpty,
+        reason: 'the same stranger spam over Nostr is still gated');
+  });
+
   // Mesh PMs are keyed by a stable pubkey derived purely from the peerID (see
   // meshStablePubkeyForPeerId / MeshBridge._pubkeyForPeerId's resolve-once
   // cache). The peerID is in every packet and known from first contact, so the
