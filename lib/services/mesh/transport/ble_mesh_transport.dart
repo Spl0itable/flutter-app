@@ -73,6 +73,16 @@ class BleMeshTransport implements MeshTransport {
   bool _scanning = false;
   bool _advertising = false;
 
+  /// Reentrancy guards for the role bring-ups. The state listener and start()'s
+  /// direct check can BOTH invoke _beginPeripheral before either finishes; the
+  /// second call's removeAllServices() then runs AFTER the first call's
+  /// addService(), leaving the device ADVERTISING the mesh service with an
+  /// empty GATT — remote centrals connect and find "no mesh characteristic".
+  /// This race is intermittent, which is exactly why linking worked on some
+  /// runs and not others. The busy flag makes each bring-up single-flight.
+  bool _centralStarting = false;
+  bool _peripheralStarting = false;
+
   final String _advertisedNameString;
 
   @override
@@ -154,6 +164,8 @@ class BleMeshTransport implements MeshTransport {
     _started = false;
     _scanning = false;
     _advertising = false;
+    _centralStarting = false;
+    _peripheralStarting = false;
     _cooldownUntil.clear();
     _failStreak.clear();
     _connecting.clear();
@@ -224,13 +236,16 @@ class BleMeshTransport implements MeshTransport {
   }
 
   Future<void> _beginCentral() async {
-    if (_scanning) return;
+    if (_scanning || _centralStarting) return;
+    _centralStarting = true;
     try {
       await _central.startDiscovery(serviceUUIDs: [_serviceUuid]);
       _scanning = true;
       _log('scanning for mesh service');
     } catch (e) {
       _log('startDiscovery failed: $e');
+    } finally {
+      _centralStarting = false;
     }
   }
 
@@ -248,7 +263,9 @@ class BleMeshTransport implements MeshTransport {
   final Map<String, int> _failStreak = {};
 
   static const Duration _cooldownBase = Duration(seconds: 15);
-  static const Duration _cooldownMax = Duration(minutes: 5);
+  // Capped at 1 minute (was 5): a peer that failed because its app was mid-
+  // restart or its GATT briefly unready shouldn't look dead for minutes.
+  static const Duration _cooldownMax = Duration(minutes: 1);
 
   /// Upper bounds on a single connect / GATT-discovery step (iOS provides none).
   static const Duration _connectTimeout = Duration(seconds: 10);
@@ -313,7 +330,15 @@ class BleMeshTransport implements MeshTransport {
         characteristic = _findCharacteristic(services);
       }
       if (characteristic == null) {
-        _log('peer $id has no mesh characteristic — dropping (backing off)');
+        // Log what the peer's GATT actually contains: distinguishes an empty
+        // GATT (peer's service add failed/was stripped) from a stale cache or
+        // a UUID mismatch.
+        final dump = services
+            .map((s) => '${_shortUuid(s.uuid)}'
+                '[${s.characteristics.map((ch) => _shortUuid(ch.uuid)).join(' ')}]')
+            .join(' ');
+        _log('peer $id has no mesh characteristic — dropping (backing off); '
+            'gatt: ${dump.isEmpty ? '(no services)' : dump}');
         _noteLinkFailure(id);
         await _central.disconnect(e.peripheral);
         return;
@@ -347,6 +372,12 @@ class BleMeshTransport implements MeshTransport {
         _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
       }
     }
+  }
+
+  /// First 8 hex chars of a UUID — enough to identify it in the tiny log pane.
+  static String _shortUuid(UUID uuid) {
+    final s = uuid.toString().replaceAll('-', '');
+    return s.length > 8 ? s.substring(0, 8) : s;
   }
 
   GATTCharacteristic? _findCharacteristic(List<GATTService> services) {
@@ -407,7 +438,8 @@ class BleMeshTransport implements MeshTransport {
   }
 
   Future<void> _beginPeripheral() async {
-    if (_advertising) return;
+    if (_advertising || _peripheralStarting) return;
+    _peripheralStarting = true;
     try {
       await _peripheral.removeAllServices();
       final characteristic = GATTCharacteristic.mutable(
@@ -439,6 +471,8 @@ class BleMeshTransport implements MeshTransport {
       _log('advertising mesh service as "$_advertisedNameString"');
     } catch (e) {
       _log('startAdvertising failed: $e');
+    } finally {
+      _peripheralStarting = false;
     }
   }
 

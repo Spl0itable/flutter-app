@@ -209,10 +209,15 @@ class MeshController extends StateNotifier<MeshUiState> {
 
       bridge.start();
 
-      final availability = await service.start();
+      await service.start();
       state = state.copyWith(
         running: true,
-        availability: availability,
+        // Read the LIVE availability, not start()'s return value: on iOS the
+        // radio flips unknown→ready while start() is still awaiting (announce
+        // broadcast etc.), so the availabilityChanged listener above may have
+        // already pushed `ready` — and the stale captured value would clobber
+        // it right back to `unknown`, pinning the UI on "Starting…".
+        availability: service.availability,
         myPeerID: service.myPeerID,
         meshChannelKeys: Set.of(bridge.meshChannelKeys),
         clearError: true,
@@ -398,6 +403,13 @@ class MeshController extends StateNotifier<MeshUiState> {
 
   Future<void> shutdown() async => _teardown();
 }
+
+/// One-shot "open the home-shell sidebar" request nonce. The mesh screen bumps
+/// this (then pops itself) when its hamburger or left-edge swipe should reveal
+/// the sidebar; the home shell listens and opens its own off-canvas drawer.
+/// This replaces hosting a SECOND Sidebar inside the mesh route's Scaffold
+/// drawer, which intermittently rebuilt to blank while the radio churned.
+final sidebarOpenRequestProvider = StateProvider<int>((ref) => 0);
 
 /// The mesh controller, reacting to the `meshEnabled` setting.
 final meshControllerProvider =

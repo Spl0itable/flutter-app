@@ -1,9 +1,9 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../services/mesh/mesh_peer.dart';
@@ -12,7 +12,6 @@ import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
-import '../../widgets/sidebar/sidebar.dart';
 import '../i18n/i18n.dart';
 import 'mesh_bridge.dart' show kMeshNearbyChannel;
 import 'mesh_controller.dart';
@@ -23,15 +22,22 @@ import 'mesh_diagnostics.dart';
 /// ChatPane — this screen only shows radio status and the peers in range, and
 /// lets you start (or jump into) a mesh DM with a nearby peer or the public
 /// `#mesh` channel.
+///
+/// This screen deliberately hosts NO sidebar of its own. Opening the sidebar
+/// (hamburger or left-edge swipe) pops back to the home shell and opens ITS
+/// off-canvas drawer — the one Sidebar instance that is always mounted and
+/// known-good. Hosting a second Sidebar in a Scaffold drawer here is what
+/// intermittently rebuilt to blank while the radio churned.
 class MeshScreen extends ConsumerStatefulWidget {
   const MeshScreen({super.key});
 
+  /// True while a MeshScreen route is mounted, so the sidebar's mesh row can
+  /// avoid stacking a second copy when the screen is already open.
+  static bool isOpen = false;
+
   /// Pushes the mesh screen with a route that does NOT install iOS's left-edge
-  /// back-swipe gesture. That system pop-gesture otherwise wins the gesture
-  /// arena over the Scaffold's `drawerEdgeDragWidth`, so a left-to-right swipe
-  /// pops this route ("go back to last place") instead of opening the sidebar.
-  /// With no route pop-gesture, the drawer's own edge-drag handles the swipe and
-  /// the sidebar slides in, matching the rest of the app.
+  /// back-swipe gesture — this screen owns the left-edge swipe itself (it opens
+  /// the sidebar, matching the rest of the app, instead of popping the route).
   static Route<void> route() => _MeshPageRoute();
 
   @override
@@ -41,7 +47,7 @@ class MeshScreen extends ConsumerStatefulWidget {
 /// A [MaterialPageRoute] whose transition never installs the Cupertino
 /// interactive back-swipe. We force the (non-Cupertino) fade-upwards builder so
 /// that on iOS no `_CupertinoBackGestureDetector` is wrapped around the page —
-/// leaving the left-edge swipe to the mesh screen's own drawer edge-drag. The
+/// leaving the left-edge swipe to the mesh screen's own sidebar gesture. The
 /// small cost is a fade-up push instead of the iOS horizontal slide.
 class _MeshPageRoute extends MaterialPageRoute<void> {
   _MeshPageRoute() : super(builder: (_) => const MeshScreen());
@@ -59,38 +65,73 @@ class _MeshPageRoute extends MaterialPageRoute<void> {
 }
 
 class _MeshScreenState extends ConsumerState<MeshScreen> {
-  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  @override
+  void initState() {
+    super.initState();
+    MeshScreen.isOpen = true;
+  }
+
+  @override
+  void dispose() {
+    MeshScreen.isOpen = false;
+    super.dispose();
+  }
+
+  /// Reveals the sidebar: bumps the home shell's open-drawer request, then pops
+  /// this route so the shell (with its drawer sliding open) is what you land on.
+  void _openSidebar() {
+    ref.read(sidebarOpenRequestProvider.notifier).state++;
+    final nav = Navigator.of(context);
+    if (nav.canPop()) nav.pop();
+  }
+
+  // Left-edge swipe → sidebar, same raw-pointer pattern (and thresholds) as the
+  // home shell's edge gesture: a touch landing within 50px of the left edge
+  // that travels 50px rightward opens the sidebar. Raw Listener, so it never
+  // steals from the lists underneath.
+  int? _edgePointer;
+  double _edgeStartX = 0;
+
+  void _edgeDown(PointerDownEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    if (_edgePointer != null || e.position.dx >= 50) return;
+    _edgePointer = e.pointer;
+    _edgeStartX = e.position.dx;
+  }
+
+  void _edgeMove(PointerMoveEvent e) {
+    if (e.pointer != _edgePointer) return;
+    if (e.position.dx - _edgeStartX > 50) {
+      _edgePointer = null;
+      _openSidebar();
+    }
+  }
+
+  void _edgeEnd(PointerEvent e) {
+    if (e.kind != PointerDeviceKind.touch) return;
+    _edgePointer = null;
+  }
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
     // Deliberately do NOT watch meshControllerProvider at this level. It ticks
     // constantly while the radio scans (every discovered/dropped peer, link and
-    // availability change), and rebuilding the whole Scaffold — the open drawer
-    // subtree included — on every tick blanked the sidebar. Only the status bar
-    // and peers list need the live state, so they watch it in local Consumers.
+    // availability change); only the status bar and peers list need the live
+    // state, so they watch it in local Consumers.
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: _edgeDown,
+      onPointerMove: _edgeMove,
+      onPointerUp: _edgeEnd,
+      onPointerCancel: _edgeEnd,
+      child: _scaffold(context, c),
+    );
+  }
+
+  Widget _scaffold(BuildContext context, NymColors c) {
     return Scaffold(
-      key: _scaffoldKey,
       backgroundColor: c.bg,
-      // The same off-canvas sidebar the rest of the app uses. Selecting a
-      // conversation from it pops the mesh screen so the chosen chat (which
-      // lives in the shell beneath this route) is revealed. Scaffold handles
-      // the left-edge swipe-to-open natively via [drawerEdgeDragWidth].
-      drawerEdgeDragWidth: 60,
-      // Opaque backing behind the sidebar. The Sidebar surface is the app-wide
-      // translucent `bgSecondary` (0.85), which everywhere else composites over
-      // the shell's WallpaperLayer/ambient glow. This pushed route has no such
-      // backdrop, so without a solid layer the drawer reads as see-through — the
-      // mesh screen (its Bluetooth glyph and all) bleeds through and the sidebar
-      // looks blank. A solid `c.bg` under it restores the normal opaque surface.
-      drawer: Container(
-        width: NymDimens.sidebarDrawerWidth,
-        color: c.bg,
-        child: Sidebar(
-          compact: true,
-          onItemSelected: () => Navigator.of(context).maybePop(),
-        ),
-      ),
       appBar: AppBar(
         backgroundColor: c.bgSecondary,
         foregroundColor: c.text,
@@ -144,7 +185,7 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
           _MeshHeaderToggle(
             svg: NymIcons.menu,
             tooltip: tr('Menu'),
-            onTap: () => _scaffoldKey.currentState?.openDrawer(),
+            onTap: _openSidebar,
           ),
           const SizedBox(width: 12),
         ],
