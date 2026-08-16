@@ -20,6 +20,13 @@ class BleMeshTransport implements MeshTransport {
   /// BLE device name so peers can pre-seed identity before the announce packet.
   BleMeshTransport(String advertisedName) : _advertisedNameString = advertisedName;
 
+  /// Diagnostic sink, wired by [MeshController] to the on-screen mesh log so a
+  /// device with no adb/Console access can still see the radio lifecycle —
+  /// power state, scanning, advertising, links. Null in tests / when unwired.
+  static void Function(String line)? debugLog;
+
+  void _log(String line) => debugLog?.call('ble: $line');
+
   final CentralManager _central = CentralManager();
   final PeripheralManager _peripheral = PeripheralManager();
 
@@ -44,6 +51,13 @@ class BleMeshTransport implements MeshTransport {
 
   MeshTransportAvailability _availability = MeshTransportAvailability.unknown;
   bool _started = false;
+
+  /// Whether each role is currently active, so a repeated power-on event (or the
+  /// initial sync check racing the state listener) can't double-start discovery
+  /// or advertising. Reset when the radio leaves the powered-on state.
+  bool _scanning = false;
+  bool _advertising = false;
+
   final String _advertisedNameString;
 
   @override
@@ -63,27 +77,54 @@ class BleMeshTransport implements MeshTransport {
   Future<MeshTransportAvailability> start() async {
     if (_started) return _availability;
     _started = true;
+    _log('start(): bringing up central+peripheral (peerID=$_advertisedNameString)');
+
+    // Wire the event handlers and BOTH managers' state listeners BEFORE the
+    // authorize() awaits below. On iOS each CBManager is created in .unknown
+    // and flips to .poweredOn asynchronously moments after construction; if we
+    // awaited first, that transition could fire on the broadcast state stream
+    // before we subscribed and be lost — leaving the radio powered on but the
+    // roles never started (the classic "mesh never starts, no logs" symptom).
+    _wireCentral();
+    _wirePeripheral();
+
+    _subs.add(_central.stateChanged.listen((e) {
+      _availability = _mapState(e.state);
+      _log('central state → ${e.state.name}');
+      if (e.state == BluetoothLowEnergyState.poweredOn) {
+        unawaited(_beginCentral());
+      } else {
+        _scanning = false;
+      }
+    }));
+    // The peripheral role has its OWN state on iOS. Advertising must (re)start
+    // when the PERIPHERAL manager powers on — not when the central does, as the
+    // old code assumed. Otherwise an iOS device could scan but never advertise,
+    // so no peer (including real bitchat) can discover it and no packets flow.
+    _subs.add(_peripheral.stateChanged.listen((e) {
+      _log('peripheral state → ${e.state.name}');
+      if (e.state == BluetoothLowEnergyState.poweredOn) {
+        unawaited(_beginPeripheral());
+      } else {
+        _advertising = false;
+      }
+    }));
 
     // Request runtime authorization for both roles.
     try {
       await _central.authorize();
       await _peripheral.authorize();
-    } catch (_) {
-      // authorize() throws on platforms that grant implicitly; ignore.
+    } catch (e) {
+      // authorize() throws on platforms that grant implicitly; that's fine.
+      _log('authorize() threw (implicit-grant platform?): $e');
     }
 
     _availability = _mapState(_central.state);
-    _subs.add(_central.stateChanged.listen((e) {
-      _availability = _mapState(e.state);
-      if (e.state == BluetoothLowEnergyState.poweredOn) {
-        unawaited(_beginCentral());
-        unawaited(_beginPeripheral());
-      }
-    }));
+    _log('initial state: central=${_central.state.name} '
+        'peripheral=${_peripheral.state.name} → ${_availability.name}');
 
-    _wireCentral();
-    _wirePeripheral();
-
+    // Handle the case where a manager was ALREADY powered on by the time we got
+    // here (the state listener above only covers future transitions).
     if (_central.state == BluetoothLowEnergyState.poweredOn) {
       await _beginCentral();
     }
@@ -96,6 +137,9 @@ class BleMeshTransport implements MeshTransport {
   @override
   Future<void> stop() async {
     _started = false;
+    _scanning = false;
+    _advertising = false;
+    _log('stop(): tearing down radio');
     for (final s in _subs) {
       await s.cancel();
     }
@@ -162,9 +206,14 @@ class BleMeshTransport implements MeshTransport {
   }
 
   Future<void> _beginCentral() async {
+    if (_scanning) return;
     try {
       await _central.startDiscovery(serviceUUIDs: [_serviceUuid]);
-    } catch (_) {}
+      _scanning = true;
+      _log('scanning for mesh service');
+    } catch (e) {
+      _log('startDiscovery failed: $e');
+    }
   }
 
   final Set<String> _connecting = {};
@@ -173,12 +222,23 @@ class BleMeshTransport implements MeshTransport {
     final id = e.peripheral.uuid.toString();
     if (_centralLinks.containsKey(id) || _connecting.contains(id)) return;
     _connecting.add(id);
+    _log('discovered peer $id (rssi ${e.rssi}) — connecting');
     try {
       await _central.connect(e.peripheral);
-      await _central.requestMTU(e.peripheral, mtu: MeshConstants.desiredMtu);
+      // Best-effort MTU bump. iOS/Darwin THROWS UnsupportedError here (Core
+      // Bluetooth negotiates the MTU itself and exposes no manual request) —
+      // if that threw out of the connect flow it aborted every central link on
+      // iOS, which is exactly why the mesh never formed there. Swallow it: the
+      // OS-negotiated MTU is fine and oversized packets fragment anyway.
+      try {
+        await _central.requestMTU(e.peripheral, mtu: MeshConstants.desiredMtu);
+      } catch (err) {
+        _log('requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
+      }
       final services = await _central.discoverGATT(e.peripheral);
       final characteristic = _findCharacteristic(services);
       if (characteristic == null) {
+        _log('peer $id has no mesh characteristic — dropping');
         await _central.disconnect(e.peripheral);
         return;
       }
@@ -188,8 +248,10 @@ class BleMeshTransport implements MeshTransport {
         state: true,
       );
       _centralLinks[id] = _CentralLink(e.peripheral, characteristic);
+      _log('linked to peer $id (central role) — $connectedLinkCount link(s)');
       _links.add(MeshLinkEvent(id, MeshLinkChange.connected, rssi: e.rssi));
-    } catch (_) {
+    } catch (err) {
+      _log('connect to $id failed: $err');
       try {
         await _central.disconnect(e.peripheral);
       } catch (_) {}
@@ -203,6 +265,7 @@ class BleMeshTransport implements MeshTransport {
     if (e.state == ConnectionState.disconnected) {
       final id = e.peripheral.uuid.toString();
       if (_centralLinks.remove(id) != null) {
+        _log('peer $id disconnected (central role)');
         _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
       }
     }
@@ -239,10 +302,13 @@ class BleMeshTransport implements MeshTransport {
         final wasNew = !_subscribedCentrals.containsKey(id);
         _subscribedCentrals[id] = e.central;
         if (wasNew) {
+          _log('central $id subscribed (peripheral role) — '
+              '$connectedLinkCount link(s)');
           _links.add(MeshLinkEvent(id, MeshLinkChange.connected));
         }
       } else {
         if (_subscribedCentrals.remove(id) != null) {
+          _log('central $id unsubscribed (peripheral role)');
           _links.add(MeshLinkEvent(id, MeshLinkChange.disconnected));
         }
       }
@@ -263,6 +329,7 @@ class BleMeshTransport implements MeshTransport {
   }
 
   Future<void> _beginPeripheral() async {
+    if (_advertising) return;
     try {
       await _peripheral.removeAllServices();
       final characteristic = GATTCharacteristic.mutable(
@@ -290,7 +357,11 @@ class BleMeshTransport implements MeshTransport {
         name: _advertisedNameString,
         serviceUUIDs: [_serviceUuid],
       ));
-    } catch (_) {}
+      _advertising = true;
+      _log('advertising mesh service as "$_advertisedNameString"');
+    } catch (e) {
+      _log('startAdvertising failed: $e');
+    }
   }
 
   @override
