@@ -6347,7 +6347,19 @@ class NostrController {
               final ev = entry.value;
               if (ev.isEmpty) continue; // cache hit, no event payload
               try {
-                appState.ingestEvent(NostrEvent.fromJson(ev));
+                final parsed = NostrEvent.fromJson(ev);
+                appState.ingestEvent(parsed);
+                // Cache the FULL self kind-0 so a later profile save merges
+                // against the user's REAL profile instead of an empty map.
+                // Unlike the live relay path ([_onEvent]), this D1-first fetch
+                // ingests straight into AppState and would otherwise never
+                // populate `_cachedKind0Profile` — leaving `saveProfile` to
+                // drop every unmanaged field (nip05, website, lud06, …) and
+                // overwrite the kind-0 wholesale on the first in-app edit.
+                if (parsed.kind == EventKind.profile &&
+                    parsed.pubkey == _identity?.pubkey) {
+                  _adoptSelfKind0(parsed);
+                }
               } catch (_) {}
             }
           });
