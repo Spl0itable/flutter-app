@@ -379,7 +379,7 @@ class _StatusBar extends ConsumerWidget {
             ),
           Switch(
             value: enabled,
-            activeThumbColor: colors.primary,
+            activeColor: colors.primary,
             onChanged: (v) =>
                 ref.read(settingsProvider.notifier).setMeshEnabled(v),
           ),
