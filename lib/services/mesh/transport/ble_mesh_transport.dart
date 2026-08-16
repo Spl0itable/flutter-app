@@ -139,6 +139,9 @@ class BleMeshTransport implements MeshTransport {
     _started = false;
     _scanning = false;
     _advertising = false;
+    _cooldownUntil.clear();
+    _failStreak.clear();
+    _connecting.clear();
     _log('stop(): tearing down radio');
     for (final s in _subs) {
       await s.cancel();
@@ -218,9 +221,48 @@ class BleMeshTransport implements MeshTransport {
 
   final Set<String> _connecting = {};
 
+  /// Per-peer link-failure backoff. A peer that advertises the service but can't
+  /// be linked — an iOS GATT cache returning the service with no characteristics,
+  /// a peripheral whose GATT isn't ready yet, or a distant peer that keeps timing
+  /// out — is otherwise re-discovered and re-connected every few seconds in a
+  /// tight loop that churns the radio and can starve a good link. We skip a peer
+  /// while it's cooling down and grow the cooldown exponentially per consecutive
+  /// failure, but still retry periodically so a transiently-unready peer links
+  /// once it recovers. Cleared the moment a link succeeds.
+  final Map<String, DateTime> _cooldownUntil = {};
+  final Map<String, int> _failStreak = {};
+
+  static const Duration _cooldownBase = Duration(seconds: 15);
+  static const Duration _cooldownMax = Duration(minutes: 5);
+
+  void _noteLinkFailure(String id) {
+    // Prune expired entries so rotating iOS peer UUIDs can't grow these maps
+    // without bound over a long session.
+    final now = DateTime.now();
+    if (_cooldownUntil.length > 128) {
+      _cooldownUntil.removeWhere((_, until) => now.isAfter(until));
+      _failStreak.removeWhere((k, _) => !_cooldownUntil.containsKey(k));
+    }
+    final n = (_failStreak[id] ?? 0) + 1;
+    _failStreak[id] = n;
+    var shift = n - 1;
+    if (shift > 10) shift = 10;
+    final ms = (_cooldownBase.inMilliseconds << shift)
+        .clamp(0, _cooldownMax.inMilliseconds)
+        .toInt();
+    _cooldownUntil[id] = now.add(Duration(milliseconds: ms));
+  }
+
+  void _noteLinkSuccess(String id) {
+    _failStreak.remove(id);
+    _cooldownUntil.remove(id);
+  }
+
   Future<void> _onDiscovered(DiscoveredEventArgs e) async {
     final id = e.peripheral.uuid.toString();
     if (_centralLinks.containsKey(id) || _connecting.contains(id)) return;
+    final until = _cooldownUntil[id];
+    if (until != null && DateTime.now().isBefore(until)) return;
     _connecting.add(id);
     _log('discovered peer $id (rssi ${e.rssi}) — connecting');
     try {
@@ -235,10 +277,18 @@ class BleMeshTransport implements MeshTransport {
       } catch (err) {
         _log('requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
       }
-      final services = await _central.discoverGATT(e.peripheral);
-      final characteristic = _findCharacteristic(services);
+      var services = await _central.discoverGATT(e.peripheral);
+      var characteristic = _findCharacteristic(services);
       if (characteristic == null) {
-        _log('peer $id has no mesh characteristic — dropping');
+        // Retry once: iOS sometimes surfaces the service before its
+        // characteristics have populated on a freshly-opened connection.
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        services = await _central.discoverGATT(e.peripheral);
+        characteristic = _findCharacteristic(services);
+      }
+      if (characteristic == null) {
+        _log('peer $id has no mesh characteristic — dropping (backing off)');
+        _noteLinkFailure(id);
         await _central.disconnect(e.peripheral);
         return;
       }
@@ -248,10 +298,12 @@ class BleMeshTransport implements MeshTransport {
         state: true,
       );
       _centralLinks[id] = _CentralLink(e.peripheral, characteristic);
+      _noteLinkSuccess(id);
       _log('linked to peer $id (central role) — $connectedLinkCount link(s)');
       _links.add(MeshLinkEvent(id, MeshLinkChange.connected, rssi: e.rssi));
     } catch (err) {
       _log('connect to $id failed: $err');
+      _noteLinkFailure(id);
       try {
         await _central.disconnect(e.peripheral);
       } catch (_) {}
