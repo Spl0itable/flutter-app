@@ -200,6 +200,12 @@ class MeshController extends StateNotifier<MeshUiState> {
         );
       }));
       _subs.add(service.onProfile.listen(_onProfile));
+      // Keep the UI availability live: the BLE radio reports `unknown` at start
+      // and only becomes `ready` a beat later when the adapter powers on, so a
+      // one-shot read would leave the status stuck on "Starting…".
+      _subs.add(transport.availabilityChanged.listen((availability) {
+        state = state.copyWith(availability: availability);
+      }));
 
       bridge.start();
 
