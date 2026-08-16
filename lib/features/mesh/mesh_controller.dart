@@ -404,12 +404,12 @@ class MeshController extends StateNotifier<MeshUiState> {
   Future<void> shutdown() async => _teardown();
 }
 
-/// One-shot "open the home-shell sidebar" request nonce. The mesh screen bumps
-/// this (then pops itself) when its hamburger or left-edge swipe should reveal
-/// the sidebar; the home shell listens and opens its own off-canvas drawer.
-/// This replaces hosting a SECOND Sidebar inside the mesh route's Scaffold
-/// drawer, which intermittently rebuilt to blank while the radio churned.
-final sidebarOpenRequestProvider = StateProvider<int>((ref) => 0);
+/// Whether the mesh screen overlay is showing inside the home shell. The mesh
+/// screen is NOT a pushed route: it renders in the shell's content area beneath
+/// the off-canvas drawer, so the sidebar opens over it like on any other screen
+/// and a conversation switch (sidebar tap, peer tap, notification tap) closes
+/// it to reveal the chat.
+final meshScreenOpenProvider = StateProvider<bool>((ref) => false);
 
 /// The mesh controller, reacting to the `meshEnabled` setting.
 final meshControllerProvider =

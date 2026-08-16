@@ -13,7 +13,6 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/mesh/mesh_controller.dart';
-import '../../features/mesh/mesh_screen.dart';
 import '../../features/groups/group_logic.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
@@ -1166,12 +1165,11 @@ class _MeshStatusIndicator extends ConsumerWidget {
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
           onTap: () {
+            // Shows the in-shell mesh overlay (idempotent — already-open stays
+            // open, no stacking). onItemSelected closes the mobile drawer so
+            // the mesh screen is revealed beneath it.
+            ref.read(meshScreenOpenProvider.notifier).state = true;
             onItemSelected?.call();
-            // Don't stack a second mesh screen when one is already open —
-            // just let onItemSelected close the drawer over it.
-            if (!MeshScreen.isOpen) {
-              Navigator.of(context).push(MeshScreen.route());
-            }
           },
           // A generous, full-width tap target (like the connected-relays row),
           // so the mesh status line is easy to hit instead of a thin text strip.
