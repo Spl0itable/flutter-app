@@ -45,4 +45,10 @@ class MeshConstants {
   /// Random relay jitter bounds (avoids synchronized flooding storms).
   static const int relayJitterMinMs = 10;
   static const int relayJitterMaxMs = 220;
+
+  /// Gap inserted between consecutive fragments of a multi-fragment transfer
+  /// (images/files). Paces GATT writes/notifications so iOS Core Bluetooth's
+  /// bounded send queue doesn't overflow and silently drop fragments, which
+  /// would leave the payload unreassemblable on the receiver.
+  static const Duration interFragmentDelay = Duration(milliseconds: 20);
 }

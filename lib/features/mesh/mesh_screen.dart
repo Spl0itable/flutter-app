@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/transport/mesh_transport.dart';
@@ -73,8 +74,15 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
       // lives in the shell beneath this route) is revealed. Scaffold handles
       // the left-edge swipe-to-open natively via [drawerEdgeDragWidth].
       drawerEdgeDragWidth: 60,
-      drawer: SizedBox(
+      // Opaque backing behind the sidebar. The Sidebar surface is the app-wide
+      // translucent `bgSecondary` (0.85), which everywhere else composites over
+      // the shell's WallpaperLayer/ambient glow. This pushed route has no such
+      // backdrop, so without a solid layer the drawer reads as see-through — the
+      // mesh screen (its Bluetooth glyph and all) bleeds through and the sidebar
+      // looks blank. A solid `c.bg` under it restores the normal opaque surface.
+      drawer: Container(
         width: NymDimens.sidebarDrawerWidth,
+        color: c.bg,
         child: Sidebar(
           compact: true,
           onItemSelected: () => Navigator.of(context).maybePop(),
@@ -173,64 +181,87 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
           Divider(height: 1, color: c.border),
           Expanded(child: _PeersList(mesh: mesh, colors: c)),
           Divider(height: 1, color: c.border),
-          _MeshRxDiagnostics(colors: c),
+          _MeshDiagnostics(colors: c),
         ],
       ),
     );
   }
 }
 
-/// Live receive-pipeline log — shows, per inbound mesh packet/message, whether
-/// the bridge ran, the resolved conversation key, the open view, and whether it
-/// LANDED in the store the chat reads. A debugging aid to pinpoint why a
-/// received message might not appear in a chat on a real device.
-class _MeshRxDiagnostics extends StatelessWidget {
-  const _MeshRxDiagnostics({required this.colors});
+/// Live mesh log — the radio lifecycle (power state, scanning, advertising,
+/// links) plus, per inbound packet/message, whether the bridge ran, the
+/// resolved conversation key, the open view, and whether it LANDED in the store
+/// the chat reads. A collapsible bar: collapsed by default so it stays out of
+/// the way, tapped open to read and copy the logs on a device with no adb /
+/// Console access.
+class _MeshDiagnostics extends StatefulWidget {
+  const _MeshDiagnostics({required this.colors});
   final NymColors colors;
 
   @override
+  State<_MeshDiagnostics> createState() => _MeshDiagnosticsState();
+}
+
+class _MeshDiagnosticsState extends State<_MeshDiagnostics> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    final c = colors;
-    return SizedBox(
-      height: 190,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 4, 2),
+    final c = widget.colors;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // Collapsible header bar: chevron + title, with Copy/Clear revealed
+        // only while expanded.
+        InkWell(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
             child: Row(
               children: [
+                NymSvgIcon(
+                  _expanded ? NymIcons.chevronDown : NymIcons.chevronRight,
+                  size: 14,
+                  color: c.textDim,
+                ),
+                const SizedBox(width: 8),
                 Expanded(
-                  child: Text('Receive diagnostics',
+                  child: Text(tr('Mesh diagnostics'),
                       style: TextStyle(
                           color: c.textDim,
                           fontSize: 12,
                           fontWeight: FontWeight.w600)),
                 ),
-                TextButton(
-                  onPressed: () {
-                    final text =
-                        MeshDiagnostics.instance.entries.value.join('\n');
-                    Clipboard.setData(ClipboardData(text: text));
-                  },
-                  child: Text(tr('Copy'),
-                      style: TextStyle(color: c.primary, fontSize: 12)),
-                ),
-                TextButton(
-                  onPressed: MeshDiagnostics.instance.clear,
-                  child: Text(tr('Clear'),
-                      style: TextStyle(color: c.textDim, fontSize: 12)),
-                ),
+                if (_expanded) ...[
+                  TextButton(
+                    onPressed: () {
+                      final text =
+                          MeshDiagnostics.instance.entries.value.join('\n');
+                      Clipboard.setData(ClipboardData(text: text));
+                    },
+                    child: Text(tr('Copy'),
+                        style: TextStyle(color: c.primary, fontSize: 12)),
+                  ),
+                  TextButton(
+                    onPressed: MeshDiagnostics.instance.clear,
+                    child: Text(tr('Clear'),
+                        style: TextStyle(color: c.textDim, fontSize: 12)),
+                  ),
+                ],
               ],
             ),
           ),
-          Expanded(
+        ),
+        if (_expanded)
+          SizedBox(
+            height: 190,
             child: ValueListenableBuilder<List<String>>(
               valueListenable: MeshDiagnostics.instance.entries,
               builder: (context, entries, _) {
                 if (entries.isEmpty) {
                   return Center(
-                    child: Text(tr('No mesh packets received yet'),
+                    child: Text(tr('No mesh activity yet'),
                         style: TextStyle(color: c.textDim, fontSize: 12)),
                   );
                 }
@@ -254,8 +285,7 @@ class _MeshRxDiagnostics extends StatelessWidget {
               },
             ),
           ),
-        ],
-      ),
+      ],
     );
   }
 }
@@ -439,6 +469,40 @@ class _PeersList extends ConsumerWidget {
   final MeshUiState mesh;
   final NymColors colors;
 
+  static final RegExp _hex64Re =
+      RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+
+  /// The peer's display name with its trailing `#xxxx` suffix dimmed, matching
+  /// how nyms render everywhere else in the app. When the peer has a verified
+  /// Nostr pubkey we derive the canonical suffix from it; otherwise we split any
+  /// suffix already present on the announced nickname.
+  Widget _peerName(MeshPeer peer, NymColors c) {
+    final pk = peer.nostrPubkey;
+    final display = (pk != null && _hex64Re.hasMatch(pk))
+        ? getNymFromPubkey(peer.displayName, pk)
+        : peer.displayName;
+    final parts = splitNymSuffix(display);
+    return Text.rich(
+      TextSpan(
+        text: parts.base,
+        children: parts.suffix.isEmpty
+            ? null
+            : [
+                TextSpan(
+                  text: parts.suffix,
+                  style: TextStyle(
+                    color: c.textDim.withValues(alpha: 0.7),
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(color: c.text),
+    );
+  }
+
   void _openPeer(BuildContext context, WidgetRef ref, MeshPeer peer) {
     final pubkey =
         ref.read(meshControllerProvider.notifier).bridge?.openPeerDm(peer);
@@ -476,9 +540,7 @@ class _PeersList extends ConsumerWidget {
             imageUrl: peer.avatarUrl,
             label: peer.displayName,
           ),
-          title: Text(peer.displayName,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: colors.text)),
+          title: _peerName(peer, colors),
           subtitle: Text(
             peer.peerID + (peer.nostrLinkVerified ? '  • linked' : ''),
             style: TextStyle(
