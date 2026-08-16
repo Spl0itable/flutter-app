@@ -64,8 +64,11 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final mesh = ref.watch(meshControllerProvider);
-
+    // Deliberately do NOT watch meshControllerProvider at this level. It ticks
+    // constantly while the radio scans (every discovered/dropped peer, link and
+    // availability change), and rebuilding the whole Scaffold — the open drawer
+    // subtree included — on every tick blanked the sidebar. Only the status bar
+    // and peers list need the live state, so they watch it in local Consumers.
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: c.bg,
@@ -148,7 +151,10 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
       ),
       body: Column(
         children: [
-          _StatusBar(mesh: mesh, colors: c),
+          Consumer(builder: (context, ref, _) {
+            return _StatusBar(
+                mesh: ref.watch(meshControllerProvider), colors: c);
+          }),
           // The public #mesh channel — opens in the normal chat view, where it
           // weaves together Nostr (kind-20000) and Bluetooth-mesh messages.
           ListTile(
@@ -179,7 +185,12 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             },
           ),
           Divider(height: 1, color: c.border),
-          Expanded(child: _PeersList(mesh: mesh, colors: c)),
+          Expanded(
+            child: Consumer(builder: (context, ref, _) {
+              return _PeersList(
+                  mesh: ref.watch(meshControllerProvider), colors: c);
+            }),
+          ),
           Divider(height: 1, color: c.border),
           _MeshDiagnostics(colors: c),
         ],

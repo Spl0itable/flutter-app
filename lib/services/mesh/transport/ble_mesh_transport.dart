@@ -36,6 +36,21 @@ class BleMeshTransport implements MeshTransport {
 
   final _inbound = StreamController<MeshInboundFrame>.broadcast();
   final _links = StreamController<MeshLinkEvent>.broadcast();
+  final _availabilityChanges =
+      StreamController<MeshTransportAvailability>.broadcast();
+
+  /// Fires whenever [availability] changes. On iOS the radio reports `unknown`
+  /// synchronously at start() and only flips to `ready` a beat later when the
+  /// CBManager powers on, so a one-shot read at start would leave the UI stuck
+  /// on "Starting…". The controller listens here to keep the status live.
+  Stream<MeshTransportAvailability> get availabilityChanged =>
+      _availabilityChanges.stream;
+
+  void _setAvailability(MeshTransportAvailability next) {
+    if (next == _availability) return;
+    _availability = next;
+    if (!_availabilityChanges.isClosed) _availabilityChanges.add(next);
+  }
 
   final List<StreamSubscription<dynamic>> _subs = [];
 
@@ -89,7 +104,7 @@ class BleMeshTransport implements MeshTransport {
     _wirePeripheral();
 
     _subs.add(_central.stateChanged.listen((e) {
-      _availability = _mapState(e.state);
+      _setAvailability(_mapState(e.state));
       _log('central state → ${e.state.name}');
       if (e.state == BluetoothLowEnergyState.poweredOn) {
         unawaited(_beginCentral());
@@ -119,7 +134,7 @@ class BleMeshTransport implements MeshTransport {
       _log('authorize() threw (implicit-grant platform?): $e');
     }
 
-    _availability = _mapState(_central.state);
+    _setAvailability(_mapState(_central.state));
     _log('initial state: central=${_central.state.name} '
         'peripheral=${_peripheral.state.name} → ${_availability.name}');
 
@@ -235,6 +250,10 @@ class BleMeshTransport implements MeshTransport {
   static const Duration _cooldownBase = Duration(seconds: 15);
   static const Duration _cooldownMax = Duration(minutes: 5);
 
+  /// Upper bounds on a single connect / GATT-discovery step (iOS provides none).
+  static const Duration _connectTimeout = Duration(seconds: 10);
+  static const Duration _discoverTimeout = Duration(seconds: 8);
+
   void _noteLinkFailure(String id) {
     // Prune expired entries so rotating iOS peer UUIDs can't grow these maps
     // without bound over a long session.
@@ -266,7 +285,12 @@ class BleMeshTransport implements MeshTransport {
     _connecting.add(id);
     _log('discovered peer $id (rssi ${e.rssi}) — connecting');
     try {
-      await _central.connect(e.peripheral);
+      // iOS CBCentralManager.connect() has NO built-in timeout — a peer that
+      // never completes the connection leaves the attempt pending forever,
+      // pinning the peer in `_connecting` so it's never retried (and, if it's
+      // the peer we actually want, never linked). Bound every step so a stuck
+      // attempt aborts, backs off, and frees the slot for the next scan hit.
+      await _central.connect(e.peripheral).timeout(_connectTimeout);
       // Best-effort MTU bump. iOS/Darwin THROWS UnsupportedError here (Core
       // Bluetooth negotiates the MTU itself and exposes no manual request) —
       // if that threw out of the connect flow it aborted every central link on
@@ -277,13 +301,15 @@ class BleMeshTransport implements MeshTransport {
       } catch (err) {
         _log('requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
       }
-      var services = await _central.discoverGATT(e.peripheral);
+      var services =
+          await _central.discoverGATT(e.peripheral).timeout(_discoverTimeout);
       var characteristic = _findCharacteristic(services);
       if (characteristic == null) {
         // Retry once: iOS sometimes surfaces the service before its
         // characteristics have populated on a freshly-opened connection.
         await Future<void>.delayed(const Duration(milliseconds: 400));
-        services = await _central.discoverGATT(e.peripheral);
+        services =
+            await _central.discoverGATT(e.peripheral).timeout(_discoverTimeout);
         characteristic = _findCharacteristic(services);
       }
       if (characteristic == null) {
