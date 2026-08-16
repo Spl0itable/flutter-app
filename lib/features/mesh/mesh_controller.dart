@@ -20,6 +20,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import 'mesh_bridge.dart';
+import 'mesh_diagnostics.dart';
 
 /// Immutable UI snapshot of the mesh radio status. Conversations themselves live
 /// in the normal [AppState] stores (channels/PMs) and render through the
@@ -158,6 +159,11 @@ class MeshController extends StateNotifier<MeshUiState> {
       }
       final identity = await NoiseIdentity.loadOrCreate();
       _nostrLink = _computeNostrLink(identity);
+      // Route low-level radio lifecycle (power state, scanning, advertising,
+      // links) into the same on-screen mesh diagnostics panel the receive
+      // pipeline uses, so an iOS device with no Console access can see whether
+      // the transport actually came up.
+      BleMeshTransport.debugLog = MeshDiagnostics.instance.log;
       final transport = BleMeshTransport(identity.peerID);
       final service = MeshService(
         identity: identity,

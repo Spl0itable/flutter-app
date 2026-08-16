@@ -256,14 +256,17 @@ class MeshService {
     // Subscribe before powering up the radio so no early frame or link event
     // (e.g. a peer that links during startup) is missed.
     _running = true;
+    debugLog?.call('service.start(): peerID=$myPeerID');
     _inboundSub = _transport.inbound.listen(_onFrame);
     _linkSub = _transport.links.listen(_onLink);
     final availability = await _transport.start();
+    debugLog?.call('transport up → availability=${availability.name}');
     _announceTimer =
         Timer.periodic(MeshConstants.announceInterval, (_) => _broadcastAnnounce());
     _cleanupTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _cleanupStalePeers());
     await _broadcastAnnounce();
+    debugLog?.call('sent initial identity announce — awaiting peers');
     return availability;
   }
 

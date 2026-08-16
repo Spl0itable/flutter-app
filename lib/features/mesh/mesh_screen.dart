@@ -25,8 +25,36 @@ import 'mesh_diagnostics.dart';
 class MeshScreen extends ConsumerStatefulWidget {
   const MeshScreen({super.key});
 
+  /// Pushes the mesh screen with a route that does NOT install iOS's left-edge
+  /// back-swipe gesture. That system pop-gesture otherwise wins the gesture
+  /// arena over the Scaffold's `drawerEdgeDragWidth`, so a left-to-right swipe
+  /// pops this route ("go back to last place") instead of opening the sidebar.
+  /// With no route pop-gesture, the drawer's own edge-drag handles the swipe and
+  /// the sidebar slides in, matching the rest of the app.
+  static Route<void> route() => _MeshPageRoute();
+
   @override
   ConsumerState<MeshScreen> createState() => _MeshScreenState();
+}
+
+/// A [MaterialPageRoute] whose transition never installs the Cupertino
+/// interactive back-swipe. We force the (non-Cupertino) fade-upwards builder so
+/// that on iOS no `_CupertinoBackGestureDetector` is wrapped around the page —
+/// leaving the left-edge swipe to the mesh screen's own drawer edge-drag. The
+/// small cost is a fade-up push instead of the iOS horizontal slide.
+class _MeshPageRoute extends MaterialPageRoute<void> {
+  _MeshPageRoute() : super(builder: (_) => const MeshScreen());
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return const FadeUpwardsPageTransitionsBuilder().buildTransitions<void>(
+        this, context, animation, secondaryAnimation, child);
+  }
 }
 
 class _MeshScreenState extends ConsumerState<MeshScreen> {

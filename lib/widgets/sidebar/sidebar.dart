@@ -1167,9 +1167,7 @@ class _MeshStatusIndicator extends ConsumerWidget {
           borderRadius: BorderRadius.circular(8),
           onTap: () {
             onItemSelected?.call();
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const MeshScreen()),
-            );
+            Navigator.of(context).push(MeshScreen.route());
           },
           // A generous, full-width tap target (like the connected-relays row),
           // so the mesh status line is easy to hit instead of a thin text strip.
