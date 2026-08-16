@@ -52,7 +52,7 @@ dependencies:
 
   # Notifications
   flutter_local_notifications: ^18.0.0
-  permission_handler: any
+  permission_handler: ^11.3.1
   # Foreground playback of the synthesized notification tones (notifications.js
   # Web Audio equivalent — we feed it the rendered WAV bytes).
   audioplayers: ^6.0.0
