@@ -108,7 +108,9 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             _MeshHeaderToggle(
               svg: NymIcons.menu,
               tooltip: tr('Menu'),
-              onTap: widget.onOpenSidebar,
+              // Instance fields don't promote; the surrounding null check
+              // guarantees this.
+              onTap: widget.onOpenSidebar!,
             ),
           ],
           const SizedBox(width: 12),
