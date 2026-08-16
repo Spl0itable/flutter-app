@@ -1,4 +1,3 @@
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -24,93 +23,28 @@ import 'mesh_diagnostics.dart';
 /// lets you start (or jump into) a mesh DM with a nearby peer or the public
 /// `#mesh` channel.
 ///
-/// This screen deliberately hosts NO sidebar of its own. Opening the sidebar
-/// (hamburger or left-edge swipe) pops back to the home shell and opens ITS
-/// off-canvas drawer — the one Sidebar instance that is always mounted and
-/// known-good. Hosting a second Sidebar in a Scaffold drawer here is what
-/// intermittently rebuilt to blank while the radio churned.
+/// NOT a pushed route: this renders as an overlay INSIDE the home shell (toggled
+/// by [meshScreenOpenProvider]), beneath the shell's off-canvas drawer. So the
+/// sidebar opens OVER it like on any other screen, the shell's left-edge swipe
+/// works unchanged, and any conversation switch — a sidebar tap, a peer tap, a
+/// notification tap — closes the overlay and reveals the chat, exactly like the
+/// rest of the app.
 class MeshScreen extends ConsumerStatefulWidget {
-  const MeshScreen({super.key});
+  const MeshScreen({super.key, this.onOpenSidebar});
 
-  /// True while a MeshScreen route is mounted, so the sidebar's mesh row can
-  /// avoid stacking a second copy when the screen is already open.
-  static bool isOpen = false;
-
-  /// Pushes the mesh screen with a route that does NOT install iOS's left-edge
-  /// back-swipe gesture — this screen owns the left-edge swipe itself (it opens
-  /// the sidebar, matching the rest of the app, instead of popping the route).
-  static Route<void> route() => _MeshPageRoute();
+  /// Opens the shell's off-canvas drawer (compact layouts). Null on wide
+  /// layouts, where the sidebar is permanently visible.
+  final VoidCallback? onOpenSidebar;
 
   @override
   ConsumerState<MeshScreen> createState() => _MeshScreenState();
 }
 
-/// A [MaterialPageRoute] whose transition never installs the Cupertino
-/// interactive back-swipe. We force the (non-Cupertino) fade-upwards builder so
-/// that on iOS no `_CupertinoBackGestureDetector` is wrapped around the page —
-/// leaving the left-edge swipe to the mesh screen's own sidebar gesture. The
-/// small cost is a fade-up push instead of the iOS horizontal slide.
-class _MeshPageRoute extends MaterialPageRoute<void> {
-  _MeshPageRoute() : super(builder: (_) => const MeshScreen());
-
-  @override
-  Widget buildTransitions(
-    BuildContext context,
-    Animation<double> animation,
-    Animation<double> secondaryAnimation,
-    Widget child,
-  ) {
-    return const FadeUpwardsPageTransitionsBuilder().buildTransitions<void>(
-        this, context, animation, secondaryAnimation, child);
-  }
-}
-
 class _MeshScreenState extends ConsumerState<MeshScreen> {
-  @override
-  void initState() {
-    super.initState();
-    MeshScreen.isOpen = true;
-  }
-
-  @override
-  void dispose() {
-    MeshScreen.isOpen = false;
-    super.dispose();
-  }
-
-  /// Reveals the sidebar: bumps the home shell's open-drawer request, then pops
-  /// this route so the shell (with its drawer sliding open) is what you land on.
-  void _openSidebar() {
-    ref.read(sidebarOpenRequestProvider.notifier).state++;
-    final nav = Navigator.of(context);
-    if (nav.canPop()) nav.pop();
-  }
-
-  // Left-edge swipe → sidebar, same raw-pointer pattern (and thresholds) as the
-  // home shell's edge gesture: a touch landing within 50px of the left edge
-  // that travels 50px rightward opens the sidebar. Raw Listener, so it never
-  // steals from the lists underneath.
-  int? _edgePointer;
-  double _edgeStartX = 0;
-
-  void _edgeDown(PointerDownEvent e) {
-    if (e.kind != PointerDeviceKind.touch) return;
-    if (_edgePointer != null || e.position.dx >= 50) return;
-    _edgePointer = e.pointer;
-    _edgeStartX = e.position.dx;
-  }
-
-  void _edgeMove(PointerMoveEvent e) {
-    if (e.pointer != _edgePointer) return;
-    if (e.position.dx - _edgeStartX > 50) {
-      _edgePointer = null;
-      _openSidebar();
-    }
-  }
-
-  void _edgeEnd(PointerEvent e) {
-    if (e.kind != PointerDeviceKind.touch) return;
-    _edgePointer = null;
+  /// Closes the mesh overlay, revealing whatever conversation is active in the
+  /// shell beneath.
+  void _close() {
+    ref.read(meshScreenOpenProvider.notifier).state = false;
   }
 
   @override
@@ -120,17 +54,6 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
     // constantly while the radio scans (every discovered/dropped peer, link and
     // availability change); only the status bar and peers list need the live
     // state, so they watch it in local Consumers.
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: _edgeDown,
-      onPointerMove: _edgeMove,
-      onPointerUp: _edgeEnd,
-      onPointerCancel: _edgeEnd,
-      child: _scaffold(context, c),
-    );
-  }
-
-  Widget _scaffold(BuildContext context, NymColors c) {
     return Scaffold(
       backgroundColor: c.bg,
       appBar: AppBar(
@@ -149,16 +72,14 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             _MeshNavBtn(
               svg: NymIcons.chevronLeft,
               tooltip: tr('Go back'),
-              onTap: Navigator.of(context).canPop()
-                  ? () => Navigator.of(context).maybePop()
-                  : null,
+              // Back = close the overlay, revealing the active conversation.
+              onTap: _close,
             ),
             _MeshNavBtn(
               svg: NymIcons.chevronRight,
               tooltip: tr('Go forward'),
-              // A pushed leaf route has nothing ahead of it — the forward
-              // chevron rests disabled, exactly as the chat header's does until
-              // you've navigated back.
+              // Nothing ahead of the mesh overlay — rests disabled, exactly as
+              // the chat header's does until you've navigated back.
               onTap: null,
             ),
             const SizedBox(width: 4),
@@ -182,12 +103,14 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
                 : 0,
             onTap: () => showNotificationsPanel(context),
           ),
-          const SizedBox(width: 8),
-          _MeshHeaderToggle(
-            svg: NymIcons.menu,
-            tooltip: tr('Menu'),
-            onTap: _openSidebar,
-          ),
+          if (widget.onOpenSidebar != null) ...[
+            const SizedBox(width: 8),
+            _MeshHeaderToggle(
+              svg: NymIcons.menu,
+              tooltip: tr('Menu'),
+              onTap: widget.onOpenSidebar,
+            ),
+          ],
           const SizedBox(width: 12),
         ],
       ),
@@ -223,7 +146,9 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
               ref
                   .read(appStateProvider.notifier)
                   .switchChannel(kMeshNearbyChannel);
-              Navigator.of(context).maybePop();
+              // Explicit close: the shell's view-change listener also closes
+              // the overlay, but not when #mesh was ALREADY the active view.
+              _close();
             },
           ),
           Divider(height: 1, color: c.border),
@@ -561,7 +486,9 @@ class _PeersList extends ConsumerWidget {
         ref.read(meshControllerProvider.notifier).bridge?.openPeerDm(peer);
     if (pubkey == null) return;
     ref.read(appStateProvider.notifier).switchView(ChatView.pm(pubkey));
-    Navigator.of(context).maybePop();
+    // Explicit close in case this DM was already the active view (the shell's
+    // view-change listener wouldn't fire then).
+    ref.read(meshScreenOpenProvider.notifier).state = false;
   }
 
   @override

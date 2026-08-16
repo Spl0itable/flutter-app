@@ -12,7 +12,8 @@ import '../core/theme/nym_metrics.dart';
 import '../features/calls/call_overlay.dart';
 import '../features/calls/call_providers.dart';
 import '../features/calls/incoming_call.dart';
-import '../features/mesh/mesh_controller.dart' show sidebarOpenRequestProvider;
+import '../features/mesh/mesh_controller.dart' show meshScreenOpenProvider;
+import '../features/mesh/mesh_screen.dart';
 import '../features/nymbot/bot_credits_modal.dart';
 import '../features/nymbot/nymbot_providers.dart'
     show BotBuyRequest, botBuyRequestProvider, botChatControllerProvider;
@@ -274,14 +275,11 @@ class HomeShellState extends ConsumerState<HomeShell>
       if (prev != next && _narrow && _drawerOpen && mounted) {
         setState(() => _drawerOpen = false);
       }
-    });
-
-    // The mesh screen's hamburger / left-edge swipe: it pops itself and bumps
-    // this nonce so the shell's own (always-mounted, known-good) drawer opens —
-    // the mesh route hosts no Sidebar of its own.
-    ref.listen<int>(sidebarOpenRequestProvider, (prev, next) {
-      if (prev != next && _narrow && !_drawerOpen && mounted) {
-        setState(() => _drawerOpen = true);
+      // Switching conversations also dismisses the mesh overlay (a sidebar
+      // tap, a peer tap, or a notification tap should land you IN the chat,
+      // with the mesh screen out of the way).
+      if (prev != next && ref.read(meshScreenOpenProvider)) {
+        ref.read(meshScreenOpenProvider.notifier).state = false;
       }
     });
 
@@ -340,10 +338,18 @@ class HomeShellState extends ConsumerState<HomeShell>
   }
 
   Widget _wide(BuildContext context, bool useColumns) {
+    // The mesh screen swaps into the content area like any other view; the
+    // persistent sidebar stays put (so it needs no hamburger — onOpenSidebar
+    // stays null).
+    final meshOpen = ref.watch(meshScreenOpenProvider);
     return Row(
       children: [
         const SizedBox(width: NymDimens.sidebarWidth, child: Sidebar()),
-        Expanded(child: _content(context, useColumns)),
+        Expanded(
+          child: meshOpen
+              ? const MeshScreen()
+              : _content(context, useColumns),
+        ),
       ],
     );
   }
@@ -367,6 +373,17 @@ class HomeShellState extends ConsumerState<HomeShell>
         Positioned.fill(
           child: _content(context, useColumns, compact: true),
         ),
+
+        // Mesh screen overlay — INSIDE the shell, beneath the dim scrim and
+        // drawer, so the sidebar opens over it like on any other screen and the
+        // shell's left-edge swipe keeps working. Closed by any conversation
+        // switch (see the view listener in build) or its own back chevron.
+        if (ref.watch(meshScreenOpenProvider))
+          Positioned.fill(
+            child: MeshScreen(
+              onOpenSidebar: () => setState(() => _drawerOpen = true),
+            ),
+          ),
 
         // Dim backdrop (`.mobile-overlay`): rgba(0,0,0,0.6) that snaps between
         // display:none/block with NO fade (styles-shell.css:1-14). Only with
