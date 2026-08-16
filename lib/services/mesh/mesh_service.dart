@@ -980,11 +980,23 @@ class MeshService {
   }
 
   /// Serializes, fragments if needed, and broadcasts a packet.
+  ///
+  /// Multi-fragment payloads (images/files) are PACED. iOS Core Bluetooth
+  /// accepts `writeValue(.withoutResponse)` / `updateValue` (notify) into a
+  /// bounded queue and SILENTLY DROPS once it's full — firing a hundred
+  /// fragments back-to-back in a tight loop overruns it, so a file left with
+  /// holes never reassembles on the far side (the "images don't send over mesh"
+  /// symptom). A short gap between fragments keeps the queue drained. Single
+  /// fragments (text, reactions, typing, receipts) are unaffected.
   Future<void> _sendPacket(BitchatPacket packet) async {
     final fragments = PacketFragmenter.fragment(packet);
-    for (final f in fragments) {
-      final bytes = f.toBytes();
+    final paced = fragments.length > 1;
+    for (var i = 0; i < fragments.length; i++) {
+      final bytes = fragments[i].toBytes();
       if (bytes != null) await _broadcast(bytes);
+      if (paced && i != fragments.length - 1) {
+        await Future<void>.delayed(MeshConstants.interFragmentDelay);
+      }
     }
   }
 
