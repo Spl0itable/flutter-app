@@ -12,6 +12,7 @@ import '../core/theme/nym_metrics.dart';
 import '../features/calls/call_overlay.dart';
 import '../features/calls/call_providers.dart';
 import '../features/calls/incoming_call.dart';
+import '../features/mesh/mesh_controller.dart' show sidebarOpenRequestProvider;
 import '../features/nymbot/bot_credits_modal.dart';
 import '../features/nymbot/nymbot_providers.dart'
     show BotBuyRequest, botBuyRequestProvider, botChatControllerProvider;
@@ -272,6 +273,15 @@ class HomeShellState extends ConsumerState<HomeShell>
     ref.listen(appStateProvider.select((s) => s.view), (prev, next) {
       if (prev != next && _narrow && _drawerOpen && mounted) {
         setState(() => _drawerOpen = false);
+      }
+    });
+
+    // The mesh screen's hamburger / left-edge swipe: it pops itself and bumps
+    // this nonce so the shell's own (always-mounted, known-good) drawer opens —
+    // the mesh route hosts no Sidebar of its own.
+    ref.listen<int>(sidebarOpenRequestProvider, (prev, next) {
+      if (prev != next && _narrow && !_drawerOpen && mounted) {
+        setState(() => _drawerOpen = true);
       }
     });
 

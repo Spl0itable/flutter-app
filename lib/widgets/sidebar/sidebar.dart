@@ -1167,7 +1167,11 @@ class _MeshStatusIndicator extends ConsumerWidget {
           borderRadius: BorderRadius.circular(8),
           onTap: () {
             onItemSelected?.call();
-            Navigator.of(context).push(MeshScreen.route());
+            // Don't stack a second mesh screen when one is already open —
+            // just let onItemSelected close the drawer over it.
+            if (!MeshScreen.isOpen) {
+              Navigator.of(context).push(MeshScreen.route());
+            }
           },
           // A generous, full-width tap target (like the connected-relays row),
           // so the mesh status line is easy to hit instead of a thin text strip.
