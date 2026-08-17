@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import '../../widgets/common/keyboard_inset_dialog.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -112,7 +113,7 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    return KeyboardInsetDialog(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(
@@ -1568,7 +1569,7 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    return KeyboardInsetDialog(
       child: Material(
         color: Colors.transparent,
         child: ConstrainedBox(
@@ -2015,7 +2016,7 @@ class _InvoiceDialogState extends ConsumerState<_InvoiceDialog> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final recipient = widget.recipientPubkey;
-    return Center(
+    return KeyboardInsetDialog(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(

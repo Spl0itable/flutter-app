@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import '../../widgets/common/keyboard_inset_dialog.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
@@ -391,7 +392,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       visibleSections.add((spec: s, groups: groups));
     }
 
-    return Center(
+    return KeyboardInsetDialog(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(
