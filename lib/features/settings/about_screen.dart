@@ -24,10 +24,45 @@ import 'settings_widgets.dart';
 /// public source repo so the links are real and tappable (gap report F14).
 const String _kStaticBase = 'https://github.com/Spl0itable/NYM/blob/main/';
 
-/// App version string shown in the About header (`#aboutVersion`). Matches the
-/// current PWA constant `NYMCHAT_VERSION` (app.js:4229). The native build can
-/// later override this from its own manifest; until then it tracks the PWA.
+/// Bundled fallback for the About-header version, shown until the live version
+/// resolves (and if the fetch fails offline). Kept in sync with the main
+/// project's `NYMCHAT_VERSION` at release; the live value from
+/// [_kVersionUrl] supersedes it whenever reachable.
 const String kAboutVersion = 'v3.73.521';
+
+/// Live app version, published by the main project's build as a tiny
+/// `version.json` (`{"version":"vX.Y.Z"}`) derived from `NYMCHAT_VERSION`. The
+/// About header shows this so the native apps track the live main-project
+/// version instead of a hardcoded string. Fetched via native HTTP (no CORS),
+/// cached for the session in [_liveVersionCache].
+const String _kVersionUrl = 'https://web.nymchat.app/version.json';
+
+/// Session cache so re-opening About doesn't refetch. Null until first success.
+String? _liveVersionCache;
+
+/// Fetches the live main-project version, or null on any failure (caller keeps
+/// the bundled [kAboutVersion]). Result is cached for the session.
+Future<String?> _fetchLiveVersion() async {
+  if (_liveVersionCache != null) return _liveVersionCache;
+  try {
+    final res = await http
+        .get(Uri.parse(_kVersionUrl))
+        .timeout(const Duration(seconds: 6));
+    if (res.statusCode < 200 || res.statusCode >= 300) return null;
+    final doc = jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
+    if (doc is! Map) return null;
+    final v = doc['version'];
+    // Validate shape (vN.N.N-ish) so a stray HTML/error body can't land in the
+    // header.
+    if (v is String && RegExp(r'^v?[0-9][0-9A-Za-z.\-]{1,31}$').hasMatch(v)) {
+      _liveVersionCache = v;
+      return v;
+    }
+  } catch (_) {
+    // Offline / timeout / bad body — fall back to the bundled constant.
+  }
+  return null;
+}
 
 /// Warrant-canary source + pinned developer pubkey (canary-verify.js:5-6).
 const String _kCanaryUrl =
@@ -227,6 +262,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   _CanaryResult? _canary;
   bool _canaryFailed = false;
 
+  /// Live main-project version once fetched; falls back to [kAboutVersion].
+  String _version = _liveVersionCache ?? kAboutVersion;
+
   @override
   void initState() {
     super.initState();
@@ -238,6 +276,14 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     if (msg != null && msg.isNotEmpty) _messageController.text = msg;
     // The PWA kicks off `runCanaryCheck()` every time the About modal opens.
     _runCanaryCheck();
+    // Track the live main-project version; keeps the bundled fallback on error.
+    _loadLiveVersion();
+  }
+
+  Future<void> _loadLiveVersion() async {
+    final v = await _fetchLiveVersion();
+    if (!mounted || v == null || v == _version) return;
+    setState(() => _version = v);
   }
 
   Future<void> _runCanaryCheck() async {
@@ -428,7 +474,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
           Padding(
             padding: const EdgeInsets.only(bottom: 3),
             child: Text(
-              kAboutVersion,
+              _version,
               style: TextStyle(
                 color: c.textDim,
                 fontSize: 12,
