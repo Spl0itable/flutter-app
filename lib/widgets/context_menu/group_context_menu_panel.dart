@@ -534,6 +534,16 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
         color: c.text,
         onTap: () => _toggleAllowInvites(group),
       ));
+      // Share history with new members (owner-only checkbox row, PWA
+      // `groupCtxToggleShareHistory`).
+      rows.add(_ActionRow(
+        svg: group.shareHistory
+            ? NymIcons.checkboxChecked
+            : NymIcons.checkboxUnchecked,
+        label: tr('Share history with new members'),
+        color: c.text,
+        onTap: () => _toggleShareHistory(group),
+      ));
     }
 
     // Add Members — owner, or a member when member-invites are allowed.
@@ -635,6 +645,13 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
   Future<void> _toggleAllowInvites(Group group) async {
     final controller = ref.read(nostrControllerProvider);
     await controller.setGroupAllowInvites(group.id, !group.allowMemberInvites);
+  }
+
+  /// Owner: flip "share history with new members" → `setGroupShareHistory`
+  /// (PWA `groupCtxToggleShareHistory`).
+  Future<void> _toggleShareHistory(Group group) async {
+    final controller = ref.read(nostrControllerProvider);
+    await controller.setGroupShareHistory(group.id, !group.shareHistory);
   }
 
   /// Owner: flip "allow joining via invite link" → `setGroupInviteEnabled`

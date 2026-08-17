@@ -2870,6 +2870,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
         metaUpdatedAt: (data['metaUpdatedAt'] as num?)?.toInt() ?? 0,
         lastModTs: (data['lastModTs'] as num?)?.toInt() ?? 0,
         lastModEventId: nz(data['lastModEventId']),
+        shareHistory: data['shareHistory'] == true,
+        historyReceived: data['historyReceived'] == true,
+        modTsByTarget: data['modTsByTarget'] is Map
+            ? (data['modTsByTarget'] as Map).map((k, v) =>
+                MapEntry(k.toString(), (v as num?)?.toInt() ?? 0))
+            : null,
+        modSeenIds: data['modSeenIds'] is List
+            ? (data['modSeenIds'] as List).map((e) => e.toString()).toList()
+            : null,
         modLog: parseLog(data['modLog']),
       ));
       _scheduleEmit();
@@ -2903,6 +2912,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
       g.inviteEnabled = data['inviteEnabled'] == true;
       g.inviteEpoch = (data['inviteEpoch'] as num?)?.toInt() ?? 0;
+      // Same absence-safe guard as allowMemberInvites: older devices' blobs
+      // don't carry shareHistory, and its absence must not flip the policy.
+      if (data.containsKey('shareHistory')) {
+        g.shareHistory = data['shareHistory'] == true;
+      }
       g.metaUpdatedAt = incomingMetaTs;
       changed = true;
     } else {
@@ -2953,6 +2967,36 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (incomingModTs > g.lastModTs) {
       g.lastModTs = incomingModTs;
       g.lastModEventId = nz(data['lastModEventId']);
+      changed = true;
+    }
+    // Per-target moderation clocks + seen-ids merge monotonically too (local
+    // hydrate blobs carry them; sync blobs from other surfaces may not).
+    final incomingTargets = data['modTsByTarget'];
+    if (incomingTargets is Map) {
+      incomingTargets.forEach((k, v) {
+        final ts = (v as num?)?.toInt() ?? 0;
+        final pk = k.toString();
+        if (ts > (g.modTsByTarget[pk] ?? 0)) {
+          g.modTsByTarget[pk] = ts;
+          changed = true;
+        }
+      });
+    }
+    final incomingSeen = data['modSeenIds'];
+    if (incomingSeen is List) {
+      for (final e in incomingSeen) {
+        final id = e.toString();
+        if (id.isNotEmpty && !g.modSeenIds.contains(id)) {
+          g.modSeenIds.add(id);
+          changed = true;
+        }
+      }
+      if (g.modSeenIds.length > 100) {
+        g.modSeenIds.removeRange(0, g.modSeenIds.length - 100);
+      }
+    }
+    if (data['historyReceived'] == true && !g.historyReceived) {
+      g.historyReceived = true;
       changed = true;
     }
     if (changed) _scheduleEmit();
