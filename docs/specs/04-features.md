@@ -560,9 +560,12 @@ zapRequest?}` → `{pr, verify?, serverVerify, invoiceId}` → poll `check-invoi
 
 ### 11.3 Pro models (`?model <name>` / `?model off`)
 
-`claude-fable`(Fable 5, base 2cr), `claude-opus`(4.8), `claude-sonnet`(4.6), `claude-haiku`(4.5),
-`gpt-5`(GPT-5.1), `gpt-5-mini`, `codex`(GPT-5.1 Codex) — base 1 credit (Fable 2) + per-length scaling
-to a per-model max (max reserved, only actual charged). Selection passed as `proModel`.
+`claude-fable`(Fable 5, base 2cr), `claude-opus`(Opus 5), `claude-sonnet`(Sonnet 5),
+`claude-haiku`(4.5), `gpt-5`(GPT-5.6 Sol), `gpt-5-mini`(GPT-5.4 mini), `gemini-pro`(Gemini 3.1 Pro),
+`gemini-flash`(Gemini 3.6 Flash), `grok`(Grok 4.6), `kimi`(Kimi K3), `qwen`(Qwen 3.5),
+`minimax`(MiniMax M3) — base 1 credit (Fable 2) + per-length scaling to a per-model max (max
+reserved, only actual charged). Selection passed as `proModel`. Retired keys (`codex` and the
+version-suffixed Claude keys) are remapped by `kProModelAliases` so stored preferences survive.
 
 ### 11.4 Git integration (`?git`)
 

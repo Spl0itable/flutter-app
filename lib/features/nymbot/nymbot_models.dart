@@ -47,9 +47,9 @@ class ProModel {
   }
 }
 
-/// The 7 Pro models, in README order (line 170):
-/// Claude Fable 5, Claude Opus 4.8, Claude Sonnet 4.6, Claude Haiku 4.5,
-/// GPT-5.1, GPT-5 mini, GPT-5.1 Codex.
+/// The 12 Pro models, in README order (line 172): Claude Fable 5, Claude Opus 5,
+/// Claude Sonnet 5, Claude Haiku 4.5, GPT-5.6 Sol, GPT-5.4 mini, Gemini 3.1 Pro,
+/// Gemini 3.6 Flash, Grok 4.6, Kimi K3, Qwen 3.5, MiniMax M3.
 const List<ProModel> kProModels = [
   ProModel(
     key: 'claude-fable',
@@ -60,15 +60,15 @@ const List<ProModel> kProModels = [
   ),
   ProModel(
     key: 'claude-opus',
-    label: 'Claude Opus 4.8',
-    modelId: 'anthropic/claude-opus-4.8',
+    label: 'Claude Opus 5',
+    modelId: 'anthropic/claude-opus-5',
     baseCredits: 1,
     max: 8,
   ),
   ProModel(
     key: 'claude-sonnet',
-    label: 'Claude Sonnet 4.6',
-    modelId: 'anthropic/claude-sonnet-4.6',
+    label: 'Claude Sonnet 5',
+    modelId: 'anthropic/claude-sonnet-5',
     baseCredits: 1,
     max: 6,
   ),
@@ -81,26 +81,71 @@ const List<ProModel> kProModels = [
   ),
   ProModel(
     key: 'gpt-5',
-    label: 'GPT-5.1',
-    modelId: 'openai/gpt-5.1',
+    label: 'GPT-5.6 Sol',
+    modelId: 'openai/gpt-5.6-sol',
     baseCredits: 1,
-    max: 4,
+    max: 6,
   ),
   ProModel(
     key: 'gpt-5-mini',
-    label: 'GPT-5 mini',
-    modelId: 'openai/gpt-5-mini',
+    label: 'GPT-5.4 mini',
+    modelId: 'openai/gpt-5.4-mini',
     baseCredits: 1,
     max: 1,
   ),
   ProModel(
-    key: 'codex',
-    label: 'GPT-5.1 Codex',
-    modelId: 'openai/gpt-5.1-codex',
+    key: 'gemini-pro',
+    label: 'Gemini 3.1 Pro',
+    modelId: 'google/gemini-3.1-pro',
     baseCredits: 1,
-    max: 4,
+    max: 5,
+  ),
+  ProModel(
+    key: 'gemini-flash',
+    label: 'Gemini 3.6 Flash',
+    modelId: 'google/gemini-3.6-flash',
+    baseCredits: 1,
+    max: 3,
+  ),
+  ProModel(
+    key: 'grok',
+    label: 'Grok 4.6',
+    modelId: 'xai/grok-4.6',
+    baseCredits: 1,
+    max: 6,
+  ),
+  ProModel(
+    key: 'kimi',
+    label: 'Kimi K3',
+    modelId: 'moonshotai/kimi-k3',
+    baseCredits: 1,
+    max: 3,
+  ),
+  ProModel(
+    key: 'qwen',
+    label: 'Qwen 3.5',
+    modelId: 'alibaba/qwen3.5-397b-a17b',
+    baseCredits: 1,
+    max: 3,
+  ),
+  ProModel(
+    key: 'minimax',
+    label: 'MiniMax M3',
+    modelId: 'minimax/m3',
+    baseCredits: 1,
+    max: 3,
   ),
 ];
+
+/// Retired `?model` keys, mapped to their replacements. Mirrors
+/// `BOT_PRO_MODEL_ALIASES` in `functions/api/bot.js` so a preference persisted
+/// by an older build still resolves instead of silently reverting to standard
+/// routing.
+const Map<String, String> kProModelAliases = {
+  'codex': 'gpt-5',
+  'claude-opus-4.8': 'claude-opus',
+  'claude-sonnet-4.6': 'claude-sonnet',
+};
 
 /// A single PM-only Nymbot command, surfaced by the `?…` suggestion palette
 /// inside the private bot chat (PWA `botPMCommands`, commands.js:272-281).
@@ -240,13 +285,14 @@ List<BotPMCommand> filterBotPMCommands(String input) {
 /// as well as a loose match on the label (case-insensitive). Returns null for
 /// unknown names or the literal `off`.
 ProModel? lookupProModel(String name) {
-  final n = name.trim().toLowerCase();
+  var n = name.trim().toLowerCase();
   if (n.isEmpty || n == 'off') return null;
+  n = kProModelAliases[n] ?? n;
   for (final m in kProModels) {
     if (m.key == n) return m;
     if (m.label.toLowerCase() == n) return m;
   }
-  // Loose contains match (e.g. "opus" -> Claude Opus 4.8).
+  // Loose contains match (e.g. "opus" -> Claude Opus 5).
   for (final m in kProModels) {
     if (m.label.toLowerCase().contains(n) || m.key.contains(n)) return m;
   }
