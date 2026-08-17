@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import '../../widgets/common/keyboard_inset_dialog.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_auth/local_auth.dart';
@@ -77,7 +78,7 @@ class _VaultSettingsModalState extends ConsumerState<VaultSettingsModal> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final vault = ref.watch(identityVaultProvider);
-    return Center(
+    return KeyboardInsetDialog(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(

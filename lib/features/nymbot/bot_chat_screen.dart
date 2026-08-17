@@ -1068,6 +1068,10 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
           text: _strippedQuoteText(content),
           fullText: content,
         );
+      case InsertTextAction() || ShareFilesAction():
+        // Share-sheet actions target real conversations, never the bot chat;
+        // ignore them here so the mailbox isn't mis-applied.
+        return;
     }
     _focus.requestFocus();
     setState(() {});

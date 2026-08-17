@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import '../../widgets/common/keyboard_inset_dialog.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -318,7 +319,7 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    return KeyboardInsetDialog(
       child: Container(
         constraints: const BoxConstraints(maxWidth: 400),
         width: MediaQuery.of(context).size.width * 0.9,

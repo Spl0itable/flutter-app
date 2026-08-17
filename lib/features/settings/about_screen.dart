@@ -267,7 +267,17 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    // The soft keyboard reduces the visible area but not size.height, so the
+    // dialog must (a) shift up by the keyboard inset and (b) cap its height to
+    // the space left above the keyboard — otherwise the "Contact the developer"
+    // field at the bottom of the scroll body renders behind the keyboard.
+    final viewInsets = MediaQuery.of(context).viewInsets;
+    final visibleHeight = MediaQuery.of(context).size.height - viewInsets.bottom;
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 150),
+      curve: Curves.easeOut,
+      padding: EdgeInsets.only(bottom: viewInsets.bottom),
+      child: Center(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(
@@ -290,7 +300,8 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
               clipBehavior: Clip.antiAlias,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(context).size.height * 0.9,
+                  // Leave ~40px breathing room inside the visible area.
+                  maxHeight: (visibleHeight - 40).clamp(200.0, visibleHeight) * 0.98,
                 ),
                 child: Stack(
                   children: [
@@ -386,6 +397,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
             ),
           ),
         ),
+      ),
       ),
     );
   }

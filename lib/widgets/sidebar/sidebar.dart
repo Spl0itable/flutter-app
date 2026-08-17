@@ -253,6 +253,12 @@ class _SidebarState extends ConsumerState<Sidebar> {
 
     final app = ref.watch(appStateProvider);
     final view = ref.watch(currentViewProvider);
+    // While the mesh overlay is open no conversation is "current", so the
+    // sidebar must show nothing as active — otherwise the channel you left
+    // behind stays highlighted and re-tapping it is a no-op view change that
+    // never dismisses the overlay. Every active-highlight below is gated on
+    // `!meshOpen`.
+    final meshOpen = ref.watch(meshScreenOpenProvider);
     // Visible channels + PWA sort. `applyHiddenChannels` (channels.js:820-833)
     // NEVER hides `#nymchat` or the ACTIVE row — neither via the per-channel
     // hidden set nor via hide-non-pinned — which is exactly what keeps the
@@ -262,8 +268,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final hideNonPinned = ref
         .watch(settingsProvider.select((settings) => settings.hideNonPinned));
     final location = ref.watch(userLocationProvider);
-    final activeChannelKey =
-        view.kind == ViewKind.channel ? view.id.toLowerCase() : '';
+    final activeChannelKey = (!meshOpen && view.kind == ViewKind.channel)
+        ? view.id.toLowerCase()
+        : '';
     final visibleChannels = app.channels
         .where((ch) => !app.blockedChannels.contains(ch.key))
         .where((ch) =>
@@ -339,6 +346,12 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final showPmSkel = !_skelTimedOut && pmEntries.isEmpty;
 
     void select(ChatView v) {
+      // Dismiss the mesh overlay on ANY conversation tap — even when the tapped
+      // view equals the current one (switchView is then a no-op, so this is the
+      // only thing that reveals the channel you were in beneath the overlay).
+      if (ref.read(meshScreenOpenProvider)) {
+        ref.read(meshScreenOpenProvider.notifier).state = false;
+      }
       notifier.switchView(v);
       widget.onItemSelected?.call();
     }
@@ -463,7 +476,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
               for (final ch in r.rows)
                 ChannelListItem(
                   entry: ch,
-                  active: view.kind == ViewKind.channel && view.id == ch.key,
+                  active: !meshOpen &&
+                      view.kind == ViewKind.channel &&
+                      view.id == ch.key,
                   pinned: pinned.contains(ch.key),
                   // `unreadCounts` is keyed by the `#<geohash|name>` storageKey
                   // (app_state `_ingestChannelMessage` / `channelKeyOf`), NOT
@@ -577,8 +592,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 if (e.group != null)
                   _GroupListItem(
                     group: e.group!,
-                    active:
-                        view.kind == ViewKind.group && view.id == e.group!.id,
+                    active: !meshOpen &&
+                        view.kind == ViewKind.group &&
+                        view.id == e.group!.id,
                     unread:
                         unread[GroupLogic.groupStorageKey(e.group!.id)] ?? 0,
                     textSize: textSize,
@@ -590,7 +606,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
                   PMListItem(
                     nym: e.pm!.nym,
                     pubkey: e.pm!.pubkey,
-                    active: view.kind == ViewKind.pm && view.id == e.pm!.pubkey,
+                    active: !meshOpen &&
+                        view.kind == ViewKind.pm &&
+                        view.id == e.pm!.pubkey,
                     unread: unread[e.pm!.pubkey] ?? 0,
                     textSize: textSize,
                     mesh: meshPmPubkeys.contains(e.pm!.pubkey.toLowerCase()),

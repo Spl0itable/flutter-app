@@ -47,6 +47,78 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
     ref.read(meshScreenOpenProvider.notifier).state = false;
   }
 
+  /// Sanitizes a mesh-group name the way channel names are sanitized elsewhere
+  /// (lowercase; letters and digits only) so the same name resolves to the
+  /// same room on every device. Returns '' when nothing usable remains.
+  String _sanitizeGroupName(String raw) {
+    final lower = raw.trim().toLowerCase().replaceAll(RegExp(r'^#+'), '');
+    final cleaned = lower.replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+    return cleaned.length > 40 ? cleaned.substring(0, 40) : cleaned;
+  }
+
+  /// Prompts for a mesh-group name + optional password, joins/creates it via
+  /// the mesh controller (which registers the channel and derives the AES key
+  /// when a password is given), then opens it in the normal chat view.
+  Future<void> _promptJoinMeshGroup() async {
+    final nameCtrl = TextEditingController();
+    final passCtrl = TextEditingController();
+    final c = context.nym;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: c.bgSecondary,
+        title: Text(tr('Mesh group'), style: TextStyle(color: c.text)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              autofocus: true,
+              style: TextStyle(color: c.text),
+              decoration: InputDecoration(
+                prefixText: '#',
+                prefixStyle: TextStyle(color: c.textDim),
+                hintText: tr('group name'),
+                hintStyle: TextStyle(color: c.textDim),
+              ),
+              onSubmitted: (_) => Navigator.of(ctx).pop(true),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passCtrl,
+              obscureText: true,
+              style: TextStyle(color: c.text),
+              decoration: InputDecoration(
+                hintText: tr('password (optional — encrypts the group)'),
+                hintStyle: TextStyle(color: c.textDim),
+              ),
+              onSubmitted: (_) => Navigator.of(ctx).pop(true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(tr('Cancel'), style: TextStyle(color: c.textDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(tr('Join'), style: TextStyle(color: c.primary)),
+          ),
+        ],
+      ),
+    );
+    if (result != true || !mounted) return;
+    final name = _sanitizeGroupName(nameCtrl.text);
+    if (name.isEmpty) return;
+    await ref
+        .read(meshControllerProvider.notifier)
+        .joinChannel(name, password: passCtrl.text);
+    if (!mounted) return;
+    ref.read(appStateProvider.notifier).switchChannel(name);
+    _close();
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -152,6 +224,32 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
               // the overlay, but not when #mesh was ALREADY the active view.
               _close();
             },
+          ),
+          // Join or create a NAMED mesh group. Unlike #mesh (one public room in
+          // range), a named group is a topic room only its members see; a
+          // password makes it end-to-end encrypted over the air (PBKDF2 →
+          // AES-GCM, MeshChannelEncryption). Everyone in range who joins the
+          // same name (and knows the password) is in the group — membership is
+          // by shared name, mirroring how mesh chat rooms work rather than a
+          // per-member roster.
+          ListTile(
+            leading: Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: c.primary.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: NymSvgIcon(NymIcons.groupAddMembers,
+                  size: 18, color: c.primary),
+            ),
+            title: Text(tr('Join or create a mesh group'),
+                style: TextStyle(color: c.text)),
+            subtitle: Text(tr('A named room · optional password for privacy'),
+                style: TextStyle(color: c.textDim, fontSize: 12)),
+            trailing: Icon(Icons.add, size: 18, color: c.primary),
+            onTap: _promptJoinMeshGroup,
           ),
           Divider(height: 1, color: c.border),
           Expanded(

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../widgets/common/keyboard_inset_dialog.dart';
 
 import '../../core/crypto/bech32_codec.dart';
 import '../../core/crypto/keys.dart';
@@ -95,7 +96,7 @@ class _DevNsecModalState extends State<DevNsecModal> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    return KeyboardInsetDialog(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: ConstrainedBox(

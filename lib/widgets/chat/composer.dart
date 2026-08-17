@@ -325,6 +325,22 @@ class _ComposerState extends ConsumerState<Composer> {
           text: _strippedQuoteText(content),
           fullText: content,
         );
+      case InsertTextAction(:final text):
+        // OS share sheet: append the shared text/URL for the user to review.
+        final existing = _controller.text;
+        final needsSpace = existing.isNotEmpty && !existing.endsWith(' ')
+            ? (existing.endsWith('\n') ? '' : '\n')
+            : '';
+        _controller.text = existing + needsSpace + text;
+        _controller.selection =
+            TextSelection.collapsed(offset: _controller.text.length);
+      case ShareFilesAction(:final paths):
+        // OS share sheet: run shared files through the normal upload pipeline.
+        final files = [for (final p in paths) XFile(p)];
+        if (files.isNotEmpty) {
+          // Fire-and-forget; _pickAndUploadImage manages its own progress state.
+          unawaited(_pickAndUploadImage(preselected: files));
+        }
     }
     _focus.requestFocus();
     setState(() {});
@@ -1310,15 +1326,20 @@ class _ComposerState extends ConsumerState<Composer> {
   /// ALL resulting URLs (space-joined) to the input — the formatter renders them
   /// as media (users.js:971-1028). For multi-select the progress label reads
   /// "Uploading i of N…".
-  Future<void> _pickAndUploadImage() async {
+  Future<void> _pickAndUploadImage({List<XFile>? preselected}) async {
     List<XFile> picked;
-    try {
-      final picker = ImagePicker();
-      // `pickMultipleMedia` returns image OR video files (PWA
-      // accept="image/*,video/…" `multiple`).
-      picked = await picker.pickMultipleMedia();
-    } catch (_) {
-      return; // picker unavailable (tests/desktop)
+    if (preselected != null) {
+      // Files supplied by the OS share sheet — skip the gallery picker.
+      picked = preselected;
+    } else {
+      try {
+        final picker = ImagePicker();
+        // `pickMultipleMedia` returns image OR video files (PWA
+        // accept="image/*,video/…" `multiple`).
+        picked = await picker.pickMultipleMedia();
+      } catch (_) {
+        return; // picker unavailable (tests/desktop)
+      }
     }
     if (picked.isEmpty) return;
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../common/keyboard_inset_dialog.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
@@ -74,7 +75,7 @@ class _ReportModalState extends State<ReportModal> {
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Center(
+    return KeyboardInsetDialog(
       child: Container(
         // `.modal-content { max-height: 90vh; overflow-y:auto }`
         // (styles-components.css:25-26) — cap height so the inner
