@@ -146,6 +146,13 @@ class CacheStore {
         // so inlining it in the SQL literal cannot break out of the quotes.
         await plain.rawQuery("ATTACH DATABASE '$tmp' AS enc KEY '$password'");
         await plain.rawQuery("SELECT sqlcipher_export('enc')");
+        // sqlcipher_export copies schema + data but NOT user_version. Carry it
+        // over so the encrypted copy doesn't read as a brand-new (version-0)
+        // database — today onCreate is all IF-NOT-EXISTS so that would be
+        // harmless, but a future onUpgrade must see the real version.
+        final ver = await plain.rawQuery('PRAGMA main.user_version');
+        final v = (ver.isNotEmpty ? ver.first.values.first : 0) as int? ?? 0;
+        await plain.rawQuery('PRAGMA enc.user_version = $v');
         await plain.rawQuery('DETACH DATABASE enc');
       } finally {
         await plain.close();
