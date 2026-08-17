@@ -215,6 +215,31 @@ void main() {
       }
     });
 
+    // The worker reaches these two groups over completely different
+    // transports (Workers AI binding vs AI Gateway), and picking the wrong one
+    // is a hard failure, so the ids that encode the split are pinned here.
+    test('Workers AI models carry @cf/ ids, providers carry vendor slugs', () {
+      const workersAi = {'kimi', 'qwen', 'minimax'};
+      for (final m in kProModels) {
+        if (workersAi.contains(m.key)) {
+          expect(m.modelId, startsWith('@cf/'),
+              reason: '${m.key} is Cloudflare-hosted and needs its @cf/ id');
+        } else {
+          expect(m.modelId, isNot(startsWith('@cf/')),
+              reason: '${m.key} is provider-hosted and must keep its slug');
+          expect(m.modelId, contains('/'), reason: '${m.key} slug');
+        }
+      }
+      expect(
+          kProModels.firstWhere((m) => m.key == 'kimi').modelId,
+          '@cf/moonshotai/kimi-k3');
+      // Claude is the one family the worker must reach on Anthropic's native
+      // endpoint, so its slugs stay under the anthropic/ namespace.
+      for (final m in kProModels.where((m) => m.key.startsWith('claude-'))) {
+        expect(m.modelId, startsWith('anthropic/'), reason: m.key);
+      }
+    });
+
     test('lookupProModel resolves key, label, loose, and off', () {
       expect(lookupProModel('claude-opus')!.label, 'Claude Opus 5');
       expect(lookupProModel('Claude Opus 5')!.key, 'claude-opus');

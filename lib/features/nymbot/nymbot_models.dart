@@ -25,7 +25,12 @@ class ProModel {
   /// README display label, e.g. `Claude Opus 5`.
   final String label;
 
-  /// Internal provider/model id, e.g. `anthropic/claude-opus-5`.
+  /// Internal model id, mirroring `BOT_PRO_MODELS[key].model` in
+  /// `functions/api/bot.js`. The prefix says which transport the worker uses:
+  /// an `@cf/` id is a model Cloudflare hosts itself and runs on the Workers AI
+  /// binding, anything else is a third-party provider slug reached through the
+  /// AI Gateway (`anthropic/…` on Anthropic's native endpoint, the rest on the
+  /// unified-billing one). Documentation only — the client sends [key].
   final String modelId;
 
   /// Base Pro credits charged per model call (before length scaling).
@@ -117,21 +122,21 @@ const List<ProModel> kProModels = [
   ProModel(
     key: 'kimi',
     label: 'Kimi K3',
-    modelId: 'moonshotai/kimi-k3',
+    modelId: '@cf/moonshotai/kimi-k3',
     baseCredits: 1,
     max: 3,
   ),
   ProModel(
     key: 'qwen',
     label: 'Qwen 3.5',
-    modelId: 'alibaba/qwen3.5-397b-a17b',
+    modelId: '@cf/qwen/qwen3.5-397b-a17b',
     baseCredits: 1,
     max: 3,
   ),
   ProModel(
     key: 'minimax',
     label: 'MiniMax M3',
-    modelId: 'minimax/m3',
+    modelId: '@cf/minimax/minimax-m3',
     baseCredits: 1,
     max: 3,
   ),
