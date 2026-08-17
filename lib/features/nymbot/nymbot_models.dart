@@ -7,7 +7,7 @@ library;
 /// The Pro frontier models selectable with `?model <name>`.
 ///
 /// Exact list + ids verified against `functions/api/bot.js` `BOT_PRO_MODELS`
-/// (and README line 170 / spec §11.3). [key] is the value sent as `proModel`;
+/// (and README line 172 / spec §11.3). [key] is the value sent as `proModel`;
 /// [label] is the README's display name; [baseCredits] is the per-call base
 /// Pro-credit cost (1, except Fable = 2).
 class ProModel {
@@ -22,10 +22,10 @@ class ProModel {
   /// Value passed to the worker as `proModel`, e.g. `claude-opus`.
   final String key;
 
-  /// README display label, e.g. `Claude Opus 4.8`.
+  /// README display label, e.g. `Claude Opus 5`.
   final String label;
 
-  /// Internal provider/model id, e.g. `anthropic/claude-opus-4.8`.
+  /// Internal provider/model id, e.g. `anthropic/claude-opus-5`.
   final String modelId;
 
   /// Base Pro credits charged per model call (before length scaling).
@@ -159,7 +159,7 @@ class BotPMCommand {
   final String desc;
 }
 
-/// The 8 PM-only commands the PWA shows in the Nymbot private chat, in order
+/// The 10 PM-only commands the PWA shows in the Nymbot private chat, in order
 /// (commands.js `botPMCommands`). NOTE: this is the *PM* set — distinct from the
 /// public-channel `?` commands (`kBotCommands`), which are not wired here.
 const List<BotPMCommand> kBotPMCommands = [
@@ -174,6 +174,14 @@ const List<BotPMCommand> kBotPMCommands = [
   BotPMCommand(
     name: '?git',
     desc: 'Connect a git repo to Pro replies (GitHub/GitLab/Gitea)',
+  ),
+  BotPMCommand(
+    name: '?image',
+    desc: 'Generate an image from a description',
+  ),
+  BotPMCommand(
+    name: '?speak',
+    desc: 'Read text aloud as a voice clip',
   ),
   BotPMCommand(
     name: '?buy',
@@ -248,7 +256,7 @@ List<BotPMCommand>? botPMSubcommands(String cmd, [String rest = '']) {
 
 /// Filters [kBotPMCommands] (and subcommands) for the `?…` palette given the
 /// current input. Mirrors `showBotCommandPalette` (commands.js:436-468):
-///  * a bare prefix (`?mo`) filters the 8 base commands by `startsWith`;
+///  * a bare prefix (`?mo`) filters the 10 base commands by `startsWith`;
 ///  * a base command plus a space (`?git `) surfaces its subcommands filtered
 ///    by the remaining text.
 List<BotPMCommand> filterBotPMCommands(String input) {

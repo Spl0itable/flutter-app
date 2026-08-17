@@ -1789,11 +1789,13 @@ const String botWelcomeText =
     '• `?clear` — wipe this chat and start fresh.\n'
     '• `?balance` — check your credit balance (also shown in the header).\n'
     '• `?buy` — purchase more credits. `?gift @nym#xxxx` — gift credits to someone.\n'
-    '• `?model` — go **Pro**: pick a specific frontier model (Claude Fable 5, Claude Opus/Sonnet/Haiku, GPT-5.1, Codex) for every reply, paid with separate Pro credits.\n'
+    '• `?model` — go **Pro**: pick a specific frontier model (Claude Fable 5, Claude Opus/Sonnet/Haiku, GPT-5.6 Sol, Gemini, Grok, Kimi K3, Qwen, MiniMax) for every reply, paid with separate Pro credits.\n'
+    '• `?image <description>` — generate a picture. `?speak <text>` — get it read aloud as a voice clip.\n'
+    '• Send or link a picture — models that can see will look at the image itself, not just the link.\n'
     '• `?git` — connect a git repo (GitHub, GitLab, Gitea/Codeberg) so Pro replies read your actual code and can even commit, branch, and open PRs — like a chat-based coding agent.\n'
     '• `?transfer @nym#xxxx confirm` — move ALL your credits to another pubkey (great for switching nyms).\n'
     '\n'
-    "**Pricing:** general chat, creative writing, and translation replies cost **1 credit**. Coding and reasoning/math replies cost **2 credits** (they use larger models). Pro replies start at **1–2 Pro credits** and scale with reply length (each model's range is in `?model`). Credits are tied to your nym — save your nsec so you don't lose them.\n"
+    "**Pricing:** general chat, creative writing, and translation replies cost **1 credit**. Coding and reasoning/math replies cost **2 credits** (they use larger models). Pro replies start at **1–2 Pro credits** and scale with reply length (each model's range is in `?model`). `?image` costs **5 credits** (2 Pro) and `?speak` **3 credits** (1 Pro), charged per generation — nothing is charged if it fails. Credits are tied to your nym — save your nsec so you don't lose them.\n"
     '\n'
     'So, what can I help you with?';
 

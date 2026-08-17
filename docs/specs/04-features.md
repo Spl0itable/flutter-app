@@ -567,6 +567,20 @@ zapRequest?}` → `{pr, verify?, serverVerify, invoiceId}` → poll `check-invoi
 reserved, only actual charged). Selection passed as `proModel`. Retired keys (`codex` and the
 version-suffixed Claude keys) are remapped by `kProModelAliases` so stored preferences survive.
 
+### 11.3a Media generation (`?image` / `?speak`)
+
+Private chat only — the free public bot never generates media. Parsed by the worker inside the
+`pm` action (so no new client action), generated with a Cloudflare-hosted model, uploaded to
+Blossom under the bot's own BUD-02 auth, and returned as a URL in the gift-wrapped reply.
+Charged per generation, not per output token: `?image` 5 standard / 2 Pro credits, `?speak`
+3 standard / 1 Pro credit. Pro selects the higher-quality model. Nothing is charged when
+generation or upload fails. Response carries `media: 'image' | 'speak'`.
+
+**Vision input.** Image URLs in a message are passed to the model as real images when the
+selected model can see — all Claude, GPT, Gemini, Grok and Kimi Pro models; Qwen and MiniMax
+cannot. On standard routing only the `creative` and `translation` routes can. Max 4 images per
+message; falls back to text-only for models without vision.
+
 ### 11.4 Git integration (`?git`)
 
 Providers GitHub/GitLab/Gitea (incl. Codeberg/self-hosted). `git:{provider,host,token,repo,branch,
