@@ -2,12 +2,16 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'dart:io';
+
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_sqlcipher/sqflite.dart';
 
+import '../../core/crypto/keys.dart' as keys;
 import '../../models/message.dart';
 import '../../models/user.dart';
+import 'secure_store.dart';
 
 /// sqflite-backed mirror of the PWA's IndexedDB `nym-cache` (v2) store
 /// (`js/modules/persistence.js`, docs/specs/01 §5.1).
@@ -28,8 +32,11 @@ import '../../models/user.dart';
 /// - PMs are **only** persisted when caching is enabled
 ///   (`settings.cachePMs`); when disabled, `savePmMessages` is a no-op (and the
 ///   `pms` table can be cleared via [clearPms]).
-/// - Message cache is **not** encrypted at rest (matches the PWA; the only
-///   privacy control is the cachePMs opt-out).
+/// - The database is encrypted at rest with SQLCipher under a random key held
+///   in the platform keystore (Keychain / Android Keystore) — the local mirror
+///   of end-to-end-encrypted conversations must not be plaintext on disk. A
+///   pre-encryption plaintext database is migrated in place losslessly via
+///   `sqlcipher_export` on first open.
 class CacheStore {
   CacheStore({Database? db}) : _db = db;
 
@@ -89,16 +96,99 @@ class CacheStore {
 
   int _now() => DateTime.now().millisecondsSinceEpoch;
 
+  /// SecureStore key holding the SQLCipher passphrase for [_dbName].
+  static const String _dbKeyName = 'nym_cache_db_key';
+
+  /// Returns the SQLCipher passphrase from the platform keystore, minting a
+  /// random 64-hex one on first use. The passphrase never leaves the device:
+  /// it is not synced and is destroyed with the keystore on panic wipe, which
+  /// renders any surviving database file undecryptable ciphertext.
+  Future<String> _databasePassword(SecureStore secure) async {
+    final existing = await secure.get(_dbKeyName);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final minted = keys.bytesToHex(keys.randomBytes(32));
+    await secure.set(_dbKeyName, minted);
+    return minted;
+  }
+
+  /// True when the file at [path] is a plaintext SQLite database (SQLCipher
+  /// databases have a random header instead of the magic string).
+  Future<bool> _isPlaintextDb(String path) async {
+    try {
+      final f = File(path);
+      if (!await f.exists()) return false;
+      final raf = await f.open();
+      try {
+        final header = await raf.read(16);
+        return String.fromCharCodes(header).startsWith('SQLite format 3');
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Losslessly migrates a pre-encryption plaintext database to SQLCipher:
+  /// open plain, `sqlcipher_export` into an encrypted sibling, then swap the
+  /// files. On any failure the plaintext original is left untouched so the
+  /// open below falls back to it (encryption retries next launch) instead of
+  /// destroying the user's local history.
+  Future<void> _migratePlaintextIfNeeded(String path, String password) async {
+    if (!await _isPlaintextDb(path)) return;
+    final tmp = '$path.enc';
+    try {
+      final tmpFile = File(tmp);
+      if (await tmpFile.exists()) await tmpFile.delete();
+      final plain = await openDatabase(path);
+      try {
+        // The passphrase is 64 lowercase hex chars (see [_databasePassword]),
+        // so inlining it in the SQL literal cannot break out of the quotes.
+        await plain.rawQuery("ATTACH DATABASE '$tmp' AS enc KEY '$password'");
+        await plain.rawQuery("SELECT sqlcipher_export('enc')");
+        await plain.rawQuery('DETACH DATABASE enc');
+      } finally {
+        await plain.close();
+      }
+      // Swap: remove the plaintext original (and its WAL/SHM sidecars, which
+      // also hold plaintext pages) and move the encrypted copy into place.
+      for (final suffix in ['', '-wal', '-shm', '-journal']) {
+        final side = File('$path$suffix');
+        if (await side.exists()) await side.delete();
+      }
+      await File(tmp).rename(path);
+    } catch (_) {
+      try {
+        final tmpFile = File(tmp);
+        if (await tmpFile.exists()) await tmpFile.delete();
+      } catch (_) {}
+    }
+  }
+
   /// Open (and create/migrate) the cache database. If a [Database] was injected
   /// via the constructor (e.g. an in-memory DB in tests) it is used directly,
-  /// otherwise the on-device app-documents path is used.
+  /// otherwise the on-device app-documents path is used, encrypted with
+  /// SQLCipher under a keystore-held key.
   Future<void> open() async {
     if (_db != null) return;
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, _dbName);
     _path = path;
+    final password = await _databasePassword(SecureStore());
+    await _migratePlaintextIfNeeded(path, password);
+    if (await _isPlaintextDb(path)) {
+      // Migration failed and left the plaintext original — open it as-is so
+      // the app keeps working; encryption is retried on the next launch.
+      _db = await openDatabase(
+        path,
+        version: _dbVersion,
+        onCreate: (db, version) => _createSchema(db),
+      );
+      return;
+    }
     _db = await openDatabase(
       path,
+      password: password,
       version: _dbVersion,
       onCreate: (db, version) => _createSchema(db),
     );
