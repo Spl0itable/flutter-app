@@ -177,12 +177,17 @@ void main() {
       final labels = kProModels.map((m) => m.label).toList();
       expect(labels, [
         'Claude Fable 5',
-        'Claude Opus 4.8',
-        'Claude Sonnet 4.6',
+        'Claude Opus 5',
+        'Claude Sonnet 5',
         'Claude Haiku 4.5',
-        'GPT-5.1',
-        'GPT-5 mini',
-        'GPT-5.1 Codex',
+        'GPT-5.6 Sol',
+        'GPT-5.4 mini',
+        'Gemini 3.1 Pro',
+        'Gemini 3.6 Flash',
+        'Grok 4.6',
+        'Kimi K3',
+        'Qwen 3.5',
+        'MiniMax M3',
       ]);
     });
 
@@ -194,7 +199,12 @@ void main() {
         'claude-haiku',
         'gpt-5',
         'gpt-5-mini',
-        'codex',
+        'gemini-pro',
+        'gemini-flash',
+        'grok',
+        'kimi',
+        'qwen',
+        'minimax',
       ]);
       final fable = kProModels.firstWhere((m) => m.key == 'claude-fable');
       expect(fable.modelId, 'anthropic/claude-fable-5');
@@ -206,11 +216,28 @@ void main() {
     });
 
     test('lookupProModel resolves key, label, loose, and off', () {
-      expect(lookupProModel('claude-opus')!.label, 'Claude Opus 4.8');
-      expect(lookupProModel('Claude Opus 4.8')!.key, 'claude-opus');
+      expect(lookupProModel('claude-opus')!.label, 'Claude Opus 5');
+      expect(lookupProModel('Claude Opus 5')!.key, 'claude-opus');
       expect(lookupProModel('opus')!.key, 'claude-opus');
       expect(lookupProModel('off'), isNull);
       expect(lookupProModel(''), isNull);
+    });
+
+    test('retired keys still resolve via the alias map', () {
+      // A preference persisted by an older build must not silently fall back to
+      // standard routing — openai/gpt-5.1-codex is gone from the catalog.
+      expect(lookupProModel('codex')!.key, 'gpt-5');
+      expect(lookupProModel('claude-opus-4.8')!.key, 'claude-opus');
+      expect(lookupProModel('claude-sonnet-4.6')!.key, 'claude-sonnet');
+    });
+
+    test('every alias target is a real model key', () {
+      final keys = kProModels.map((m) => m.key).toSet();
+      for (final entry in kProModelAliases.entries) {
+        expect(keys, contains(entry.value), reason: 'alias ${entry.key}');
+        expect(keys, isNot(contains(entry.key)),
+            reason: '${entry.key} is aliased but still a live key');
+      }
     });
   });
 
