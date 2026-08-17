@@ -192,10 +192,9 @@ void main() {
       expect(g.members, isNot(contains('victim')));
     });
 
-    test('stale (older ts) mod event is ignored', () {
+    test('stale (older ts) mod event for the SAME target is ignored', () {
       final g = makeGroup('owner', ['a', 'b']);
-      // First event at ts 100 succeeds.
-      final first = GroupLogic.applyControlEvent(
+      final promote = GroupLogic.applyControlEvent(
         group: g,
         type: GroupControlType.promoteMod,
         tags: [
@@ -205,21 +204,136 @@ void main() {
         ts: 100,
         eventId: 'e1',
       );
-      expect(first, GroupControlResult.applied);
+      expect(promote, GroupControlResult.applied);
       expect(g.mods, contains('a'));
-      // A later event with an EARLIER ts is stale.
+      final revoke = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.revokeMod,
+        tags: [
+          ['mod', 'a'],
+        ],
+        senderPubkey: 'owner',
+        ts: 110,
+        eventId: 'e2',
+      );
+      expect(revoke, GroupControlResult.applied);
+      expect(g.mods, isNot(contains('a')));
+      // A delayed copy of an OLDER event for the same target is stale.
       final stale = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.promoteMod,
+        tags: [
+          ['mod', 'a'],
+        ],
+        senderPubkey: 'owner',
+        ts: 50, // < a's per-target clock (110)
+        eventId: 'e3',
+      );
+      expect(stale, GroupControlResult.stale);
+      expect(g.mods, isNot(contains('a'))); // unchanged
+    });
+
+    test('out-of-order mod event for a DIFFERENT target still applies', () {
+      final g = makeGroup('owner', ['a', 'b']);
+      // Kick b at ts 105 arrives first.
+      final kick = GroupLogic.applyControlEvent(
         group: g,
         type: GroupControlType.removeMember,
         tags: [
           ['kick', 'b'],
         ],
         senderPubkey: 'owner',
-        ts: 50, // < lastModTs (100)
+        ts: 105,
+        eventId: 'e1',
+      );
+      expect(kick, GroupControlResult.applied);
+      // The promote for a at ts 100 was issued earlier but delivered later —
+      // it targets a different member, so it must NOT be dropped (the old
+      // single global lastModTs gate silently discarded it).
+      final promote = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.promoteMod,
+        tags: [
+          ['mod', 'a'],
+        ],
+        senderPubkey: 'owner',
+        ts: 100,
         eventId: 'e2',
       );
-      expect(stale, GroupControlResult.stale);
-      expect(g.members, contains('b')); // unchanged
+      expect(promote, GroupControlResult.applied);
+      expect(g.mods, contains('a'));
+    });
+
+    test('exact replay of an applied mod event is stale (seen-id dedup)', () {
+      final g = makeGroup('owner', ['a', 'b']);
+      final tags = [
+        ['mod', 'a'],
+        ['x', 'shared-id-1'],
+      ];
+      final first = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.promoteMod,
+        tags: tags,
+        senderPubkey: 'owner',
+        ts: 100,
+        eventId: 'e1',
+      );
+      expect(first, GroupControlResult.applied);
+      final replay = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.promoteMod,
+        tags: tags,
+        senderPubkey: 'owner',
+        ts: 100,
+        eventId: 'e1-other-wrap',
+      );
+      expect(replay, GroupControlResult.stale);
+    });
+
+    test('re-add advances the target clock so a replayed old kick is stale',
+        () {
+      final g = makeGroup('owner', ['a', 'b']);
+      final kick = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.removeMember,
+        tags: [
+          ['kick', 'b'],
+          ['x', 'kick-1'],
+        ],
+        senderPubkey: 'owner',
+        ts: 100,
+        eventId: 'e1',
+      );
+      expect(kick, GroupControlResult.applied);
+      expect(g.members, isNot(contains('b')));
+      final readd = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.addMember,
+        tags: [
+          ['p', 'b'],
+          ['x', 'add-1'],
+        ],
+        senderPubkey: 'owner',
+        ts: 200,
+        eventId: 'e2',
+      );
+      expect(readd, GroupControlResult.applied);
+      expect(g.members, contains('b'));
+      // A relayed copy of an older kick (different event, ts < re-add) must
+      // not remove the re-added member again.
+      final replayedKick = GroupLogic.applyControlEvent(
+        group: g,
+        type: GroupControlType.removeMember,
+        tags: [
+          ['kick', 'b'],
+          ['x', 'kick-0'],
+        ],
+        senderPubkey: 'owner',
+        ts: 150,
+        eventId: 'e3',
+      );
+      expect(replayedKick, GroupControlResult.stale);
+      expect(g.members, contains('b'));
     });
 
     test('promote / revoke / transfer are owner-only', () {

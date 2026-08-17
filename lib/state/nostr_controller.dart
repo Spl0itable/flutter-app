@@ -468,7 +468,7 @@ class NostrController {
       // groups.js:291-311/556-600) so an offline/flaky-API launch still has
       // its groups and can decrypt group wraps; the D1 settings restore then
       // merges on top.
-      _hydrateGroupStore();
+      await _hydrateGroupStore();
       // Seed Low Data Mode from the persisted setting BEFORE the relay layer
       // shards its geo relays (the PWA reads `settings.lowDataMode` in
       // `_computeExpectedShards`, relays.js:1905-1978; boot applies the saved
@@ -718,6 +718,9 @@ class NostrController {
     // 2824-2827) — under D1 the critical REQ carries only the live-tail
     // vouches filter, so this IS the history path.
     unawaited(_fetchVouchesFromD1(sync));
+    // After catch-up: re-exchange group ephemeral keys if this client was
+    // offline long enough that missed rotations may have expired off relays.
+    unawaited(_maybeSendGroupKeyResyncs());
   }
 
   /// Rebuilds the web of trust from D1 (vouch lists are archived under the
@@ -1114,6 +1117,11 @@ class NostrController {
     _storageSync = null;
     _zapArchive?.dispose();
     _zapArchive = null;
+    _lastOnlineTimer?.cancel();
+    _lastOnlineTimer = null;
+    _lastOnlineTrackingStarted = false;
+    _keyResyncReplyMs.clear();
+    _pendingGroupHistory.clear();
     _lastPresenceBroadcast = 0;
     _presenceTimestamps.clear();
     _typingThrottle.clear();
@@ -2938,6 +2946,28 @@ class NostrController {
     for (final t in tags) {
       if (t.length > 1 && t[0] == 'p') _maybeBackfillProfiles(t[1]);
     }
+    // key-resync: the sender's advertised `ephemeral_pk` was already recorded
+    // by the generic extraction in [_onRumorMessage]. A resync REQUEST (a
+    // member returning after a long offline gap re-exchanging keys) gets a
+    // rate-limited reply carrying our current key. Never a chat bubble.
+    if (type == GroupControlType.keyResync) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      if (senderPubkey != self && _tagValue(tags, 'resync_req') == '1') {
+        unawaited(_maybeReplyKeyResync(groupId, senderPubkey));
+      }
+      return;
+    }
+
+    // group-history: a member shared recent chat history with us after we were
+    // added (owner-controlled setting). Never displayed as a bubble.
+    if (type == GroupControlType.history) {
+      final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
+      if (senderPubkey != self) {
+        _handleGroupHistoryShare(groupId, senderPubkey, rumor);
+      }
+      return;
+    }
+
     final inviteTs = (rumor['created_at'] as num?)?.toInt() ?? 0;
     // Bootstrap invite: create the local group if we don't have it yet.
     if (type == GroupControlType.invite) {
@@ -2980,6 +3010,7 @@ class NostrController {
             description: description,
             members: members,
             mods: mods);
+        _processPendingGroupHistory(groupId);
         return;
       }
       appState.upsertGroup(Group(
@@ -2995,8 +3026,10 @@ class NostrController {
         allowMemberInvites: _tagValue(tags, 'allow_invites') != '0',
         inviteEnabled: _tagValue(tags, 'invite_enabled') == '1',
         inviteEpoch: int.tryParse(_tagValue(tags, 'invite_epoch') ?? '') ?? 0,
+        shareHistory: _tagValue(tags, 'share_history') == '1',
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
+      _processPendingGroupHistory(groupId);
       // Group invite notification (groups.js:851-871 `Group invite: <name>`).
       if (_notificationsEnabled &&
           !_ref.read(appStateProvider).blockedUsers.contains(senderPubkey)) {
@@ -3123,6 +3156,7 @@ class NostrController {
               allowMemberInvites: allowInv != null ? allowInv != '0' : true,
               inviteEnabled: inviteEnabledTag == '1',
               inviteEpoch: int.tryParse(inviteEpochTag ?? '') ?? 0,
+              shareHistory: _tagValue(tags, 'share_history') == '1',
               lastMessageTime: inviteTs > 0
                   ? inviteTs * 1000
                   : DateTime.now().millisecondsSinceEpoch,
@@ -3172,6 +3206,11 @@ class NostrController {
         ts: ts,
         eventId: u.wrapId,
       );
+    }
+    // A shared-history blob can outrun the add-member wrap that creates the
+    // group entry; apply any stashed blob now that the group exists.
+    if (type == GroupControlType.addMember) {
+      _processPendingGroupHistory(groupId);
     }
   }
 
@@ -4540,6 +4579,13 @@ class NostrController {
     final identity = _identity;
     final groups = _groups;
     if (service == null || identity == null || groups == null) return null;
+    // Every message costs one gift wrap per member — keep fan-out bounded.
+    if ({...memberPubkeys, identity.pubkey}.length > kMaxGroupMembers) {
+      _emitSystemMessage(tr(
+          'Groups are limited to {n} members (every message is encrypted separately for each member).',
+          {'n': '$kMaxGroupMembers'}));
+      return null;
+    }
     final group = await groups.createGroup(
       selfPubkey: identity.pubkey,
       name: name,
@@ -5118,6 +5164,289 @@ class NostrController {
     return true;
   }
 
+  /// Owner-only: toggles sharing recent chat history with newly added members
+  /// (PWA `setGroupShareHistory`). Mutates the group locally and broadcasts a
+  /// `group-metadata` control — any member may be the one who adds someone, so
+  /// every member needs to know the policy. Returns true if the value changed.
+  Future<bool> setGroupShareHistory(String groupId, bool enabled) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.isOwner(group, identity.pubkey)) {
+      _emitSystemMessage(tr('Only the group owner can change this setting.'));
+      return false;
+    }
+    if (enabled == group.shareHistory) return false;
+
+    group.shareHistory = enabled;
+    group.metaUpdatedAt = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    appState.upsertGroup(group);
+    await groups.sendMetadata(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _emitSystemMessage(enabled
+        ? tr('New members will now receive recent chat history when they join.')
+        : tr('New members will no longer receive chat history.'));
+    return true;
+  }
+
+  /// Forwards recent plain chat history to a newly added [memberPubkey] as one
+  /// `group-history` blob wrapped only to them (PWA `_sendGroupHistoryTo`).
+  /// Forwarded entries can't carry the original authors' signatures (the seal
+  /// is ours), so the receiver marks them unverified.
+  Future<void> _sendGroupHistoryTo(Group group, String memberPubkey) async {
+    final identity = _identity;
+    final groups = _groups;
+    if (identity == null || groups == null || !group.shareHistory) return;
+    final key = GroupLogic.groupStorageKey(group.id);
+    final list = _ref.read(appStateProvider).messages[key] ?? const <Message>[];
+    const maxMsgs = 50;
+    const maxJson = 32000; // stay well under the NIP-44 plaintext cap
+    final picked = <Map<String, dynamic>>[];
+    for (var i = list.length - 1; i >= 0 && picked.length < maxMsgs; i--) {
+      final m = list[i];
+      // Plain chat messages only — no system rows, file offers, or empties.
+      if (m.kind != MessageKind.normal) continue;
+      if (m.content.isEmpty || m.isFileOffer) continue;
+      final x = m.nymMessageId;
+      if (m.pubkey.isEmpty || x == null || x.isEmpty) continue;
+      picked.add({
+        'p': m.pubkey,
+        'c': m.content.length > 2000 ? m.content.substring(0, 2000) : m.content,
+        't': m.createdAt,
+        'x': x,
+      });
+    }
+    if (picked.isEmpty) return;
+    var payload = picked.reversed.toList(); // oldest first
+    while (payload.length > 1 && jsonEncode(payload).length > maxJson) {
+      payload = payload.sublist((payload.length / 4).ceil());
+    }
+    try {
+      await groups.sendControl(
+        group: group,
+        selfPubkey: identity.pubkey,
+        type: GroupControlType.history,
+        extraTags: const [],
+        recipients: [memberPubkey],
+        content: jsonEncode(payload),
+      );
+    } catch (_) {}
+  }
+
+  /// Pending shared-history blobs that arrived before their group's bootstrap
+  /// (invite / add-member) created the local entry.
+  final Map<String, _PendingGroupHistory> _pendingGroupHistory = {};
+
+  /// Receiver side of history sharing (PWA `_handleGroupHistoryShare`): folds
+  /// a shared blob into the group's message list. Guards: sharing enabled for
+  /// the group, the sender is a member (or the owner), only one blob per
+  /// group, and only while our copy of the room is still essentially empty
+  /// (fresh joiner).
+  void _handleGroupHistoryShare(
+      String groupId, String senderPubkey, Map<String, dynamic> rumor) {
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (group == null) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _pendingGroupHistory
+          .removeWhere((_, e) => nowMs - e.stashedAtMs > 600000);
+      if (_pendingGroupHistory.length < 8 &&
+          !_pendingGroupHistory.containsKey(groupId)) {
+        _pendingGroupHistory[groupId] = _PendingGroupHistory(
+            senderPubkey: senderPubkey, rumor: rumor, stashedAtMs: nowMs);
+      }
+      return;
+    }
+    if (!group.shareHistory || group.historyReceived) return;
+    final isMemberSender = group.createdBy == senderPubkey ||
+        group.members.contains(senderPubkey);
+    if (!isMemberSender) return;
+    final key = GroupLogic.groupStorageKey(groupId);
+    // Only fresh joiners: if we already hold history, this blob isn't for us.
+    final existing = _ref.read(appStateProvider).messages[key];
+    if (existing != null && existing.length > 3) return;
+
+    final content = rumor['content'];
+    if (content is! String || content.isEmpty) return;
+    List<dynamic> entries;
+    try {
+      final decoded = jsonDecode(content);
+      if (decoded is! List) return;
+      entries = decoded;
+    } catch (_) {
+      return;
+    }
+    if (entries.length > 100) entries = entries.sublist(0, 100);
+
+    final hexRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final self = _identity?.pubkey ?? '';
+    var added = 0;
+    for (final e in entries) {
+      if (e is! Map) continue;
+      final p = e['p'];
+      final c = e['c'];
+      final x = e['x'];
+      if (p is! String || !hexRe.hasMatch(p)) continue;
+      if (c is! String || c.isEmpty) continue;
+      if (x is! String || !hexRe.hasMatch(x)) continue;
+      var t = (e['t'] as num?)?.toInt() ?? 0;
+      if (t <= 0) continue;
+      if (t > nowSec) t = nowSec;
+      final pk = p.toLowerCase();
+      final landed = appState.ingestGroupMessage(Message(
+        id: x,
+        author: _nymDisplayFor(pk),
+        pubkey: pk,
+        content: c.length > 4000 ? c.substring(0, 4000) : c,
+        createdAt: t,
+        isOwn: pk == self,
+        isGroup: true,
+        groupId: groupId,
+        conversationKey: key,
+        eventKind: EventKind.giftWrap,
+        isHistorical: true,
+        // Forwarded by another member; the original seal isn't verifiable.
+        senderVerified: false,
+        nymMessageId: x,
+        deliveryStatus: DeliveryStatus.delivered,
+      ));
+      if (landed) {
+        added++;
+        _maybeBackfillProfiles(pk);
+      }
+    }
+    if (added == 0) return;
+    group.historyReceived = true;
+    appState.upsertGroup(group);
+    appState.addSystemMessage(
+      tr('{count} earlier messages shared by {name}.',
+          {'count': '$added', 'name': _nymDisplayFor(senderPubkey)}),
+      storageKey: key,
+    );
+  }
+
+  /// Applies a stashed history blob after the group bootstrap landed.
+  void _processPendingGroupHistory(String groupId) {
+    final pending = _pendingGroupHistory.remove(groupId);
+    if (pending == null) return;
+    _handleGroupHistoryShare(groupId, pending.senderPubkey, pending.rumor);
+  }
+
+  // --- Key-resync heartbeat --------------------------------------------------
+  // Members advertise a fresh ephemeral receiving key with every message and
+  // keep only a bounded window of previous keys, so a client offline long
+  // enough for relays to expire the missed rotations comes back holding stale
+  // copies of other members' keys — and messages encrypted to a stale key past
+  // the prev window are undecryptable. After a long offline gap we re-exchange
+  // current keys (PWA `_maybeSendGroupKeyResyncs` / `_maybeReplyKeyResync`).
+
+  int _offlineGapSec = 0;
+  bool _lastOnlineTrackingStarted = false;
+  Timer? _lastOnlineTimer;
+  final Map<String, int> _keyResyncReplyMs = {};
+
+  /// Tracks when this client was last online (`nym_last_online_ts`, refreshed
+  /// every 2 minutes) and returns the offline gap measured at boot.
+  int _initLastOnlineTracking() {
+    if (_lastOnlineTrackingStarted) return _offlineGapSec;
+    _lastOnlineTrackingStarted = true;
+    final kv = _ref.read(keyValueStoreProvider);
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final stored = int.tryParse(kv.getString('nym_last_online_ts') ?? '') ?? 0;
+    final gap = stored > 0 ? nowSec - stored : 0;
+    _offlineGapSec = gap > 0 ? gap : 0;
+    void write() => kv.setString('nym_last_online_ts',
+        '${DateTime.now().millisecondsSinceEpoch ~/ 1000}');
+    write();
+    _lastOnlineTimer =
+        Timer.periodic(const Duration(minutes: 2), (_) => write());
+    return _offlineGapSec;
+  }
+
+  /// After the reconnect catch-up: if this client was offline longer than
+  /// [kGroupResyncOfflineGapSec], send a key-resync request per group, at most
+  /// once per group per [kGroupResyncCooldownSec].
+  Future<void> _maybeSendGroupKeyResyncs() async {
+    try {
+      final gap = _initLastOnlineTracking();
+      final identity = _identity;
+      final groups = _groups;
+      final service = _service;
+      if (identity == null ||
+          groups == null ||
+          service == null ||
+          !service.canSign) {
+        return;
+      }
+      if (gap < kGroupResyncOfflineGapSec) return;
+      final st = _ref.read(appStateProvider);
+      if (st.groups.isEmpty) return;
+      final kv = _ref.read(keyValueStoreProvider);
+      Map<String, dynamic> cooldowns = {};
+      try {
+        final raw = kv.getString('nym_group_resync_ts');
+        if (raw != null && raw.isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map) cooldowns = decoded.cast<String, dynamic>();
+        }
+      } catch (_) {}
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      var sentAny = false;
+      for (final group in List<Group>.from(st.groups)) {
+        final others =
+            group.members.where((pk) => pk != identity.pubkey).toList();
+        if (others.isEmpty) continue;
+        final last = (cooldowns[group.id] as num?)?.toInt() ?? 0;
+        if (last > nowSec - kGroupResyncCooldownSec) continue;
+        cooldowns[group.id] = nowSec;
+        await groups.sendKeyResyncRequest(
+          group: group,
+          selfPubkey: identity.pubkey,
+          settings: _msgSettings,
+        );
+        sentAny = true;
+      }
+      try {
+        kv.setString('nym_group_resync_ts', jsonEncode(cooldowns));
+      } catch (_) {}
+      // ensureSelf may have minted keys — persist + re-arm the ephemeral REQ.
+      if (sentAny) _afterSelfKeyRotation();
+    } catch (_) {}
+  }
+
+  /// Replies to a member's key-resync request with our current key (1h rate
+  /// limit per group+requester so request replays can't amplify).
+  Future<void> _maybeReplyKeyResync(String groupId, String requester) async {
+    try {
+      final identity = _identity;
+      final groups = _groups;
+      if (identity == null || groups == null) return;
+      final group = _ref.read(appStateProvider.notifier).groupById(groupId);
+      if (group == null) return;
+      final isMemberSender = group.createdBy == requester ||
+          group.members.contains(requester);
+      if (!isMemberSender) return;
+      if (!group.members.contains(identity.pubkey)) return;
+      final rlKey = '$groupId:$requester';
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if ((_keyResyncReplyMs[rlKey] ?? 0) > nowMs - 3600000) return;
+      _keyResyncReplyMs[rlKey] = nowMs;
+      await groups.sendKeyResyncReply(
+        group: group,
+        selfPubkey: identity.pubkey,
+        requesterPubkey: requester,
+        settings: _msgSettings,
+      );
+      _persistGroupStore();
+    } catch (_) {}
+  }
+
   /// Owner-only: turns joining [groupId] via an invite link on or off
   /// (groups.js `setGroupInviteEnabled`, 2288). Mutates the group locally and
   /// broadcasts a `group-metadata` control so members pick up the new
@@ -5191,9 +5520,15 @@ class NostrController {
 
     final canMod = GroupLogic.canModerate(group, identity.pubkey);
     final added = <String>[];
+    var capHit = false;
     for (final pk in pubkeys) {
       if (pk.isEmpty || pk == identity.pubkey) continue;
       if (group.members.contains(pk)) continue;
+      // Every message costs one gift wrap per member — keep fan-out bounded.
+      if (group.members.length >= kMaxGroupMembers) {
+        capHit = true;
+        break;
+      }
       // Re-admitting a banned user requires owner/mod.
       if (group.banned.contains(pk)) {
         if (!canMod) continue;
@@ -5201,6 +5536,10 @@ class NostrController {
       }
       group.members.add(pk);
       added.add(pk);
+    }
+    if (capHit) {
+      _emitSystemMessage(tr('This group is full ({n} members max).',
+          {'n': '$kMaxGroupMembers'}));
     }
     if (added.isEmpty) return false;
     appState.upsertGroup(group);
@@ -5217,6 +5556,12 @@ class NostrController {
       content: content,
       settings: _msgSettings,
     );
+    // Owner opted in to sharing recent history: send it to each new member.
+    if (group.shareHistory) {
+      for (final pk in added) {
+        unawaited(_sendGroupHistoryTo(group, pk));
+      }
+    }
     _emitSystemMessage(content);
     return true;
   }
@@ -6690,8 +7035,15 @@ class NostrController {
     try {
       final groups = _groups;
       if (groups != null) {
-        kv.setString('nym_ephemeral_keys_${identity.pubkey}',
-            jsonEncode(groups.ephemeralKeysForSync()));
+        // The ephemeral SECRET keys decrypt received group messages — store
+        // them in the platform keystore (Keychain / Android Keystore) like the
+        // identity secrets, not plaintext SharedPreferences.
+        unawaited(SecureStore().set('nym_ephemeral_keys_${identity.pubkey}',
+            jsonEncode(groups.ephemeralKeysForSync())));
+        // Drop the legacy plaintext copy left by pre-secure-storage builds.
+        if (kv.getString('nym_ephemeral_keys_${identity.pubkey}') != null) {
+          kv.remove('nym_ephemeral_keys_${identity.pubkey}');
+        }
       }
     } catch (_) {}
   }
@@ -6700,7 +7052,7 @@ class NostrController {
   /// `_loadGroupConversations`, groups.js:556-600, and `_loadEphemeralKeys`,
   /// groups.js:291-311). Runs through the same additive apply the D1 restore
   /// uses, so left groups stay dropped and later sync merges dedup cleanly.
-  void _hydrateGroupStore() {
+  Future<void> _hydrateGroupStore() async {
     final identity = _identity;
     if (identity == null) return;
     final kv = _ref.read(keyValueStoreProvider);
@@ -6725,8 +7077,16 @@ class NostrController {
     } catch (_) {}
     try {
       final groups = _groups;
-      final raw = kv.getString('nym_ephemeral_keys_${identity.pubkey}');
-      if (groups != null && raw != null && raw.isNotEmpty) {
+      if (groups == null) return;
+      // Ephemeral secret keys live in the platform keystore; fall back to the
+      // legacy plaintext KV blob (pre-secure-storage builds), which migrates to
+      // the keystore on the next [_persistGroupStore].
+      String? raw;
+      try {
+        raw = await SecureStore().get('nym_ephemeral_keys_${identity.pubkey}');
+      } catch (_) {}
+      raw ??= kv.getString('nym_ephemeral_keys_${identity.pubkey}');
+      if (raw != null && raw.isNotEmpty) {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
           decoded.forEach((gid, entry) {
@@ -9084,8 +9444,13 @@ class NostrController {
       'banner': g.banner,
       'avatar': g.avatar,
       'description': g.description,
+      // The PWA sync payload now carries both policy flags (settings.js
+      // `_buildGroupConversationsSync`); the apply side stays absence-safe for
+      // blobs from older devices.
+      'allowMemberInvites': g.allowMemberInvites,
       'inviteEnabled': g.inviteEnabled == true,
       'inviteEpoch': g.inviteEpoch,
+      'shareHistory': g.shareHistory == true,
       'metaUpdatedAt': g.metaUpdatedAt,
       'modLog': [for (final e in modLog) e.toJson()],
     };
@@ -9115,6 +9480,10 @@ class NostrController {
     data['allowMemberInvites'] = g.allowMemberInvites;
     data['lastModTs'] = g.lastModTs;
     data['lastModEventId'] = g.lastModEventId;
+    data['modTsByTarget'] = g.modTsByTarget;
+    data['modSeenIds'] =
+        g.modSeenIds.length > 100 ? g.modSeenIds.sublist(g.modSeenIds.length - 100) : g.modSeenIds;
+    data['historyReceived'] = g.historyReceived;
     return data;
   }
 
@@ -10390,4 +10759,17 @@ class _Nip46SecureAdapter implements Nip46SecureStore {
   Future<void> set(String key, String value) => _secure.set(key, value);
   @override
   Future<void> remove(String key) => _secure.remove(key);
+}
+
+/// A shared-history blob stashed until its group's bootstrap (invite /
+/// add-member) creates the local entry (PWA `_pendingGroupHistory`).
+class _PendingGroupHistory {
+  _PendingGroupHistory({
+    required this.senderPubkey,
+    required this.rumor,
+    required this.stashedAtMs,
+  });
+  final String senderPubkey;
+  final Map<String, dynamic> rumor;
+  final int stashedAtMs;
 }
