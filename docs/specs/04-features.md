@@ -572,9 +572,17 @@ version-suffixed Claude keys) are remapped by `kProModelAliases` so stored prefe
 Private chat only — the free public bot never generates media. Parsed by the worker inside the
 `pm` action (so no new client action), generated with a Cloudflare-hosted model, uploaded to
 Blossom under the bot's own BUD-02 auth, and returned as a URL in the gift-wrapped reply.
-Charged per generation, not per output token: `?image` 5 standard / 2 Pro credits, `?speak`
-3 standard / 1 Pro credit. Pro selects the higher-quality model. Nothing is charged when
-generation or upload fails. Response carries `media: 'image' | 'speak'`.
+Charged per generation, not per output token: `?image` 5 standard credits, `?speak` 3 standard /
+1 Pro. Nothing is charged when generation or upload fails. Response carries
+`media: 'image' | 'speak'`.
+
+With a Pro model selected, `?image --model <name> <prompt>` (or `-m`) picks a frontier generator
+for 2-3 Pro credits: `nano-banana` (Nano Banana Pro, default), `nano-banana-2`, `imagen`, `flux`,
+`flux-pro`, `seedream`, `gpt-image`, `grok-image`, `recraft`. `?image models` lists them free.
+These route through AI Gateway on Cloudflare billing — no third-party provider keys. Request
+bodies are built per provider family (google / imagen / bfl / openai-images); responses are
+parsed by a shared shape-tolerant walker, and provider-hosted URLs are re-fetched and re-hosted
+on Blossom so they can't expire.
 
 **Vision input.** Image URLs in a message are passed to the model as real images when the
 selected model can see — all Claude, GPT, Gemini, Grok and Kimi Pro models; Qwen and MiniMax

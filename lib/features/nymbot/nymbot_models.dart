@@ -177,7 +177,7 @@ const List<BotPMCommand> kBotPMCommands = [
   ),
   BotPMCommand(
     name: '?image',
-    desc: 'Generate an image from a description',
+    desc: 'Generate an image (--model <name> on Pro; ?image models)',
   ),
   BotPMCommand(
     name: '?speak',
