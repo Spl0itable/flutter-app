@@ -338,6 +338,12 @@ class StorageSync {
       }
       flat['recentEmojis'] =
           _kvJsonList(kv, StorageKeys.recentEmojis).take(24).toList();
+      // Only publish a swipe-react emoji the user actually picked. `Settings`
+      // defaults the field to ❤️, so a device that never chose one would
+      // otherwise broadcast that default over the pick made on another device.
+      if ((kv.getString(StorageKeys.swipeReactEmoji) ?? '').isEmpty) {
+        flat.remove('swipeReactEmoji');
+      }
       flat['groupNotifyMentionsOnly'] =
           kv.getString(StorageKeys.groupNotifyMentionsOnly) == 'true';
       flat['notifyFriendsOnly'] =

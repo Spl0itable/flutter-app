@@ -349,3 +349,26 @@ class Settings {
     );
   }
 }
+
+/// A swipe-react emoji is either a literal emoji or a `:shortcode:` naming a
+/// custom emoji — the picker returns both (`EmojiPicker.onSelect`). Used to
+/// validate the value arriving from a settings sync.
+///
+/// The previous rule was a flat 8-character cap, which rejected every
+/// `:shortcode:` and the longer ZWJ sequences. A pick that failed here was
+/// dropped silently, and the next publish from a device that had never chosen
+/// one put the ❤️ default back over it — the "quick react keeps reverting"
+/// bug.
+final RegExp _swipeReactShortcodeRe = RegExp(r'^:[A-Za-z0-9_]{1,48}:$');
+
+/// A literal emoji carries no ASCII letters, digits or whitespace, which is
+/// what separates it from a short piece of text that happens to fit the length
+/// bound. ZWJ (U+200D) and the variation selectors are not whitespace, so
+/// sequences like 🏳️‍🌈 and 👨‍👩‍👧‍👦 still pass.
+final RegExp _swipeReactTextishRe = RegExp(r'[A-Za-z0-9\s]');
+
+bool isValidSwipeReactEmoji(String value) {
+  if (value.isEmpty) return false;
+  if (_swipeReactShortcodeRe.hasMatch(value)) return true;
+  return value.length <= 16 && !_swipeReactTextishRe.hasMatch(value);
+}

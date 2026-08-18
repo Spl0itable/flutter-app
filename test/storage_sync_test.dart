@@ -6,10 +6,13 @@ import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
 import 'package:nym_bar/core/crypto/keys.dart';
 import 'package:nym_bar/models/nostr_event.dart';
+import 'package:nym_bar/core/constants/storage_keys.dart';
 import 'package:nym_bar/models/settings.dart';
 import 'package:nym_bar/services/api/api_client.dart';
 import 'package:nym_bar/services/api/storage_sync.dart';
 import 'package:nym_bar/services/nostr/event_signer.dart';
+import 'package:nym_bar/services/storage/key_value_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Deterministic test identity (non-zero 32-byte key, valid for bip340).
 final Uint8List _priv = Uint8List.fromList(List<int>.generate(32, (i) => i + 1));
@@ -110,6 +113,56 @@ void main() {
       for (final local in StorageSync.deviceLocalKeys) {
         expect(allKeys.contains(local), false, reason: 'leaked $local');
       }
+    });
+
+    // The "quick react keeps reverting to ❤️" bug. Two halves, both here:
+    // a device that never picked an emoji must not broadcast the default over
+    // another device's pick, and a `:shortcode:` custom emoji must survive the
+    // round trip (the old 8-character cap dropped every one of them).
+    test('swipeReactEmoji is only published when the user actually picked one',
+        () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = KeyValueStore(await SharedPreferences.getInstance());
+
+      // Never picked: Settings still reports the ❤️ default, but nothing is
+      // published, so this device cannot clobber another device's choice.
+      final untouched =
+          StorageSync.buildSectionPayloads(const Settings(), kv: kv);
+      expect(const Settings().swipeReactEmoji, '❤️');
+      expect(untouched['messaging']!.containsKey('swipeReactEmoji'), false);
+
+      // Picked: the real value rides the messaging section.
+      await kv.setString(StorageKeys.swipeReactEmoji, ':blobcat_hug:');
+      final picked = StorageSync.buildSectionPayloads(
+        const Settings(swipeReactEmoji: ':blobcat_hug:'),
+        kv: kv,
+      );
+      expect(picked['messaging']!['swipeReactEmoji'], ':blobcat_hug:');
+
+      // Even an explicit ❤️ pick is published — "chose the default" and "never
+      // chose" are different states.
+      await kv.setString(StorageKeys.swipeReactEmoji, '❤️');
+      final chosenDefault =
+          StorageSync.buildSectionPayloads(const Settings(), kv: kv);
+      expect(chosenDefault['messaging']!['swipeReactEmoji'], '❤️');
+    });
+
+    test('isValidSwipeReactEmoji accepts shortcodes and ZWJ sequences', () {
+      // Custom emoji from the picker — every one of these is longer than the
+      // old 8-character cap.
+      expect(isValidSwipeReactEmoji(':blobcat_hug:'), true);
+      expect(isValidSwipeReactEmoji(':partyparrot:'), true);
+      // Plain and multi-codepoint unicode.
+      expect(isValidSwipeReactEmoji('❤️'), true);
+      expect(isValidSwipeReactEmoji('👍🏽'), true);
+      expect(isValidSwipeReactEmoji('🏳️‍🌈'), true);
+      expect(isValidSwipeReactEmoji('👨‍👩‍👧‍👦'), true,
+          reason: 'family ZWJ sequence is 11 UTF-16 units');
+      // Still bounded: no empty value, no prose, no unbounded shortcode.
+      expect(isValidSwipeReactEmoji(''), false);
+      expect(isValidSwipeReactEmoji('not an emoji at all, just text'), false);
+      expect(isValidSwipeReactEmoji(':${'a' * 49}:'), false);
+      expect(isValidSwipeReactEmoji(':has spaces:'), false);
     });
 
     test(
