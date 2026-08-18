@@ -36,6 +36,7 @@ import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
 import 'link_preview.dart';
 import 'nym_format.dart';
+import 'audio_message.dart';
 import 'video_message.dart';
 
 /// Shared stateless [ApiClient] for media/emoji proxy URL construction. The
@@ -263,6 +264,7 @@ class MessageContent extends ConsumerWidget {
           }
         case CodeBlock():
         case MediaBlock():
+        case AudioBlock():
           break;
       }
     }
@@ -321,6 +323,8 @@ class MessageContent extends ConsumerWidget {
         );
       case MediaBlock(:final items):
         return _MediaGallery(items: items, blur: blurImages);
+      case AudioBlock(:final url, :final fileName):
+        return AudioMessage(url: url, fileName: fileName);
     }
   }
 }
@@ -331,7 +335,12 @@ class MessageContent extends ConsumerWidget {
 /// :1094-1099, `blockquote` :1270-1279, `h1,h2,h3` :1312-1317); plain text
 /// lines keep the 4px line gap.
 double _blockMargin(FormatBlock block) => switch (block) {
-      MediaBlock() || CodeBlock() || QuoteBlock() || HeadingBlock() => 10,
+      MediaBlock() ||
+      AudioBlock() ||
+      CodeBlock() ||
+      QuoteBlock() ||
+      HeadingBlock() =>
+        10,
       ParagraphBlock() => 4,
     };
 
@@ -349,7 +358,12 @@ double _blockGap(FormatBlock a, FormatBlock b) {
 /// carry it; a paragraph's 4px is a line gap between siblings, not a margin,
 /// so text sits flush at the edges exactly like the PWA.
 double _blockEdgeMargin(FormatBlock block) => switch (block) {
-      MediaBlock() || CodeBlock() || QuoteBlock() || HeadingBlock() => 10,
+      MediaBlock() ||
+      AudioBlock() ||
+      CodeBlock() ||
+      QuoteBlock() ||
+      HeadingBlock() =>
+        10,
       ParagraphBlock() => 0,
     };
 
@@ -1328,6 +1342,7 @@ int _blockTextLength(FormatBlock block) {
     case QuoteBlock():
       return _quoteTextLength(block);
     case MediaBlock():
+    case AudioBlock():
       return 0; // media renders as elements, no text content
   }
 }
@@ -1412,7 +1427,8 @@ void _appendBlockText(StringBuffer buf, FormatBlock block) {
         _appendBlockText(buf, child);
       }
     case MediaBlock():
-      break; // <img>/<video> — no text content
+    case AudioBlock():
+      break; // <img>/<video>/<audio> — no text content
   }
 }
 
@@ -1784,6 +1800,8 @@ class _QuoteBox extends ConsumerWidget {
         );
       case MediaBlock(:final items):
         return _MediaGallery(items: items);
+      case AudioBlock(:final url, :final fileName):
+        return AudioMessage(url: url, fileName: fileName);
     }
   }
 }

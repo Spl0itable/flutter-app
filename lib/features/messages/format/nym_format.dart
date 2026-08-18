@@ -135,6 +135,19 @@ class MediaBlock extends FormatBlock {
   final List<MediaItem> items;
 }
 
+/// A playable audio link, rendered as a transport bar with the file offered
+/// underneath it. Audio never joins a [MediaBlock] gallery: a seek bar squeezed
+/// into a photo grid cell cannot be scrubbed.
+class AudioBlock extends FormatBlock {
+  const AudioBlock({required this.url, required this.fileName});
+
+  /// Playback/download URL (already proxied when a proxyBase was supplied).
+  final String url;
+
+  /// Basename for the download affordance; empty when the URL carries none.
+  final String fileName;
+}
+
 /// A single image or video inside a [MediaBlock].
 class MediaItem {
   const MediaItem({required this.url, required this.isVideo});
@@ -625,7 +638,12 @@ class NymFormat {
     }
 
     for (final node in inlines) {
-      if (node is _MediaInline) {
+      if (node is _AudioInline) {
+        // Its own block: never folded into a gallery run.
+        flushMedia();
+        flushInlines();
+        blocks.add(node.block);
+      } else if (node is _MediaInline) {
         flushInlines();
         mediaRun.add(node.item);
       } else if (node is TextSpanNode && node.text.trim().isEmpty) {
@@ -691,6 +709,17 @@ class NymFormat {
         RegExp(r'~~(.+?)~~'),
         (m) => _NodeTok(
             StrikeNode(_parseInline(m[1]!, ctx, codeBlocks, inlineCode))));
+
+    // Audio first: video below claims the ambiguous .ogg/.webm, so the
+    // unambiguous audio extensions have to be taken before it runs.
+    tokens = _splitByRegex(
+        tokens,
+        RegExp(r'(https?://[^\s]+\.(mp3|m4a|aac|wav|flac|opus|oga)(\?[^\s]*)?)',
+            caseSensitive: false),
+        (m) => _NodeTok(_AudioInline(AudioBlock(
+              url: _proxied(m[1]!, ctx.proxyBase),
+              fileName: _urlFileName(m[1]!),
+            ))));
 
     // Media: video then image.
     tokens = _splitByRegex(
@@ -887,6 +916,19 @@ class NymFormat {
     return '$base?url=${Uri.encodeQueryComponent(url)}';
   }
 
+  /// Basename of a URL's path, for the audio download label. Empty when the
+  /// URL has no usable last segment.
+  static String _urlFileName(String url) {
+    try {
+      final segs = Uri.parse(url).pathSegments;
+      if (segs.isEmpty) return '';
+      final last = Uri.decodeComponent(segs.last).trim();
+      return last.length > 60 ? last.substring(0, 60) : last;
+    } catch (_) {
+      return '';
+    }
+  }
+
   static String _proxiedEmoji(String url, String? base) {
     if (base == null || base.isEmpty) return url;
     return '$base?emoji=1&url=${Uri.encodeQueryComponent(url)}';
@@ -955,6 +997,11 @@ class _MultiTok extends _Tok {
 
 /// An inline node that carries a media item; flattened into MediaBlocks by
 /// [_inlineToBlocks]. Never reaches the renderer as an inline span.
+class _AudioInline extends InlineNode {
+  const _AudioInline(this.block);
+  final AudioBlock block;
+}
+
 class _MediaInline extends InlineNode {
   const _MediaInline(this.item);
   final MediaItem item;

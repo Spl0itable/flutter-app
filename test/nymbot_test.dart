@@ -215,24 +215,18 @@ void main() {
       }
     });
 
-    // The worker reaches these two groups over completely different
-    // transports (Workers AI binding vs AI Gateway), and picking the wrong one
-    // is a hard failure, so the ids that encode the split are pinned here.
-    test('Workers AI models carry @cf/ ids, providers carry vendor slugs', () {
-      const workersAi = {'kimi', 'qwen', 'minimax'};
+    // Every Pro model is third-party and reached by its provider slug. A
+    // "@cf/" prefix names a model Cloudflare hosts itself, and asking the
+    // gateway for one that isn't gets a 5018 "not allowed to access" — so the
+    // absence of that prefix is the thing worth pinning.
+    test('Pro models carry provider slugs, never a @cf/ prefix', () {
       for (final m in kProModels) {
-        if (workersAi.contains(m.key)) {
-          expect(m.modelId, startsWith('@cf/'),
-              reason: '${m.key} is Cloudflare-hosted and needs its @cf/ id');
-        } else {
-          expect(m.modelId, isNot(startsWith('@cf/')),
-              reason: '${m.key} is provider-hosted and must keep its slug');
-          expect(m.modelId, contains('/'), reason: '${m.key} slug');
-        }
+        expect(m.modelId, isNot(startsWith('@cf/')),
+            reason: '${m.key} is provider-hosted and must keep its slug');
+        expect(m.modelId, contains('/'), reason: '${m.key} slug');
       }
-      expect(
-          kProModels.firstWhere((m) => m.key == 'kimi').modelId,
-          '@cf/moonshotai/kimi-k3');
+      expect(kProModels.firstWhere((m) => m.key == 'kimi').modelId,
+          'moonshotai/kimi-k3');
       // Claude is the one family the worker must reach on Anthropic's native
       // endpoint, so its slugs stay under the anthropic/ namespace.
       for (final m in kProModels.where((m) => m.key.startsWith('claude-'))) {
