@@ -8785,9 +8785,7 @@ class NostrController {
       } catch (_) {}
     }
     final swipeEmoji = p['swipeReactEmoji'];
-    if (swipeEmoji is String &&
-        swipeEmoji.isNotEmpty &&
-        swipeEmoji.length <= 8) {
+    if (swipeEmoji is String && isValidSwipeReactEmoji(swipeEmoji)) {
       try {
         c.setSwipeReactEmoji(swipeEmoji);
       } catch (_) {}
