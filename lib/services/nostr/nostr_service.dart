@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/constants/event_kinds.dart';
 import '../../core/constants/relays.dart';
@@ -2093,11 +2094,92 @@ class NostrService {
     }
   }
 
+  /// SharedPreferences key for the persisted geo-relay directory.
+  static const String geoRelayCacheKey = 'nym_geo_relays';
+
+  /// How long a cached directory is used before we look for changes. Matches
+  /// bitchat on both platforms: iOS `geoRelayFetchIntervalSeconds`
+  /// (TransportConfig.swift) and Android `ONE_DAY_MS` (RelayDirectory.kt) are
+  /// both 24h. The directory changes rarely, and refetching it on every cold
+  /// start costs a round trip before geohash channels can be joined.
+  static const Duration geoRelayCacheTtl = Duration(hours: 24);
+
+  /// Reads the persisted directory. Returns null when absent or unusable —
+  /// never merely because it is stale, so a failed refresh can still fall back
+  /// to it.
+  Future<({DateTime fetchedAt, List<GeoRelay> relays})?>
+      _loadGeoRelayCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(geoRelayCacheKey);
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final rawRelays = decoded['relays'];
+      if (rawRelays is! List || rawRelays.isEmpty) return null;
+      final relays = <GeoRelay>[];
+      for (final r in rawRelays) {
+        if (r is! Map) continue;
+        final url = (r['url'] ?? '').toString();
+        final lat = r['lat'], lng = r['lng'];
+        if (url.isEmpty || lat is! num || lng is! num) continue;
+        if (!lat.toDouble().isFinite || !lng.toDouble().isFinite) continue;
+        relays
+            .add(GeoRelay(url: url, lat: lat.toDouble(), lng: lng.toDouble()));
+      }
+      if (relays.isEmpty) return null;
+      final ms = decoded['fetchedAt'];
+      return (
+        fetchedAt:
+            DateTime.fromMillisecondsSinceEpoch(ms is num ? ms.toInt() : 0),
+        relays: relays,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveGeoRelayCache(List<GeoRelay> relays) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        geoRelayCacheKey,
+        jsonEncode({
+          'fetchedAt': DateTime.now().millisecondsSinceEpoch,
+          'relays': [
+            for (final r in relays) {'url': r.url, 'lat': r.lat, 'lng': r.lng},
+          ],
+        }),
+      );
+    } catch (_) {
+      // Storage unavailable — the in-memory directory still works this session.
+    }
+  }
+
   /// Fetches the geo relay list via the API proxy (`action=geo-relays`),
   /// falling back to a direct CSV fetch+parse. Caches into [geoRelays].
+  ///
+  /// A directory persisted within [geoRelayCacheTtl] is adopted WITHOUT any
+  /// network call, so a cold start or reconnect works from disk. Pass
+  /// [force] to check for changes regardless of age.
   Future<List<GeoRelay>> fetchGeoRelays({
     Future<String> Function(Uri url)? csvFetcher,
+    bool force = false,
   }) async {
+    final cached = await _loadGeoRelayCache();
+    if (cached != null) {
+      // Adopt the cached list either way: fresh, this is the whole operation;
+      // stale, it keeps geohash channels working while the refresh is in
+      // flight and remains the fallback if that refresh fails.
+      geoRelays
+        ..clear()
+        ..addAll(cached.relays);
+      final age = DateTime.now().difference(cached.fetchedAt);
+      if (!force && !age.isNegative && age < geoRelayCacheTtl) {
+        return geoRelays;
+      }
+    }
+
     var relays = await _apiClient.geoRelays();
     if (relays.isEmpty && csvFetcher != null) {
       try {
@@ -2111,6 +2193,7 @@ class NostrService {
       geoRelays
         ..clear()
         ..addAll(relays);
+      await _saveGeoRelayCache(relays);
     }
     return geoRelays;
   }
@@ -2239,12 +2322,31 @@ class NostrService {
       {int count = RelayConfig.geoRelayCount}) {
     if (geoRelays.isEmpty || geohash.isEmpty) return const [];
     final center = ch.decodeGeohash(geohash);
-    final sorted = [...geoRelays]..sort((a, b) {
-        final da = ch.calculateDistance(center.lat, center.lng, a.lat, a.lng);
-        final db = ch.calculateDistance(center.lat, center.lng, b.lat, b.lng);
-        return da.compareTo(db);
+    // Distance is computed ONCE per relay, not inside the comparator, and the
+    // index is carried so ties resolve by directory position.
+    //
+    // Both details matter. Dart's List.sort is NOT stable, so a plain
+    // distance-only comparator leaves tied relays in an unspecified order —
+    // and ties are the common case here, not an edge case: 353 of the 409
+    // relays in the directory share exact coordinates with another relay
+    // (the CSV uses city centroids). Without a deterministic tiebreak this
+    // client could pick a different set of 5 than the PWA from the very same
+    // directory, and publishers and subscribers must agree on relays or they
+    // never see each other. Index order reproduces the PWA's stable sort over
+    // the same directory order.
+    final ranked = <({GeoRelay relay, double distance, int index})>[
+      for (var i = 0; i < geoRelays.length; i++)
+        (
+          relay: geoRelays[i],
+          distance: ch.calculateDistance(
+              center.lat, center.lng, geoRelays[i].lat, geoRelays[i].lng),
+          index: i,
+        ),
+    ]..sort((a, b) {
+        final d = a.distance.compareTo(b.distance);
+        return d != 0 ? d : a.index.compareTo(b.index);
       });
-    return sorted.take(count).toList();
+    return [for (final r in ranked.take(count)) r.relay];
   }
 
   /// Exposes the identity pubkey for the controller.
