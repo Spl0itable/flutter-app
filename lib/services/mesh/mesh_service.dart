@@ -970,6 +970,26 @@ class MeshService {
     });
   }
 
+  /// Broadcasts our identity announcement.
+  ///
+  /// NOTE ON MESH ANONYMITY, before anyone reaches for peerID rotation:
+  /// everything below goes out UNENCRYPTED, on every cycle — the nickname, the
+  /// Noise static key (from which the peerID derives), the signing key, and
+  /// `nostrLink`, which is `nostrPubkey(32) ‖ signature(64)`, i.e. the user's
+  /// actual Nostr identity.
+  ///
+  /// So rotating the peerID on an epoch — bitchat's WHITEPAPER §9 design, and
+  /// the obvious response to a stable BLE identifier being physically
+  /// trackable — buys NOTHING on its own: a tracker follows the nostrLink or
+  /// the nickname instead. A cloaking mode has to suppress all three together
+  /// or none of them.
+  ///
+  /// That was evaluated and deliberately NOT built: suppressing the nostrLink
+  /// is what makes a mesh peer identifiable as a known npub, and losing that
+  /// costs more than the rotation gains. Revisit if bitchat ships §9 upstream,
+  /// at which point rotation becomes a compatible default rather than an
+  /// interop-breaking toggle — but it still needs the nostrLink and nickname
+  /// handled, not just the key.
   Future<void> _broadcastAnnounce() async {
     if (!_running) return;
     final announcement = IdentityAnnouncement(
