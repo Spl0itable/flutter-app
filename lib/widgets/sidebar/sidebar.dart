@@ -1503,7 +1503,8 @@ class _NavSection extends StatelessWidget {
                   // (the PWA rotates the same glyph -90° → chevronRight).
                   _MiniIcon(
                     svg: open ? NymIcons.chevronDown : NymIcons.chevronRight,
-                    tooltip: open ? tr('Collapse section') : tr('Expand section'),
+                    tooltip:
+                        open ? tr('Collapse section') : tr('Expand section'),
                     onTap: onToggleOpen,
                   ),
                 ],

@@ -73,11 +73,13 @@ class FakeMeshTransport implements MeshTransport {
     sentFrames.add(Uint8List.fromList(frame));
     bus.broadcastFrom(this, frame);
   }
+
   @override
   Future<MeshTransportAvailability> start() async {
     bus.markStarted(this);
     return MeshTransportAvailability.ready;
   }
+
   @override
   Future<void> stop() async {}
   @override
@@ -166,7 +168,8 @@ void main() {
     );
   });
 
-  test('public message is addressed to the BROADCAST recipient (bitchat interop)',
+  test(
+      'public message is addressed to the BROADCAST recipient (bitchat interop)',
       () async {
     await alice.start();
     await bob.start();
@@ -226,8 +229,8 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
 
     // 600 bytes forces 3 chunks (255-byte PM content cap).
-    final long = List.generate(600, (i) => String.fromCharCode(97 + i % 26))
-        .join();
+    final long =
+        List.generate(600, (i) => String.fromCharCode(97 + i % 26)).join();
 
     final chunks = <String>[];
     final done = Completer<void>();
@@ -307,7 +310,8 @@ void main() {
     expect(received, isFalse); // undecryptable → not surfaced
   });
 
-  test('a plaintext NAMED channel message keeps its channel (not folded to #mesh)',
+  test(
+      'a plaintext NAMED channel message keeps its channel (not folded to #mesh)',
       () async {
     await alice.start();
     await bob.start();

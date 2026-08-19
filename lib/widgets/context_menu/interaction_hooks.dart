@@ -114,8 +114,7 @@ class InteractionHooks extends StateNotifier<ComposerAction?> {
   void requestInsertText(String text) => state = InsertTextAction(text);
 
   /// Attach shared local files to the composer (OS share sheet).
-  void requestShareFiles(List<String> paths) =>
-      state = ShareFilesAction(paths);
+  void requestShareFiles(List<String> paths) => state = ShareFilesAction(paths);
 
   /// Clears the pending action once the composer has applied it.
   void consume() => state = null;

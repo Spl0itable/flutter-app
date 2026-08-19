@@ -52,7 +52,8 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
   /// same room on every device. Returns '' when nothing usable remains.
   String _sanitizeGroupName(String raw) {
     final lower = raw.trim().toLowerCase().replaceAll(RegExp(r'^#+'), '');
-    final cleaned = lower.replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+    final cleaned =
+        lower.replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
     return cleaned.length > 40 ? cleaned.substring(0, 40) : cleaned;
   }
 
@@ -159,19 +160,16 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             const SizedBox(width: 8),
             Text(tr('Bluetooth Mesh'),
                 style: TextStyle(
-                    color: c.text,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600)),
+                    color: c.text, fontSize: 16, fontWeight: FontWeight.w600)),
           ],
         ),
         actions: [
           _MeshHeaderToggle(
             svg: NymIcons.bell,
             tooltip: tr('Notifications'),
-            badge: ref.watch(settingsProvider
-                    .select((s) => s.notificationsEnabled))
-                ? ref.watch(
-                    notificationHistoryProvider.select((s) => s.unread))
+            badge: ref.watch(
+                    settingsProvider.select((s) => s.notificationsEnabled))
+                ? ref.watch(notificationHistoryProvider.select((s) => s.unread))
                 : 0,
             onTap: () => showNotificationsPanel(context),
           ),
@@ -422,9 +420,7 @@ class _MeshHeaderToggle extends StatelessWidget {
       height: 40,
       alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: c.isLight
-            ? const Color(0xD9FFFFFF)
-            : const Color(0xCC141423),
+        color: c.isLight ? const Color(0xD9FFFFFF) : const Color(0xCC141423),
         borderRadius: NymRadius.rsm,
         border: Border.all(
           color:
@@ -451,8 +447,7 @@ class _MeshHeaderToggle extends StatelessWidget {
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
                       color: c.danger,
-                      borderRadius:
-                          const BorderRadius.all(Radius.circular(8)),
+                      borderRadius: const BorderRadius.all(Radius.circular(8)),
                     ),
                     child: Text(
                       badge > 99 ? '99+' : '$badge',
@@ -509,9 +504,11 @@ class _StatusBar extends ConsumerWidget {
           ),
           if (needsPermission)
             TextButton(
-              onPressed: () =>
-                  ref.read(meshControllerProvider.notifier).openSystemSettings(),
-              child: Text(tr('Enable'), style: TextStyle(color: colors.primary)),
+              onPressed: () => ref
+                  .read(meshControllerProvider.notifier)
+                  .openSystemSettings(),
+              child:
+                  Text(tr('Enable'), style: TextStyle(color: colors.primary)),
             ),
           Switch(
             value: enabled,

@@ -59,8 +59,7 @@ class ChannelListItem extends ConsumerWidget {
     // state always wins.
     final showPinned = pinned && !active;
     // Geohash rows get a `title="{getGeohashLocation(geohash)}"` hover tooltip.
-    final location =
-        entry.isGeohash ? geohashLocationLabel(entry.geohash) : '';
+    final location = entry.isGeohash ? geohashLocationLabel(entry.geohash) : '';
 
     // `.channel-item.active` fill is primary@0.10 + a primary@0.05 glow (dark);
     // `body.light-mode` neutralises it to black@0.06 with `box-shadow:none`
@@ -77,13 +76,18 @@ class ChannelListItem extends ConsumerWidget {
         : Colors.white.withValues(alpha: 0.06);
     final Color borderColor = active
         ? c.primaryA(0.20)
-        : (showPinned ? _pinnedGrey.withValues(alpha: 0.20) : Colors.transparent);
+        : (showPinned
+            ? _pinnedGrey.withValues(alpha: 0.20)
+            : Colors.transparent);
     final List<BoxShadow>? glow = active
         ? (c.isLight
             ? null
             : [BoxShadow(color: c.primaryA(0.05), blurRadius: 12)])
         : (showPinned
-            ? [BoxShadow(color: _pinnedGrey.withValues(alpha: 0.05), blurRadius: 12)]
+            ? [
+                BoxShadow(
+                    color: _pinnedGrey.withValues(alpha: 0.05), blurRadius: 12)
+              ]
             : null);
 
     final nameText = Text(
@@ -149,7 +153,8 @@ class ChannelListItem extends ConsumerWidget {
                 child: Row(
                   children: [
                     if (mesh) ...[
-                      NymSvgIcon(NymIcons.bluetooth, size: 12, color: c.primary),
+                      NymSvgIcon(NymIcons.bluetooth,
+                          size: 12, color: c.primary),
                       const SizedBox(width: 6),
                     ],
                     Expanded(
@@ -312,9 +317,8 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final gh = widget.geohash;
-    final text = gh.isEmpty
-        ? 'Not a geohash'
-        : (_place ?? geohashLocationLabel(gh));
+    final text =
+        gh.isEmpty ? 'Not a geohash' : (_place ?? geohashLocationLabel(gh));
     if (text.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(top: 1),

@@ -15,7 +15,8 @@ import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Deterministic test identity (non-zero 32-byte key, valid for bip340).
-final Uint8List _priv = Uint8List.fromList(List<int>.generate(32, (i) => i + 1));
+final Uint8List _priv =
+    Uint8List.fromList(List<int>.generate(32, (i) => i + 1));
 final String _pub = getPublicKeyHex(_priv);
 final LocalSigner _signer = LocalSigner(_priv);
 
@@ -23,7 +24,8 @@ final LocalSigner _signer = LocalSigner(_priv);
 /// each decoded request body; [respond] returns the (status, body, headers).
 StorageSync _syncWith(
   void Function(Map<String, dynamic> body) onBody, {
-  required (int, String, Map<String, String>) Function(Map<String, dynamic> body)
+  required (int, String, Map<String, String>) Function(
+          Map<String, dynamic> body)
       respond,
   bool durable = true,
   String? pubkey,
@@ -58,7 +60,8 @@ void main() {
   // 1. settings-set body shape + which keys sync vs stay local.
   // ===========================================================================
   group('settings-set', () {
-    test('body carries action, pubkey, category, blob, contentHash, auth', () async {
+    test('body carries action, pubkey, category, blob, contentHash, auth',
+        () async {
       final bodies = <Map<String, dynamic>>[];
       final sync = _syncWith(
         bodies.add,
@@ -87,7 +90,8 @@ void main() {
           bodies.firstWhere((b) => b['category'] == appearanceCat);
       final plain =
           await _signer.nip44Decrypt(_pub, appearance['blob'] as String);
-      expect((jsonDecode(plain) as Map)['__cat'], 'nymchat-settings-appearance');
+      expect(
+          (jsonDecode(plain) as Map)['__cat'], 'nymchat-settings-appearance');
     });
 
     test('synced keys land in their PWA section; device-local keys never sync',
@@ -199,7 +203,8 @@ void main() {
       }
     });
 
-    test('a landing-channel change re-publishes the channels section', () async {
+    test('a landing-channel change re-publishes the channels section',
+        () async {
       final bodies = <Map<String, dynamic>>[];
       final sync = _syncWith(
         bodies.add,
@@ -259,7 +264,8 @@ void main() {
   group('settings-get', () {
     /// Encrypts a section payload to self the way [StorageSync.settingsSet]
     /// does, so the round-trip decrypt path is exercised.
-    Future<String> encBlob(Map<String, dynamic> payload, String category) async {
+    Future<String> encBlob(
+        Map<String, dynamic> payload, String category) async {
       final withCat = {...payload, '__cat': category};
       return _signer.nip44Encrypt(_pub, jsonEncode(withCat));
     }
@@ -710,10 +716,12 @@ void main() {
   //    channel-activity) — all PUBLIC reads, no auth.
   // ===========================================================================
   group('channel activity discovery', () {
-    String activityBody(Map<String, dynamic> activity, Map<String, dynamic> last) =>
+    String activityBody(
+            Map<String, dynamic> activity, Map<String, dynamic> last) =>
         jsonEncode({'activity': activity, 'last': last});
 
-    test('channel-active body is public (no pubkey/auth) and parses buckets/last',
+    test(
+        'channel-active body is public (no pubkey/auth) and parses buckets/last',
         () async {
       final bodies = <Map<String, dynamic>>[];
       final sync = _syncWith(
@@ -815,7 +823,8 @@ void main() {
     final pkA = 'a' * 64;
     final pkB = 'b' * 64;
 
-    test('body is public (no auth/pubkey), batches valid pubkeys, parses active',
+    test(
+        'body is public (no auth/pubkey), batches valid pubkeys, parses active',
         () async {
       final bodies = <Map<String, dynamic>>[];
       final sync = _syncWith(
@@ -864,7 +873,8 @@ void main() {
       // 120 valid distinct hex + 1 invalid; only the first 100 valid go.
       final many = [
         'not-hex',
-        ...List<String>.generate(120, (i) => i.toRadixString(16).padLeft(64, '0')),
+        ...List<String>.generate(
+            120, (i) => i.toRadixString(16).padLeft(64, '0')),
       ];
       await sync.shopStatus(many);
       expect(sent!.length, 100);

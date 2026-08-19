@@ -101,7 +101,8 @@ class GeohashPlaceCache {
     _inflight[key] = completer.future;
 
     _chain = _chain.then((_) async {
-      final gap = _lastAt.add(kGeohashPlaceMinInterval).difference(DateTime.now());
+      final gap =
+          _lastAt.add(kGeohashPlaceMinInterval).difference(DateTime.now());
       if (gap > Duration.zero) await Future<void>.delayed(gap);
       _lastAt = DateTime.now();
       try {

@@ -25,8 +25,7 @@ class ShareIntake {
   Future<void> start() async {
     try {
       // Cold start: the app was launched by a share intent.
-      final initial =
-          await ReceiveSharingIntent.instance.getInitialMedia();
+      final initial = await ReceiveSharingIntent.instance.getInitialMedia();
       if (initial.isNotEmpty) {
         _present(initial);
         // Tell the plugin we consumed it so a later getInitialMedia won't

@@ -114,7 +114,8 @@ class MeshService {
     final fromPeer = _peers[peerID]?.noisePublicKey;
     if (fromPeer != null && fromPeer.length == 32) return _hex(fromPeer);
     final fromSession = _noise.remoteStaticKey(peerID);
-    if (fromSession != null && fromSession.length == 32) return _hex(fromSession);
+    if (fromSession != null && fromSession.length == 32)
+      return _hex(fromSession);
     return null;
   }
 
@@ -187,7 +188,10 @@ class MeshService {
     final targetId = read();
     final emoji = read();
     final nick = read() ?? '';
-    if (targetId == null || emoji == null || targetId.isEmpty || emoji.isEmpty) {
+    if (targetId == null ||
+        emoji == null ||
+        targetId.isEmpty ||
+        emoji.isEmpty) {
       return null;
     }
     return _ReactionData(targetId, emoji, remove, nick);
@@ -233,8 +237,8 @@ class MeshService {
         offset = data.length;
         return '';
       }
-      final s = utf8.decode(data.sublist(offset, offset + len),
-          allowMalformed: true);
+      final s =
+          utf8.decode(data.sublist(offset, offset + len), allowMalformed: true);
       offset += len;
       return s;
     }
@@ -261,10 +265,10 @@ class MeshService {
     _linkSub = _transport.links.listen(_onLink);
     final availability = await _transport.start();
     debugLog?.call('transport up → availability=${availability.name}');
-    _announceTimer =
-        Timer.periodic(MeshConstants.announceInterval, (_) => _broadcastAnnounce());
-    _cleanupTimer =
-        Timer.periodic(const Duration(seconds: 30), (_) => _cleanupStalePeers());
+    _announceTimer = Timer.periodic(
+        MeshConstants.announceInterval, (_) => _broadcastAnnounce());
+    _cleanupTimer = Timer.periodic(
+        const Duration(seconds: 30), (_) => _cleanupStalePeers());
     await _broadcastAnnounce();
     debugLog?.call('sent initial identity announce — awaiting peers');
     return availability;
@@ -397,7 +401,7 @@ class MeshService {
     Uint8List bytes,
   ) async {
     final file = BitchatFilePacket(
-      fileName: fileName, mimeType: mimeType, content: bytes);
+        fileName: fileName, mimeType: mimeType, content: bytes);
     final encoded = file.encode();
     if (encoded == null) return;
     final plaintext =
@@ -413,7 +417,7 @@ class MeshService {
     Uint8List bytes,
   ) async {
     final file = BitchatFilePacket(
-      fileName: fileName, mimeType: mimeType, content: bytes);
+        fileName: fileName, mimeType: mimeType, content: bytes);
     final encoded = file.encode();
     if (encoded == null) return;
     await _sendPacket(await _buildPacket(
@@ -478,7 +482,8 @@ class MeshService {
       payload: packet.payload,
     );
     if (!_seen.checkAndAdd(key)) {
-      debugLog?.call('  ↳ deduped (seen) type=0x${packet.type.toRadixString(16)}');
+      debugLog
+          ?.call('  ↳ deduped (seen) type=0x${packet.type.toRadixString(16)}');
       return;
     }
 
@@ -541,7 +546,9 @@ class MeshService {
     final directedToUs = packet.recipientID != null &&
         !packet.isBroadcast &&
         _hex(packet.recipientID!) == identity.peerID;
-    if (!directedToUs && packet.ttl > 1 && packet.type != MeshMessageType.leave) {
+    if (!directedToUs &&
+        packet.ttl > 1 &&
+        packet.type != MeshMessageType.leave) {
       _scheduleRelay(packet);
     }
   }
@@ -567,8 +574,8 @@ class MeshService {
       }
     }
 
-    final peer = _peers.putIfAbsent(
-        senderPeerID, () => MeshPeer(peerID: senderPeerID));
+    final peer =
+        _peers.putIfAbsent(senderPeerID, () => MeshPeer(peerID: senderPeerID));
     peer.nickname = announcement.nickname;
     peer.noisePublicKey = announcement.noisePublicKey;
     peer.signingPublicKey = announcement.signingPublicKey;
@@ -835,12 +842,14 @@ class MeshService {
     _profileRequested.add(peerID);
     await _sendPacket(await _buildPacket(
       type: MeshMessageType.nymProfileRequest,
-      payload: MeshProfileRequest(wantAvatar: avatar, wantBanner: banner).encode(),
+      payload:
+          MeshProfileRequest(wantAvatar: avatar, wantBanner: banner).encode(),
       recipientID: _peerIdBytes(peerID),
     ));
   }
 
-  Future<void> _handleProfileRequest(String senderPeerID, Uint8List payload) async {
+  Future<void> _handleProfileRequest(
+      String senderPeerID, Uint8List payload) async {
     final provider = _profileProvider;
     if (provider == null) return;
     final request = MeshProfileRequest.decode(payload);
@@ -1018,8 +1027,7 @@ class MeshService {
   // ---- Peer bookkeeping -----------------------------------------------------
 
   void _touchPeer(String peerID, {String? nickname}) {
-    final peer =
-        _peers.putIfAbsent(peerID, () => MeshPeer(peerID: peerID));
+    final peer = _peers.putIfAbsent(peerID, () => MeshPeer(peerID: peerID));
     if (nickname != null && nickname.isNotEmpty) peer.nickname = nickname;
     peer.touch();
     _emitPeers();
@@ -1036,7 +1044,8 @@ class MeshService {
     final now = DateTime.now();
     final removed = <String>[];
     _peers.removeWhere((id, peer) {
-      final stale = now.difference(peer.lastSeen) > MeshConstants.stalePeerTimeout;
+      final stale =
+          now.difference(peer.lastSeen) > MeshConstants.stalePeerTimeout;
       if (stale) removed.add(id);
       return stale;
     });
@@ -1060,8 +1069,8 @@ class MeshService {
     var byteCount = 0;
     for (final rune in content.runes) {
       final ch = String.fromCharCode(rune);
-      final len = ch.codeUnits.fold<int>(
-          0, (n, u) => n + (u <= 0x7F ? 1 : (u <= 0x7FF ? 2 : 3)));
+      final len = ch.codeUnits
+          .fold<int>(0, (n, u) => n + (u <= 0x7F ? 1 : (u <= 0x7FF ? 2 : 3)));
       if (byteCount + len > PrivateMessagePacket.maxContentBytes) {
         chunks.add(buffer.toString());
         buffer.clear();

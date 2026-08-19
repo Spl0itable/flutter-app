@@ -65,7 +65,8 @@ void main() {
     // The last one is not — that is the case the old layout dropped on the
     // floor — but scrolling brings it in.
     final last = find.text(kProModels.last.label);
-    await tester.scrollUntilVisible(last, 200, scrollable: find.byType(Scrollable).first);
+    await tester.scrollUntilVisible(last, 200,
+        scrollable: find.byType(Scrollable).first);
     await tester.pumpAndSettle();
     expect(last, findsOneWidget);
     expect(tester.takeException(), isNull);

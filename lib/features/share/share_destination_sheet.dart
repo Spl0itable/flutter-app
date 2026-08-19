@@ -98,9 +98,12 @@ class _ShareDestinationSheetState
       section(tr('Channels'));
       for (final ch in chanMatches) {
         final label = '#${ch.isGeohash ? ch.geohash : ch.channel}';
-        rows.add(_row(c, Text('#',
-                style: TextStyle(
-                    color: c.primary, fontWeight: FontWeight.w700)), label,
+        rows.add(_row(
+            c,
+            Text('#',
+                style:
+                    TextStyle(color: c.primary, fontWeight: FontWeight.w700)),
+            label,
             () => _deliverTo(ChatView.channel(ch.key))));
       }
     }
@@ -152,14 +155,14 @@ class _ShareDestinationSheetState
         : (widget.payload.text ?? '');
 
     return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
-        constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.8),
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.8),
         decoration: BoxDecoration(
           color: c.bgSecondary,
-          borderRadius:
-              const BorderRadius.vertical(top: Radius.circular(18)),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
           border: Border.all(color: c.glassBorder),
         ),
         child: Column(
