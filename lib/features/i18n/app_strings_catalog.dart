@@ -1184,4 +1184,9 @@ const List<String> kAppStringsCatalog = <String>[
   '💭 Reasoning',
   '📊 POLL',
   '📊 Voters',
+  'Ghost Mode on',
+  'Ghost Mode off',
+  'Enable Ghost Mode?',
+  'Ghost Mode hides who you are on the Bluetooth mesh.\n\nYour device stops advertising your nym and your Nostr identity. It presents a throwaway name and key instead, and replaces them every few minutes, so nearby devices cannot recognise you or follow you between places.\n\nYou can still send and receive messages. Anyone you talk to while it is on sees an anonymous identity, not your usual one, and will not be able to tell it was you. Turning it off restores your normal identity.',
+  'Waiting for Bluetooth range. This chat stays on Bluetooth because you met over Ghost Mode, so messages send when they are nearby.',
 ];

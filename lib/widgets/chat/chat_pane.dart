@@ -11,6 +11,7 @@ import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/emoji/emoji_prefetch.dart';
 import '../../features/i18n/i18n.dart';
+import '../../features/mesh/mesh_controller.dart';
 import '../../features/notifications/notifications_panel.dart';
 import '../../features/nymbot/bot_chat_screen.dart' show BotChatScreen;
 import '../../features/channels/geohash_place_cache.dart';
@@ -180,6 +181,7 @@ class ChatPane extends ConsumerWidget {
           // `.input-container` — tutorial spotlight target. Stays mounted in
           // columns mode; sends to the focused column's conversation (the deck
           // re-points `currentViewProvider` on focus, mirroring `_cvFocusColumn`).
+          const _AwaitingMeshRangeNotice(),
           KeyedSubtree(
             key: TutorialTargets.keyFor(TutorialTarget.composer),
             child: Composer(compact: compact),
@@ -1680,5 +1682,54 @@ class _FriendBadge extends StatelessWidget {
     final color =
         context.nym.isLight ? const Color(0xFF0288D1) : const Color(0xFF4FC3F7);
     return NymSvgIcon(NymIcons.friendBadge, size: size, color: color);
+  }
+}
+
+
+/// Shown above the composer when the open conversation is pinned to the mesh by
+/// Ghost Mode and the peer is out of Bluetooth range.
+///
+/// Without it the send just stalls: the message is echoed locally and nothing
+/// is published, because publishing would route over Nostr under the real key
+/// and tell the peer that the ghost was us. That refusal is deliberate, so it
+/// has to be legible rather than look like a bug.
+class _AwaitingMeshRangeNotice extends ConsumerWidget {
+  const _AwaitingMeshRangeNotice();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Watch the mesh state, not just read the bridge: the notice has to clear
+    // itself the moment the peer comes back into range.
+    ref.watch(meshControllerProvider);
+    final view = ref.watch(currentViewProvider);
+    final bridge = ref.read(meshControllerProvider.notifier).bridge;
+    if (bridge == null || !bridge.isAwaitingMeshRange(view)) {
+      return const SizedBox.shrink();
+    }
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      color: c.bgSecondary,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(Icons.bluetooth_searching,
+                size: 15, color: c.textDim),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              tr('Waiting for Bluetooth range. This chat stays on Bluetooth '
+                  'because you met over Ghost Mode, so messages send when '
+                  'they are nearby.'),
+              style: TextStyle(color: c.textDim, fontSize: 12, height: 1.35),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

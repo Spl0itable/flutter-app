@@ -155,6 +155,15 @@ class MeshBridge {
   bool isGhostPinned(String pubkey) =>
       _ghostPinnedPms.contains(pubkey.toLowerCase());
 
+  /// True when [view] is pinned to the mesh but the peer is not in radio range,
+  /// so a send will sit unsent rather than go out over Nostr. Drives the
+  /// composer notice — without it the message just silently stalls.
+  bool isAwaitingMeshRange(ChatView view) {
+    if (view.kind != ViewKind.pm) return false;
+    if (!_ghostPinnedPms.contains(view.id.toLowerCase())) return false;
+    return peerIdForPubkey(view.id) == null;
+  }
+
   void _loadGhostPins() {
     _ghostPinnedPms.addAll(
       _ref
