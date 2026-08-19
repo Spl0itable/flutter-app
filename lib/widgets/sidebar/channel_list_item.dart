@@ -320,18 +320,41 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine> {
     final text =
         gh.isEmpty ? 'Not a geohash' : (_place ?? geohashLocationLabel(gh));
     if (text.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 1),
-      child: Text(
+    final style = TextStyle(
+      color: c.textDim,
+      fontSize: widget.textSize - 3,
+      height: 1.25,
+    );
+    // Same split as the channel header (chat_pane.dart `_locationLine`): the
+    // city half is the only part allowed to ellipsize, so a narrow sidebar
+    // renders "Long City Na…, Country" instead of dropping the country. Only
+    // a resolved place name has the "City, Country" shape — raw coordinates
+    // and 'Not a geohash' stay a single run.
+    final splitIdx = _place != null ? text.lastIndexOf(', ') : -1;
+    final Widget line;
+    if (splitIdx > 0 && splitIdx < text.length - 2) {
+      line = Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(
+              text.substring(0, splitIdx),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: style,
+            ),
+          ),
+          Text(text.substring(splitIdx), maxLines: 1, style: style),
+        ],
+      );
+    } else {
+      line = Text(
         text,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          color: c.textDim,
-          fontSize: widget.textSize - 3,
-          height: 1.25,
-        ),
-      ),
-    );
+        style: style,
+      );
+    }
+    return Padding(padding: const EdgeInsets.only(top: 1), child: line);
   }
 }

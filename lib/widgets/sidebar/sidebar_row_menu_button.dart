@@ -46,7 +46,7 @@ class SidebarRowMenuButton extends StatelessWidget {
           width: 22,
           height: 22,
           child: Icon(
-            Icons.more_horiz,
+            Icons.more_vert,
             size: 16,
             color: c.textDim.withValues(alpha: 0.7),
           ),

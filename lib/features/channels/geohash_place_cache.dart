@@ -8,9 +8,12 @@
 //
 //   * it PERSISTS — a per-widget Map dies with the widget, and every relaunch
 //     would re-geocode the whole sidebar;
-//   * lookups are SERIALISED with a ≥1.1s gap, and concurrent callers for one
-//     geohash collapse into a single request (the header and its sidebar row
-//     ask for the same place on channel switch).
+//   * lookups are RATE-LIMITED, and concurrent callers for one geohash collapse
+//     into a single request (the header and its sidebar row ask for the same
+//     place on channel switch). Every lookup goes through our proxy, which
+//     edge-caches Nominatim's answer for a day and is itself Nominatim's
+//     client, so a few can be in flight at once — that is what lets a sidebar
+//     of geohashes resolve in a round trip or two rather than one per second.
 //
 // Storage key and JSON shape match the web client's `nym_geohash_places`.
 
@@ -27,8 +30,9 @@ import '../../state/settings_provider.dart';
 /// Bound on the persisted map. Entries are ~30 bytes.
 const int kGeohashPlaceMax = 500;
 
-/// Nominatim's documented rate limit, plus headroom.
-const Duration kGeohashPlaceMinInterval = Duration(milliseconds: 1100);
+/// Lookups allowed in flight at once. Bounded because the proxy fans out to
+/// Nominatim on a cache miss; generous because the cache absorbs the repeats.
+const int kGeohashPlaceConcurrency = 4;
 
 const String kGeohashPlaceKey = 'nym_geohash_places';
 
@@ -45,8 +49,8 @@ class GeohashPlaceCache {
   final Map<String, String> _cache = {};
   final Map<String, Future<String>> _inflight = {};
 
-  Future<void> _chain = Future<void>.value();
-  DateTime _lastAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _active = 0;
+  final List<Completer<void>> _waiters = [];
   Timer? _saveTimer;
 
   void _load() {
@@ -88,7 +92,7 @@ class GeohashPlaceCache {
   /// this returns something.
   String? cached(String geohash) => _cache[geohash.toLowerCase()];
 
-  /// Resolves [geohash] to "City, Country", queued behind any other lookup.
+  /// Resolves [geohash] to "City, Country" under the concurrency bound.
   Future<String> resolve(String geohash) {
     final key = geohash.toLowerCase();
     final hit = _cache[key];
@@ -97,41 +101,43 @@ class GeohashPlaceCache {
     final pending = _inflight[key];
     if (pending != null) return pending;
 
-    final completer = Completer<String>();
-    _inflight[key] = completer.future;
+    final future = _run(key);
+    _inflight[key] = future;
+    return future;
+  }
 
-    _chain = _chain.then((_) async {
-      final gap =
-          _lastAt.add(kGeohashPlaceMinInterval).difference(DateTime.now());
-      if (gap > Duration.zero) await Future<void>.delayed(gap);
-      _lastAt = DateTime.now();
-      try {
-        final coords = decodeGeohash(key);
-        final data = await _api.geocode(coords.lat, coords.lng, zoom: 10);
-        final addr = (data['address'] as Map?) ?? const {};
-        String s(Object? v) => v is String ? v : '';
-        final city = [
-          s(addr['city']),
-          s(addr['town']),
-          s(addr['village']),
-          s(addr['county']),
-        ].firstWhere((x) => x.isNotEmpty, orElse: () => '');
-        final country = s(addr['country']);
-        var place = [city, country].where((x) => x.isNotEmpty).join(', ');
-        if (place.isEmpty) place = 'Unknown location';
-        _cache[key] = place;
-        _scheduleSave();
-        completer.complete(place);
-      } catch (_) {
-        // Report the miss without caching it, so it retries later — but never
-        // let one failure wedge everything queued behind it.
-        completer.complete('');
-      } finally {
-        _inflight.remove(key);
-      }
-    });
-
-    return completer.future;
+  Future<String> _run(String key) async {
+    if (_active >= kGeohashPlaceConcurrency) {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+    }
+    _active++;
+    try {
+      final coords = decodeGeohash(key);
+      final data = await _api.geocode(coords.lat, coords.lng, zoom: 10);
+      final addr = (data['address'] as Map?) ?? const {};
+      String s(Object? v) => v is String ? v : '';
+      final city = [
+        s(addr['city']),
+        s(addr['town']),
+        s(addr['village']),
+        s(addr['county']),
+      ].firstWhere((x) => x.isNotEmpty, orElse: () => '');
+      final country = s(addr['country']);
+      var place = [city, country].where((x) => x.isNotEmpty).join(', ');
+      if (place.isEmpty) place = 'Unknown location';
+      _cache[key] = place;
+      _scheduleSave();
+      return place;
+    } catch (_) {
+      // Report the miss without caching it, so it retries later.
+      return '';
+    } finally {
+      _active--;
+      _inflight.remove(key);
+      if (_waiters.isNotEmpty) _waiters.removeAt(0).complete();
+    }
   }
 }
 
