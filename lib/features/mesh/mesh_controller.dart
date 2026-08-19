@@ -167,6 +167,10 @@ class MeshController extends StateNotifier<MeshUiState> {
         );
         return;
       }
+      // A persisted Ghost Mode session must be re-armed BEFORE we choose an
+      // identity, or boot would announce the real one and only ghost a moment
+      // later — the one announce that would deanonymise the whole session.
+      await _ref.read(ghostModeProvider.notifier).ensureRestored();
       final ghost = _ref.read(ghostModeProvider);
       final identity = ghost.enabled && ghost.current != null
           ? ghost.current!.meshIdentity
@@ -287,6 +291,11 @@ class MeshController extends StateNotifier<MeshUiState> {
   final Set<String> _profileAsked = {};
 
   Future<MeshProfile?> _buildMyProfile(MeshProfileRequest request) async {
+    // An avatar or banner is a far stronger fingerprint than any of the keys
+    // Ghost Mode rotates — the same picture across two epochs relinks them
+    // instantly. Refuse outright rather than relying on the ghost pubkey
+    // happening to have no profile to look up.
+    if (_ref.read(ghostModeProvider).enabled) return null;
     final pubkey = _nostrPubkey?.call();
     (Uint8List, String?)? avatar;
     (Uint8List, String?)? banner;

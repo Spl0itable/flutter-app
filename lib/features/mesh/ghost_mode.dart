@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/constants/storage_keys.dart';
+import '../../state/settings_provider.dart';
 import '../../core/crypto/keys.dart';
 import '../../services/mesh/noise/noise_identity.dart';
 import '../../state/nostr_controller.dart';
@@ -68,7 +70,13 @@ class GhostState {
 /// to an older pubkey are still received and decrypted; nothing is persisted,
 /// so the whole trail dies with the process.
 class GhostModeController extends StateNotifier<GhostState> {
-  GhostModeController({this.onRotate}) : super(const GhostState());
+  GhostModeController({this.onRotate, this.persist})
+      : super(const GhostState());
+
+  /// Persists the on/off choice. The KEYS are never written anywhere — only the
+  /// fact that the mode is on, so a restart comes back ghosted (with a brand
+  /// new identity) instead of silently reverting to the real one.
+  final void Function(bool enabled)? persist;
 
   /// How long one identity is presented before it is replaced.
   static const Duration rotateEvery = Duration(minutes: 15);
@@ -85,12 +93,36 @@ class GhostModeController extends StateNotifier<GhostState> {
 
   Future<void> enable() async {
     if (state.enabled) return;
+    persist?.call(true);
     state = state.copyWith(enabled: true);
     await _newEpoch();
     _arm();
   }
 
+  Future<void>? _restoreFuture;
+
+  /// Re-arms a persisted session at boot. Mints a FRESH identity — the previous
+  /// one is gone, which is the point — and is a no-op if the flag was off.
+  ///
+  /// Deliberately does NOT fire [onRotate]: the mesh awaits [ensureRestored]
+  /// before it picks an identity, so there is nothing to restart, and calling
+  /// back into the mesh from here would re-enter a start already in progress.
+  Future<void> restore({required bool wasEnabled}) {
+    if (!wasEnabled || state.enabled) return Future.value();
+    return _restoreFuture ??= () async {
+      final epoch = await _mintEpoch();
+      state = GhostState(enabled: true, epochs: [epoch]);
+      _arm();
+    }();
+  }
+
+  /// Completes once a persisted session has been re-armed. The mesh awaits this
+  /// before reading [GhostState], so a restart can never announce the real
+  /// identity first and rotate to the ghost one a moment later.
+  Future<void> ensureRestored() => _restoreFuture ?? Future.value();
+
   Future<void> disable() async {
+    persist?.call(false);
     _timer?.cancel();
     _timer = null;
     // Drop every key with the mode: the point is that it leaves no trail.
@@ -105,16 +137,19 @@ class GhostModeController extends StateNotifier<GhostState> {
     _arm();
   }
 
-  Future<void> _newEpoch() async {
+  Future<GhostEpoch> _mintEpoch() async {
     final priv = generatePrivateKey();
-    final epoch = GhostEpoch(
+    return GhostEpoch(
       meshIdentity: await NoiseIdentity.ephemeral(),
       privkey: priv,
       pubkey: getPublicKeyHex(priv),
       nickname: _pseudonym(),
       startedAt: DateTime.now(),
     );
-    final next = [epoch, ...state.epochs];
+  }
+
+  Future<void> _newEpoch() async {
+    final next = [await _mintEpoch(), ...state.epochs];
     if (next.length > maxEpochs) next.removeRange(maxEpochs, next.length);
     state = state.copyWith(epochs: next);
     await onRotate?.call();
@@ -153,10 +188,18 @@ class GhostModeController extends StateNotifier<GhostState> {
 // other, so inference cannot resolve either without a written type.
 final StateNotifierProvider<GhostModeController, GhostState> ghostModeProvider =
     StateNotifierProvider<GhostModeController, GhostState>((ref) {
-  return GhostModeController(onRotate: () async {
-    // Re-point the gift-wrap subscriptions at the new key BEFORE the mesh comes
-    // back up, so a peer that reads the fresh announce can be answered.
-    ref.read(nostrControllerProvider).refreshEphemeralSubscriptions();
-    await ref.read(meshControllerProvider.notifier).restart();
-  });
+  final kv = ref.read(keyValueStoreProvider);
+  final controller = GhostModeController(
+    persist: (on) => kv.setBool(StorageKeys.ghostMode, on),
+    onRotate: () async {
+      // Re-point the gift-wrap subscriptions at the new key BEFORE the mesh
+      // comes back up, so a peer that reads the fresh announce can be answered.
+      ref.read(nostrControllerProvider).refreshEphemeralSubscriptions();
+      await ref.read(meshControllerProvider.notifier).restart();
+    },
+  );
+  unawaited(controller.restore(
+    wasEnabled: kv.getBool(StorageKeys.ghostMode),
+  ));
+  return controller;
 });

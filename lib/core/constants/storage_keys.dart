@@ -48,6 +48,11 @@ class StorageKeys {
   static const wallpaperCustomUrl = 'nym_wallpaper_custom_url';
   static const lowDataMode = 'nym_low_data_mode';
   static const meshEnabled = 'nym_mesh_enabled';
+
+  /// Ghost Mode on/off. Device-local on purpose: it is not part of the synced
+  /// settings blob, so enabling it on one device does not announce that intent
+  /// to the others.
+  static const ghostMode = 'nym_ghost_mode';
   static const groupchatPmOnlyMode = 'nym_groupchat_pm_only_mode';
   static const nickStyle = 'nym_nick_style';
   static const pinnedLandingChannel = 'nym_pinned_landing_channel';

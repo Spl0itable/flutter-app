@@ -30,6 +30,7 @@ class GhostModeButton extends ConsumerWidget {
               painter: _GhostPainter(
                 body: on ? colors.primary : colors.textDim,
                 badge: on ? const Color(0xFF22C55E) : const Color(0xFFEF4444),
+                surface: colors.bgSecondary,
                 checked: on,
               ),
             ),
@@ -83,19 +84,29 @@ class _GhostPainter extends CustomPainter {
   _GhostPainter({
     required this.body,
     required this.badge,
+    required this.surface,
     required this.checked,
   });
 
   final Color body;
   final Color badge;
+
+  /// Painted as a ring behind the badge so it stays readable when the badge and
+  /// the ghost body land on similar colours (green check on a green ghost).
+  final Color surface;
   final bool checked;
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width, h = size.height;
+    // Off reads as an empty outline, on as a solid shape — legible at 24px
+    // without relying on the badge colour alone.
+    final stroke = w * 0.09;
     final p = Paint()
       ..color = body
-      ..style = PaintingStyle.fill;
+      ..style = checked ? PaintingStyle.fill : PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeJoin = StrokeJoin.round;
 
     // Ghost: domed head, straight sides, scalloped hem.
     final path = Path()
@@ -110,19 +121,28 @@ class _GhostPainter extends CustomPainter {
       ..lineTo(w * 0.31, h * 0.92)
       ..lineTo(w * 0.21, h * 0.80)
       ..close();
-    canvas.drawPath(path, p);
+    if (checked) {
+      // Filled: punch the eyes back out of the solid body.
+      final eye = Paint()..blendMode = BlendMode.clear;
+      canvas.saveLayer(Offset.zero & size, Paint());
+      canvas.drawPath(path, p);
+      canvas.drawCircle(Offset(w * 0.30, h * 0.47), w * 0.065, eye);
+      canvas.drawCircle(Offset(w * 0.54, h * 0.47), w * 0.065, eye);
+      canvas.restore();
+    } else {
+      // Outline: the body is a stroke, so the eyes are drawn as solid dots.
+      canvas.drawPath(path, p);
+      final eye = Paint()
+        ..color = body
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(Offset(w * 0.30, h * 0.47), w * 0.055, eye);
+      canvas.drawCircle(Offset(w * 0.54, h * 0.47), w * 0.055, eye);
+    }
 
-    // Eyes punched out of the body.
-    final eye = Paint()..blendMode = BlendMode.clear;
-    canvas.saveLayer(Offset.zero & size, Paint());
-    canvas.drawPath(path, p);
-    canvas.drawCircle(Offset(w * 0.30, h * 0.47), w * 0.065, eye);
-    canvas.drawCircle(Offset(w * 0.54, h * 0.47), w * 0.065, eye);
-    canvas.restore();
-
-    // Status badge, bottom-right.
-    final c = Offset(w * 0.80, h * 0.80);
-    final r = w * 0.21;
+    // Status badge, bottom-right. Inset so the ring stays inside the box.
+    final c = Offset(w * 0.72, h * 0.72);
+    final r = w * 0.20;
+    canvas.drawCircle(c, r * 1.30, Paint()..color = surface);
     canvas.drawCircle(c, r, Paint()..color = badge);
     final mark = Paint()
       ..color = Colors.white
@@ -147,5 +167,8 @@ class _GhostPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_GhostPainter old) =>
-      old.body != body || old.badge != badge || old.checked != checked;
+      old.body != body ||
+      old.badge != badge ||
+      old.surface != surface ||
+      old.checked != checked;
 }
