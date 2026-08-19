@@ -40,6 +40,7 @@ import 'channel_list_item.dart';
 import 'pm_context_menu.dart';
 import 'pm_list_item.dart';
 import 'sidebar_row_gestures.dart';
+import 'sidebar_row_menu_button.dart';
 import 'sidebar_skeleton.dart';
 import 'user_list_item.dart';
 
@@ -1956,6 +1957,16 @@ class _GroupListItem extends ConsumerWidget {
                     const SizedBox(width: 5),
                     _GroupUnreadPill(count: unread),
                   ],
+                  // Same menu the hold opens, to the right of the unread pill
+                  // (`.row-menu-btn`).
+                  const SizedBox(width: 2),
+                  SidebarRowMenuButton(
+                    semanticLabel: 'Group menu',
+                    onShowMenu: (pos) {
+                      _leaveMenu(context, ref, pos);
+                      return true;
+                    },
+                  ),
                 ],
               ),
             ),

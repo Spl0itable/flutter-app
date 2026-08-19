@@ -12,6 +12,7 @@ import '../context_menu/profile_badges.dart';
 import '../nym_icons.dart';
 import 'pm_context_menu.dart';
 import 'sidebar_row_gestures.dart';
+import 'sidebar_row_menu_button.dart';
 
 /// A single PM thread row (`.pm-item`, pms.js `createPMConversation`). Same box
 /// metrics as `.channel-item` with a 26px PM avatar (`margin-right:4px`), the
@@ -180,6 +181,17 @@ class PMListItem extends ConsumerWidget {
                     if (unread > 0) ...[
                       const SizedBox(width: 5),
                       _UnreadPill(count: unread),
+                    ],
+                    // Same menu the hold opens, to the right of the unread
+                    // pill (`.row-menu-btn`).
+                    if (pubkey.isNotEmpty) ...[
+                      const SizedBox(width: 2),
+                      SidebarRowMenuButton(
+                        onShowMenu: (pos) {
+                          showPmContextMenu(context, ref, pubkey, pos);
+                          return true;
+                        },
+                      ),
                     ],
                   ],
                 ),
