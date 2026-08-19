@@ -291,12 +291,11 @@ class HomeShellState extends ConsumerState<HomeShell>
     _narrow = !isWide;
 
     // Deck (multi-column) vs single chat view (`nym_chat_view_mode`).
-    final useColumns =
-        ref.watch(settingsProvider.select((s) => s.useColumns));
+    final useColumns = ref.watch(settingsProvider.select((s) => s.useColumns));
     // Ghost swaps the ambient glow to white tints with no vignette
     // (`body.theme-ghost::before`).
-    final isGhost = ref.watch(
-        settingsProvider.select((s) => s.theme == NymThemeKey.ghost));
+    final isGhost =
+        ref.watch(settingsProvider.select((s) => s.theme == NymThemeKey.ghost));
 
     return Scaffold(
       backgroundColor: c.bg,
@@ -326,12 +325,12 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// stay mounted), matching the PWA, which hides only `#messagesScroller` and
   /// shows `#columnsStrip` in its place (styles-columns.css:9-15) — never the
   /// `.chat-header` or `.input-container`.
-  Widget _content(BuildContext context, bool useColumns, {bool compact = false}) {
+  Widget _content(BuildContext context, bool useColumns,
+      {bool compact = false}) {
     return ChatPane(
       compact: compact,
       useColumns: useColumns,
-      onOpenSidebar:
-          compact ? () => setState(() => _drawerOpen = true) : null,
+      onOpenSidebar: compact ? () => setState(() => _drawerOpen = true) : null,
       onStartCall: _startCall,
       onStartGroupCall: _startGroupCall,
     );
@@ -346,9 +345,7 @@ class HomeShellState extends ConsumerState<HomeShell>
       children: [
         const SizedBox(width: NymDimens.sidebarWidth, child: Sidebar()),
         Expanded(
-          child: meshOpen
-              ? const MeshScreen()
-              : _content(context, useColumns),
+          child: meshOpen ? const MeshScreen() : _content(context, useColumns),
         ),
       ],
     );
@@ -396,8 +393,7 @@ class HomeShellState extends ConsumerState<HomeShell>
             onTap: () => setState(() => _drawerOpen = false),
             child: Container(
               color: Colors.black.withValues(
-                alpha: ref.watch(settingsProvider
-                            .select((s) => s.solidUi)) &&
+                alpha: ref.watch(settingsProvider.select((s) => s.solidUi)) &&
                         context.nym.isLight
                     ? 0.35
                     : 0.6,

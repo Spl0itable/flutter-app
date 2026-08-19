@@ -26,7 +26,12 @@ import '../autocomplete/autocomplete_dropdown.dart';
 import '../autocomplete/autocomplete_queries.dart' show queryEmoji, EmojiResult;
 import '../autocomplete/autocomplete_triggers.dart';
 import '../commands/command_palette.dart'
-    show buildPaletteRows, commandItemRow, paletteCommands, CommandPalette, PaletteRow;
+    show
+        buildPaletteRows,
+        commandItemRow,
+        paletteCommands,
+        CommandPalette,
+        PaletteRow;
 import '../commands/command_registry.dart' show CommandSpec;
 import '../emoji/emoji_data.dart';
 import '../emoji/emoji_picker.dart';
@@ -988,7 +993,8 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     final next = text.replaceRange(start, caret, result.insertText);
     _controller.value = TextEditingValue(
       text: next,
-      selection: TextSelection.collapsed(offset: start + result.insertText.length),
+      selection:
+          TextSelection.collapsed(offset: start + result.insertText.length),
     );
     _onTextChanged();
     _focus.requestFocus();
@@ -2011,7 +2017,8 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
     if (_cmdRows.isNotEmpty) {
       return CommandPalette(
         rows: _cmdRows,
-        selectedIndex: _paletteIndex.clamp(0, (_paletteLength - 1).clamp(0, 1 << 30)),
+        selectedIndex:
+            _paletteIndex.clamp(0, (_paletteLength - 1).clamp(0, 1 << 30)),
         onSelect: _completeCommand,
       );
     }

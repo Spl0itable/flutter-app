@@ -118,10 +118,18 @@ void main() {
     });
 
     test('contains the credit ops as credit commands', () {
-      for (final name in ['balance', 'buy', 'model', 'git', 'gift', 'transfer']) {
+      for (final name in [
+        'balance',
+        'buy',
+        'model',
+        'git',
+        'gift',
+        'transfer'
+      ]) {
         final cmd = lookupBotCommand(name);
         expect(cmd, isNotNull);
-        expect(cmd!.creditCommand, isTrue, reason: '?$name should be a credit op');
+        expect(cmd!.creditCommand, isTrue,
+            reason: '?$name should be a credit op');
       }
     });
 
@@ -151,8 +159,8 @@ void main() {
     });
 
     test('multi-line + multiple blocks concatenated', () {
-      final reply = splitReasoning(
-          '<think>first\nline</think>A<think>second</think>B');
+      final reply =
+          splitReasoning('<think>first\nline</think>A<think>second</think>B');
       expect(reply.reasoning, 'first\nline\n\nsecond');
       expect(reply.text, 'AB');
     });

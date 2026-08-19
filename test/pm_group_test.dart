@@ -35,11 +35,12 @@ void main() {
       expect(GroupLogic.tagValue(rumor.tags, 'x'), nymMessageId);
       expect(GroupLogic.tagValue(rumor.tags, 'ms'), '1700000000123');
 
-      final wrap =
-          nip59Wrap(rumor: rumor, senderPrivkey: senderSk, recipientPubkey: recipientPk);
+      final wrap = nip59Wrap(
+          rumor: rumor, senderPrivkey: senderSk, recipientPubkey: recipientPk);
       expect(wrap.kind, EventKind.giftWrap);
 
-      final res = await unwrapGiftWrap(wrap, [(sk: recipientSk, bitchat: false)]);
+      final res =
+          await unwrapGiftWrap(wrap, [(sk: recipientSk, bitchat: false)]);
       expect(res, isNotNull);
       expect(res!.rumor['content'], 'hello over nip-17');
       expect(res.rumor['pubkey'], senderPk);
@@ -75,9 +76,10 @@ void main() {
         content: 'self copy',
         nymMessageId: PmLogic.generateSharedEventId(),
       );
-      final selfWrap =
-          nip59Wrap(rumor: rumor, senderPrivkey: selfSk, recipientPubkey: selfPk);
-      final res = await unwrapGiftWrap(selfWrap, [(sk: selfSk, bitchat: false)]);
+      final selfWrap = nip59Wrap(
+          rumor: rumor, senderPrivkey: selfSk, recipientPubkey: selfPk);
+      final res =
+          await unwrapGiftWrap(selfWrap, [(sk: selfSk, bitchat: false)]);
       final m = PmLogic.mapPmRumor(
         rumor: res!.rumor,
         wrapId: selfWrap.id,
@@ -607,7 +609,8 @@ void main() {
       final info = PmLogic.parseReceipt(rumor)!;
       expect(info.messageId, 'MSGID123');
       expect(info.receiptType, 'read');
-      expect(PmLogic.deliveryFromReceipt(info.receiptType), DeliveryStatus.read);
+      expect(
+          PmLogic.deliveryFromReceipt(info.receiptType), DeliveryStatus.read);
       // status ordering only advances.
       expect(
         PmLogic.statusOrder(DeliveryStatus.read) >
@@ -686,7 +689,8 @@ void main() {
       expect(n.closedPMs.contains(peer), isFalse);
     });
 
-    test('onClosedPmsChanged fires on close/re-open; hydrate restores (F02)', () {
+    test('onClosedPmsChanged fires on close/re-open; hydrate restores (F02)',
+        () {
       final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
       var fired = 0;
       n.onClosedPmsChanged = () => fired++;
@@ -788,8 +792,8 @@ void main() {
         nymMessageId: 'nmid2',
         ephemeralPk: 'ephpk',
       );
-      final wrap =
-          nip59Wrap(rumor: rumor, senderPrivkey: selfSk, recipientPubkey: memberPk);
+      final wrap = nip59Wrap(
+          rumor: rumor, senderPrivkey: selfSk, recipientPubkey: memberPk);
       final res = await unwrapGiftWrap(wrap, [(sk: memberSk, bitchat: false)]);
       expect(res, isNotNull);
       expect(res!.rumor['content'], 'group payload');
@@ -835,13 +839,14 @@ void main() {
         readerPubkey: readerPk,
         readerNym: 'neo#2222',
       );
-      final msg = n.state.messages['#$geohash']!
-          .firstWhere((m) => m.id == msgId);
+      final msg =
+          n.state.messages['#$geohash']!.firstWhere((m) => m.id == msgId);
       expect(msg.readers[readerPk], 'neo#2222');
       expect(msg.readers.length, 1);
     });
 
-    test('a receipt that arrives before its message is replayed on landing', () {
+    test('a receipt that arrives before its message is replayed on landing',
+        () {
       final n = AppStateNotifier()..goLive(selfPk, 'me#1111');
       // Receipt first — no message yet, so nothing to mirror onto.
       n.applyChannelReader(
@@ -851,8 +856,8 @@ void main() {
       );
       // Message lands afterwards → readers get attached.
       ingestOwnChannelMessage(n);
-      final msg = n.state.messages['#$geohash']!
-          .firstWhere((m) => m.id == msgId);
+      final msg =
+          n.state.messages['#$geohash']!.firstWhere((m) => m.id == msgId);
       expect(msg.readers[readerPk], 'neo#2222');
     });
 
@@ -876,8 +881,8 @@ void main() {
         readerPubkey: readerPk,
         readerNym: 'neo#2222',
       );
-      final msg = n.state.messages['#$geohash']!
-          .firstWhere((m) => m.id == msgId);
+      final msg =
+          n.state.messages['#$geohash']!.firstWhere((m) => m.id == msgId);
       expect(msg.readers, isEmpty);
     });
 
@@ -893,8 +898,8 @@ void main() {
       // Same reader sends an updated display name.
       n.applyChannelReader(
           messageId: msgId, readerPubkey: readerPk, readerNym: 'neo2#2222');
-      final msg = n.state.messages['#$geohash']!
-          .firstWhere((m) => m.id == msgId);
+      final msg =
+          n.state.messages['#$geohash']!.firstWhere((m) => m.id == msgId);
       expect(msg.readers.length, 2);
       expect(msg.readers[readerPk], 'neo2#2222');
       expect(msg.readers[readerPk2], 'trin#3333');

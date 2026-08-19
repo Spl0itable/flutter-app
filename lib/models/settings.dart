@@ -250,7 +250,8 @@ class Settings {
   /// (PWA `_normalizeIndicatorScope`, settings.js:27-32): legacy booleans map
   /// `'true'` → `'everywhere'` and `'false'` → `'disabled'`; anything else
   /// out-of-enum falls back to [fallback].
-  static String normalizeIndicatorScope(String? value, {String fallback = 'pms-groups'}) {
+  static String normalizeIndicatorScope(String? value,
+      {String fallback = 'pms-groups'}) {
     if (value == 'true') return 'everywhere';
     if (value == 'false') return 'disabled';
     if (value != null && indicatorScopes.contains(value)) return value;
@@ -299,10 +300,9 @@ class Settings {
       ),
       typingIndicatorsScope: normalizeIndicatorScope(
         kv.getString(StorageKeys.typingIndicatorsScope),
-        fallback:
-            kv.getString(StorageKeys.typingIndicatorsEnabled) == 'false'
-                ? 'disabled'
-                : 'everywhere',
+        fallback: kv.getString(StorageKeys.typingIndicatorsEnabled) == 'false'
+            ? 'disabled'
+            : 'everywhere',
       ),
       nickStyle: kv.getString(StorageKeys.nickStyle) ?? 'fancy',
       chatLayout: kv.getString(StorageKeys.chatLayout) ?? 'bubbles',
@@ -341,11 +341,9 @@ class Settings {
           kv.getBool(StorageKeys.syncMlsHistory, defaultValue: true),
       showStatus: kv.getString(StorageKeys.showStatus) ?? 'true',
       wallpaperType: kv.getString(StorageKeys.wallpaperType) ?? 'geometric',
-      notificationsEnabled: (kv.getString(StorageKeys.notificationsEnabled) ??
-              'true') !=
-          'false',
-      hideNonPinned:
-          kv.getBool(StorageKeys.hideNonPinned, defaultValue: false),
+      notificationsEnabled:
+          (kv.getString(StorageKeys.notificationsEnabled) ?? 'true') != 'false',
+      hideNonPinned: kv.getBool(StorageKeys.hideNonPinned, defaultValue: false),
     );
   }
 }

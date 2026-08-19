@@ -73,7 +73,9 @@ void main() {
       // The quoted body should contain the text "hi".
       final para = q.children.whereType<ParagraphBlock>().first;
       expect(
-        para.inlines.whereType<TextSpanNode>().any((t) => t.text.contains('hi')),
+        para.inlines
+            .whereType<TextSpanNode>()
+            .any((t) => t.text.contains('hi')),
         isTrue,
       );
     });
@@ -200,7 +202,9 @@ void main() {
       expect(inlines.whereType<EmojiNode>(), isEmpty);
       expect(inlines.whereType<CustomEmojiNode>(), isEmpty);
       expect(
-        inlines.whereType<TextSpanNode>().any((t) => t.text.contains(':notanemoji:')),
+        inlines
+            .whereType<TextSpanNode>()
+            .any((t) => t.text.contains(':notanemoji:')),
         isTrue,
       );
     });
@@ -252,7 +256,8 @@ void main() {
       for (final ext in ['ogg', 'webm', 'mp4', 'mov']) {
         final blocks = NymFormat.format('https://x.com/clip.$ext');
         expect(blocks.whereType<AudioBlock>(), isEmpty, reason: '.$ext');
-        expect(blocks.whereType<MediaBlock>().first.items.single.isVideo, isTrue,
+        expect(
+            blocks.whereType<MediaBlock>().first.items.single.isVideo, isTrue,
             reason: '.$ext');
       }
     });

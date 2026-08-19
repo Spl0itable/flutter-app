@@ -46,8 +46,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../context_menu/interaction_hooks.dart';
-import 'message_row.dart'
-    show GroupInfoMember, encodeGroupInfoSystemMessage;
+import 'message_row.dart' show GroupInfoMember, encodeGroupInfoSystemMessage;
 
 /// Session-wide per-conversation unsent drafts — the PWA's app-level
 /// `_inputDrafts` map + `_getInputContextKey` (channels.js:1075-1105). The PWA
@@ -359,10 +358,7 @@ class _ComposerState extends ConsumerState<Composer> {
       }
       if (depth < 1) kept.add(line);
     }
-    return kept
-        .join('\n')
-        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
-        .trim();
+    return kept.join('\n').replaceAll(RegExp(r'\n{3,}'), '\n\n').trim();
   }
 
   /// The chip's cleaned preview text: drop the hidden game-state token, then
@@ -550,8 +546,9 @@ class _ComposerState extends ConsumerState<Composer> {
       _onSystemMessage(tr('User {user} not found', {'user': arg.trim()}));
       return;
     }
-    unawaited(
-        ref.read(nostrControllerProvider).addGroupMembers(view.id, [target.pubkey]));
+    unawaited(ref
+        .read(nostrControllerProvider)
+        .addGroupMembers(view.id, [target.pubkey]));
   }
 
   /// `/unban @nym` — a port of the PWA's owner-only `unbanFromGroup`
@@ -623,22 +620,20 @@ class _ComposerState extends ConsumerState<Composer> {
         (
           pubkey: pk,
           labels: [
-            if (pk == ownerPk)
-              'owner'
-            else if (mods.contains(pk))
-              'mod',
+            if (pk == ownerPk) 'owner' else if (mods.contains(pk)) 'mod',
             if (pk == app.selfPubkey) 'you',
           ],
         ),
     ];
     ref.read(nostrControllerProvider).ensureProfiles(sorted);
     // Straight to the in-list system pill — no SnackBar echo of the payload.
-    ref.read(appStateProvider.notifier).addSystemMessage(
-        encodeGroupInfoSystemMessage((
-      name: group.name,
-      count: group.members.length,
-      members: members,
-    )));
+    ref
+        .read(appStateProvider.notifier)
+        .addSystemMessage(encodeGroupInfoSystemMessage((
+          name: group.name,
+          count: group.members.length,
+          members: members,
+        )));
   }
 
   void _onFocusChanged() {
@@ -687,8 +682,8 @@ class _ComposerState extends ConsumerState<Composer> {
     final next = [..._translateFavorites];
     if (!next.remove(code)) next.add(code);
     setState(() => _translateFavorites = next);
-    _ensurePrefs()
-        .then((prefs) => prefs.setString(kTranslateFavoritesKey, jsonEncode(next)));
+    _ensurePrefs().then(
+        (prefs) => prefs.setString(kTranslateFavoritesKey, jsonEncode(next)));
   }
 
   /// Insert text at the current selection (mirrors PWA `insertEmoji`/`insertGif`
@@ -784,8 +779,7 @@ class _ComposerState extends ConsumerState<Composer> {
     // subcommands, so the `?` palette must survive a space there
     // (`showBotCommandPalette` with `inBotPM`, commands.js:436-468).
     final botPM = _inBotPM();
-    final trigger =
-        detectTrigger(_controller.text, caret: caret, botPM: botPM);
+    final trigger = detectTrigger(_controller.text, caret: caret, botPM: botPM);
     _trigger = trigger;
     _selectedIndex = 0;
 
@@ -872,8 +866,7 @@ class _ComposerState extends ConsumerState<Composer> {
     // `.message-input { padding: 10px 16px }` + 1px borders; with text the
     // right inset is the 38px translate-button reserve (see [_textField]).
     final hasText = text.trim().isNotEmpty;
-    final contentWidth =
-        box.size.width - 16 - (hasText ? 38 : 16) - 2;
+    final contentWidth = box.size.width - 16 - (hasText ? 38 : 16) - 2;
     if (contentWidth <= 0) return _popout;
     final painter = TextPainter(
       text: TextSpan(text: text, style: TextStyle(fontSize: fontSize)),
@@ -984,8 +977,7 @@ class _ComposerState extends ConsumerState<Composer> {
   /// SENT message text is byte-for-byte what it was before the chip.
   void _selectMention(MentionResult m) {
     final fullNym = '${m.baseNym}#${m.suffix}';
-    final ch =
-        _controller.mentionSentinel(fullNym: fullNym, pubkey: m.pubkey);
+    final ch = _controller.mentionSentinel(fullNym: fullNym, pubkey: m.pubkey);
     _replaceTriggerToken(ch != null ? '$ch ' : m.insertText);
   }
 
@@ -1092,9 +1084,7 @@ class _ComposerState extends ConsumerState<Composer> {
       // hardware Enter would only ever insert a newline (never send).
       final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
           event.logicalKey == LogicalKeyboardKey.numpadEnter;
-      if (isEnter &&
-          !_popout &&
-          !HardwareKeyboard.instance.isShiftPressed) {
+      if (isEnter && !_popout && !HardwareKeyboard.instance.isShiftPressed) {
         _send();
         return KeyEventResult.handled;
       }
@@ -1691,7 +1681,8 @@ class _ComposerState extends ConsumerState<Composer> {
                     width: 22,
                     height: 22,
                     child: Center(
-                      child: NymSvgIcon(NymIcons.close, size: 14, color: c.textDim),
+                      child: NymSvgIcon(NymIcons.close,
+                          size: 14, color: c.textDim),
                     ),
                   ),
                 ),
@@ -1837,22 +1828,23 @@ class _ComposerState extends ConsumerState<Composer> {
             onSelect: _completeCommand,
           )
         : _botPaletteActive
-        ? BotCommandPalette(
-            rows: _botRows,
-            selectedIndex: _selectedIndex,
-            onSelect: _completeBotCommand,
-          )
-        : AutocompleteDropdown(
-            view: _acView!,
-            selectedIndex: _selectedIndex,
-            custom: _customEmojis,
-            badgesFor: _mentionBadges,
-            cosmeticsFor: (pk) => resolveCosmetics(ref, pk),
-            onSelectMention: _selectMention,
-            onSelectChannel: (ch) => _replaceTriggerToken(ch.insertText),
-            onSelectEmoji: _onEmojiAutocompletePicked,
-            onSelectKaomoji: (k) => _replaceTriggerToken(kaomojiInsertText(k)),
-          );
+            ? BotCommandPalette(
+                rows: _botRows,
+                selectedIndex: _selectedIndex,
+                onSelect: _completeBotCommand,
+              )
+            : AutocompleteDropdown(
+                view: _acView!,
+                selectedIndex: _selectedIndex,
+                custom: _customEmojis,
+                badgesFor: _mentionBadges,
+                cosmeticsFor: (pk) => resolveCosmetics(ref, pk),
+                onSelectMention: _selectMention,
+                onSelectChannel: (ch) => _replaceTriggerToken(ch.insertText),
+                onSelectEmoji: _onEmojiAutocompletePicked,
+                onSelectKaomoji: (k) =>
+                    _replaceTriggerToken(kaomojiInsertText(k)),
+              );
     // The dropdown is anchored to the in-flow slot's TOP, but the PWA pushes it
     // up by `--ac-offset = overhang + (previewH ? previewH+8 : 0)`
     // (ui-context.js:1759): the popout OVERHANG (the floating field's height
@@ -2101,7 +2093,8 @@ class _ComposerState extends ConsumerState<Composer> {
         borderRadius: NymRadius.rmd,
         // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5).
         boxShadow: [
-          BoxShadow(color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
+          BoxShadow(
+              color: Color(0x80000000), blurRadius: 32, offset: Offset(0, 8)),
         ],
       ),
       child: stack,
@@ -2192,8 +2185,9 @@ class _ComposerState extends ConsumerState<Composer> {
                   // .translate-input-dropdown` flips to white@0.98 / black@0.12 /
                   // shadow rgba(0,0,0,0.12) (styles-themes-responsive.css:1278-
                   // 1282) — M4.
-                  color:
-                      c.isLight ? Colors.white.withValues(alpha: 0.98) : c.bgSecondary,
+                  color: c.isLight
+                      ? Colors.white.withValues(alpha: 0.98)
+                      : c.bgSecondary,
                   border: Border.all(
                       color: c.isLight
                           ? Colors.black.withValues(alpha: 0.12)
@@ -2217,8 +2211,8 @@ class _ComposerState extends ConsumerState<Composer> {
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        border: Border(
-                            bottom: BorderSide(color: c.glassBorder)),
+                        border:
+                            Border(bottom: BorderSide(color: c.glassBorder)),
                       ),
                       // NOT autofocused: the PWA never focuses the dropdown
                       // search on open (only the Select-Your-Language MODAL
@@ -2269,8 +2263,7 @@ class _ComposerState extends ConsumerState<Composer> {
                             )
                           : ListView.builder(
                               shrinkWrap: true,
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 4),
+                              padding: const EdgeInsets.symmetric(vertical: 4),
                               itemCount: langs.length,
                               itemBuilder: (_, i) {
                                 final e = langs[i];
@@ -2539,6 +2532,7 @@ class _IconBtn extends StatefulWidget {
     this.enabled = true,
     this.onTap,
   }) : assert(svg != null || label != null, 'provide an svg or a label');
+
   /// The exact-PWA glyph markup (image/file/emoji), or null for a [label] button.
   final String? svg;
 
@@ -2608,8 +2602,7 @@ class _IconBtnState extends State<_IconBtn> {
     final btn = Tooltip(
       message: widget.tooltip,
       child: MouseRegion(
-        cursor:
-            enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
         onEnter: enabled ? (_) => setState(() => _hover = true) : null,
         onExit: enabled ? (_) => setState(() => _hover = false) : null,
         child: AnimatedContainer(
@@ -2817,8 +2810,8 @@ class _SendButtonState extends State<_SendButton> {
                   // Desktop `.send-btn`: `padding:10px 22px` / `font-size:12px`.
                   // Phone (≤768): `padding:10px` / `font-size:11px`
                   // (styles-themes-responsive.css:341).
-                  padding: EdgeInsets.symmetric(
-                      horizontal: widget.phone ? 10 : 22),
+                  padding:
+                      EdgeInsets.symmetric(horizontal: widget.phone ? 10 : 22),
                   alignment: Alignment.center,
                   child: Text(
                     _anonFired ? tr('ANON') : tr('SEND'),
@@ -2872,13 +2865,15 @@ class _PreviewChip extends StatelessWidget {
         // .quote-preview/.edit-preview` re-states rgba(0,0,0,0.08) — the light
         // glassBorder — so both themes resolve to glassBorder.
         border: Border.all(color: c.glassBorder),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
         // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); `body.light-mode` softens
         // it to 0 8px 32px rgba(0,0,0,0.12) (styles-themes-responsive.css:
         // 1070-1083).
         boxShadow: [
           BoxShadow(
-            color: c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+            color:
+                c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
             blurRadius: 32,
             offset: const Offset(0, 8),
           ),
@@ -3131,9 +3126,7 @@ class _ChipCloseButtonState extends State<_ChipCloseButton> {
             child: NymSvgIcon(
               NymIcons.close,
               size: 16,
-              color: _hover
-                  ? (c.isLight ? c.text : Colors.white)
-                  : c.textDim,
+              color: _hover ? (c.isLight ? c.text : Colors.white) : c.textDim,
             ),
           ),
         ),

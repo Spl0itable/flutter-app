@@ -18,7 +18,8 @@ import 'mesh_transport.dart';
 class BleMeshTransport implements MeshTransport {
   /// [advertisedName] is our mesh peerID — bitchat advertises the peerID as the
   /// BLE device name so peers can pre-seed identity before the announce packet.
-  BleMeshTransport(String advertisedName) : _advertisedNameString = advertisedName;
+  BleMeshTransport(String advertisedName)
+      : _advertisedNameString = advertisedName;
 
   /// Diagnostic sink, wired by [MeshController] to the on-screen mesh log so a
   /// device with no adb/Console access can still see the radio lifecycle —
@@ -102,7 +103,8 @@ class BleMeshTransport implements MeshTransport {
   Future<MeshTransportAvailability> start() async {
     if (_started) return _availability;
     _started = true;
-    _log('start(): bringing up central+peripheral (peerID=$_advertisedNameString)');
+    _log(
+        'start(): bringing up central+peripheral (peerID=$_advertisedNameString)');
 
     // Wire the event handlers and BOTH managers' state listeners BEFORE the
     // authorize() awaits below. On iOS each CBManager is created in .unknown
@@ -225,7 +227,8 @@ class BleMeshTransport implements MeshTransport {
 
   void _wireCentral() {
     _subs.add(_central.discovered.listen((e) => _onDiscovered(e)));
-    _subs.add(_central.connectionStateChanged.listen(_onCentralConnectionState));
+    _subs
+        .add(_central.connectionStateChanged.listen(_onCentralConnectionState));
     _subs.add(_central.characteristicNotified.listen((e) {
       if (e.characteristic.uuid != _characteristicUuid) return;
       _inbound.add(MeshInboundFrame(
@@ -316,7 +319,8 @@ class BleMeshTransport implements MeshTransport {
       try {
         await _central.requestMTU(e.peripheral, mtu: MeshConstants.desiredMtu);
       } catch (err) {
-        _log('requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
+        _log(
+            'requestMTU unsupported (${err.runtimeType}); using negotiated MTU');
       }
       var services =
           await _central.discoverGATT(e.peripheral).timeout(_discoverTimeout);
@@ -363,8 +367,7 @@ class BleMeshTransport implements MeshTransport {
     }
   }
 
-  void _onCentralConnectionState(
-      PeripheralConnectionStateChangedEventArgs e) {
+  void _onCentralConnectionState(PeripheralConnectionStateChangedEventArgs e) {
     if (e.state == ConnectionState.disconnected) {
       final id = e.peripheral.uuid.toString();
       if (_centralLinks.remove(id) != null) {

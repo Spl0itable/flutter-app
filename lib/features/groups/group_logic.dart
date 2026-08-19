@@ -113,7 +113,9 @@ class GroupEphemeralKeys {
   /// `{ members, memberKeyTs?, self?: { current, prev[] } }`. `memberKeyTs` is
   /// only emitted when non-empty (the PWA gates it on `ek._memberKeyTs`).
   Map<String, dynamic> toSyncJson() {
-    final entry = <String, dynamic>{'members': Map<String, String>.from(members)};
+    final entry = <String, dynamic>{
+      'members': Map<String, String>.from(members)
+    };
     if (memberKeyTs.isNotEmpty) {
       entry['memberKeyTs'] = Map<String, int>.from(memberKeyTs);
     }
@@ -714,7 +716,8 @@ class GroupLogic {
         }
         group.members.remove(senderPubkey);
         group.mods.remove(senderPubkey);
-        _modLog(group, type: 'leave', actor: senderPubkey, target: senderPubkey);
+        _modLog(group,
+            type: 'leave', actor: senderPubkey, target: senderPubkey);
         return GroupControlResult.applied;
 
       case GroupControlType.deleteMessage:

@@ -243,7 +243,8 @@ class MeshController extends StateNotifier<MeshUiState> {
     refreshMarkers();
   }
 
-  bool hasChannelKey(String channel) => _service?.hasChannelKey(channel) ?? false;
+  bool hasChannelKey(String channel) =>
+      _service?.hasChannelKey(channel) ?? false;
 
   /// Re-copies the bridge's mesh markers into the UI state so the sidebar can
   /// badge newly-seen mesh channels/PMs. Called by the bridge as traffic lands.
@@ -336,7 +337,8 @@ class MeshController extends StateNotifier<MeshUiState> {
     final seeds = <String>{peerID, meshStablePubkeyForPeerId(peerID)};
     final peer = state.peerById(peerID);
     if (peer != null) {
-      seeds.add(_bridge?.pubkeyForPeer(peer) ?? meshStablePubkeyForPeerId(peerID));
+      seeds.add(
+          _bridge?.pubkeyForPeer(peer) ?? meshStablePubkeyForPeerId(peerID));
       if (peer.nostrLinkVerified && peer.nostrPubkey != null) {
         seeds.add(peer.nostrPubkey!);
       }

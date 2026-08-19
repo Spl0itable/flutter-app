@@ -109,8 +109,8 @@ class _AudioMessageState extends State<AudioMessage> {
   Future<void> _seek(double fraction) async {
     if (_duration <= Duration.zero) return;
     await _ensurePlayer();
-    final target = Duration(
-        milliseconds: (_duration.inMilliseconds * fraction).round());
+    final target =
+        Duration(milliseconds: (_duration.inMilliseconds * fraction).round());
     await _player!.seek(target);
     if (mounted) setState(() => _position = target);
   }

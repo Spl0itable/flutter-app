@@ -221,7 +221,8 @@ List<BotPMCommand>? botPMSubcommands(String cmd, [String rest = '']) {
   if (cmd == '?model') {
     return [
       for (final m in kProModels)
-        BotPMCommand(name: '?model ${m.key}', desc: '${m.label} — ${m.priceLabel}'),
+        BotPMCommand(
+            name: '?model ${m.key}', desc: '${m.label} — ${m.priceLabel}'),
       const BotPMCommand(
           name: '?model off', desc: 'Back to standard multi-model routing'),
     ];
@@ -242,19 +243,23 @@ List<BotPMCommand>? botPMSubcommands(String cmd, [String rest = '']) {
     }
     return const [
       BotPMCommand(
-          name: '?git provider', desc: 'Choose github, gitlab, or gitea [host]'),
+          name: '?git provider',
+          desc: 'Choose github, gitlab, or gitea [host]'),
       BotPMCommand(name: '?git token', desc: 'Save your personal access token'),
       BotPMCommand(name: '?git repos', desc: 'List repos the token can access'),
       BotPMCommand(
           name: '?git repo', desc: 'Select working repo (owner/name [branch])'),
       BotPMCommand(name: '?git branch', desc: 'Set the working branch'),
       BotPMCommand(
-          name: '?git writes on', desc: 'Allow commits, branches & pull requests'),
+          name: '?git writes on',
+          desc: 'Allow commits, branches & pull requests'),
       BotPMCommand(
           name: '?git writes off', desc: 'Back to read-only repo access'),
-      BotPMCommand(name: '?git off', desc: 'Disconnect the repo (keeps the token)'),
       BotPMCommand(
-          name: '?git disconnect', desc: 'Remove token and repo from this device'),
+          name: '?git off', desc: 'Disconnect the repo (keeps the token)'),
+      BotPMCommand(
+          name: '?git disconnect',
+          desc: 'Remove token and repo from this device'),
     ];
   }
   return null;
@@ -290,7 +295,11 @@ List<BotPMCommand> filterBotPMCommands(String input) {
   if (subs == null) return const [];
   return [
     for (final s in subs)
-      if (s.name.toLowerCase().substring(base.length).trimLeft().startsWith(rest))
+      if (s.name
+          .toLowerCase()
+          .substring(base.length)
+          .trimLeft()
+          .startsWith(rest))
         s,
   ];
 }

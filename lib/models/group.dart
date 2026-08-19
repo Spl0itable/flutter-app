@@ -149,13 +149,17 @@ class Group {
   factory Group.fromJson(Map<String, dynamic> j) => Group(
         id: j['id'] as String,
         name: (j['name'] ?? '') as String,
-        members:
-            ((j['members'] as List?) ?? const []).map((e) => e.toString()).toList(),
+        members: ((j['members'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
         lastMessageTime: (j['lastMessageTime'] as num?)?.toInt() ?? 0,
         createdBy: j['createdBy'] as String?,
-        mods: ((j['mods'] as List?) ?? const []).map((e) => e.toString()).toList(),
-        banned:
-            ((j['banned'] as List?) ?? const []).map((e) => e.toString()).toList(),
+        mods: ((j['mods'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
+        banned: ((j['banned'] as List?) ?? const [])
+            .map((e) => e.toString())
+            .toList(),
         avatar: j['avatar'] as String?,
         banner: j['banner'] as String?,
         description: j['description'] as String?,
@@ -168,14 +172,15 @@ class Group {
         shareHistory: j['shareHistory'] == true,
         historyReceived: j['historyReceived'] == true,
         modTsByTarget: j['modTsByTarget'] is Map
-            ? (j['modTsByTarget'] as Map).map((k, v) =>
-                MapEntry(k.toString(), (v as num?)?.toInt() ?? 0))
+            ? (j['modTsByTarget'] as Map).map(
+                (k, v) => MapEntry(k.toString(), (v as num?)?.toInt() ?? 0))
             : null,
         modSeenIds: ((j['modSeenIds'] as List?) ?? const [])
             .map((e) => e.toString())
             .toList(),
         modLog: ((j['modLog'] as List?) ?? const [])
-            .map((e) => ModLogEntry.fromJson((e as Map).cast<String, dynamic>()))
+            .map(
+                (e) => ModLogEntry.fromJson((e as Map).cast<String, dynamic>()))
             .toList(),
       );
 }

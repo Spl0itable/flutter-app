@@ -401,7 +401,8 @@ class CacheStore {
         // matter what timestamp it carries — mark it historical so it is never
         // flood-dimmed or snap-in animated on rehydrate (matches the PWA restore
         // path; a live message that was cached and reloaded is no longer "live").
-        out.add(Message.fromJson(e.cast<String, dynamic>())..isHistorical = true);
+        out.add(
+            Message.fromJson(e.cast<String, dynamic>())..isHistorical = true);
       }
     }
     return out;
@@ -467,9 +468,8 @@ class CacheStore {
     final decoded = jsonDecode(json);
     if (decoded is! Map) return null;
     final map = decoded.cast<String, dynamic>();
-    final kind0Ts = (row['kind0Ts'] as int?) ??
-        (map['kind0Ts'] as num?)?.toInt() ??
-        0;
+    final kind0Ts =
+        (row['kind0Ts'] as int?) ?? (map['kind0Ts'] as num?)?.toInt() ?? 0;
     return UserProfile.fromJson(map, kind0Ts: kind0Ts);
   }
 
@@ -828,8 +828,7 @@ class CacheStore {
   /// there is no file to `stat`). Returns 0 if the pragmas are unavailable.
   Future<int> totalBytes() async {
     try {
-      final pageCountRows =
-          await _database.rawQuery('PRAGMA page_count');
+      final pageCountRows = await _database.rawQuery('PRAGMA page_count');
       final pageSizeRows = await _database.rawQuery('PRAGMA page_size');
       final pageCount = _firstInt(pageCountRows);
       final pageSize = _firstInt(pageSizeRows);

@@ -467,8 +467,7 @@ class NymFormat {
         if (depth >= _maxQuoteDepth) continue;
 
         final firstLine = quoteLines.isEmpty ? '' : quoteLines[0];
-        final authorMatch =
-            RegExp(r'^@([^:]+):\s*(.*)').firstMatch(firstLine);
+        final authorMatch = RegExp(r'^@([^:]+):\s*(.*)').firstMatch(firstLine);
         if (authorMatch != null) {
           final parts = <String>[];
           if ((authorMatch[2] ?? '').isNotEmpty) parts.add(authorMatch[2]!);
@@ -564,8 +563,7 @@ class NymFormat {
     }
 
     for (final line in lines) {
-      final fenceOnly =
-          RegExp(r'^F(\d+)$').firstMatch(line.trim());
+      final fenceOnly = RegExp(r'^F(\d+)$').firstMatch(line.trim());
       if (fenceOnly != null) {
         flushPara();
         blocks.add(codeBlocks[int.parse(fenceOnly[1]!)]);
@@ -625,8 +623,8 @@ class NymFormat {
     void flushInlines() {
       if (runInlines.isEmpty) return;
       // Drop trailing/leading empty text-only runs.
-      final hasContent = runInlines.any((n) =>
-          n is! TextSpanNode || (n).text.trim().isNotEmpty);
+      final hasContent = runInlines
+          .any((n) => n is! TextSpanNode || (n).text.trim().isNotEmpty);
       if (hasContent) blocks.add(ParagraphBlock(List.of(runInlines)));
       runInlines = [];
     }
@@ -687,13 +685,16 @@ class NymFormat {
         (m) => _NodeTok(InlineCodeNode(inlineCode[int.parse(m[1]!)])));
 
     // Bold/italic/strike — recursive on inner content.
-    tokens = _splitByRegex(tokens, RegExp(r'\*\*(.+?)\*\*'),
-        (m) => _NodeTok(BoldNode(_parseInline(m[1]!, ctx, codeBlocks, inlineCode))));
+    tokens = _splitByRegex(
+        tokens,
+        RegExp(r'\*\*(.+?)\*\*'),
+        (m) => _NodeTok(
+            BoldNode(_parseInline(m[1]!, ctx, codeBlocks, inlineCode))));
     tokens = _splitByRegex(
         tokens,
         RegExp(r'(?<!\w)__(.+?)__(?!\w)'),
-        (m) =>
-            _NodeTok(BoldNode(_parseInline(m[1]!, ctx, codeBlocks, inlineCode))));
+        (m) => _NodeTok(
+            BoldNode(_parseInline(m[1]!, ctx, codeBlocks, inlineCode))));
     tokens = _splitByRegex(
         tokens,
         RegExp(r'(?<![:/])\*([^*\s][^*]*)\*'),
@@ -750,13 +751,13 @@ class NymFormat {
       final invite = _parseGroupInvite(token);
       if (invite == null) return _RawTok(m[0]!);
       final name = _sanitizeGroupName(invite['n']?.toString() ?? '');
-      return _NodeTok(GroupInviteChip(
-          name: name.isEmpty ? 'group' : name, token: token));
+      return _NodeTok(
+          GroupInviteChip(name: name.isEmpty ? 'group' : name, token: token));
     });
 
     // Bare links.
-    tokens = _splitByRegex(tokens, RegExp(r'https?://[^\s]+'),
-        (m) => _NodeTok(LinkNode(m[0]!)));
+    tokens = _splitByRegex(
+        tokens, RegExp(r'https?://[^\s]+'), (m) => _NodeTok(LinkNode(m[0]!)));
 
     // Mentions with suffix: @name#xxxx. The name part allows SPACES (a nym can
     // be multi-word), bounded by the `#xxxx` suffix — the PWA's
@@ -774,18 +775,16 @@ class NymFormat {
         (m) => _NodeTok(MentionNode(base: m[0]!)));
 
     // Channel refs: (start|space)#name
-    tokens = _splitByRegex(
-        tokens,
+    tokens = _splitByRegex(tokens,
         RegExp(r'(^|\s)#([a-z0-9_-]+)(?=\s|$|[.,!?])', caseSensitive: false),
         (m) {
       final lead = m[1] ?? '';
       final name = m[2]!.toLowerCase();
       final isGeo = isValidGeohash(name);
-      final isActive = isGeo
-          ? ctx.currentGeohash == name
-          : ctx.currentChannel == name;
-      final ref = ChannelRefNode(
-          name: name, isGeohash: isGeo, isActive: isActive);
+      final isActive =
+          isGeo ? ctx.currentGeohash == name : ctx.currentChannel == name;
+      final ref =
+          ChannelRefNode(name: name, isGeohash: isGeo, isActive: isActive);
       if (lead.isEmpty) return _NodeTok(ref);
       return _MultiTok([_RawTok(lead), _NodeTok(ref)]);
     });
