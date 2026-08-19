@@ -53,6 +53,11 @@ class StorageKeys {
   /// settings blob, so enabling it on one device does not announce that intent
   /// to the others.
   static const ghostMode = 'nym_ghost_mode';
+
+  /// Peers we talked to while ghosted. Their conversations are pinned to the
+  /// mesh for good, so a later reply can never go out over Nostr under the real
+  /// key and reveal that the ghost was us.
+  static const ghostPinnedPms = 'nym_ghost_pinned_pms';
   static const groupchatPmOnlyMode = 'nym_groupchat_pm_only_mode';
   static const nickStyle = 'nym_nick_style';
   static const pinnedLandingChannel = 'nym_pinned_landing_channel';
