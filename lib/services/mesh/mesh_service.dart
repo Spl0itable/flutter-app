@@ -265,8 +265,7 @@ class MeshService {
     _linkSub = _transport.links.listen(_onLink);
     final availability = await _transport.start();
     debugLog?.call('transport up → availability=${availability.name}');
-    _announceTimer = Timer.periodic(
-        MeshConstants.announceInterval, (_) => _broadcastAnnounce());
+    _scheduleAnnounce();
     _cleanupTimer = Timer.periodic(
         const Duration(seconds: 30), (_) => _cleanupStalePeers());
     await _broadcastAnnounce();
@@ -943,6 +942,33 @@ class MeshService {
   /// Noise-sealed instead of as a signed-but-plaintext directed file. 0x100
   /// little-endian is [0x00, 0x01].
   static final Uint8List _capabilities = Uint8List.fromList([0x00, 0x01]);
+
+  /// Schedules the next identity announce on a JITTERED, load-adaptive gap
+  /// instead of a fixed period.
+  ///
+  /// Two reasons. A metronome is a fingerprint in its own right — a listener
+  /// can follow a device between places by beacon rhythm without decoding any
+  /// field — and while no peer is known the beacons buy nothing, so the gap
+  /// stretches to [MeshConstants.announceIntervalIdle].
+  ///
+  /// Both bounds stay far below bitchat's [MeshConstants.stalePeerTimeout], so
+  /// a peer never drops us for going quiet, and the announce contents are
+  /// unchanged — this is invisible to bitchat peers.
+  void _scheduleAnnounce() {
+    _announceTimer?.cancel();
+    if (!_running) return;
+    final base = _peers.isEmpty
+        ? MeshConstants.announceIntervalIdle
+        : MeshConstants.announceInterval;
+    final spreadMs = MeshConstants.announceJitter.inMilliseconds;
+    final jitterMs = _random.nextInt(spreadMs * 2 + 1) - spreadMs;
+    var next = base + Duration(milliseconds: jitterMs);
+    if (next < const Duration(seconds: 5)) next = const Duration(seconds: 5);
+    _announceTimer = Timer(next, () {
+      _broadcastAnnounce();
+      _scheduleAnnounce();
+    });
+  }
 
   Future<void> _broadcastAnnounce() async {
     if (!_running) return;
