@@ -2306,6 +2306,14 @@ class NostrController {
   void _observeNymchatPubkey(String pubkey) {
     final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
     if (pubkey.isEmpty || pubkey == self) return;
+    // Our vouch list is PUBLISHED PUBLICLY under the real identity, so one of
+    // our own Ghost Mode keys landing in it would announce the link outright.
+    // Nothing signs Nostr events with a ghost key today, so this is not
+    // currently reachable — it is here so that if anything ever does, it fails
+    // closed instead of deanonymising the session.
+    if (_ref.read(ghostModeProvider).pubkeys.contains(pubkey.toLowerCase())) {
+      return;
+    }
     final notifier = _ref.read(appStateProvider.notifier);
     notifier.markNymchatPubkey(pubkey);
     final added = notifier.observeNymchatPubkey(pubkey);
@@ -9754,6 +9762,16 @@ class NostrController {
     unawaited(sync.pmDeposit([raw]));
   }
 
+  /// The pubkey a gift wrap is addressed to (its single `p` tag), or null.
+  static String? _wrapRecipient(Map<String, dynamic> raw) {
+    final tags = raw['tags'];
+    if (tags is! List) return null;
+    for (final t in tags) {
+      if (t is List && t.length >= 2 && t[0] == 'p') return '${t[1]}'.toLowerCase();
+    }
+    return null;
+  }
+
   void _archiveGiftWrap(GiftWrapUnwrapped u) {
     // Never re-upload a wrap that CAME from the archive (`pm-get` boot /
     // reconnect replay) — the PWA's `if (!fromD1)` gate at pms.js:1021.
@@ -9763,6 +9781,15 @@ class NostrController {
     if (!_ref.read(settingsProvider).cachePMs) return;
     final raw = u.rawWrap;
     if (raw == null) return;
+    // A wrap addressed to a Ghost Mode key must NEVER be archived. pm-put is
+    // authenticated as the real account, so uploading it would write
+    // `ghost pubkey -> this account` into the archive and hand the server the
+    // exact link Ghost Mode exists to break. Ghost conversations stay
+    // in-memory, which is the intended lifetime anyway.
+    final to = _wrapRecipient(raw);
+    if (to != null && _ref.read(ghostModeProvider).pubkeys.contains(to)) {
+      return;
+    }
     final self = _identity?.pubkey;
     if (self == null) return;
     // A wrap addressed to us → archive to our inbox. A wrap we sent to someone

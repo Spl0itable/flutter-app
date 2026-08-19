@@ -140,10 +140,19 @@ class MeshController extends StateNotifier<MeshUiState> {
   /// Tears the mesh down and brings it back up on the current identity. Ghost
   /// Mode calls this on every rotation: MeshService binds its Noise manager to
   /// one identity at construction, so a new identity means a new service.
-  Future<void> restart() async {
-    if (!state.enabled) return;
-    await _stop();
-    await _start();
+  Future<void>? _restartChain;
+
+  Future<void> restart() {
+    if (!state.enabled) return Future.value();
+    // Serialised: _stop and _start both bail out while _busy, so two overlapping
+    // restarts could tear the mesh down and then skip bringing it back up,
+    // leaving the radio silently off until the next toggle.
+    final prev = _restartChain ?? Future<void>.value();
+    return _restartChain = prev.then((_) async {
+      if (!state.enabled) return;
+      await _stop();
+      await _start();
+    }).catchError((_) {});
   }
 
   Future<void> setEnabled(bool enabled) async {
