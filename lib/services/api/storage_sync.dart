@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
+import 'dart:math';
 
 import 'package:crypto/crypto.dart' show sha256;
 
@@ -550,7 +550,45 @@ class StorageSync {
       );
       if (ok) sent.add(entry.key);
     }
+    await publishSettingsChangedPing(sent.toList());
     return sent;
+  }
+
+  /// A stable id for THIS client instance, so a device ignores the echo of its
+  /// own ping.
+  String? _syncInstanceIdCache;
+  String get syncInstanceId =>
+      _syncInstanceIdCache ??= '${Random().nextInt(1 << 32).toRadixString(36)}'
+          '${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+
+  /// Announces "settings changed, re-read D1" to our other devices.
+  ///
+  /// The settings wraps themselves are not a reliable live cross-device channel
+  /// — the web client does not even subscribe to them when the relay proxy is
+  /// in use, because D1 is the source of truth there — so a device only picked
+  /// up another device's change on its next D1 read.
+  ///
+  /// This ping rides the critical kind-1059 `#p:self` subscription that is
+  /// already open, and deliberately carries NO settings content: just which
+  /// sections moved and who sent it. That keeps it a few hundred bytes, well
+  /// clear of the wrap size limits the section blobs have to fight with, and
+  /// the receiver pulls the authoritative values from D1 — already written by
+  /// the section publishes above. It is NOT stored as a D1 category: it is a
+  /// notification, not a settings blob.
+  Future<void> publishSettingsChangedPing(List<String> sections) async {
+    if (sections.isEmpty) return;
+    final publisher = _syncWrapPublisher;
+    if (publisher == null) return;
+    try {
+      await publisher({
+        'src': syncInstanceId,
+        'sections': sections,
+        'ts': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      }, 'nymchat-sync-ping');
+    } catch (_) {
+      // Best-effort: a failed ping just means the other device waits for its
+      // next D1 read, which is the behaviour we had before.
+    }
   }
 
   /// Relay-side NIP-59 `nym-sync` publisher (`_publishWrappedNostrEvent`,
@@ -594,7 +632,7 @@ class StorageSync {
   /// NIP-44 v2 `calc_padded_len`.
   static int nip44PaddedLen(int len) {
     if (len <= 32) return 32;
-    final nextPower = 1 << ((math.log(len - 1) / math.ln2).floor() + 1);
+    final nextPower = 1 << ((log(len - 1) / ln2).floor() + 1);
     final chunk = nextPower <= 256 ? 32 : nextPower ~/ 8;
     return chunk * (((len - 1) ~/ chunk) + 1);
   }
