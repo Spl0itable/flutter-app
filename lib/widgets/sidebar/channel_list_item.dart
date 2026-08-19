@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/channels/channel_context_menu.dart';
+import '../../features/channels/geohash_place_cache.dart';
 import '../../features/settings/settings_helpers.dart';
 import '../../models/channel.dart';
 import '../nym_icons.dart';
@@ -97,6 +98,19 @@ class ChannelListItem extends ConsumerWidget {
       ),
     );
 
+    // Name plus the location line beneath it (`.channel-sub`).
+    final nameBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        nameText,
+        _ChannelLocationLine(
+          geohash: entry.isGeohash ? entry.geohash : '',
+          textSize: textSize,
+        ),
+      ],
+    );
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       // The PWA's 500ms press-and-hold (mouse button 0 / touch, 10px move
@@ -142,8 +156,8 @@ class ChannelListItem extends ConsumerWidget {
                       // `.channel-name` inherits `--text` weight normal even
                       // when active (active changes bg/border/bar only).
                       child: location.isEmpty
-                          ? nameText
-                          : Tooltip(message: location, child: nameText),
+                          ? nameBlock
+                          : Tooltip(message: location, child: nameBlock),
                     ),
                     // PWA `.channel-badges` only ever contains the unread
                     // pill. `.std-badge` / `.geohash-badge` are DEAD CSS —
@@ -235,6 +249,83 @@ class _UnreadPill extends StatelessWidget {
           fontSize: 10,
           fontWeight: FontWeight.w600,
           fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+  }
+}
+
+/// The dim location line under a sidebar channel name: the reverse-geocoded
+/// place for a geohash channel, "Not a geohash" for a named one — the same
+/// information the channel header carries.
+///
+/// A geohash paints its decoded coordinates immediately (local, no network) and
+/// upgrades in place when the queued lookup lands, so the row is never empty and
+/// never sits on a spinner. Resolution goes through [GeohashPlaceCache], which
+/// persists and rate-limits; a place already cached costs no request at all.
+class _ChannelLocationLine extends ConsumerStatefulWidget {
+  const _ChannelLocationLine({required this.geohash, required this.textSize});
+
+  /// Empty for a named (non-geohash) channel.
+  final String geohash;
+  final double textSize;
+
+  @override
+  ConsumerState<_ChannelLocationLine> createState() =>
+      _ChannelLocationLineState();
+}
+
+class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine> {
+  String? _place;
+
+  @override
+  void initState() {
+    super.initState();
+    _prime();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChannelLocationLine old) {
+    super.didUpdateWidget(old);
+    if (old.geohash != widget.geohash) {
+      _place = null;
+      _prime();
+    }
+  }
+
+  void _prime() {
+    final gh = widget.geohash;
+    if (gh.isEmpty) return;
+    final cache = ref.read(geohashPlaceCacheProvider);
+    final hit = cache.cached(gh);
+    if (hit != null) {
+      _place = hit;
+      return;
+    }
+    cache.resolve(gh).then((place) {
+      if (!mounted || place.isEmpty || widget.geohash != gh) return;
+      setState(() => _place = place);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    final gh = widget.geohash;
+    final text = gh.isEmpty
+        ? 'Not a geohash'
+        : (_place ?? geohashLocationLabel(gh));
+    if (text.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 1),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: c.textDim,
+          fontSize: widget.textSize - 3,
+          height: 1.25,
         ),
       ),
     );
