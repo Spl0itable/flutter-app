@@ -35,6 +35,7 @@ import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
+import '../../widgets/wallpaper/wallpaper_cache.dart';
 import 'settings_helpers.dart';
 import 'settings_widgets.dart';
 
@@ -806,6 +807,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             tr('Failed to upload wallpaper: All Blossom servers failed'));
         return;
       }
+      // Cache the bytes we already have under the new url, so this device never
+      // fetches its own wallpaper back from the host, and drop any previous
+      // wallpaper's cached copy. The url still goes to settings — it is what
+      // travels to the user's other devices, which fetch once and then cache
+      // the same way.
+      await WallpaperCache.store(url, bytes);
+      unawaited(WallpaperCache.pruneExcept(url));
       await ref.read(keyValueStoreProvider).setString(
             StorageKeys.wallpaperCustomUrl,
             url,
