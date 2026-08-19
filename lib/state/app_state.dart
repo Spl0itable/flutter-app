@@ -4456,12 +4456,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
       RegExp(r'^[\p{L}\p{N}]+$', unicode: true).hasMatch(name);
 
   /// Approximates a channel's last-activity ms from its hourly buckets when the
-  /// `last` map omitted it: the first non-zero bucket (index = hours ago) →
-  /// `(now - h*3600s)` (PWA `_d1ChannelLastActivityMs`, channels.js:204-207).
+  /// `last` map omitted it (PWA `_d1ChannelLastActivityMs`).
+  ///
+  /// Credits the bucket's OLDER edge — `nowMs - (h+1)*3600s` — not its newer
+  /// one. An hourly bucket only says "something happened during this hour";
+  /// crediting the newest instant in it let a 59-minute-old message claim it
+  /// had just arrived and outrank channels carrying exact timestamps from
+  /// minutes ago, which is how stale channels ended up sorted to the top of the
+  /// sidebar. An approximation must never outrank a known value.
+  ///
   /// Returns 0 when every bucket is empty.
   static int _approxLastFromBuckets(List<int> buckets, int nowMs) {
     for (var h = 0; h < buckets.length; h++) {
-      if (buckets[h] > 0) return nowMs - h * 3600 * 1000;
+      if (buckets[h] > 0) return nowMs - (h + 1) * 3600 * 1000;
     }
     return 0;
   }
