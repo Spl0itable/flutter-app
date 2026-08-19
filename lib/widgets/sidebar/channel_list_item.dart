@@ -8,6 +8,7 @@ import '../../features/settings/settings_helpers.dart';
 import '../../models/channel.dart';
 import '../nym_icons.dart';
 import 'sidebar_row_gestures.dart';
+import 'sidebar_row_menu_button.dart';
 
 /// The grey "pinned/favorited" tint the PWA paints on a `.channel-item.pinned`
 /// row when it is not the active channel (`rgba(150,150,160,…)`,
@@ -152,6 +153,18 @@ class ChannelListItem extends ConsumerWidget {
                     if (unread > 0) ...[
                       const SizedBox(width: 5),
                       _UnreadPill(count: unread),
+                    ],
+                    // Same menu the hold opens. Suppressed where there would
+                    // be no menu to open (#nymchat has no actions), so the
+                    // control never appears as a dead tap target.
+                    if (buildChannelMenuActions(context, ref, entry)
+                        .isNotEmpty) ...[
+                      const SizedBox(width: 2),
+                      SidebarRowMenuButton(
+                        semanticLabel: 'Channel menu',
+                        onShowMenu: (pos) => maybeShowChannelContextMenu(
+                            context, ref, entry, pos),
+                      ),
                     ],
                   ],
                 ),
