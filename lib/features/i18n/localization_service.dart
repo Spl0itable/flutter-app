@@ -280,6 +280,15 @@ class LocalizationService {
       _primePending.isNotEmpty ||
       _sweepPending.isNotEmpty;
 
+  /// True while a translation pass is actually running or still queued.
+  ///
+  /// Drives the sidebar's progress row. Picking a language on first run kicks
+  /// a full-catalog [sweep] that runs silently in the background — deliberately
+  /// non-blocking, but with nothing on screen the app looks like it is stuck
+  /// half-translated. This lets the UI say so, and say it in ONE unobtrusive
+  /// place rather than over the composer.
+  bool get isTranslating => isActive && (_flushing || _anyPending);
+
   void _scheduleFlush() {
     if (_flushing || !_anyPending) return;
     _debounce?.cancel();
@@ -318,7 +327,15 @@ class LocalizationService {
     if (lang != _lang) return;
     if (_anyPending) {
       _scheduleFlush();
-    } else if (_failed.isNotEmpty) {
+    } else {
+      // One more notify AFTER _flushing drops, so anything watching
+      // [isTranslating] sees the finished state. The per-chunk notify above
+      // fires while the flag is still set, so without this the progress row
+      // would sit there claiming to be working long after it stopped.
+      onChanged?.call();
+    }
+    if (lang != _lang) return;
+    if (!_anyPending && _failed.isNotEmpty) {
       // Everything reachable is cached; give parked failures a delayed retry.
       _scheduleFailedRetry();
     }

@@ -14,6 +14,7 @@ import '../../features/channels/channel_manager.dart';
 import '../../features/globe/geohash_explorer.dart';
 import '../../features/mesh/mesh_controller.dart';
 import '../../features/groups/group_logic.dart';
+import '../../features/i18n/localization_service.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
@@ -908,6 +909,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
           const SizedBox(height: 10),
           _ConnectionStatusIndicator(connectedCount: connectedRelays),
           _MeshStatusIndicator(onItemSelected: widget.onItemSelected),
+          const _TranslatingIndicator(),
         ],
       ),
     );
@@ -1153,6 +1155,62 @@ class _ConnectionStatusIndicator extends StatelessWidget {
 /// A Bluetooth-mesh status line under the connected-relays indicator: a glyph +
 /// peer/link count when active. Tapping opens the mesh view (peers + the #mesh
 /// public channel). Renders nothing on platforms without mesh support.
+/// Progress row shown while the app-wide UI translation is running.
+///
+/// Choosing a language on first run kicks a full-catalog sweep
+/// ([LocalizationService.sweep]) that is deliberately non-blocking — the user
+/// starts using the app immediately and strings swap in behind them. But with
+/// nothing on screen saying so, a half-translated app just looks broken, and
+/// the web client's answer to that was a floating pill parked in the corner
+/// where the message input lives.
+///
+/// So it goes here instead: in flow at the bottom of the sidebar, under the
+/// mesh row, where it cannot cover anything. It removes itself the moment the
+/// sweep finishes.
+class _TranslatingIndicator extends ConsumerWidget {
+  const _TranslatingIndicator();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The service bumps this after every translated chunk, and once more when
+    // the pass finishes, so this row appears and disappears on its own.
+    ref.watch(i18nVersionProvider);
+    if (!LocalizationService.instance.isTranslating) {
+      return const SizedBox.shrink();
+    }
+    final c = context.nym;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 11,
+            height: 11,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(c.primary),
+              backgroundColor: c.textDim.withValues(alpha: 0.25),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Translated like everything else: on a cache miss this renders
+          // English and swaps to the chosen language as the sweep reaches it —
+          // which is the very process it is reporting on.
+          Flexible(
+            child: Text(
+              tr('Translating...'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: c.textDim, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MeshStatusIndicator extends ConsumerWidget {
   const _MeshStatusIndicator({this.onItemSelected});
 
