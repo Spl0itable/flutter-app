@@ -751,6 +751,12 @@ class NostrController {
     }
     final parsed = <NostrEvent>[];
     for (final raw in rows) {
+      // D1 archives EVERY peer's vouch list under this one pseudo-channel, so
+      // the cohort grows with the whole network rather than with anything this
+      // user did — a real PWA trace showed ~107k rows. Verifying and
+      // re-ingesting that many is unbounded work; live relay vouches still
+      // expand the graph, so a cap only slows discovery.
+      if (parsed.length >= _kVouchD1MaxEvents) break;
       try {
         final ev = NostrEvent.fromJson(raw);
         if (ev.kind != EventKind.appData) continue;
@@ -780,11 +786,25 @@ class NostrController {
     if (valid.isEmpty) return;
     // Coalesce the fixpoint expansion's per-vouch notifies into one rebuild.
     _ref.read(appStateProvider.notifier).runBatched(() {
+      // Each vouch is ingested at most ONCE. _ingestVouch drops any vouch whose
+      // author is not already trusted, and applying an accepted one twice is
+      // idempotent (it is a set union), so re-scanning the whole cohort on
+      // every pass was O(20 x N) for no added trust. Tracking what has been
+      // applied keeps the fixpoint identical at a fraction of the work.
+      final applied = <int>{};
       var changed = true;
       var guard = 0;
       while (changed && guard++ < 20) {
         final before = _ref.read(appStateProvider).nymchatPubkeys.length;
-        for (final ev in valid) {
+        for (var i = 0; i < valid.length; i++) {
+          if (applied.contains(i)) continue;
+          final ev = valid[i];
+          // Not rooted yet — leave it for a later pass, once its author may
+          // have become trusted.
+          if (!_ref.read(appStateProvider).nymchatPubkeys.contains(ev.pubkey)) {
+            continue;
+          }
+          applied.add(i);
           try {
             _ingestVouch(ev);
           } catch (_) {}
@@ -793,6 +813,10 @@ class NostrController {
       }
     });
   }
+
+  /// Hard cap on how much of the D1 vouch archive one rebuild ingests.
+  /// Mirrors the PWA's `VOUCH_D1_MAX_EVENTS` (nostr-core.js).
+  static const int _kVouchD1MaxEvents = 5000;
 
   /// Max number of per-channel D1 archive restores in flight at once. The PWA
   /// coalesces the whole set into ONE `channel-get` (channels.js:1123); here
