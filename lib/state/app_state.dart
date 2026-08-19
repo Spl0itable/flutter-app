@@ -6270,7 +6270,13 @@ class LiveCustomEmojiNotifier extends StateNotifier<CustomEmojiState> {
   /// no localStorage quota, so the PWA's QuotaExceeded trim fallback has no
   /// native counterpart.)
   void _persist() {
-    _persistTimer?.cancel();
+    // THROTTLE, not debounce: leave an armed timer alone rather than pushing it
+    // back. Re-arming means a sustained trickle of new emoji never lets the
+    // write fire, so nothing reaches disk until the trickle stops. The callback
+    // reads the live maps, so arming once still captures everything registered
+    // before it runs, and any later change arms a fresh timer.
+    // (Matches the same fix in the PWA's _saveCustomEmojiMap.)
+    if (_persistTimer != null) return;
     _persistTimer = Timer(const Duration(seconds: 2), () {
       _persistTimer = null;
       _persistNow();
