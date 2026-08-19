@@ -9367,6 +9367,11 @@ class NostrController {
           'leftGroups': appState.leftGroups.toList(),
           'leftGroupTimes': Map<String, dynamic>.from(appState.leftGroupTimes),
         },
+        // Orders userJoinedChannels for the channels-section trimmer, which
+        // runs only when the payload would otherwise be too large to publish
+        // at all — least-recently-active channels go first.
+        channelActivity: Map<String, int>.from(
+            _ref.read(appStateProvider).channelLastActivity),
       );
       // N26 outbound: publish the cross-device notification read-state wrap (the
       // `nymchat-notifications` category) so a notification read/dismissed here
