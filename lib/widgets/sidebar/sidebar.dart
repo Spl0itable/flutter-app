@@ -1152,28 +1152,12 @@ class _ConnectionStatusIndicator extends StatelessWidget {
   }
 }
 
-/// A Bluetooth-mesh status line under the connected-relays indicator: a glyph +
-/// peer/link count when active. Tapping opens the mesh view (peers + the #mesh
-/// public channel). Renders nothing on platforms without mesh support.
-/// Progress row shown while the app-wide UI translation is running.
-///
-/// Choosing a language on first run kicks a full-catalog sweep
-/// ([LocalizationService.sweep]) that is deliberately non-blocking — the user
-/// starts using the app immediately and strings swap in behind them. But with
-/// nothing on screen saying so, a half-translated app just looks broken, and
-/// the web client's answer to that was a floating pill parked in the corner
-/// where the message input lives.
-///
-/// So it goes here instead: in flow at the bottom of the sidebar, under the
-/// mesh row, where it cannot cover anything. It removes itself the moment the
-/// sweep finishes.
+/// Progress row shown while the app-wide UI translation sweep is running.
 class _TranslatingIndicator extends ConsumerWidget {
   const _TranslatingIndicator();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // The service bumps this after every translated chunk, and once more when
-    // the pass finishes, so this row appears and disappears on its own.
     ref.watch(i18nVersionProvider);
     if (!LocalizationService.instance.isTranslating) {
       return const SizedBox.shrink();
@@ -1194,9 +1178,6 @@ class _TranslatingIndicator extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: 8),
-          // Translated like everything else: on a cache miss this renders
-          // English and swaps to the chosen language as the sweep reaches it —
-          // which is the very process it is reporting on.
           Flexible(
             child: Text(
               tr('Translating...'),
@@ -1211,6 +1192,9 @@ class _TranslatingIndicator extends ConsumerWidget {
   }
 }
 
+/// A Bluetooth-mesh status line under the connected-relays indicator: a glyph +
+/// peer/link count when active. Tapping opens the mesh view (peers + the #mesh
+/// public channel). Renders nothing on platforms without mesh support.
 class _MeshStatusIndicator extends ConsumerWidget {
   const _MeshStatusIndicator({this.onItemSelected});
 
