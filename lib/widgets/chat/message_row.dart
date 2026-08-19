@@ -3640,7 +3640,7 @@ class _TimestampTextState extends State<_TimestampText> {
     late final Widget value;
     if (target == null) {
       value = Text(
-        tr('None — sent from another client'),
+        tr('None'),
         softWrap: false,
         style: TextStyle(color: c.textDim, fontSize: 12),
       );

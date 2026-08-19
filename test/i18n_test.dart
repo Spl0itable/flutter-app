@@ -127,7 +127,53 @@ void main() {
       expect(svc.isTranslating, isFalse,
           reason: 'the row must clear once the sweep drains');
       expect(notifies, greaterThan(0),
-          reason: 'a notify after completion is what repaints the row away');
+          reason: 'the last per-chunk notify is what repaints the row away');
+
+      svc.onChanged = null;
+      svc.setLanguage('en');
+    });
+
+    test('a notify that re-requests a failed string cannot starve the sweep',
+        () async {
+      // Regression: onChanged bumps i18nVersionProvider, which rebuilds the
+      // tree, which calls tr() again. A failed string is un-marked from
+      // _requested, so that rebuild re-queues it on the HIGH-priority lane. If
+      // completion also notified, the sweep lane never got a turn: nothing
+      // translated and the progress row stayed up for good.
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final kv = await KeyValueStore.open();
+      final svc = LocalizationService.instance;
+      svc.setLanguage('en');
+
+      final mock = MockClient((req) async {
+        final text = (jsonDecode(req.body)['text'] ?? '').toString();
+        if (text == 'Flaky') return http.Response('nope', 500);
+        return http.Response(
+          jsonEncode(
+              {'translatedText': text.toUpperCase(), 'detectedLanguage': 'de'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      svc.configure(
+        kv: kv,
+        language: 'de',
+        apiClient: ApiClient(client: mock, baseUrl: 'https://h/api/proxy'),
+      );
+
+      // Stand in for the rebuild: every notify re-reads the failing string.
+      svc.onChanged = () => svc.translate('Flaky');
+
+      svc.translate('Flaky');
+      svc.sweep(const ['Alpha', 'Beta', 'Gamma']);
+
+      await Future<void>.delayed(const Duration(seconds: 4));
+
+      expect(svc.translate('Alpha'), 'ALPHA',
+          reason: 'the sweep lane must still drain behind the retried string');
+      expect(svc.translate('Gamma'), 'GAMMA');
+      expect(svc.isTranslating, isFalse,
+          reason: 'the row must clear even though one string keeps failing');
 
       svc.onChanged = null;
       svc.setLanguage('en');
