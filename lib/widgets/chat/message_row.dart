@@ -3642,7 +3642,7 @@ class _TimestampTextState extends State<_TimestampText> {
       value = Text(
         tr('None'),
         softWrap: false,
-        style: TextStyle(color: c.textDim, fontSize: 12),
+        style: TextStyle(color: c.primary, fontSize: 12),
       );
     } else {
       final bits = powBitsForId(widget.powEventId);

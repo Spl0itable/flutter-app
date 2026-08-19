@@ -17,6 +17,7 @@ import '../core/theme/nym_colors.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
+import '../features/mesh/ghost_mode.dart';
 import '../features/mesh/mesh_controller.dart';
 import '../features/commands/command_handler.dart';
 import '../features/commands/command_registry.dart';
@@ -4286,7 +4287,7 @@ class NostrController {
       // Build + send first so we know the shared id, then echo with it.
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
-      _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      _applyEphemeralKeys();
       // A self-key rotation on send: persist the new key locally, re-REQ the
       // live ephemeral gift-wrap subscription so replies wrapped to the NEW
       // key arrive, and sync so our other devices can decrypt this message's
@@ -5857,7 +5858,7 @@ class NostrController {
       if (group == null) return false;
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
-      _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      _applyEphemeralKeys();
       // A self-key rotation on send: persist the new key locally, re-REQ the
       // live ephemeral gift-wrap subscription so replies wrapped to the NEW
       // key arrive, and sync so our other devices can decrypt this message's
@@ -7217,7 +7218,7 @@ class NostrController {
               }
             }
           });
-          _service?.setEphemeralKeys(groups.allEphemeralSecretKeys());
+          _applyEphemeralKeys();
         }
       }
     } catch (_) {}
@@ -8542,7 +8543,7 @@ class NostrController {
           }
         }
       });
-      _service?.setEphemeralKeys(groups.allEphemeralSecretKeys());
+      _applyEphemeralKeys();
     }
 
     // 3) Group message history → message store.
@@ -8578,13 +8579,35 @@ class NostrController {
   /// the SAME unwrap path live wraps use.
   Subscription? _ephemeralSub;
 
+  /// Re-registers the ephemeral key set and re-opens its gift-wrap REQ. Called
+  /// by Ghost Mode after an identity rotation.
+  void refreshEphemeralSubscriptions() => _refreshEphemeralSubscriptions();
+
+  /// Every secret key a wrap addressed to us might be encrypted to: the group
+  /// ephemeral keys plus, in Ghost Mode, one per live epoch. Registering them
+  /// together is what lets a reply sent to an identity we have already rotated
+  /// away from still decrypt.
+  void _applyEphemeralKeys() {
+    final service = _service;
+    final groups = _groups;
+    if (service == null || groups == null) return;
+    service.setEphemeralKeys([
+      ...groups.allEphemeralSecretKeys(),
+      ..._ref.read(ghostModeProvider).secretKeys,
+    ]);
+  }
+
   void _refreshEphemeralSubscriptions() {
     final service = _service;
     final groups = _groups;
     if (service == null || groups == null) return;
+    _applyEphemeralKeys();
     _ephemeralSub?.close();
     _ephemeralSub = null;
-    final pks = groups.allEphemeralPubkeys();
+    final pks = [
+      ...groups.allEphemeralPubkeys(),
+      ..._ref.read(ghostModeProvider).pubkeys,
+    ];
     if (pks.isEmpty) return;
     // Filter split per relays.js:2711-2721: in PROXY/D1 mode the REQ is
     // real-time only (`limit: 1` — D1 supplies the group history via
@@ -9955,7 +9978,7 @@ class NostrController {
       }
       final ek = _groups!.keysFor(group.id);
       final next = ek.rotateSelf();
-      _service!.setEphemeralKeys(_groups!.allEphemeralSecretKeys());
+      _applyEphemeralKeys();
       // A self-key rotation on send: persist the new key locally, re-REQ the
       // live ephemeral gift-wrap subscription so replies wrapped to the NEW
       // key arrive, and sync so our other devices can decrypt this message's
