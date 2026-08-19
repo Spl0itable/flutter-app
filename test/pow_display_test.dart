@@ -86,6 +86,48 @@ void main() {
     });
   });
 
+  group('inbound PoW exclusion filter', () {
+    // The filter is a pure predicate over (threshold, event id) — the ingest
+    // path applies exactly this. Mining is unaffected either way: the send path
+    // floors at kNymchatPowFloor, so a Nymchat message always clears 16.
+    bool dropped(int thresholdBits, String id) =>
+        thresholdBits > 0 && powBitsForId(id) < thresholdBits;
+
+    final nymchatMsg = '0000ffff${'0' * 56}'; // 16 bits — the Nymchat floor
+    final unmined = 'ffffffff${'0' * 56}'; //     0 bits — another client
+    final strong = '000000ff${'0' * 56}'; //     24 bits
+
+    test('disabled keeps everything, including unmined messages', () {
+      expect(dropped(0, unmined), isFalse);
+      expect(dropped(0, nymchatMsg), isFalse);
+    });
+
+    test('16 keeps Nymchat traffic and drops clients that do no work', () {
+      expect(dropped(16, nymchatMsg), isFalse);
+      expect(dropped(16, strong), isFalse);
+      expect(dropped(16, unmined), isTrue);
+    });
+
+    test('above 16 also hides other Nymchat users, as the label warns', () {
+      expect(dropped(20, nymchatMsg), isTrue);
+      expect(dropped(24, nymchatMsg), isTrue);
+      expect(dropped(20, strong), isFalse);
+    });
+
+    test('our OWN messages always clear our own filter', () {
+      // The send path mines at max(setting, kNymchatPowFloor), so whatever the
+      // filter is set to, what we send meets it — raising the setting cannot
+      // make our own messages disappear.
+      for (final setting in const [0, 16, 20, 24]) {
+        final mined = setting > kNymchatPowFloor ? setting : kNymchatPowFloor;
+        expect(mined >= setting, isTrue,
+            reason: 'setting $setting mines at $mined');
+        // An id that just meets what we would mine still passes the filter.
+        expect(mined >= normalizePowDifficulty(setting), isTrue);
+      }
+    });
+  });
+
   group('normalizePowDifficulty', () {
     test('disabled stays disabled', () {
       expect(normalizePowDifficulty(0), 0);

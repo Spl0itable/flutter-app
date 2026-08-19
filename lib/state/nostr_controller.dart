@@ -421,6 +421,9 @@ class NostrController {
       final settings = _ref.read(settingsProvider.notifier);
       appSpamFilterEnabled = settings.spamFilterEnabled;
       appSpamFilterAggressive = settings.spamFilterAggressive;
+      // The inbound PoW exclusion threshold. Unlike the spam flags this one DOES
+      // have settings-modal UI, so it is refreshed on save too (_flushSettingsSync).
+      appPowFilterBits = pow.normalizePowDifficulty(settings.powDifficulty);
 
       // The active pubkey scopes the per-identity image-blur read
       // (`nym_image_blur_<pubkey>` first, then the global key —
@@ -9408,6 +9411,9 @@ class NostrController {
 
   Future<void> _flushSettingsSync(StorageSync sync) async {
     try {
+      // Keep the inbound PoW filter in step with the saved setting.
+      appPowFilterBits = pow.normalizePowDifficulty(
+          _ref.read(settingsProvider.notifier).powDifficulty);
       // The default landing channel is KV-only (not a typed Settings field), so
       // thread it in explicitly so it rides the `channels` section like the PWA
       // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.

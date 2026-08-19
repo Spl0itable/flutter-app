@@ -108,6 +108,19 @@ bool nymVouchSpamGateEnabled = false;
 bool appSpamFilterEnabled = true;
 bool appSpamFilterAggressive = true;
 
+/// Inbound PoW exclusion threshold in leading zero bits; 0 disables it.
+///
+/// This is the user's "Proof of Work Difficulty" setting, and it does ONE
+/// thing: drop public-channel messages whose proof of work falls below it.
+/// It never affects what we send — the send path floors every message at
+/// [kNymchatPowFloor] regardless — so a Nymchat message always clears a
+/// threshold of 16. Gift-wrapped PMs and group messages are never mined and
+/// are never subject to it.
+///
+/// Seeded from settings at boot alongside the spam-filter flags, and refreshed
+/// when the setting is saved.
+int appPowFilterBits = 0;
+
 /// Identifies what the chat pane is currently showing. Mirrors the PWA's
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
 /// `inPMMode` state (docs/specs/03 §3.5).
@@ -1809,6 +1822,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _ingestChannelMessage(NostrEvent e, {bool historical = false}) {
     if (e.id.isNotEmpty && !_seenIds.add(e.id)) return;
+    // NIP-13 exclusion filter (the PWA's `enablePow && !validatePow(...)` gate,
+    // nostr-core.js). Public channel messages only — this runs on the channel
+    // ingest path, so gift-wrapped PMs/groups, reactions and profiles never
+    // reach it. Our own messages are mined to at least the configured value, so
+    // they always clear their own threshold.
+    if (appPowFilterBits > 0 && powBitsForId(e.id) < appPowFilterBits) return;
     // An incoming edit (the published/echoed edit event carries
     // `['edit', originalId]`, buildChannelEditTags) rewrites the original in
     // place — it must NOT be appended as a new message (the user-reported
