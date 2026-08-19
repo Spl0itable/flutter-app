@@ -2055,6 +2055,17 @@ class NostrService {
   static const String geoRelayCsvUrl =
       'https://raw.githubusercontent.com/permissionlesstech/georelays/refs/heads/main/nostr_relays.csv';
 
+  /// The validator-gated copy inside the bitchat repo that bitchat iOS reads
+  /// (`GeoRelayDirectory.swift` remoteURL). Distinct from [geoRelayCsvUrl],
+  /// which bitchat-android still reads — the two directories have diverged.
+  static const String geoRelayVettedCsvUrl =
+      'https://raw.githubusercontent.com/permissionlesstech/bitchat/refs/heads/main/relays/online_relays_gps.csv';
+
+  /// The upstream directory (bitchat-android's) and the vetted one (iOS's),
+  /// kept apart because selection applies each client's own rule.
+  final List<GeoRelay> _geoRelaysUpstream = [];
+  final List<GeoRelay> _geoRelaysVetted = [];
+
   /// All geo relays loaded so far (lazily fetched).
   final List<GeoRelay> geoRelays = [];
 
@@ -2107,7 +2118,21 @@ class NostrService {
   /// Reads the persisted directory. Returns null when absent or unusable —
   /// never merely because it is stale, so a failed refresh can still fall back
   /// to it.
-  Future<({DateTime fetchedAt, List<GeoRelay> relays})?>
+  static List<GeoRelay> _decodeGeoRelayList(Object? raw) {
+    if (raw is! List) return const [];
+    final out = <GeoRelay>[];
+    for (final r in raw) {
+      if (r is! Map) continue;
+      final url = (r['url'] ?? '').toString();
+      final lat = r['lat'], lng = r['lng'];
+      if (url.isEmpty || lat is! num || lng is! num) continue;
+      if (!lat.toDouble().isFinite || !lng.toDouble().isFinite) continue;
+      out.add(GeoRelay(url: url, lat: lat.toDouble(), lng: lng.toDouble()));
+    }
+    return out;
+  }
+
+  Future<({DateTime fetchedAt, List<GeoRelay> relays, List<GeoRelay> vetted})?>
       _loadGeoRelayCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -2115,37 +2140,31 @@ class NostrService {
       if (raw == null || raw.isEmpty) return null;
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return null;
-      final rawRelays = decoded['relays'];
-      if (rawRelays is! List || rawRelays.isEmpty) return null;
-      final relays = <GeoRelay>[];
-      for (final r in rawRelays) {
-        if (r is! Map) continue;
-        final url = (r['url'] ?? '').toString();
-        final lat = r['lat'], lng = r['lng'];
-        if (url.isEmpty || lat is! num || lng is! num) continue;
-        if (!lat.toDouble().isFinite || !lng.toDouble().isFinite) continue;
-        relays
-            .add(GeoRelay(url: url, lat: lat.toDouble(), lng: lng.toDouble()));
-      }
+      final relays = _decodeGeoRelayList(decoded['relays']);
       if (relays.isEmpty) return null;
       final ms = decoded['fetchedAt'];
       return (
         fetchedAt:
             DateTime.fromMillisecondsSinceEpoch(ms is num ? ms.toInt() : 0),
         relays: relays,
+        vetted: _decodeGeoRelayList(decoded['vetted']),
       );
     } catch (_) {
       return null;
     }
   }
 
-  Future<void> _saveGeoRelayCache(List<GeoRelay> relays) async {
+  Future<void> _saveGeoRelayCache(
+      List<GeoRelay> relays, List<GeoRelay> vetted) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
         geoRelayCacheKey,
         jsonEncode({
           'fetchedAt': DateTime.now().millisecondsSinceEpoch,
+          'vetted': [
+            for (final r in vetted) {'url': r.url, 'lat': r.lat, 'lng': r.lng},
+          ],
           'relays': [
             for (final r in relays) {'url': r.url, 'lat': r.lat, 'lng': r.lng},
           ],
@@ -2168,34 +2187,61 @@ class NostrService {
   }) async {
     final cached = await _loadGeoRelayCache();
     if (cached != null) {
-      // Adopt the cached list either way: fresh, this is the whole operation;
-      // stale, it keeps geohash channels working while the refresh is in
-      // flight and remains the fallback if that refresh fails.
-      geoRelays
-        ..clear()
-        ..addAll(cached.relays);
+      // Adopt the cached lists either way: fresh, this is the whole operation;
+      // stale, they keep geohash channels working while the refresh is in
+      // flight and remain the fallback if that refresh fails.
+      _adoptGeoRelays(cached.relays, cached.vetted);
       final age = DateTime.now().difference(cached.fetchedAt);
       if (!force && !age.isNegative && age < geoRelayCacheTtl) {
         return geoRelays;
       }
     }
 
-    var relays = await _apiClient.geoRelays();
-    if (relays.isEmpty && csvFetcher != null) {
+    var dirs = await _apiClient.geoRelayDirectories();
+    if (dirs.upstream.isEmpty && csvFetcher != null) {
+      // Direct fallback. The vetted list is best-effort: without it we still
+      // match bitchat-android, which is what this did before.
       try {
         final csv = await csvFetcher(Uri.parse(geoRelayCsvUrl));
-        relays = parseGeoRelaysCsv(csv);
+        var vetted = const <GeoRelay>[];
+        try {
+          vetted = parseGeoRelaysCsv(
+              await csvFetcher(Uri.parse(geoRelayVettedCsvUrl)));
+        } catch (_) {
+          // additive only
+        }
+        dirs = (upstream: parseGeoRelaysCsv(csv), vetted: vetted);
       } catch (_) {
         // keep whatever we have
       }
     }
-    if (relays.isNotEmpty) {
-      geoRelays
-        ..clear()
-        ..addAll(relays);
-      await _saveGeoRelayCache(relays);
+    if (dirs.upstream.isNotEmpty) {
+      _adoptGeoRelays(dirs.upstream, dirs.vetted);
+      await _saveGeoRelayCache(dirs.upstream, dirs.vetted);
     }
     return geoRelays;
+  }
+
+  /// Installs both directories. [geoRelays] becomes their UNION so pool
+  /// sharding covers everything either names; the two stay separate because
+  /// selection applies each client's own rule (see [closestGeoRelays]).
+  void _adoptGeoRelays(List<GeoRelay> upstream, List<GeoRelay> vetted) {
+    _geoRelaysUpstream
+      ..clear()
+      ..addAll(upstream);
+    _geoRelaysVetted
+      ..clear()
+      ..addAll(vetted);
+    final byUrl = <String, GeoRelay>{};
+    for (final r in upstream) {
+      byUrl[r.url] = r;
+    }
+    for (final r in vetted) {
+      byUrl.putIfAbsent(r.url, () => r);
+    }
+    geoRelays
+      ..clear()
+      ..addAll(byUrl.values);
   }
 
   /// The geo-relay url list to shard onto the pool right now, mirroring
@@ -2322,31 +2368,53 @@ class NostrService {
       {int count = RelayConfig.geoRelayCount}) {
     if (geoRelays.isEmpty || geohash.isEmpty) return const [];
     final center = ch.decodeGeohash(geohash);
-    // Distance is computed ONCE per relay, not inside the comparator, and the
-    // index is carried so ties resolve by directory position.
-    //
-    // Both details matter. Dart's List.sort is NOT stable, so a plain
-    // distance-only comparator leaves tied relays in an unspecified order —
-    // and ties are the common case here, not an edge case: 353 of the 409
-    // relays in the directory share exact coordinates with another relay
-    // (the CSV uses city centroids). Without a deterministic tiebreak this
-    // client could pick a different set of 5 than the PWA from the very same
-    // directory, and publishers and subscribers must agree on relays or they
-    // never see each other. Index order reproduces the PWA's stable sort over
-    // the same directory order.
-    final ranked = <({GeoRelay relay, double distance, int index})>[
-      for (var i = 0; i < geoRelays.length; i++)
-        (
-          relay: geoRelays[i],
-          distance: ch.calculateDistance(
-              center.lat, center.lng, geoRelays[i].lat, geoRelays[i].lng),
-          index: i,
-        ),
-    ]..sort((a, b) {
+
+    // Distance is computed ONCE per relay rather than inside the comparator,
+    // and every sort carries an explicit tiebreak because Dart's List.sort is
+    // NOT stable — tied relays would otherwise come out in an unspecified
+    // order. Ties are the common case here, not an edge case: 353 of the 409
+    // relays in the upstream directory share exact coordinates with another
+    // relay, because the CSV uses city centroids.
+    List<({GeoRelay relay, double distance, int index})> rank(
+            List<GeoRelay> list) =>
+        [
+          for (var i = 0; i < list.length; i++)
+            (
+              relay: list[i],
+              distance: ch.calculateDistance(
+                  center.lat, center.lng, list[i].lat, list[i].lng),
+              index: i,
+            ),
+        ];
+
+    // bitchat-android's rule: distance only, ties by directory position (its
+    // Kotlin sortedBy is stable over the CSV order).
+    final upstream =
+        rank(_geoRelaysUpstream.isNotEmpty ? _geoRelaysUpstream : geoRelays)
+          ..sort((a, b) {
+            final d = a.distance.compareTo(b.distance);
+            return d != 0 ? d : a.index.compareTo(b.index);
+          });
+
+    // bitchat iOS's rule: (distance, host) ascending. Every url here is
+    // `wss://<host>` with the same prefix, so comparing urls orders by host.
+    final vetted = rank(_geoRelaysVetted)
+      ..sort((a, b) {
         final d = a.distance.compareTo(b.distance);
-        return d != 0 ? d : a.index.compareTo(b.index);
+        return d != 0 ? d : a.relay.url.compareTo(b.relay.url);
       });
-    return [for (final r in ranked.take(count)) r.relay];
+
+    // UNION of what each client would pick. The two directories agree on the
+    // closest five for only 3.6% of locations (mean overlap 2.87 of 5), so no
+    // single rule reaches both populations — and a geohash channel only works
+    // if publishers and subscribers land on the same relays. Costs ~6 relays
+    // instead of 5; buys reachability by every bitchat user.
+    final out = <GeoRelay>[];
+    final seen = <String>{};
+    for (final r in [...upstream.take(count), ...vetted.take(count)]) {
+      if (seen.add(r.relay.url)) out.add(r.relay);
+    }
+    return out;
   }
 
   /// Exposes the identity pubkey for the controller.
