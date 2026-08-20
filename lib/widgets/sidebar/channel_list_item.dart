@@ -174,8 +174,8 @@ class ChannelListItem extends ConsumerWidget {
                       _UnreadPill(count: unread),
                     ],
                     // Same menu the hold opens. Suppressed where there would
-                    // be no menu to open (#nymchat has no actions), so the
-                    // control never appears as a dead tap target.
+                    // be no menu to open, so the control never appears as a
+                    // dead tap target.
                     if (buildChannelMenuActions(context, ref, entry)
                         .isNotEmpty) ...[
                       const SizedBox(width: 2),
