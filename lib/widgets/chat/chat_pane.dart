@@ -1,4 +1,4 @@
-import 'dart:async' show unawaited;
+import 'dart:async' show Timer, unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -243,6 +243,9 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   // late response can't force a redundant rebuild after the view moved on.
   int _geocodeToken = 0;
 
+  /// Pending retry for a place name that missed.
+  Timer? _placeRetry;
+
   bool get _canBack => _index > 0;
   bool get _canForward => _index >= 0 && _index < _history.length - 1;
 
@@ -256,6 +259,12 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _maybeActivateBotHeader(ref.read(currentViewProvider));
     });
+  }
+
+  @override
+  void dispose() {
+    _placeRetry?.cancel();
+    super.dispose();
   }
 
   /// Columns mode keeps this shared header while the deck renders the bot
@@ -897,13 +906,30 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   /// a single request, including this header and its sidebar row), the >=1.1s
   /// spacing Nominatim requires, and persistence. All this adds is the rebuild
   /// and the failed-lookup fallback.
-  void _resolvePlaceName(String ghKey) {
+  void _resolvePlaceName(String ghKey, {bool force = false}) {
     if (!isValidGeohash(ghKey)) return;
     final cache = ref.read(geohashPlaceCacheProvider);
     if (cache.cached(ghKey) != null) return;
     final token = ++_geocodeToken;
-    cache.resolve(ghKey).then((place) {
-      if (place.isEmpty) _placeFailed.add(ghKey);
+    cache.resolve(ghKey, force: force).then((place) {
+      if (place.isEmpty) {
+        _placeFailed.add(ghKey);
+        // Nothing else re-triggers a lookup, so schedule the retry the cache's
+        // backoff allows — otherwise the header keeps the coordinates.
+        final at = cache.retryAt(ghKey);
+        if (at != null) {
+          final wait = at.difference(DateTime.now());
+          _placeRetry?.cancel();
+          _placeRetry = Timer(
+            wait.isNegative ? const Duration(seconds: 1) : wait,
+            () {
+              if (!mounted) return;
+              _placeFailed.remove(ghKey);
+              _resolvePlaceName(ghKey);
+            },
+          );
+        }
+      }
       if (!mounted || token != _geocodeToken) return;
       setState(() {});
     });
