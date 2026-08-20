@@ -2160,7 +2160,7 @@ class _ComposerState extends ConsumerState<Composer> {
         ? sortedTranslateLanguagesWithFavorites(_translateFavorites)
         : _translateLangOrder;
     final langs = order
-        .where((e) => q.isEmpty || e.value.toLowerCase().contains(q))
+        .where((e) => q.isEmpty || languageSearchKey(e.key, e.value).contains(q))
         .toList();
     return Stack(
       children: [
@@ -2272,7 +2272,8 @@ class _ComposerState extends ConsumerState<Composer> {
                               itemBuilder: (_, i) {
                                 final e = langs[i];
                                 return _TranslateLangRow(
-                                  name: e.value,
+                                  name: languageNative(e.key),
+                                  subtitle: languageSubtitle(e.key),
                                   favorited: favSet.contains(e.key),
                                   onTap: () => _translateDraft(e.key),
                                   onToggleFavorite: () =>
@@ -3257,12 +3258,16 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
 class _TranslateLangRow extends StatefulWidget {
   const _TranslateLangRow({
     required this.name,
+    required this.subtitle,
     required this.favorited,
     required this.onTap,
     required this.onToggleFavorite,
   });
 
   final String name;
+
+  /// The English name, under the endonym, when it adds something.
+  final String subtitle;
   final bool favorited;
   final VoidCallback onTap;
   final VoidCallback onToggleFavorite;
@@ -3300,13 +3305,25 @@ class _TranslateLangRowState extends State<_TranslateLangRow> {
           child: Row(
             children: [
               Expanded(
-                child: Text(
-                  widget.name,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: _hover ? c.textBright : c.text,
-                    fontSize: 13,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      widget.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _hover ? c.textBright : c.text,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (widget.subtitle.isNotEmpty)
+                      Text(
+                        widget.subtitle,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: c.textDim, fontSize: 10),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(width: 8),
