@@ -22,6 +22,7 @@ import '../../features/autocomplete/autocomplete_queries.dart';
 import '../../features/autocomplete/autocomplete_triggers.dart';
 import '../../features/autocomplete/pending_edit.dart';
 import '../../features/commands/command_handler.dart';
+import '../../features/commands/command_i18n.dart';
 import '../../features/commands/command_palette.dart';
 import '../../features/commands/command_registry.dart';
 import '../../features/emoji/custom_emoji.dart';
@@ -802,10 +803,14 @@ class _ComposerState extends ConsumerState<Composer> {
       // filtered by `cmd.startsWith(input)`.
       _botRows = botPM
           ? [
-              for (final c in filterBotPMCommands(trigger.query))
-                BotPaletteCommand(command: c.name, desc: c.desc),
+              for (final c
+                  in filterBotPMCommands(canonicalizeCommandInput(trigger.query)))
+                BotPaletteCommand(
+                  command: localizeCommandTokensIn(c.name),
+                  desc: c.desc,
+                ),
             ]
-          : buildBotPaletteRows(trigger.query);
+          : buildLocalizedBotPaletteRows(trigger.query);
       _paletteRows = const [];
       _acView = null;
     } else if (trigger.kind != TriggerKind.none) {
@@ -982,10 +987,12 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   void _completeCommand(CommandSpec spec) {
-    // selectCommand inserts `"<command> "` then hides the palette.
+    // selectCommand inserts `"<command> "` then hides the palette. The name is
+    // inserted in the user's language; the dispatcher resolves it back.
+    final name = localizedCommandToken(spec.name);
     _controller.value = TextEditingValue(
-      text: '${spec.name} ',
-      selection: TextSelection.collapsed(offset: spec.name.length + 1),
+      text: '$name ',
+      selection: TextSelection.collapsed(offset: name.length + 1),
     );
     _hideOverlay();
     _focus.requestFocus();
