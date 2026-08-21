@@ -857,7 +857,10 @@ class NostrController {
   /// restore honors the per-channel 60s freshness window
   /// (`channelRestoreManyFromD1` without force, channels.js:1127) — only an
   /// explicit view open forces. Best-effort; empty/blank keys are skipped.
-  Future<void> _backfillChannelArchivesFor(Iterable<String> keys) async {
+  Future<void> _backfillChannelArchivesFor(
+    Iterable<String> keys, {
+    void Function(NostrEvent event)? onRestored,
+  }) async {
     final list = <String>{
       for (final k in keys)
         if (k.isNotEmpty) k,
@@ -866,7 +869,8 @@ class NostrController {
     var next = 0;
     Future<void> worker() async {
       while (next < list.length) {
-        await _backfillChannelArchive(list[next++], force: false);
+        await _backfillChannelArchive(list[next++],
+            force: false, onRestored: onRestored);
       }
     }
 
@@ -1748,6 +1752,30 @@ class NostrController {
   bool _isHistorical(int createdAtSec) =>
       DateTime.now().millisecondsSinceEpoch - createdAtSec * 1000 > 10000;
 
+  /// Whether an event at [tsMs] must be recorded SILENTLY — bell history only,
+  /// no sound or popup.
+  ///
+  /// Normally that means anything but a live arrival: [historical] provenance,
+  /// or older than [liveWindowMs] (10s for channel/reaction/zap events, 30s for
+  /// messages, matching each PWA path).
+  ///
+  /// During a background catch-up ([runBackgroundCatchUp]) the watermark decides
+  /// instead. Everything a catch-up pulls is older than any live window — that
+  /// is what "the app was suspended" means — so the live rule would silence the
+  /// entire point of the wake-up.
+  bool _silentForAlert(
+    int tsMs, {
+    bool historical = false,
+    int liveWindowMs = 10000,
+  }) {
+    final cutoff = _catchUpAlertCutoffMs;
+    if (cutoff != null) {
+      return !catchUpShouldAlert(messageTsMs: tsMs, cutoffMs: cutoff);
+    }
+    if (historical) return true;
+    return DateTime.now().millisecondsSinceEpoch - tsMs > liveWindowMs;
+  }
+
   bool get _notificationsEnabled =>
       _ref.read(settingsProvider).notificationsEnabled;
   bool get _notifyFriendsOnly =>
@@ -1829,7 +1857,7 @@ class NostrController {
       eventId: e.id,
       tsMs: e.createdAt * 1000,
       contextLabel: key != null ? tr('in {key}', {'key': key}) : null,
-      silent: !alert,
+      silent: !alert || _silentForAlert(e.createdAt * 1000),
     );
   }
 
@@ -1871,17 +1899,12 @@ class NostrController {
     // PWA `treatAsHistorical = msg.isHistorical || ageMs > 30000` — drives the
     // loud alert only. A fresh message alerts; an older one records silently.
     //
-    // A background catch-up (iOS BGAppRefresh) is the exception: it runs while
-    // the app is suspended, so everything it pulls is older than the 30s live
-    // window and that rule would silence the entire point of the wake-up.
-    // There the watermark decides instead — anything that arrived since the
-    // last catch-up alerts, everything else stays silent.
-    final ageMs = DateTime.now().millisecondsSinceEpoch - m.timestamp;
-    final catchUpCutoff = _catchUpAlertCutoffMs;
-    final treatAsHistorical = catchUpCutoff != null
-        ? !catchUpShouldAlert(
-            messageTsMs: m.timestamp, cutoffMs: catchUpCutoff)
-        : (m.isHistorical || ageMs > 30000);
+    // A background catch-up is the exception, handled inside [_silentForAlert].
+    final treatAsHistorical = _silentForAlert(
+      m.timestamp,
+      historical: m.isHistorical,
+      liveWindowMs: 30000,
+    );
     _dispatchNotification(
       // The panel renders the avatar + decorated `<author#suffix>` from the
       // sender pubkey (like the PWA modal, which keys both off `senderPubkey`),
@@ -2115,7 +2138,7 @@ class NostrController {
       route: route ?? reactorPubkey,
       eventId: eventId,
       tsMs: tsSec * 1000,
-      silent: _isHistorical(tsSec),
+      silent: _silentForAlert(tsSec * 1000),
     );
   }
 
@@ -2192,7 +2215,7 @@ class NostrController {
       route: zapperPubkey,
       eventId: eventId,
       tsMs: tsSec * 1000,
-      silent: _isHistorical(tsSec),
+      silent: _silentForAlert(tsSec * 1000),
     );
   }
 
@@ -2249,7 +2272,7 @@ class NostrController {
         route: zapper,
         eventId: event.id,
         tsMs: event.createdAt * 1000,
-        silent: _isHistorical(event.createdAt),
+        silent: _silentForAlert(event.createdAt * 1000),
       );
     }).catchError((_) {});
   }
@@ -8100,14 +8123,20 @@ class NostrController {
   /// `BGAppRefresh`: a short, system-scheduled window, minutes to hours after
   /// the fact, in which the app may run. This is what it runs.
   ///
-  /// Deliberately narrow for that budget: the PM and group archives, which is
-  /// where a missed message actually matters. A channel @-mention that landed
-  /// while suspended is NOT recovered here — those archives are far larger and
-  /// would spend the window on the least urgent case.
+  /// The window is small and the OS kills an app that overruns it, so the work
+  /// is ordered by what a missed notification costs and each stage only starts
+  /// if enough of [budget] is left to finish something:
+  ///
+  ///  1. **PMs and group chats** — someone talking to you directly. Their
+  ///     reactions ride the same gift-wrap archive, so those come along.
+  ///  2. **Channel @-mentions** — someone calling you out in public. Restored
+  ///     for JOINED channels only, and skipping the activity-discovery step,
+  ///     which serves the sidebar/globe rather than notifications.
+  ///  3. **Zaps to us** — the profile zap receipts, cheapest and least urgent.
   ///
   /// Everything ingested flows through the normal pipeline, so the bell
   /// history, the dedup guards and every notification preference apply exactly
-  /// as they do for a live message. Returns when the work is done or [budget]
+  /// as they do for a live message. Returns when the work is done or the budget
   /// expires — the caller reports completion to the OS.
   Future<void> runBackgroundCatchUp({
     Duration budget = const Duration(seconds: 20),
@@ -8126,14 +8155,41 @@ class NostrController {
       storedWatermarkMs: storedSec > 0 ? storedSec * 1000 : 0,
       nowMs: nowMs,
     );
+    final deadline = DateTime.now().add(budget);
+
+    /// Runs one stage inside what remains of the budget. A stage that cannot
+    /// get [needs] is skipped rather than started and cut off mid-fetch —
+    /// there is no partial credit, and the next window will reach it.
+    Future<void> stage(
+      Future<void> Function() work, {
+      required Duration needs,
+    }) async {
+      final left = deadline.difference(DateTime.now());
+      if (left < needs) return;
+      try {
+        await work().timeout(left);
+      } catch (_) {
+        // Out of budget or a failed fetch — whatever landed has already been
+        // ingested and notified; the rest waits for the next window.
+      }
+    }
+
     try {
-      await Future.wait([
-        _restorePmArchive(sync),
-        _backfillGroupArchive(),
-      ]).timeout(budget);
-    } catch (_) {
-      // Out of budget or a failed fetch — whatever landed has already been
-      // ingested and notified; the rest waits for the next window.
+      await stage(
+        () => Future.wait([
+          _restorePmArchive(sync),
+          _backfillGroupArchive(),
+        ]),
+        needs: const Duration(seconds: 2),
+      );
+      await stage(
+        _catchUpChannelMentions,
+        needs: const Duration(seconds: 5),
+      );
+      await stage(
+        _catchUpProfileZaps,
+        needs: const Duration(seconds: 3),
+      );
     } finally {
       _catchUpAlertCutoffMs = null;
       // Stamped with the START of this run, so an event that lands mid-run is
@@ -8141,6 +8197,51 @@ class NostrController {
       // is not a risk: the replay guards reject anything already surfaced.
       await kv.setInt(StorageKeys.backgroundCatchUpTs, nowMs ~/ 1000);
     }
+  }
+
+  /// Catch-up stage 2: restore the joined channels' archives and notify for any
+  /// @-mention of us they contain.
+  ///
+  /// The archive restore ingests straight into the store ([_backfillChannelArchive]
+  /// → `ingestEvent`) rather than through `_onEvent`, so nothing in it would
+  /// otherwise reach the notification gate — the [onRestored] hook is what
+  /// carries each restored event to the same [_maybeNotifyChannel] a live
+  /// message takes, where the mention/blocked/friends-only gates and the
+  /// catch-up watermark apply as usual.
+  ///
+  /// Only channels the user actually joined are restored: a mention in a
+  /// channel they merely passed through is not worth the window.
+  Future<void> _catchUpChannelMentions() async {
+    final joined = <String>{
+      for (final c in _ref.read(appStateProvider).channels)
+        if (c.key.isNotEmpty) c.key,
+    };
+    if (joined.isEmpty) return;
+    await _backfillChannelArchivesFor(
+      joined,
+      onRestored: (ev) {
+        if (ev.kind != EventKind.geoChannel &&
+            ev.kind != EventKind.namedChannel) {
+          return;
+        }
+        _maybeNotifyChannel(ev);
+      },
+    );
+  }
+
+  /// Catch-up stage 3: profile zap receipts, so a zap that landed while we were
+  /// suspended still surfaces. Cheapest of the three and the least urgent,
+  /// which is why it goes last.
+  Future<void> _catchUpProfileZaps() async {
+    final selfPk = _identity?.pubkey;
+    final zapArchive = _zapArchive;
+    if (selfPk == null || zapArchive == null) return;
+    final appState = _ref.read(appStateProvider.notifier);
+    await zapArchive.backfill(
+      [selfPk],
+      'profile',
+      (receipt) => _onPublicZapReceipt(receipt, appState),
+    );
   }
 
   /// Per-channel in-flight backfill (channels.js `_channelD1FetchedAt`). The
@@ -8242,8 +8343,12 @@ class NostrController {
   /// `channelGet`'s 60s freshness window; the RECONNECT/boot mass restore
   /// passes false, matching `channelRestoreManyFromD1`'s non-forced skip
   /// (`!force && fetchedAt > now-60000`, channels.js:1127).
+  /// [onRestored] is invoked for each archived event as it is replayed. Only
+  /// the background catch-up passes one: the replay ingests straight into the
+  /// store rather than through `_onEvent`, so a restored @-mention would
+  /// otherwise never reach the notification gate.
   Future<void> _backfillChannelArchive(String channelKey,
-      {bool force = true}) async {
+      {bool force = true, void Function(NostrEvent event)? onRestored}) async {
     final sync = _storageSync;
     if (sync == null || channelKey.isEmpty) return;
     final name = channelKey.toLowerCase();
@@ -8257,7 +8362,8 @@ class NostrController {
       final produced = await inFlight;
       if (produced || _channelBackfillInFlight.containsKey(name)) return;
     }
-    final run = _runChannelBackfill(name, channelKey, sync, force: force);
+    final run = _runChannelBackfill(name, channelKey, sync,
+        force: force, onRestored: onRestored);
     _channelBackfillInFlight[name] = run;
     try {
       await run;
@@ -8275,7 +8381,7 @@ class NostrController {
   /// knows an immediate retry is warranted. Never throws.
   Future<bool> _runChannelBackfill(
       String name, String channelKey, StorageSync sync,
-      {required bool force}) async {
+      {required bool force, void Function(NostrEvent event)? onRestored}) async {
     try {
       // [force] bypasses channelGet's 60s freshness window on an explicit
       // channel OPEN/boot-view, which the PWA always forces
@@ -8327,6 +8433,13 @@ class NostrController {
               // /picture-/throttle-guarded + debounced inside, so calling it per
               // restored message coalesces into one batched `profile-get`.
               _maybeBackfillProfiles(ev.pubkey);
+            }
+            if (onRestored != null) {
+              try {
+                onRestored(ev);
+              } catch (_) {
+                // A hook failure must not abort the archive replay.
+              }
             }
           } catch (_) {
             // Skip a malformed archived event (mirrors the PWA's per-event catch).
