@@ -16,6 +16,7 @@ import 'features/onboarding/boot_gate.dart';
 import 'features/share/share_intake.dart';
 import 'services/notification_service.dart';
 import 'services/platform/background_connectivity.dart';
+import 'services/platform/background_refresh.dart';
 import 'services/platform/deep_link_target.dart';
 import 'services/platform/deep_links.dart';
 import 'state/app_state.dart';
@@ -43,6 +44,12 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
   /// notification (Android) or an open background task (iOS).
   final BackgroundConnectivityService _backgroundConnectivity =
       BackgroundConnectivityService();
+
+  /// iOS-only catch-up: with no push provider, a `BGAppRefresh` window is the
+  /// only chance a suspended app gets to notice what arrived and notify about
+  /// it. No-op on Android, where the foreground service keeps the socket open
+  /// and events arrive live.
+  final BackgroundRefreshService _backgroundRefresh = BackgroundRefreshService();
 
   /// Lets sign-out clear any dialogs/modals pushed above the boot gate. The
   /// remount (keyed [BootGate]) replaces the gate's content, but pushed routes
@@ -101,6 +108,12 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
       if (ref.read(settingsProvider).notificationsEnabled) {
         unawaited(notifications.ensurePermission());
       }
+      // iOS background catch-up. Registered whether or not notifications are on
+      // right now, so switching them on later needs no relaunch; the catch-up
+      // itself re-checks the setting before doing anything.
+      _backgroundRefresh.start(
+        () => ref.read(nostrControllerProvider).runBackgroundCatchUp(),
+      );
     } catch (e) {
       debugPrint('[Platform] notifications skipped: $e');
     }
@@ -193,6 +206,16 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     } else {
       unawaited(_backgroundConnectivity.stop());
     }
+    // Ask iOS for a catch-up window while we are away. Requested on the way
+    // out because a task request is only useful once the app is suspended, and
+    // re-requested after each window fires (the native side does that).
+    var notificationsOn = false;
+    try {
+      notificationsOn = ref.read(settingsProvider).notificationsEnabled;
+    } catch (_) {}
+    if (notificationsOn && state != AppLifecycleState.detached) {
+      unawaited(_backgroundRefresh.schedule());
+    }
     try {
       ref
           .read(nostrControllerProvider)
@@ -258,6 +281,15 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
       settingsProvider.select((s) => s.backgroundConnectivity),
       (_, next) {
         if (!next) unawaited(_backgroundConnectivity.stop());
+      },
+    );
+    // Notifications off: stop asking iOS for catch-up windows there is nothing
+    // to do in. Turning them back on re-requests one at the next background
+    // transition, and asks the OS for permission from the panel toggle.
+    ref.listen<bool>(
+      settingsProvider.select((s) => s.notificationsEnabled),
+      (_, next) {
+        if (!next) unawaited(_backgroundRefresh.cancel());
       },
     );
     // Sign-out bumps the boot generation (nostr_controller `signOut`). Pop any

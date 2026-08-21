@@ -28,6 +28,7 @@ import '../features/groups/group_manager.dart';
 import '../features/i18n/i18n.dart';
 import '../features/i18n/localization_service.dart';
 import '../features/messages/trust_graph.dart';
+import '../features/notifications/background_catch_up.dart';
 import '../features/notifications/notification_routing.dart';
 import '../features/notifications/notifications_service.dart';
 import '../services/notification_service.dart' show NotificationService;
@@ -1869,8 +1870,18 @@ class NostrController {
     if (!record) return;
     // PWA `treatAsHistorical = msg.isHistorical || ageMs > 30000` — drives the
     // loud alert only. A fresh message alerts; an older one records silently.
+    //
+    // A background catch-up (iOS BGAppRefresh) is the exception: it runs while
+    // the app is suspended, so everything it pulls is older than the 30s live
+    // window and that rule would silence the entire point of the wake-up.
+    // There the watermark decides instead — anything that arrived since the
+    // last catch-up alerts, everything else stays silent.
     final ageMs = DateTime.now().millisecondsSinceEpoch - m.timestamp;
-    final treatAsHistorical = m.isHistorical || ageMs > 30000;
+    final catchUpCutoff = _catchUpAlertCutoffMs;
+    final treatAsHistorical = catchUpCutoff != null
+        ? !catchUpShouldAlert(
+            messageTsMs: m.timestamp, cutoffMs: catchUpCutoff)
+        : (m.isHistorical || ageMs > 30000);
     _dispatchNotification(
       // The panel renders the avatar + decorated `<author#suffix>` from the
       // sender pubkey (like the PWA modal, which keys both off `senderPubkey`),
@@ -8073,6 +8084,63 @@ class NostrController {
     // `inactive` state (a permission dialog, the app switcher), and an
     // unconditional flush would re-encode every section for nothing.
     if (_settingsSyncTimer != null) flushSettingsSyncNow();
+  }
+
+  /// While a background catch-up is running, the timestamp a message must beat
+  /// to raise a notification (see [runBackgroundCatchUp]). Null at every other
+  /// moment, which leaves the normal live-arrival rule in charge.
+  int? _catchUpAlertCutoffMs;
+
+  /// Pulls what arrived while the app was suspended and lets anything new
+  /// enough raise a notification — the iOS half of "notifications without a
+  /// push provider".
+  ///
+  /// iOS suspends the process, so there is no socket to receive on and no way
+  /// to be woken by network data without APNs. What iOS does offer is
+  /// `BGAppRefresh`: a short, system-scheduled window, minutes to hours after
+  /// the fact, in which the app may run. This is what it runs.
+  ///
+  /// Deliberately narrow for that budget: the PM and group archives, which is
+  /// where a missed message actually matters. A channel @-mention that landed
+  /// while suspended is NOT recovered here — those archives are far larger and
+  /// would spend the window on the least urgent case.
+  ///
+  /// Everything ingested flows through the normal pipeline, so the bell
+  /// history, the dedup guards and every notification preference apply exactly
+  /// as they do for a live message. Returns when the work is done or [budget]
+  /// expires — the caller reports completion to the OS.
+  Future<void> runBackgroundCatchUp({
+    Duration budget = const Duration(seconds: 20),
+  }) async {
+    final sync = _storageSync;
+    // Not booted (relaunched into the background with a locked vault, or no
+    // identity yet): nothing to pull, and the next window will try again.
+    if (sync == null) return;
+    if (!_ref.read(settingsProvider).notificationsEnabled) return;
+
+    final kv = _ref.read(keyValueStoreProvider);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final storedSec =
+        kv.getInt(StorageKeys.backgroundCatchUpTs, defaultValue: 0);
+    _catchUpAlertCutoffMs = catchUpCutoffMs(
+      storedWatermarkMs: storedSec > 0 ? storedSec * 1000 : 0,
+      nowMs: nowMs,
+    );
+    try {
+      await Future.wait([
+        _restorePmArchive(sync),
+        _backfillGroupArchive(),
+      ]).timeout(budget);
+    } catch (_) {
+      // Out of budget or a failed fetch — whatever landed has already been
+      // ingested and notified; the rest waits for the next window.
+    } finally {
+      _catchUpAlertCutoffMs = null;
+      // Stamped with the START of this run, so an event that lands mid-run is
+      // covered by the next one rather than falling through the gap. Re-alerting
+      // is not a risk: the replay guards reject anything already surfaced.
+      await kv.setInt(StorageKeys.backgroundCatchUpTs, nowMs ~/ 1000);
+    }
   }
 
   /// Per-channel in-flight backfill (channels.js `_channelD1FetchedAt`). The
