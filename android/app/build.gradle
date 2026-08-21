@@ -47,7 +47,7 @@ android {
         // unchanged.
         minSdk = 24
         targetSdk = 36
-        versionCode = 227
+        versionCode = 228
         versionName = flutter.versionName
         
         // Support all ABIs - AGP 8.9.1 automatically handles 16 KB alignment

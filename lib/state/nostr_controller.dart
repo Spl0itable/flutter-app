@@ -28,7 +28,9 @@ import '../features/groups/group_manager.dart';
 import '../features/i18n/i18n.dart';
 import '../features/i18n/localization_service.dart';
 import '../features/messages/trust_graph.dart';
+import '../features/notifications/notification_routing.dart';
 import '../features/notifications/notifications_service.dart';
+import '../services/notification_service.dart' show NotificationService;
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
 import '../features/nymbot/nymbot_providers.dart';
@@ -1758,7 +1760,21 @@ class NostrController {
           .getString(StorageKeys.groupNotifyMentionsOnly) ==
       'true';
 
+  /// Whether the app is on screen. Backgrounded, nothing is "being viewed" —
+  /// see [_isActiveView].
+  bool _appInForeground = true;
+
+  /// True only when the user can actually SEE [storageKey] right now: it is the
+  /// open conversation AND the app is in the foreground.
+  ///
+  /// The foreground half matters twice. It gates the notification suppression —
+  /// backgrounding the app while sitting in a PM used to silence that
+  /// conversation's messages completely (no alert and, because the same gate
+  /// feeds `shouldRecordNotification`, no bell entry either), which is precisely
+  /// the case a notification exists for. And it gates the read receipts below:
+  /// a backgrounded app must not tell the sender their message was read.
   bool _isActiveView(String storageKey) =>
+      _appInForeground &&
       _ref.read(appStateProvider).view.storageKey == storageKey;
 
   void _maybeNotifyChannel(NostrEvent e) {
@@ -1911,6 +1927,20 @@ class NostrController {
     String? contextLabel,
     bool silent = false,
   }) {
+    // The tap target, shared with the bell row so both open the same place.
+    final tapRoute = route ?? senderPubkey;
+    final payload = encodeNotificationPayload(
+      type: historyType,
+      route: tapRoute,
+      senderPubkey: senderPubkey,
+    );
+    // One OS notification per conversation, replaced as it goes — keyed the same
+    // way the bell routes, so `pm`/`reaction` from one peer collapse together.
+    final conversationKey = notificationConversationKey(
+      historyType: historyType,
+      route: tapRoute,
+    );
+    final kind = notificationKindFor(historyType);
     // The verified Nymbot never notifies AT ALL — the PWA returns BEFORE any
     // sound/popup/history in BOTH `showNotification` (notifications.js:14) and
     // `_addNotificationToHistory` (notifications.js:126). This gate must
@@ -1945,6 +1975,13 @@ class NostrController {
               isFriend: isFriend,
               isMention: isMention,
               isGroup: isGroup,
+              // Tapping the notification opens the conversation it came from.
+              // This was previously null, so a tapped notification opened the
+              // app on whatever view it had last and left the user to find the
+              // message themselves.
+              payload: payload,
+              conversationKey: conversationKey,
+              kind: kind,
               // Belt-and-suspenders: the top-level gate above already returned
               // for the verified bot; the flag keeps the service's own
               // `context.isBot` gate live (notifications_service.dart:282).
@@ -7897,6 +7934,10 @@ class NostrController {
     _ref
         .read(notificationHistoryProvider.notifier)
         .markConversationSeen(view.id, tsSec: nowSec);
+    // …and dismisses the OS notification(s) for it: opening the conversation is
+    // reading it, so leaving the shade entry behind would have the user tap a
+    // notification for a message they are already looking at.
+    unawaited(_clearOsNotificationsFor(view));
     // Geo-relay keep-alive follows the ACTIVE view: run the 30s re-check only
     // while a geohash channel is open, and stop it on any other view (named
     // channel, PM, group, bot). This is the single-authority equivalent of the
@@ -7931,6 +7972,27 @@ class NostrController {
         markVisiblePmMessagesRead(view.id);
         // PM-scope zap badges for the rendered conversation (messages.js:3112).
         _backfillZapReceiptsFor(view.storageKey, scope: 'pm');
+    }
+  }
+
+  /// Dismisses the OS notifications belonging to a conversation the user just
+  /// opened. The keys mirror the `<historyType>:<route>` form
+  /// [_dispatchNotification] posts under; a PM also carries the reaction /
+  /// mention notifications raised by the same peer.
+  Future<void> _clearOsNotificationsFor(ChatView view) async {
+    final service = NotificationService();
+    Future<void> clear(String type) => service.cancelConversation(
+          notificationConversationKey(historyType: type, route: view.id),
+        );
+    switch (view.kind) {
+      case ViewKind.channel:
+        await clear('channel');
+      case ViewKind.group:
+        await clear('group');
+      case ViewKind.pm:
+        for (final type in const ['pm', 'reaction', 'mention']) {
+          await clear(type);
+        }
     }
   }
 
@@ -7975,6 +8037,7 @@ class NostrController {
   /// relays.js:490) and clears the focused at-bottom column's unread badge in
   /// columns mode (`_cvMarkVisibleColumnsRead`, relays.js:532/584).
   void onAppResumed() {
+    _appInForeground = true;
     _onViewOpened(_ref.read(appStateProvider).view);
     // Re-pull the FULL D1 backlog on every foreground/resume — the PWA fires
     // `backfillFromD1OnReconnect` on visibilitychange/focus/resume (relays.js:
@@ -8002,6 +8065,7 @@ class NostrController {
   /// now — backgrounding is the last moment we are sure to get, and the process
   /// may not be alive when the timer would have fired.
   void onAppPaused({bool keepConnectionsAlive = false}) {
+    _appInForeground = false;
     if (!keepConnectionsAlive) {
       _service?.stopGeoRelayKeepAlive();
     }
