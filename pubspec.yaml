@@ -49,6 +49,10 @@ dependencies:
   # Inline video playback for video messages / galleries (PWA <video>).
   video_player: ^2.9.1
 
+  # Store billing — the flair shop must offer an in-app purchase alongside its
+  # Lightning invoice to satisfy App Store / Play policy on digital goods.
+  in_app_purchase: ^3.2.0
+
   # Realtime media
   flutter_webrtc: ^0.12.5+hotfix.1
 
