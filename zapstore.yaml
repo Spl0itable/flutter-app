@@ -83,10 +83,10 @@ tags:
 
 website: https://nymchat.app
 
-# SPDX identifier for the AGPL-3.0 grant stated in the project README.
-# NOTE: this repo has no LICENSE file yet — add one (the AGPL-3.0 text) so the
-# listing's license claim is backed by the source tree. If the intent is
-# "version 3 or later", change this to AGPL-3.0-or-later.
+# SPDX identifier, matching the LICENSE file in this repo (a verbatim copy of
+# the one in Spl0itable/NYM). "-only" rather than "-or-later": neither the
+# project README nor any source header offers the "or any later version"
+# upgrade clause, so the grant is version 3 alone.
 license: AGPL-3.0-only
 
 # --- Media (local paths, relative to repo root) ---
