@@ -18,7 +18,7 @@ repository: https://github.com/Spl0itable/NYM
 
 # --- App metadata ---
 name: Nymchat - Geohash Mesh Chat
-summary: Encrypted chat over Bluetooth mesh. No phone number, no account, works offline.
+summary: Encrypted chat with Bluetooth mesh. No phone number, no account, works offline.
 description: |
   Nymchat is an encrypted messenger with no account, no phone number and no server that knows who you are.
 
