@@ -2808,6 +2808,13 @@ class _HoverBuilderState extends State<_HoverBuilder> {
 /// backdrop fade, >60px horizontal swipe gallery paging, 300ms double-tap
 /// 2.5× zoom toggle, prev/next paging
 /// across a message's images, tap the backdrop or the ✕ to close.
+/// Open the fullscreen still viewer on [urls] at [index]. Public entry point so
+/// surfaces outside this file (e.g. the composer's attachment strip) can expand
+/// an image without duplicating the viewer.
+Future<void> openFullscreenMedia(
+        BuildContext context, List<String> urls, int index) =>
+    _FullscreenImageViewer.open(context, urls, index);
+
 class _FullscreenImageViewer extends StatefulWidget {
   const _FullscreenImageViewer(
       {required this.urls, required this.initialIndex});

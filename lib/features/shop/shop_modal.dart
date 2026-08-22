@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/crypto/key_format.dart' show normalizePubkeyInput;
 import '../../core/constants/relays.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
@@ -656,7 +657,7 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       title: tr('Gift Item'),
       item: item,
       description: tr(
-          "Enter the recipient's hex pubkey (64 characters). You pay for the "
+          "Enter the recipient's public key — an npub or a 64-character hex "
           'item and it lands directly in their inventory.'),
       selfPubkey: identity?.pubkey,
       // shop.js:1650 — the exact self-gift rejection copy.
@@ -700,7 +701,7 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       title: tr('Transfer Item'),
       item: item,
       description: tr(
-          "Enter the recipient's hex pubkey (64 characters). The item will be "
+          "Enter the recipient's public key — an npub or a 64-character hex "
           'revoked from your inventory and assigned to theirs.'),
       selfPubkey: identity.pubkey,
       // shop.js:1731 — the exact self-transfer rejection copy.
@@ -1539,7 +1540,6 @@ class _RecipientPubkeyDialog extends StatefulWidget {
 
 class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
   final _controller = TextEditingController();
-  static final _hexRe = RegExp(r'^[0-9a-f]{64}$');
   String? _error;
 
   @override
@@ -1549,9 +1549,11 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
   }
 
   void _submit() {
-    final pk = _controller.text.trim().toLowerCase();
-    if (!_hexRe.hasMatch(pk)) {
-      setState(() => _error = tr('Invalid pubkey. Must be 64 hex characters.'));
+    // A public key in either accepted form — npub or hex (key_format.dart).
+    final pk = normalizePubkeyInput(_controller.text);
+    if (pk == null) {
+      setState(() => _error = tr(
+          'Invalid public key. Paste an npub or a 64-character hex pubkey.'));
       return;
     }
     if (widget.selfPubkey != null && pk == widget.selfPubkey) {
@@ -1624,7 +1626,7 @@ class _RecipientPubkeyDialogState extends State<_RecipientPubkeyDialog> {
                   autofocus: true,
                   style: TextStyle(color: c.text, fontSize: 13),
                   decoration: InputDecoration(
-                    hintText: tr('Recipient hex pubkey (64 chars)'),
+                    hintText: tr('Recipient npub or hex pubkey'),
                     hintStyle: TextStyle(color: c.textDim),
                     enabledBorder: OutlineInputBorder(
                       borderSide: BorderSide(color: c.glassBorder),

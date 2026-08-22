@@ -2567,8 +2567,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
       ),
       _GroupSpec(
-        text: tr('Transfer Settings to Another User Recipient hex pubkey '
-            '(64 chars) Send Transfers your nickname, avatar, and all '
+        text: tr('Transfer Settings to Another User Recipient npub or hex '
+            'pubkey Send Transfers your nickname, avatar, and all '
             'preferences to the specified pubkey'),
         child: FormGroup(
           label: tr('Transfer Settings to Another User'),
@@ -2583,7 +2583,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   Expanded(
                     child: FormInput(
                       controller: _transferPubkeyController,
-                      hint: tr('Recipient hex pubkey (64 chars)'),
+                      hint: tr('Recipient npub or hex pubkey'),
                       onChanged: (_) {
                         if (_transferError != null) {
                           setState(() => _transferError = null);

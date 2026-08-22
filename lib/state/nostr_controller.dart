@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/crypto/bech32_codec.dart' as bech32;
+import '../core/crypto/key_format.dart' show normalizePubkeyInput;
 import '../core/crypto/bitchat.dart' as bitchat;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/pow.dart' as pow;
@@ -4754,15 +4755,13 @@ class NostrController {
   /// miss on a differently-encoded id.
   void startPM(String peerPubkey, {String? nym}) {
     var peer = peerPubkey.trim();
-    if (RegExp(r'^npub1', caseSensitive: false).hasMatch(peer)) {
-      try {
-        peer = bech32.decodeNpub(peer.toLowerCase());
-      } catch (_) {
-        return; // malformed npub — nothing to open
-      }
-    }
-    if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(peer)) {
-      peer = peer.toLowerCase();
+    // Accept a public key in either form — hex, npub or nprofile.
+    final normalized = normalizePubkeyInput(peer);
+    if (normalized != null) {
+      peer = normalized;
+    } else if (RegExp(r'^(npub|nprofile)1', caseSensitive: false)
+        .hasMatch(peer)) {
+      return; // malformed bech32 key — nothing to open
     }
     if (peer.isEmpty) return;
     final appState = _ref.read(appStateProvider.notifier);
