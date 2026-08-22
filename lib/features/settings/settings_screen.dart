@@ -2522,14 +2522,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'connections and the Bluetooth mesh running while the app is in '
               'the background, so messages arrive without reopening it. Uses '
               'more battery. Android shows a permanent notification while it '
-              'is on; iOS limits how long connections can be held.'),
+              'is on; iOS limits how long connections can be held and, with '
+              'identity encryption on, catches up only while the device has '
+              'been unlocked at least once since it was powered on.'),
           child: FormGroup(
             label: tr('Stay Connected in Background'),
             hint: tr('Keeps relay connections and the Bluetooth mesh running '
                 'while the app is in the background, so messages arrive '
                 'without reopening it. Uses more battery. Android shows a '
                 'permanent notification while it is on; iOS limits how long '
-                'connections can be held.'),
+                'connections can be held and, with identity encryption on, '
+                'catches up only while the device has been unlocked at least '
+                'once since it was powered on.'),
             // Save-gated like its Data & Backup siblings (09-M1): the platform
             // keep-alive is started from the app shell when the setting's
             // committed value flips, not from this dropdown.
