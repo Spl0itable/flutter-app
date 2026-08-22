@@ -10,6 +10,8 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/crypto/key_format.dart' show normalizePubkeyInput;
+import 'iap/iap_service.dart';
+import 'iap/payment_method_sheet.dart';
 import '../../core/constants/relays.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
@@ -104,6 +106,40 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       unawaited(
         ctrl.reconcilePendingPurchases(identity, gifterNym: _gifterNym(ref)),
       );
+      unawaited(_drainStorePurchases(identity));
+    }
+  }
+
+  /// Settle store purchases that were paid but never granted — the app was
+  /// killed mid-flow, or the claim round-trip failed. The store replays an
+  /// uncompleted purchase on every `restorePurchases`, so pairing that replay
+  /// with our own pending order record recovers the item without the buyer
+  /// having to do anything.
+  Future<void> _drainStorePurchases(ShopIdentity identity) async {
+    final iap = IapService.instance;
+    if (!iap.platformSupported) return;
+    await iap.start();
+    final ctrl = ref.read(shopControllerProvider.notifier);
+    for (final entry in ctrl.pendingPurchases) {
+      if (entry['kind'] != 'iap') continue;
+      final orderId = entry['invoiceId']?.toString() ?? '';
+      final productId = entry['productId']?.toString() ?? '';
+      if (orderId.isEmpty || productId.isEmpty) continue;
+      final details = iap.detailsFor(productId);
+      final token = details == null ? null : iap.tokenFor(details);
+      if (token == null || token.isEmpty) continue;
+      try {
+        await ctrl.iapClaim(
+          orderId,
+          identity: identity,
+          productId: productId,
+          purchaseToken: token,
+          gifterNym: entry['isGift'] == true ? _gifterNym(ref) : null,
+        );
+        await iap.complete(details!);
+      } catch (_) {
+        // Leave it pending for the next open rather than dropping a paid order.
+      }
     }
   }
 
@@ -636,17 +672,195 @@ class _ShopModalState extends ConsumerState<ShopModal> {
 
   Future<void> _buy(ShopItem item) async {
     final identity = _shopIdentity(ref);
-    final granted = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
-      builder: (_) => _InvoiceDialog(item: item, identity: identity),
-    );
-    if (granted == true && mounted) {
+    // Store policy requires an in-app purchase option for digital goods, so the
+    // buyer picks the rail first; the sheet skips itself when only one is
+    // available (iap/payment_method_sheet.dart).
+    final method = await showPaymentMethodSheet(context, item: item, isGift: false);
+    if (method == null || !mounted) return;
+    if (method == PaymentMethod.lightning) {
+      await _payWithLightning(item, identity: identity);
+      return;
+    }
+    final granted = await _payWithStore(item, identity: identity);
+    if (granted && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(tr('{name} unlocked!', {'name': item.name}))),
       );
     }
   }
+
+  /// Pay in sats.
+  ///
+  /// Where the install has store billing, this is an EXTERNAL purchase and must
+  /// happen outside the app, so it hands off to the web app. Where it does not
+  /// — a Zapstore or direct-APK install on a de-Googled device, which has no
+  /// Play billing and so no store policy to satisfy — the native invoice dialog
+  /// is kept: it is the better experience and the only rail those users have.
+  Future<void> _payWithLightning(
+    ShopItem item, {
+    required ShopIdentity? identity,
+    String? recipientPubkey,
+  }) async {
+    if (await IapService.instance.billingAvailable()) {
+      if (!mounted) return;
+      await _payWithLightningOnWeb(item, recipientPubkey: recipientPubkey);
+      return;
+    }
+    if (!mounted) return;
+    final granted = await showDialog<bool>(
+      context: context,
+      barrierColor: Colors.black.withValues(alpha: 0.7),
+      builder: (_) => _InvoiceDialog(
+        item: item,
+        identity: identity,
+        recipientPubkey: recipientPubkey,
+      ),
+    );
+    if (granted == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(recipientPubkey == null
+              ? tr('{name} unlocked!', {'name': item.name})
+              : tr('Gift sent: {name}', {'name': item.name})),
+        ),
+      );
+    }
+  }
+
+  /// Hand the buyer off to the web app to pay the Lightning invoice. The native
+  /// app deliberately does NOT render an invoice for this route — that is what
+  /// makes it an external purchase rather than an in-app one.
+  Future<void> _payWithLightningOnWeb(ShopItem item, {String? recipientPubkey}) async {
+    final url = Uri.parse(shopWebUrlFor(item.id));
+    var opened = false;
+    try {
+      opened = await launchUrl(url, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      opened = false;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(opened
+            ? (recipientPubkey == null
+                ? tr('Finish your purchase in the web app.')
+                : tr('Finish your gift in the web app.'))
+            : tr('Could not open the web app.')),
+      ),
+    );
+  }
+
+  /// Buy [item] through the platform store: open a server-side order, run the
+  /// store purchase, then claim it. The item is granted by the backend after it
+  /// validates the receipt — nothing is unlocked locally on the store's word.
+  Future<bool> _payWithStore(
+    ShopItem item, {
+    required ShopIdentity? identity,
+    String? recipientPubkey,
+  }) async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (identity == null) {
+      messenger.showSnackBar(SnackBar(content: Text(tr('Sign in to buy flair.'))));
+      return false;
+    }
+    final iap = IapService.instance;
+    final platform = iap.platformTag;
+    if (platform == null) {
+      messenger.showSnackBar(
+          SnackBar(content: Text(tr('Store billing is unavailable.'))));
+      return false;
+    }
+    await iap.start();
+
+    final ctrl = ref.read(shopControllerProvider.notifier);
+    Map<String, dynamic> order;
+    try {
+      order = await ctrl.iapOrder(
+        item.id,
+        identity: identity,
+        platform: platform,
+        recipientPubkey: recipientPubkey,
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(_shopError(e))));
+      return false;
+    }
+    final orderId = (order['orderId'] ?? '').toString();
+    // The SERVER decides which tier product to charge — never the local ladder.
+    final productId = (order['productId'] ?? '').toString();
+    if (orderId.isEmpty || productId.isEmpty) {
+      messenger.showSnackBar(
+          SnackBar(content: Text(tr('Could not start this purchase.'))));
+      return false;
+    }
+
+    // Remember the order BEFORE money changes hands: if the app dies between
+    // the store taking payment and the grant landing, the drain on next open is
+    // what rescues it.
+    ctrl.addPendingPurchase({
+      'kind': 'iap',
+      'invoiceId': orderId,
+      'itemId': item.id,
+      'productId': productId,
+      'isGift': recipientPubkey != null,
+    });
+
+    final products = await iap.products();
+    final product = products[productId];
+    if (product == null) {
+      messenger.showSnackBar(
+          SnackBar(content: Text(tr('This item is not available from the store yet.'))));
+      return false;
+    }
+
+    final purchase = await iap.buy(product, applicationUserName: identity.pubkey);
+    if (!mounted) return false;
+    switch (purchase.result) {
+      case IapResult.canceled:
+        return false;
+      case IapResult.pending:
+        messenger.showSnackBar(
+            SnackBar(content: Text(tr('Your purchase is pending with the store.'))));
+        return false;
+      case IapResult.error:
+        messenger.showSnackBar(SnackBar(
+            content: Text(purchase.message ?? tr('The purchase failed.'))));
+        return false;
+      case IapResult.purchased:
+        break;
+    }
+
+    try {
+      await ctrl.iapClaim(
+        orderId,
+        identity: identity,
+        productId: productId,
+        purchaseToken: purchase.token ?? '',
+        gifterNym: recipientPubkey == null ? null : _gifterNym(ref),
+      );
+    } catch (e) {
+      // The money is already taken, so leave the purchase UNCOMPLETED: the store
+      // will replay it and the shop drains it on next open, rather than the
+      // buyer paying for nothing.
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(
+          content: Text(tr(
+              'Paid, but the item could not be unlocked yet: {err}. It will '
+              'retry automatically.',
+              {'err': _shopError(e)})),
+        ));
+      }
+      return false;
+    }
+    // Granted — now it is safe to acknowledge/consume with the store.
+    final details = iap.detailsFor(productId);
+    if (details != null) await iap.complete(details);
+    return true;
+  }
+
+  /// A user-facing message for a failed shop round-trip.
+  String _shopError(Object e) =>
+      e is ApiException && e.body.isNotEmpty ? e.body : tr('Something went wrong.');
 
   /// Gift [item] to another user (shop.js `promptGiftShopItem` →
   /// `executeGiftShopItem`): prompt for a recipient hex pubkey, then settle the
@@ -658,7 +872,8 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       item: item,
       description: tr(
           "Enter the recipient's public key — an npub or a 64-character hex "
-          'item and it lands directly in their inventory.'),
+          'pubkey. You pay for the item and it lands directly in their '
+          'inventory.'),
       selfPubkey: identity?.pubkey,
       // shop.js:1650 — the exact self-gift rejection copy.
       selfMessage: tr('Use GET to buy an item for yourself.'),
@@ -667,19 +882,24 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       showPrice: true,
     );
     if (recipient == null || !mounted) return;
-    final granted = await showDialog<bool>(
-      context: context,
-      barrierColor: Colors.black.withValues(alpha: 0.7),
-      builder: (_) => _InvoiceDialog(
-        item: item,
-        identity: identity,
-        recipientPubkey: recipient,
-      ),
+    final method = await showPaymentMethodSheet(context, item: item, isGift: true);
+    if (method == null || !mounted) return;
+    if (method == PaymentMethod.lightning) {
+      // On a store install the web app collects the recipient again — a gift
+      // pubkey can't ride in the deep link without exposing it in the buyer's
+      // browser history. Off-store, the native dialog gifts directly.
+      await _payWithLightning(item, identity: identity, recipientPubkey: recipient);
+      return;
+    }
+    final granted = await _payWithStore(
+      item,
+      identity: identity,
+      recipientPubkey: recipient,
     );
     // Only a settled claim confirms the gift (the PWA's "Gift sent!" comes from
     // `_renderShopSuccess` after shop-claim, shop.js:1579) — a cancelled or
     // failed payment must NOT report success.
-    if (granted == true && mounted) {
+    if (granted && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(tr('Gift sent: {name}', {'name': item.name}))),
       );
@@ -702,7 +922,8 @@ class _ShopModalState extends ConsumerState<ShopModal> {
       item: item,
       description: tr(
           "Enter the recipient's public key — an npub or a 64-character hex "
-          'revoked from your inventory and assigned to theirs.'),
+          'pubkey. The item will be revoked from your inventory and assigned '
+          'to theirs.'),
       selfPubkey: identity.pubkey,
       // shop.js:1731 — the exact self-transfer rejection copy.
       selfMessage: tr('Cannot transfer to yourself.'),

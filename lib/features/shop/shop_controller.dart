@@ -304,6 +304,8 @@ class ShopController extends StateNotifier<ShopState> {
     'shop-claim',
     'shop-transfer',
     'shop-redeem',
+    'shop-iap-order',
+    'shop-iap-claim',
   };
 
   /// Builds the NIP-98 `auth` map for a mutating shop [action] bound to the
@@ -404,6 +406,77 @@ class ShopController extends StateNotifier<ShopState> {
     } catch (_) {
       return false;
     }
+  }
+
+  /// `shop-iap-order` — open a store-billed order for [itemId] before invoking
+  /// the store.
+  ///
+  /// The server picks the product tier from its OWN catalog price and reserves a
+  /// supply slot for limited editions, exactly as `shop-buy-invoice` does for a
+  /// bolt11. Returns `{orderId, productId}`; the returned product id is
+  /// authoritative — buy that one, not whatever the local ladder resolved.
+  Future<Map<String, dynamic>> iapOrder(
+    String itemId, {
+    required ShopIdentity identity,
+    required String platform,
+    String? recipientPubkey,
+  }) async {
+    final auth = await _auth('shop-iap-order', identity);
+    return _api.storageAction({
+      'action': 'shop-iap-order',
+      'pubkey': identity.pubkey,
+      'itemId': itemId,
+      'platform': platform,
+      if (recipientPubkey != null) 'recipientPubkey': recipientPubkey,
+      if (auth != null) 'auth': auth,
+    });
+  }
+
+  /// `shop-iap-claim` — settle a store purchase into an owned item.
+  ///
+  /// The server validates the receipt with Apple/Google, binds the store
+  /// transaction so one receipt can only settle one order, then runs the SAME
+  /// ledger claim the Lightning path uses — so the response shape (and
+  /// [_applyShopClaim]) is shared verbatim.
+  ///
+  /// Retries the transient "not confirmed"/unavailable cases like [claim] does:
+  /// a purchase the buyer has already paid for must not be lost to one bad
+  /// round-trip.
+  Future<Map<String, dynamic>> iapClaim(
+    String orderId, {
+    required ShopIdentity identity,
+    required String productId,
+    required String purchaseToken,
+    String? gifterNym,
+  }) async {
+    Map<String, dynamic>? data;
+    for (var attempt = 0; attempt < 4; attempt++) {
+      try {
+        final auth = await _auth('shop-iap-claim', identity);
+        data = await _api.storageAction({
+          'action': 'shop-iap-claim',
+          'pubkey': identity.pubkey,
+          'orderId': orderId,
+          'productId': productId,
+          'purchaseToken': purchaseToken,
+          if (gifterNym != null) 'gifterNym': gifterNym,
+          if (auth != null) 'auth': auth,
+        });
+        break;
+      } on ApiException catch (e) {
+        // 402 = the store hasn't settled it yet; 503 = ledger briefly down.
+        final retryable = e.statusCode == 402 || e.statusCode == 503;
+        if (retryable && attempt < 3) {
+          await Future<void>.delayed(Duration(seconds: 2 * (attempt + 1)));
+          continue;
+        }
+        rethrow;
+      }
+    }
+    data ??= const {};
+    await _applyShopClaim(data, identity);
+    removePendingPurchase(orderId);
+    return data;
   }
 
   /// `shop-claim` once paid (shop.js `_claimShopPurchase` → `_applyShopClaim`).
@@ -822,6 +895,10 @@ class ShopController extends StateNotifier<ShopState> {
     arr.add({...entry, 'createdAt': DateTime.now().millisecondsSinceEpoch});
     _savePendingPurchases(arr);
   }
+
+  /// Every persisted pending purchase (shop and store alike), for callers that
+  /// settle a domain the reconciler doesn't own.
+  List<Map<String, dynamic>> get pendingPurchases => _loadPendingPurchases();
 
   /// Drops the pending entry for [invoiceId] (shop.js `_removePendingPurchase`).
   void removePendingPurchase(String invoiceId) {
