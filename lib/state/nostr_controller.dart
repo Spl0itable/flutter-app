@@ -7167,6 +7167,13 @@ class NostrController {
       friends: _readSet(StorageKeys.friends),
       blockedUsers: _readSet(StorageKeys.blocked),
       blockedKeywords: _readSet(StorageKeys.blockedKeywords),
+      // These three were persisted on every change but never read back, so a
+      // favourited / hidden / blocked channel silently reverted on the next
+      // launch. They restore alongside the social sets because they are the
+      // same kind of thing: per-user preferences that outlive a session.
+      pinnedChannels: _readSet(StorageKeys.pinnedChannels),
+      hiddenChannels: _readSet(StorageKeys.hiddenChannels),
+      blockedChannels: _readSet(StorageKeys.blockedChannels),
     );
   }
 
