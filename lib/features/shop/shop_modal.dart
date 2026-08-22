@@ -10,6 +10,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/crypto/key_format.dart' show normalizePubkeyInput;
+import 'iap/external_purchase_disclosure.dart';
 import 'iap/iap_service.dart';
 import 'iap/payment_method_sheet.dart';
 import '../../core/constants/relays.dart';
@@ -731,6 +732,11 @@ class _ShopModalState extends ConsumerState<ShopModal> {
   /// app deliberately does NOT render an invoice for this route — that is what
   /// makes it an external purchase rather than an in-app one.
   Future<void> _payWithLightningOnWeb(ShopItem item, {String? recipientPubkey}) async {
+    // Apple requires a disclosure before an app sends a buyer off-site to pay
+    // for digital goods; a decline here cancels the purchase outright. No-op on
+    // every other platform.
+    if (!await confirmExternalPurchase(context)) return;
+    if (!mounted) return;
     final url = Uri.parse(shopWebUrlFor(item.id));
     var opened = false;
     try {

@@ -1316,4 +1316,6 @@ const List<String> kAppStringsCatalog = <String>[
   'The purchase failed.',
   'This item is not available from the store yet.',
   'Your purchase is pending with the store.',
+  'Continue to the web?',
+  'You\'re about to go to an external website. Apple is not responsible for the privacy or security of purchases made on the web.',
 ];

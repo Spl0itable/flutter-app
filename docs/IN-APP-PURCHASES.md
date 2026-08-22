@@ -16,7 +16,7 @@ BUY / GIFT
     ├─ payment sheet (skipped when only one rail is available)
     │
     ├─ Bitcoin Lightning
-    │     ├─ store install   → opens https://app.nym.bar/#shop=<itemId>
+    │     ├─ store install   → opens https://web.nymchat.app/shop?item=<itemId>
     │     └─ no store billing→ native invoice dialog, exactly as before
     │
     └─ In-app purchase
@@ -50,23 +50,33 @@ experience — so it is kept rather than replaced with a web hop.
 
 ### iOS and the Lightning row
 
-Apple restricts steering users to outside payment for the same digital goods,
-and a side-by-side external price is the pattern App Review looks hardest at. So
-on iOS the Lightning row is **off** unless the build sets:
+The Lightning row is shown on iOS, and tapping it opens the web app in Safari —
+genuinely leaving the app, since Universal Links are disabled here (no
+`associated-domains` entitlement, no AASA served).
+
+Before the hand-off the buyer sees the disclosure Apple's external-link rules
+require, with their prescribed wording, and can back out
+(`external_purchase_disclosure.dart`). The wording is Apple's and must not be
+paraphrased.
+
+**This requires the External Purchase Link entitlement** for the storefronts you
+ship to. While that is pending, ship an IAP-only iOS build with:
 
 ```
-flutter build ipa --dart-define=NYM_IOS_EXTERNAL_PAY=true
+flutter build ipa --dart-define=NYM_IOS_EXTERNAL_PAY=false
 ```
 
-Flip it once the External Purchase Link entitlement is granted for the
-storefronts you ship to. Play's alternative-billing and external-offer terms are
-more permissive, so Android shows both by default.
+**One limitation to know before review.** Apple's entitlement expects the
+*system* disclosure sheet, shown by StoreKit's
+`ExternalPurchaseLink.open(url:)`. That is a native API `in_app_purchase` does
+not expose, so reaching it needs a platform channel and a Swift shim, which is
+not in this change. What ships is the in-app disclosure modal in the shape the
+external-link rules describe — the same pattern reader apps use under the
+External Link Account Entitlement. If App Review asks specifically for the
+StoreKit sheet, that shim is the follow-up.
 
-**Consequence to be aware of:** on iOS, if the tier products are not configured
-in App Store Connect, `queryProductDetails` returns nothing, and with the
-Lightning row off the sheet reports "Purchases are unavailable right now." That
-is deliberate — the alternative is silently offering external payment on iOS —
-but it does mean the iOS shop stays inert until the console work below is done.
+Play's alternative-billing and external-offer terms are more permissive, so
+Android shows both rails with no disclosure step.
 
 ## Console setup
 
@@ -113,13 +123,13 @@ buyer sees and pays.
 # Google Play
 wrangler secret put GOOGLE_PLAY_CLIENT_EMAIL     # service account email
 wrangler secret put GOOGLE_PLAY_PRIVATE_KEY      # the service account's PEM private key
-wrangler secret put ANDROID_PACKAGE_NAME         # e.g. app.nym.bar
+wrangler secret put ANDROID_PACKAGE_NAME         # com.nym.bar
 
 # App Store
 wrangler secret put APPLE_ISSUER_ID              # App Store Connect API issuer id
 wrangler secret put APPLE_KEY_ID                 # the .p8 key id
 wrangler secret put APPLE_PRIVATE_KEY            # the .p8 contents
-wrangler secret put APPLE_BUNDLE_ID              # e.g. app.nym.bar
+wrangler secret put APPLE_BUNDLE_ID              # com.nym.bar
 ```
 
 The Play service account needs the **View financial data / Manage orders**

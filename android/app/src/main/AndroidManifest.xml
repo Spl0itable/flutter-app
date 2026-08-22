@@ -108,15 +108,26 @@
             </intent-filter>
             <!-- Universal links: the hosts the deep-link parser recognizes
                  (deep_links.dart kNymLinkHosts) + the served PWA host.
-                 autoVerify drives App Links against /.well-known/assetlinks.json. -->
+                 autoVerify drives App Links against /.well-known/assetlinks.json.
+
+                 Scoped to the ROOT PATH on purpose. Every link the parser
+                 understands routes on the URL fragment (`/#u4pruyd`,
+                 `/#gjoin=...`, `/#e:...` — parseNymLink returns null without
+                 one), so their path is always "/" and none of them lose their
+                 App Link. What this DOES free is every other path on these
+                 hosts: `/shop/...`, which the app opens itself to hand a buyer
+                 off to the web for an external Lightning purchase, and the
+                 legal pages under `/terms/` and `/privacy/`. Claiming those
+                 made the app resolve its own outbound links straight back into
+                 itself instead of a browser. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="https" android:host="app.nymchat.app"/>
-                <data android:scheme="https" android:host="app.nym.bar"/>
-                <data android:scheme="https" android:host="web.nymchat.app"/>
-                <data android:scheme="https" android:host="nymchat.app"/>
+                <data android:scheme="https" android:host="app.nymchat.app" android:path="/"/>
+                <data android:scheme="https" android:host="app.nym.bar" android:path="/"/>
+                <data android:scheme="https" android:host="web.nymchat.app" android:path="/"/>
+                <data android:scheme="https" android:host="nymchat.app" android:path="/"/>
             </intent-filter>
             <!-- Share sheet: receive text/URLs shared from other apps
                  (receive_sharing_intent). The plugin reads the SEND intent and

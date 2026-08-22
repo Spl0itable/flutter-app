@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:in_app_purchase/in_app_purchase.dart';
 
+import '../../../services/api/api_config.dart';
 import 'iap_tiers.dart';
 
 /// Store billing for the flair shop.
@@ -20,21 +21,41 @@ import 'iap_tiers.dart';
 /// Which platforms may offer the "pay with Bitcoin Lightning on the web" row.
 ///
 /// Apple restricts steering users to outside payment for the same digital
-/// goods, and a side-by-side external price is the pattern App Review looks
-/// hardest at — so on iOS the Lightning row is off unless this build was
-/// compiled with `--dart-define=NYM_IOS_EXTERNAL_PAY=true`. Flip it once the
-/// External Purchase Link entitlement is granted for the storefronts you ship
-/// to. Play's alternative-billing and external-offer terms are more permissive,
-/// so Android shows both by default.
+/// goods, so the iOS hand-off is gated behind [confirmExternalPurchase], which
+/// shows Apple's prescribed disclosure before the buyer leaves.
+///
+/// ON by default. That requires the External Purchase Link entitlement for the
+/// storefronts you ship to — build with
+/// `--dart-define=NYM_IOS_EXTERNAL_PAY=false` to ship an IAP-only iOS build
+/// while that is pending. Play's alternative-billing and external-offer terms
+/// are more permissive, so Android shows both regardless.
 const bool kIosExternalPayEnabled =
-    bool.fromEnvironment('NYM_IOS_EXTERNAL_PAY', defaultValue: false);
+    bool.fromEnvironment('NYM_IOS_EXTERNAL_PAY', defaultValue: true);
 
-/// Where the Lightning row sends a buyer. `#shop=<itemId>` opens the PWA shop
-/// and goes straight to that item's invoice (app.js `routeToUrlChannel`).
-const String kShopWebBase = 'https://app.nym.bar';
+/// Where the Lightning row sends a buyer: the served PWA, whose
+/// `/shop?item=<itemId>` route opens the shop straight on that item's invoice
+/// (app.js `parseUrlChannel`).
+///
+/// Derived from [ApiConfig.apiHost] rather than written out again — the web app
+/// and the API are the same host, and a second copy is a second thing to get
+/// wrong.
+///
+/// A PATH, not a `#shop` fragment, and that is load-bearing on Android. The
+/// manifest claims these hosts as verified App Links, so a link this app opens
+/// on its own host resolves straight back INTO this app — the external purchase
+/// would bounce instead of reaching a browser. The App Links filter is scoped to
+/// `android:path="/"` (every deep link the app understands is fragment-based, so
+/// its path is always "/"), which leaves `/shop` unclaimed and free to open in
+/// the browser where an external purchase belongs.
+///
+/// The item rides in the QUERY rather than as `/shop/<itemId>`: a second path
+/// segment would re-base index.html's relative script and style URLs onto
+/// `/shop/`, and the web app would never boot.
+String get kShopWebBase => 'https://${ApiConfig.apiHost}';
 
-String shopWebUrlFor(String itemId) =>
-    itemId.isEmpty ? '$kShopWebBase/#shop' : '$kShopWebBase/#shop=$itemId';
+String shopWebUrlFor(String itemId) => itemId.isEmpty
+    ? '$kShopWebBase/shop'
+    : '$kShopWebBase/shop?item=${Uri.encodeQueryComponent(itemId)}';
 
 /// The outcome of a store purchase attempt.
 enum IapResult { purchased, canceled, pending, error }
