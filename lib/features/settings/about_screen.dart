@@ -250,7 +250,7 @@ const String kBuildNoteVerified =
     'published APK, hash it, and verify that event against the publisher key.';
 
 /// Android, checked, wrong: the APK is not what was published.
-const String kBuildStatusMismatch = 'Unrecognised build';
+const String kBuildStatusMismatch = 'Unrecognized build';
 const String kBuildNoteMismatch =
     'The APK installed on this device does not match any hash the publisher\'s '
     'signed release events carry for this version. It was modified after '

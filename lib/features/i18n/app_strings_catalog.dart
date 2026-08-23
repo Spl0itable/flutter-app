@@ -1318,7 +1318,7 @@ const List<String> kAppStringsCatalog = <String>[
   // Build integrity panel (about_screen.dart).
   'Verified official build',
   'The APK installed on this device hashes to the value in the publisher\'s signed Zapstore release event. Anyone can repeat the check: download the published APK, hash it, and verify that event against the publisher key.',
-  'Unrecognised build',
+  'Unrecognized build',
   'The APK installed on this device does not match any hash the publisher\'s signed release events carry for this version. It was modified after publication, or built by someone else.',
   'Installed from Google Play',
   'Google Play re-signs the upload with its own key and builds a separate APK for each device, so what is installed here is not the file the developer published and its hash matches nothing. To check a build yourself, install the APK published directly and open this panel again.',
