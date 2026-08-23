@@ -130,6 +130,84 @@ void main() {
     });
   });
 
+  // Persistence: a relaunch must not start cold. A cold registry fails
+  // SILENTLY — every peer's next message goes out classical while discovery
+  // re-runs — so the round-trip is asserted key-for-key rather than by count.
+  group('persistence round-trip', () {
+    Map<String, dynamic> encoded(PqRegistry r) =>
+        jsonDecode(jsonEncode(r.toJson(nowSec: before))) as Map<String, dynamic>;
+
+    test('a restored registry answers exactly like the original', () {
+      final src = PqRegistry()..ingest(author, a['content'] as String, nowSec: before);
+      final restored = PqRegistry()..hydrate(encoded(src), nowSec: before);
+      final key = restored.keyFor(author, nowSec: before, enabled: true);
+      expect(key, isNotNull);
+      expect(hex(key!), a['kemPublicKey']);
+    });
+
+    test('a KEM-less entry survives as a Nymchat claim with no key', () {
+      final src = PqRegistry()..record(author, null, after, 0);
+      final restored = PqRegistry()..hydrate(encoded(src), nowSec: before);
+      expect(restored.isKnownNymchatClient(author, nowSec: before), isTrue);
+      expect(restored.keyFor(author, nowSec: before, enabled: true), isNull);
+    });
+
+    test('the epoch survives, so rotation windows still line up', () {
+      final pk = unhex(a['kemPublicKey'] as String);
+      final src = PqRegistry()..record(author, pk, after, 7);
+      final json = encoded(src);
+      expect((json[author] as List)[2], 7);
+    });
+
+    // The bound that matters most: a peer who moved from an nsec to a remote
+    // signer holds no ML-KEM secret at all, so encapsulating to their stale key
+    // makes the message UNREADABLE rather than merely classical.
+    test('an expired entry is neither written nor restored', () {
+      final pk = unhex(a['kemPublicKey'] as String);
+      final src = PqRegistry()..record(author, pk, before - 1, 0);
+      expect(src.toJson(nowSec: before), isEmpty);
+      final restored = PqRegistry()
+        ..hydrate({
+          author: [pq.b64uEncode(pk), before - 1, 0]
+        }, nowSec: before);
+      expect(restored.keyFor(author, nowSec: before, enabled: true), isNull);
+    });
+
+    test('a fresher announcement supersedes what was restored', () {
+      final stale = Uint8List(mlKemPublicKeyLength)..fillRange(0, mlKemPublicKeyLength, 9);
+      final r = PqRegistry()
+        ..hydrate({
+          author: [pq.b64uEncode(stale), after, 0]
+        }, nowSec: before)
+        ..ingest(author, a['content'] as String, nowSec: before);
+      expect(hex(r.keyFor(author, nowSec: before, enabled: true)!),
+          a['kemPublicKey']);
+    });
+
+    // One bad row must not cost the whole cache: the surrounding entries are
+    // the difference between a warm registry and a silently classical session.
+    test('malformed rows are skipped individually', () {
+      final pk = unhex(a['kemPublicKey'] as String);
+      final r = PqRegistry()
+        ..hydrate({
+          'a' * 64: 'not a list',
+          'b' * 64: [pq.b64uEncode(pk), 'not an int', 0],
+          'c' * 64: [pq.b64uEncode(pk)], // too short
+          'd' * 64: [pq.b64uEncode(Uint8List(32)), after, 0], // wrong length
+          'e' * 64: [12345, after, 0], // pk not a string
+          author: [pq.b64uEncode(pk), after, 0],
+        }, nowSec: before);
+      expect(r.knownPeers(nowSec: before), [author]);
+    });
+
+    test('an empty registry round-trips to an empty map', () {
+      expect(PqRegistry().toJson(nowSec: before), isEmpty);
+      expect(
+          (PqRegistry()..hydrate({}, nowSec: before)).knownPeers(nowSec: before),
+          isEmpty);
+    });
+  });
+
   group('policy', () {
     final sk = unhex('1' * 64);
 

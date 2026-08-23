@@ -1134,6 +1134,8 @@ class NostrController {
     if (!_settingsHydratedC.isCompleted) _settingsHydratedC.complete();
     _deletedIdsPersistTimer?.cancel();
     _deletedIdsPersistTimer = null;
+    _pqKeysPersistTimer?.cancel();
+    _pqKeysPersistTimer = null;
     // Flush any pending debounced group-store / read-watermark writes before we
     // drop the identity + app-state handles below (the persist reads both).
     _flushDebouncedPersists();
@@ -4154,7 +4156,21 @@ class NostrController {
     if (missedAt != null && nowMs - missedAt < _pqMissTtlMs) {
       return Future<void>.value();
     }
-    final f = service.fetchPqAnnouncement(pubkey).whenComplete(() {
+    final f = _pqAnnouncementFromD1(pubkey).then((gotIt) {
+      // D1 answered with a verified key, so there is nothing to ask the relays.
+      if (gotIt) return Future<void>.value();
+      return service.fetchPqAnnouncement(
+      pubkey,
+      // Lets the lookup stop the moment the key lands, and keep listening past
+      // the EOSE quorum until then.
+      found: () => _pqRegistry.keyFor(
+            pubkey,
+            nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            enabled: true,
+          ) !=
+          null,
+      );
+    }).whenComplete(() {
       _pqLookups.remove(pubkey);
       final sec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       // A lookup that came back without a key counts as a miss, so the rate
@@ -4176,6 +4192,55 @@ class NostrController {
   int get pqKnownPeerCount => _pqRegistry
       .knownPeers(nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000)
       .length;
+
+  /// Asks D1 for a peer's announcement. True when it produced a usable key.
+  ///
+  /// Tried BEFORE the relays because it has no race in it. A relay lookup
+  /// completes on an EOSE quorum, and the relays that do NOT carry the
+  /// announcement are the ones that answer instantly — so the quorum can be
+  /// reached by relays with nothing while the one holding the key is still
+  /// working. One query to one place cannot lose a race there is no race in.
+  ///
+  /// D1 is a cache, not an authority: every event is signature-checked here
+  /// exactly as a relay event is. That signature binds the ML-KEM key to the
+  /// Nostr identity, so our own backend cannot substitute a key it could then
+  /// read messages with — it would have to forge secp256k1.
+  Future<bool> _pqAnnouncementFromD1(String pubkey) async {
+    final sync = _storageSync;
+    final service = _service;
+    if (sync == null || service == null) return false;
+    List<Map<String, dynamic>> rows;
+    try {
+      rows = await sync.channelGetByAuthor(AppDataTopic.postQuantum, pubkey);
+    } catch (_) {
+      return false;
+    }
+    NostrEvent? best;
+    for (final raw in rows) {
+      NostrEvent ev;
+      try {
+        ev = NostrEvent.fromJson(raw);
+      } catch (_) {
+        continue;
+      }
+      if (ev.kind != EventKind.appData || ev.pubkey != pubkey) continue;
+      if (best != null && best.createdAt >= ev.createdAt) continue;
+      best = ev;
+    }
+    if (best == null) return false;
+    try {
+      if (!await service.verifyEvent(best)) return false;
+    } catch (_) {
+      return false;
+    }
+    _ingestPqAnnouncement(best);
+    return _pqRegistry.keyFor(
+          pubkey,
+          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          enabled: true,
+        ) !=
+        null;
+  }
 
   /// Warms the announcements for everyone in a conversation, so the key is
   /// already in hand by the time the first message is sent.
@@ -4275,6 +4340,30 @@ class NostrController {
       final ann = PqAnnouncement.parse(event.content);
       if (ann != null && !ann.retracted) _pqDevices = ann.devices;
     }
+    _schedulePersistPqKeys();
+  }
+
+  /// Debounced (5s) persist of the peer key registry, riding the same pattern
+  /// as [_schedulePersistDeletedIds].
+  ///
+  /// Without this a relaunch starts cold, and a cold registry does not fail
+  /// loudly — it makes the next message to every peer classical while their
+  /// announcements are looked up again, which is invisible apart from a
+  /// downgraded badge. See [PqRegistry.hydrate] for why restoring is safe.
+  Timer? _pqKeysPersistTimer;
+  void _schedulePersistPqKeys() {
+    if (_pqKeysPersistTimer != null) return;
+    if (PanicWipe.inProgress) return;
+    _pqKeysPersistTimer = Timer(const Duration(seconds: 5), () {
+      _pqKeysPersistTimer = null;
+      final cache = _cache;
+      if (cache == null || !cache.isOpen) return;
+      if (PanicWipe.inProgress) return;
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      unawaited(cache
+          .saveMetaMap(CacheStore.metaPqKeys, _pqRegistry.toJson(nowSec: nowSec))
+          .catchError((_) {}));
+    });
   }
 
   /// Our ML-KEM keypair for the current epoch, or null when we can't derive one.
@@ -4357,6 +4446,7 @@ class NostrController {
     // lookup as everyone else's.
     _pqRegistry.record(
         identity.pubkey, keys?.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
+    _schedulePersistPqKeys();
   }
 
   /// Our own ML-KEM decrypt candidates: current epoch first, then a bounded
@@ -7976,6 +8066,14 @@ class NostrController {
       // so relay backlog / D1 replay can't resurrect a deleted message.
       appState.hydrateDeletedIds(trust[3]);
       appState.onDeletedIdsChanged = _schedulePersistDeletedIds;
+      // Peers' announced ML-KEM keys, so the first message after a relaunch is
+      // post-quantum instead of silently classical while discovery re-runs.
+      // Bounded by each announcement's own expiry — see [PqRegistry.hydrate].
+      final pqKeys = await cache.loadMetaMap(CacheStore.metaPqKeys);
+      if (pqKeys.isNotEmpty) {
+        _pqRegistry.hydrate(pqKeys,
+            nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000);
+      }
     } catch (e) {
       debugPrint('hydrateFromCache failed: $e');
     }
