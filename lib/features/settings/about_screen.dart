@@ -61,6 +61,16 @@ Future<String?> _fetchLiveVersion() async {
   return null;
 }
 
+/// The Zapstore publisher key, in hex — the npub whose signed release events
+/// the Android build check reads (`SIGN_WITH` in the publish workflow, shown as
+/// the developer on zapstore.dev/apps/com.nym.bar).
+///
+/// Empty until it is filled in, and the panel says the check is unconfigured
+/// rather than reporting the build as unverified. It has to be pinned: anyone
+/// can publish a kind-3063 event claiming any hash, so an unpinned lookup would
+/// accept a hash from whoever wrote to the relay last.
+const String kZapstorePublisherPubkey = '';
+
 /// Warrant-canary source + pinned developer pubkey (canary-verify.js:5-6).
 const String _kCanaryUrl =
     'https://raw.githubusercontent.com/Spl0itable/NYM/main/canary.json';
@@ -230,15 +240,15 @@ const String kBuildIntegrityLabel = 'Build integrity';
 /// signed release manifest publishes.
 const String kBuildStatusVerified = 'Verified official build';
 const String kBuildNoteVerified =
-    'The APK installed on this device hashes to the value published in the '
-    'developer\'s signed release manifest. Anyone can repeat the check: '
-    'download the published APK, hash it, and verify the manifest signature.';
+    'The APK installed on this device hashes to the value in the publisher\'s '
+    'signed Zapstore release event. Anyone can repeat the check: download the '
+    'published APK, hash it, and verify that event against the publisher key.';
 
 /// Android, checked, wrong: the APK is not what was published.
 const String kBuildStatusMismatch = 'Unrecognised build';
 const String kBuildNoteMismatch =
-    'The APK installed on this device does not match any hash the signed '
-    'release manifest publishes for this version. It was modified after '
+    'The APK installed on this device does not match any hash the publisher\'s '
+    'signed release events carry for this version. It was modified after '
     'publication, or built by someone else.';
 
 /// Android via Google Play: nothing to compare, and that is not a failure.
@@ -249,18 +259,22 @@ const String kBuildNoteStore =
     'developer published and its hash matches nothing. To check a build '
     'yourself, install the APK published directly and open this panel again.';
 
-/// Android, manifest unreachable or unverifiable — deliberately one state.
+/// Android, the release events could not be fetched or none verified —
+/// deliberately one state, since an unverifiable claim is worth what a missing
+/// one is.
 const String kBuildStatusUnreachable = 'Provenance unreachable';
 const String kBuildNoteUnreachable =
-    'The signed release manifest could not be fetched, or its signature did '
-    'not check out. Nothing is wrong with the app as far as this panel can '
-    'tell — it simply has nothing trustworthy to compare against right now.';
+    'The signed release events could not be fetched, or none of them checked '
+    'out against the publisher key. Nothing is wrong with the app as far as '
+    'this panel can tell — it simply has nothing trustworthy to compare '
+    'against right now.';
 
-/// Android, this version isn't in the manifest yet.
+/// Android, the publisher did publish, but not this version.
 const String kBuildStatusNotPublished = 'No published hash yet';
 const String kBuildNoteNotPublished =
-    'The signed release manifest publishes no hash for this version yet, so '
-    'there is nothing to compare the installed APK against.';
+    'The publisher has released other versions but none matching this one, so '
+    'there is nothing to compare the installed APK against. This is what a '
+    'build newer than the published listing looks like.';
 
 /// Everywhere else — principally iOS.
 const String kBuildStatusUnsupported = 'Not verifiable on this platform';
@@ -388,7 +402,7 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   Future<void> _runBuildCheck() async {
     if (!BuildIntegrityService.isSupported) return;
     final result = await BuildIntegrityService(
-      developerPubkey: _kCanaryPubkey,
+      publisherPubkey: kZapstorePublisherPubkey,
     ).run();
     if (!mounted) return;
     setState(() => _build = result);

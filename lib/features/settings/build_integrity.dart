@@ -10,14 +10,23 @@
 // What Android does offer is the installed APK, readable by the app at
 // `ApplicationInfo.sourceDir`. That makes the same SHAPE of proof available:
 // hash the artifact here, compare against a hash the developer published and
-// signed, and let neither half vouch for the other. Anyone else can repeat both
-// steps — download the published APK, hash it, verify the manifest's signature
-// — which is what makes the result worth anything.
+// signed, and let neither half vouch for the other.
+//
+// The published half is Zapstore's own release event — the one the listing at
+// zapstore.dev/apps/com.nym.bar already shows. `zsp publish` emits a NIP-82
+// kind-3063 Software Asset event for every release, signed with the
+// publisher's Nostr key, carrying the APK's SHA-256 in its `x` tag and the
+// signing certificate's SHA-256 in `apk_certificate_hash`. Reading that rather
+// than a manifest of our own means there is no second publishing step to
+// remember, no second thing to keep in step with the release, and the value
+// being checked is the same one Zapstore serves the download against.
 //
 // It does NOT make the app self-certifying. Whoever modifies an app can delete
 // the check along with everything else, so a green verdict proves nothing to
 // someone holding a tampered build. What it proves is the ordinary case: that
-// the copy you installed is bit-for-bit the copy that was published.
+// the copy you installed is bit-for-bit the copy that was published — and
+// anyone else can repeat both halves, because the event is public and the APK
+// is downloadable.
 //
 // iOS is out of reach entirely. App Store binaries are FairPlay-encrypted per
 // download and re-signed per install, so a hash computed on the device is
@@ -29,21 +38,22 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../models/nostr_event.dart';
 
-/// The signed release manifest: the developer's published hashes for each
-/// build, as a Nostr event whose `content` is the manifest JSON.
-///
-/// Served over HTTPS from the repository and verified against the same pinned
-/// developer pubkey the warrant canary uses, so it inherits a key the app
-/// already trusts and a publishing step the developer already performs. Being a
-/// signed event rather than a plain file is what stops a hostile mirror of the
-/// repository from vouching for its own APK.
-const String kReleaseManifestUrl =
-    'https://raw.githubusercontent.com/Spl0itable/NYM/main/android-ios-app/releases.json';
+/// The relay `zsp publish` writes to by default, and the one Zapstore's own
+/// client reads. Queried directly rather than through the app's relay pool:
+/// this is a one-shot lookup against someone else's relay, not part of the
+/// user's own relay set.
+const String kZapstoreRelay = 'wss://relay.zapstore.dev';
+
+/// NIP-82 Software Asset — binary metadata for one published artifact.
+const int kZapstoreAssetKind = 3063;
+
+/// The Android application id, matching the asset event's `i` tag.
+const String kAndroidAppId = 'com.nym.bar';
 
 /// Play's own package name — an install it made is not the published artifact.
 const String kPlayInstaller = 'com.android.vending';
@@ -126,38 +136,53 @@ class NativeBuildInfo {
       installer == kPlayInstaller || splitCount > 0;
 }
 
-/// One published build from the signed manifest.
+/// One published artifact, from a Zapstore kind-3063 Software Asset event.
 @immutable
 class PublishedBuild {
   const PublishedBuild({
     required this.version,
     this.versionCode,
-    this.apkSha256 = const [],
-    this.signerSha256,
+    this.apkSha256 = '',
+    this.certSha256,
+    this.platform,
   });
 
-  factory PublishedBuild.fromJson(Map<String, dynamic> json) {
-    final hashes = json['apkSha256'];
+  /// Reads one asset event's tags. Returns null when the event is not an
+  /// asset for [appId], or carries no hash to compare against.
+  static PublishedBuild? fromEvent(NostrEvent event, {required String appId}) {
+    if (event.kind != kZapstoreAssetKind) return null;
+    String? first(String name) {
+      for (final t in event.tags) {
+        if (t.length > 1 && t[0] == name) return t[1];
+      }
+      return null;
+    }
+
+    if (first('i') != appId) return null;
+    final x = first('x')?.toLowerCase();
+    if (x == null || x.isEmpty) return null;
+    final code = int.tryParse(first('version_code') ?? '');
     return PublishedBuild(
-      version: (json['version'] ?? '').toString(),
-      versionCode: json['versionCode'] is num
-          ? (json['versionCode'] as num).toInt()
-          : null,
-      // A list, because `--split-per-abi` publishes one APK per ABI and any of
-      // them is a legitimate install.
-      apkSha256: hashes is List
-          ? hashes.map((h) => h.toString().toLowerCase()).toList()
-          : hashes is String
-              ? [hashes.toLowerCase()]
-              : const [],
-      signerSha256: json['signerSha256']?.toString().toLowerCase(),
+      version: first('version') ?? '',
+      versionCode: code,
+      apkSha256: x,
+      certSha256: first('apk_certificate_hash')?.toLowerCase(),
+      platform: first('f'),
     );
   }
 
   final String version;
   final int? versionCode;
-  final List<String> apkSha256;
-  final String? signerSha256;
+
+  /// The `x` tag: SHA-256 of the published APK.
+  final String apkSha256;
+
+  /// The `apk_certificate_hash` tag: SHA-256 of the signing certificate.
+  final String? certSha256;
+
+  /// The `f` tag, e.g. `android-arm64-v8a`. Several assets can share a version
+  /// when a release ships one APK per ABI.
+  final String? platform;
 }
 
 /// The verdict, plus the values a reader needs to check it off-device.
@@ -177,39 +202,37 @@ class BuildIntegrityResult {
 }
 
 /// The verdict for one measurement, as a pure function so every branch is
-/// testable without a device.
+/// testable without a device or a relay.
 ///
-/// [manifestOk] is false when the manifest could not be fetched OR its
-/// signature failed — the two are deliberately one state, because an
-/// unverifiable manifest is worth exactly as much as a missing one.
+/// [provenanceOk] is false when the release events could not be fetched OR
+/// none of them verified — the two are deliberately one state, because an
+/// unverifiable claim is worth exactly as much as a missing one.
 BuildIntegrityResult describeBuildIntegrity({
   required NativeBuildInfo? info,
-  required bool manifestOk,
+  required bool provenanceOk,
   required List<PublishedBuild> builds,
 }) {
   if (info == null || info.apkSha256 == null) {
     return const BuildIntegrityResult(state: BuildIntegrityState.unsupported);
   }
-  // Checked BEFORE the manifest: on a Play install the answer is the same
-  // whether or not the manifest loaded, and reporting a network problem would
-  // imply a check that was never going to run.
+  // Checked FIRST: on a Play install the answer is the same whether or not the
+  // lookup succeeded, and reporting a network problem would imply a check that
+  // was never going to run.
   if (info.isStoreRepackaged) {
     return BuildIntegrityResult(
         state: BuildIntegrityState.storeRepackaged, info: info);
   }
-  if (!manifestOk) {
+  if (!provenanceOk) {
     return BuildIntegrityResult(
         state: BuildIntegrityState.provenanceUnreachable, info: info);
   }
-  final match = builds.where((b) =>
-      b.version == info.versionName ||
-      (b.versionCode != null && b.versionCode == info.versionCode));
-  if (match.isEmpty) {
-    return BuildIntegrityResult(
-        state: BuildIntegrityState.notPublished, info: info);
-  }
-  for (final build in match) {
-    if (build.apkSha256.contains(info.apkSha256)) {
+
+  // The hash is the check. A matching APK hash is conclusive on its own, and
+  // it is matched across EVERY published asset rather than only those tagged
+  // with this version: an asset's `version` tag is what the publisher typed,
+  // while the hash is what the bytes are.
+  for (final build in builds) {
+    if (build.apkSha256 == info.apkSha256) {
       return BuildIntegrityResult(
         state: BuildIntegrityState.verified,
         info: info,
@@ -217,54 +240,141 @@ BuildIntegrityResult describeBuildIntegrity({
       );
     }
   }
+
+  // No hash matched. Distinguish "this version was never published" — the
+  // ordinary case for a build newer than the listing, and not a fault — from
+  // "this version was published and the bytes are different", which is.
+  final sameVersion = builds
+      .where((b) =>
+          (b.version.isNotEmpty && b.version == info.versionName) ||
+          (b.versionCode != null && b.versionCode == info.versionCode))
+      .toList();
+  if (sameVersion.isEmpty) {
+    return BuildIntegrityResult(
+        state: BuildIntegrityState.notPublished, info: info);
+  }
   return BuildIntegrityResult(
     state: BuildIntegrityState.mismatch,
     info: info,
-    published: match.first,
+    published: sameVersion.first,
   );
 }
 
-/// Parses and verifies the signed release manifest.
+/// The published assets carried by [events], keeping only those signed by
+/// [publisherPubkey] and describing [appId].
 ///
-/// Returns null when the event does not verify against [pubkey] — a manifest
-/// that cannot be checked is treated exactly like one that never arrived,
-/// rather than being read anyway.
-List<PublishedBuild>? parseReleaseManifest(String body, String pubkey) {
+/// An event that does not verify is dropped rather than read: the relay is
+/// someone else's, and anyone can publish a kind-3063 event claiming any hash.
+/// Pinning the publisher key is what makes the answer mean anything.
+List<PublishedBuild> zapstoreAssets(
+  Iterable<NostrEvent> events, {
+  required String publisherPubkey,
+  String appId = kAndroidAppId,
+}) {
+  final out = <PublishedBuild>[];
+  for (final event in events) {
+    if (event.pubkey != publisherPubkey) continue;
+    try {
+      if (!schnorr.verifyEvent(event)) continue;
+    } catch (_) {
+      continue;
+    }
+    final build = PublishedBuild.fromEvent(event, appId: appId);
+    if (build != null) out.add(build);
+  }
+  return out;
+}
+
+/// Opens one short-lived socket to a relay, asks for the app's release assets,
+/// and returns what arrives before EOSE or the deadline.
+///
+/// Deliberately not routed through the app's relay pool: this is a one-shot
+/// lookup against Zapstore's relay, not part of the user's own relay set, and
+/// it should not disturb (or be disturbed by) their connections.
+typedef ZapstoreSocketFactory = WebSocketChannel Function(Uri url);
+
+Future<List<NostrEvent>> fetchZapstoreAssets({
+  required String publisherPubkey,
+  String appId = kAndroidAppId,
+  String relay = kZapstoreRelay,
+  ZapstoreSocketFactory? socketFactory,
+  Duration timeout = const Duration(seconds: 8),
+}) async {
+  final open = socketFactory ?? WebSocketChannel.connect;
+  WebSocketChannel? channel;
   try {
-    final doc = jsonDecode(body) as Map<String, dynamic>;
-    final event = NostrEvent.fromJson(doc);
-    if (!schnorr.verifyEvent(event) || event.pubkey != pubkey) return null;
-    final content = jsonDecode(event.content) as Map<String, dynamic>;
-    final builds = content['builds'];
-    if (builds is! List) return const [];
-    return builds
-        .whereType<Map<String, dynamic>>()
-        .map(PublishedBuild.fromJson)
-        .toList();
+    channel = open(Uri.parse(relay));
+    final subId = 'nym-bi-${DateTime.now().microsecondsSinceEpoch}';
+    final events = <NostrEvent>[];
+    final done = Completer<void>();
+
+    final sub = channel.stream.listen(
+      (raw) {
+        try {
+          final msg = jsonDecode(raw as String);
+          if (msg is! List || msg.isEmpty) return;
+          if (msg[0] == 'EVENT' && msg.length > 2 && msg[1] == subId) {
+            events.add(
+                NostrEvent.fromJson(msg[2] as Map<String, dynamic>));
+          } else if (msg[0] == 'EOSE' && msg.length > 1 && msg[1] == subId) {
+            if (!done.isCompleted) done.complete();
+          }
+        } catch (_) {
+          // A frame we can't read is not a reason to abandon the ones we can.
+        }
+      },
+      onError: (_) {
+        if (!done.isCompleted) done.complete();
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+    );
+
+    channel.sink.add(jsonEncode([
+      'REQ',
+      subId,
+      {
+        'kinds': [kZapstoreAssetKind],
+        'authors': [publisherPubkey],
+        '#i': [appId],
+        'limit': 50,
+      }
+    ]));
+
+    await done.future.timeout(timeout, onTimeout: () {});
+    await sub.cancel();
+    return events;
   } catch (_) {
-    return null;
+    return const [];
+  } finally {
+    try {
+      await channel?.sink.close();
+    } catch (_) { }
   }
 }
 
-/// Measures the install and checks it against the published manifest.
+/// Measures the install and checks it against Zapstore's published assets.
 class BuildIntegrityService {
   BuildIntegrityService({
     MethodChannel? channel,
-    http.Client? client,
-    this.manifestUrl = kReleaseManifestUrl,
-    required this.developerPubkey,
-  })  : _channel = channel ?? const MethodChannel(channelName),
-        _client = client;
+    this.relay = kZapstoreRelay,
+    this.appId = kAndroidAppId,
+    this.socketFactory,
+    required this.publisherPubkey,
+  }) : _channel = channel ?? const MethodChannel(channelName);
 
   /// Shared with `MainActivity.kt`.
   static const String channelName = 'app.nymchat/build_integrity';
 
   final MethodChannel _channel;
-  final http.Client? _client;
-  final String manifestUrl;
+  final String relay;
+  final String appId;
+  final ZapstoreSocketFactory? socketFactory;
 
-  /// The pinned key the manifest must be signed with.
-  final String developerPubkey;
+  /// The pinned key the release events must be signed with. Without it the
+  /// check would accept a hash from anyone who can write to the relay.
+  final String publisherPubkey;
 
   /// Only Android can read and hash its own installed artifact.
   static bool get isSupported {
@@ -276,6 +386,10 @@ class BuildIntegrityService {
     }
   }
 
+  /// True once a publisher key is configured. Without one there is nothing to
+  /// check against, and the panel says so rather than reporting a failure.
+  bool get isConfigured => publisherPubkey.length == 64;
+
   Future<NativeBuildInfo?> measure() async {
     if (!isSupported) return null;
     try {
@@ -286,21 +400,15 @@ class BuildIntegrityService {
     }
   }
 
-  Future<List<PublishedBuild>?> fetchManifest() async {
-    try {
-      final client = _client ?? http.Client();
-      final res = await client.get(Uri.parse(manifestUrl));
-      // No manifest published yet is not the same as one we couldn't reach:
-      // an empty build list lands on `notPublished`, which says so.
-      if (res.statusCode == 404) return const [];
-      if (res.statusCode < 200 || res.statusCode >= 300) return null;
-      // Charset-less application/json would decode as Latin-1 and mangle any
-      // non-ASCII content, breaking the re-hashed event id.
-      return parseReleaseManifest(
-          utf8.decode(res.bodyBytes, allowMalformed: true), developerPubkey);
-    } catch (_) {
-      return null;
-    }
+  Future<List<PublishedBuild>> fetchPublished() async {
+    final events = await fetchZapstoreAssets(
+      publisherPubkey: publisherPubkey,
+      appId: appId,
+      relay: relay,
+      socketFactory: socketFactory,
+    );
+    return zapstoreAssets(events,
+        publisherPubkey: publisherPubkey, appId: appId);
   }
 
   Future<BuildIntegrityResult> run() async {
@@ -314,11 +422,19 @@ class BuildIntegrityService {
       return BuildIntegrityResult(
           state: BuildIntegrityState.storeRepackaged, info: info);
     }
-    final builds = await fetchManifest();
+    if (!isConfigured) {
+      return BuildIntegrityResult(
+          state: BuildIntegrityState.provenanceUnreachable, info: info);
+    }
+    final builds = await fetchPublished();
+    // An empty result is ambiguous — nothing published, or the relay never
+    // answered — so it reads as unreachable rather than claiming the build is
+    // unpublished. `notPublished` is reserved for a lookup that DID return
+    // assets, none of them for this version.
     return describeBuildIntegrity(
       info: info,
-      manifestOk: builds != null,
-      builds: builds ?? const [],
+      provenanceOk: builds.isNotEmpty,
+      builds: builds,
     );
   }
 }
