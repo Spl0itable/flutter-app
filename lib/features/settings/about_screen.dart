@@ -18,6 +18,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../i18n/i18n.dart';
 import '../identity/modal_chrome.dart';
+import 'build_integrity.dart';
 import 'settings_widgets.dart';
 
 /// Bundled fallback for the About-header version, shown until the live version
@@ -212,29 +213,102 @@ String _neventEncode(String id, String author, List<String> relays) {
 
 /// The build-integrity panel's copy.
 ///
-/// The web app re-hashes every file it is running and looks the result up in
-/// the repository's signed build attestations, so its panel reports a real
-/// verdict. A native build cannot do the same thing: what runs on the device is
-/// AOT machine code, not the Dart in `android-ios-app/`, and no computation on
-/// the device relates one to the other. Saying "Signed native build" under a
-/// heading that reads "Build integrity" implied a check that never ran, so the
-/// panel now states what is actually true and points at what a reader can
-/// check for themselves.
+/// Android can measure itself: the installed APK is readable at
+/// `ApplicationInfo.sourceDir`, so the app hashes it and compares against the
+/// developer's signed release manifest — the same shape of proof the web app
+/// gets from re-hashing its own files against the repository's attestations,
+/// and checkable by anyone who downloads the published APK.
+///
+/// Everywhere else there is nothing to measure. What runs is AOT machine code,
+/// not the Dart in `android-ios-app/`, and on iOS the binary is re-signed and
+/// encrypted per download, so a hash computed on the device matches nothing
+/// publishable. Those states say so rather than implying a check that never
+/// ran. See build_integrity.dart.
 const String kBuildIntegrityLabel = 'Build integrity';
-const String kBuildIntegrityStatus = 'Not verified on device';
-const String kBuildIntegrityNote =
-    'This app cannot check itself: what runs here is compiled code, not the '
-    'source, and a check the app performs on itself proves nothing about an '
-    'app that has been altered. Verify the release you installed against the '
-    'published build instead, or use the web app, which re-hashes every file '
-    'it is running against this repository\'s signed attestations.';
 
-/// Every literal the build-integrity panel shows.
+/// Android, checked: the installed APK hashes to something the developer's
+/// signed release manifest publishes.
+const String kBuildStatusVerified = 'Verified official build';
+const String kBuildNoteVerified =
+    'The APK installed on this device hashes to the value published in the '
+    'developer\'s signed release manifest. Anyone can repeat the check: '
+    'download the published APK, hash it, and verify the manifest signature.';
+
+/// Android, checked, wrong: the APK is not what was published.
+const String kBuildStatusMismatch = 'Unrecognised build';
+const String kBuildNoteMismatch =
+    'The APK installed on this device does not match any hash the signed '
+    'release manifest publishes for this version. It was modified after '
+    'publication, or built by someone else.';
+
+/// Android via Google Play: nothing to compare, and that is not a failure.
+const String kBuildStatusStore = 'Installed from Google Play';
+const String kBuildNoteStore =
+    'Google Play re-signs the upload with its own key and builds a separate '
+    'APK for each device, so what is installed here is not the file the '
+    'developer published and its hash matches nothing. To check a build '
+    'yourself, install the APK published directly and open this panel again.';
+
+/// Android, manifest unreachable or unverifiable — deliberately one state.
+const String kBuildStatusUnreachable = 'Provenance unreachable';
+const String kBuildNoteUnreachable =
+    'The signed release manifest could not be fetched, or its signature did '
+    'not check out. Nothing is wrong with the app as far as this panel can '
+    'tell — it simply has nothing trustworthy to compare against right now.';
+
+/// Android, this version isn't in the manifest yet.
+const String kBuildStatusNotPublished = 'No published hash yet';
+const String kBuildNoteNotPublished =
+    'The signed release manifest publishes no hash for this version yet, so '
+    'there is nothing to compare the installed APK against.';
+
+/// Everywhere else — principally iOS.
+const String kBuildStatusUnsupported = 'Not verifiable on this platform';
+const String kBuildNoteUnsupported =
+    'This app cannot check itself here: what runs is compiled code, not the '
+    'source, and iOS re-signs and encrypts each download so a hash computed '
+    'on the device matches nothing published. Verify the release you '
+    'installed against the published build instead, or use the web app, '
+    'which re-hashes every file it is running against this repository\'s '
+    'signed attestations.';
+
+const String kBuildIntegrityChecking = 'Checking…';
+
+/// Every literal the build-integrity panel can show.
 const List<String> kBuildIntegrityStrings = [
   kBuildIntegrityLabel,
-  kBuildIntegrityStatus,
-  kBuildIntegrityNote,
+  kBuildIntegrityChecking,
+  kBuildStatusVerified,
+  kBuildNoteVerified,
+  kBuildStatusMismatch,
+  kBuildNoteMismatch,
+  kBuildStatusStore,
+  kBuildNoteStore,
+  kBuildStatusUnreachable,
+  kBuildNoteUnreachable,
+  kBuildStatusNotPublished,
+  kBuildNoteNotPublished,
+  kBuildStatusUnsupported,
+  kBuildNoteUnsupported,
 ];
+
+/// The status line and explanation for a verdict.
+(String, String) buildIntegrityCopy(BuildIntegrityState state) {
+  switch (state) {
+    case BuildIntegrityState.verified:
+      return (kBuildStatusVerified, kBuildNoteVerified);
+    case BuildIntegrityState.mismatch:
+      return (kBuildStatusMismatch, kBuildNoteMismatch);
+    case BuildIntegrityState.storeRepackaged:
+      return (kBuildStatusStore, kBuildNoteStore);
+    case BuildIntegrityState.provenanceUnreachable:
+      return (kBuildStatusUnreachable, kBuildNoteUnreachable);
+    case BuildIntegrityState.notPublished:
+      return (kBuildStatusNotPublished, kBuildNoteNotPublished);
+    case BuildIntegrityState.unsupported:
+      return (kBuildStatusUnsupported, kBuildNoteUnsupported);
+  }
+}
 
 /// The About modal (`#aboutModal`, index.html:2118), presented as a centered
 /// `.modal-content`. Layout mirrors the PWA: header (Nymchat + version), build
@@ -290,6 +364,9 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   /// Live main-project version once fetched; falls back to [kAboutVersion].
   String _version = _liveVersionCache ?? kAboutVersion;
 
+  /// Build-integrity check state: null while it runs, then the verdict.
+  BuildIntegrityResult? _build;
+
   @override
   void initState() {
     super.initState();
@@ -303,6 +380,18 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
     _runCanaryCheck();
     // Track the live main-project version; keeps the bundled fallback on error.
     _loadLiveVersion();
+    // Hash the installed APK and check it against the signed release manifest.
+    // No-ops off Android, where nothing on the device can be measured.
+    _runBuildCheck();
+  }
+
+  Future<void> _runBuildCheck() async {
+    if (!BuildIntegrityService.isSupported) return;
+    final result = await BuildIntegrityService(
+      developerPubkey: _kCanaryPubkey,
+    ).run();
+    if (!mounted) return;
+    setState(() => _build = result);
   }
 
   Future<void> _loadLiveVersion() async {
@@ -532,6 +621,15 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   /// plainly, styled like the PWA's w600 `.about-build-status`, and keeps the
   /// same source/provenance links for a reader to check off-device.
   Widget _buildPanel(NymColors c) {
+    final result = _build;
+    // While the check is in flight on a platform that can run one, say so
+    // instead of showing a verdict that is about to change.
+    final pending = result == null && BuildIntegrityService.isSupported;
+    final state = result?.state ?? BuildIntegrityState.unsupported;
+    final copy = buildIntegrityCopy(state);
+    final status = pending ? kBuildIntegrityChecking : copy.$1;
+    final note = pending ? '' : copy.$2;
+    final measured = result?.info;
     return Container(
       margin: const EdgeInsets.only(top: 14),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -550,21 +648,41 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
               Text(tr(kBuildIntegrityLabel),
                   style: TextStyle(color: c.textDim, fontSize: 12)),
               // Unclassed `.about-build-status` inherits `var(--text)`, w600.
-              Text(tr(kBuildIntegrityStatus),
+              // Only a real check earns a colour; the states that couldn't
+              // compare anything stay neutral rather than reading as failures.
+              Flexible(
+                child: Text(
+                  tr(status),
+                  textAlign: TextAlign.end,
                   style: TextStyle(
-                    color: c.text,
+                    color: switch (state) {
+                      BuildIntegrityState.verified => _kSuccess,
+                      BuildIntegrityState.mismatch => c.danger,
+                      _ => c.text,
+                    },
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                  )),
+                  ),
+                ),
+              ),
             ],
           ),
-          // Say what the app can and cannot establish about itself, rather than
+          // Say what the check did or could not establish, rather than
           // restating a fact next to a heading that reads as a verdict.
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(tr(kBuildIntegrityNote),
-                style: TextStyle(color: c.textDim, fontSize: 11, height: 1.45)),
-          ),
+          if (note.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(tr(note),
+                  style:
+                      TextStyle(color: c.textDim, fontSize: 11, height: 1.45)),
+            ),
+          // The values a reader needs to repeat the check off-device.
+          if (measured != null) ...[
+            if (measured.apkSha256 != null)
+              _hashRow(c, tr('Installed APK'), measured.apkSha256!),
+            if (measured.signerSha256 != null)
+              _hashRow(c, tr('Signing certificate'), measured.signerSha256!),
+          ],
           // `.about-build-meta { margin-top: 4px; font-size: 11px }`.
           Padding(
             padding: const EdgeInsets.only(top: 4),
@@ -590,6 +708,29 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
                     'https://github.com/Spl0itable/NYM#verify-build',
                     size: 11),
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A hash the reader can compare against a published value. Monospace and
+  /// selectable, because the point of showing it is that someone checks it.
+  Widget _hashRow(NymColors c, String label, String hex) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(color: c.textDim, fontSize: 11)),
+          SelectableText(
+            hex,
+            style: TextStyle(
+              color: c.textDim,
+              fontSize: 10,
+              fontFamily: kMonoFont,
+              height: 1.4,
             ),
           ),
         ],
