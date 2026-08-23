@@ -4122,6 +4122,30 @@ class NostrController {
 
   PqMode get pqMode => _pqMode;
 
+  /// How hard we try to stay readable by Bitchat. Independent of [pqMode]: it
+  /// governs whether a second, Bitchat-readable copy of each message goes out,
+  /// which matters whether or not post-quantum is in use.
+  BitchatCompatMode _bitchatCompat = BitchatCompatMode.auto;
+
+  BitchatCompatMode get bitchatCompat => _bitchatCompat;
+
+  Future<void> setBitchatCompat(BitchatCompatMode mode) async {
+    if (_bitchatCompat == mode) return;
+    _bitchatCompat = mode;
+    await _ref
+        .read(keyValueStoreProvider)
+        .setString(StorageKeys.bitchatCompat, mode.name);
+  }
+
+  /// True when this install was upgraded into post-quantum rather than starting
+  /// with it, and the user has not been told yet.
+  bool get pqUpgradeNoticePending =>
+      _ref.read(keyValueStoreProvider).getString(StorageKeys.pqUpgradeNotice) ==
+      'pending';
+
+  Future<void> dismissPqUpgradeNotice() async =>
+      _ref.read(keyValueStoreProvider).remove(StorageKeys.pqUpgradeNotice);
+
   /// True when post-quantum is both possible and switched on.
   bool get pqEnabled =>
       PqPolicy.enabled(privkey: _identity?.privkey, mode: _pqMode);
@@ -4194,8 +4218,15 @@ class NostrController {
       final seenBefore = kv.getString('nym_last_online_ts') != null;
       _pqMode = PqPolicy.initialMode(seenBefore: seenBefore);
       unawaited(_persistPqMode(_pqMode));
+      if (PqPolicy.upgradeNoticeNeeded(seenBefore: seenBefore)) {
+        unawaited(kv.setString(StorageKeys.pqUpgradeNotice, 'pending'));
+      }
     }
     _pqEpoch = int.tryParse(kv.getString(StorageKeys.pqEpoch) ?? '') ?? 0;
+    _bitchatCompat = BitchatCompatMode.values.firstWhere(
+      (m) => m.name == kv.getString(StorageKeys.bitchatCompat),
+      orElse: () => BitchatCompatMode.auto,
+    );
   }
 
   Future<void> _persistPqMode(PqMode mode) async {
@@ -4219,8 +4250,13 @@ class NostrController {
 
   /// Publishes (or republishes) our announcement, merging this device into the
   /// roster. No-op when post-quantum is off — turning it off retracts instead.
+  /// Publishes our capability announcement.
+  ///
+  /// EVERY Nymchat client publishes this, not only post-quantum-capable ones:
+  /// its presence is signed proof that a pubkey runs Nymchat, which is what
+  /// lets the send path skip the speculative Bitchat wrap. The ML-KEM key
+  /// rides along only when post-quantum is both possible and switched on.
   Future<void> publishPqAnnouncement({bool force = false}) async {
-    if (!pqEnabled) return;
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
@@ -4230,23 +4266,23 @@ class NostrController {
             pqRepublishInterval.inMilliseconds) {
       return;
     }
-    final keys = _pqSelfKeys();
-    if (keys == null) return;
+    // A KEM key only when we can actually use one.
+    final keys = pqEnabled ? _pqSelfKeys() : null;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final devices = PqPolicy.mergeDeviceRoster(
         _pqDevices, await _pqDeviceId(), ApiConfig.appVersion, nowSec: nowSec);
     final signed = await service.publishPqAnnouncement(
-      kemPublicKey: keys.publicKey,
+      kemPublicKey: keys?.publicKey,
       epoch: _pqEpoch,
       devices: devices,
     );
     if (signed == null) return;
     _pqDevices = devices;
     _pqLastPublishMs = DateTime.now().millisecondsSinceEpoch;
-    // Record our own key so self-addressed wraps resolve through the same
+    // Record our own entry so self-addressed wraps resolve through the same
     // lookup as everyone else's.
     _pqRegistry.record(
-        identity.pubkey, keys.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
+        identity.pubkey, keys?.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
   }
 
   /// Turns post-quantum on or off for this identity. Disabling publishes a
@@ -4257,14 +4293,11 @@ class NostrController {
     if (_pqMode == mode) return;
     _pqMode = mode;
     await _persistPqMode(mode);
-    if (mode == PqMode.on) {
-      await publishPqAnnouncement(force: true);
-    } else {
-      _pqLastPublishMs = 0;
-      final identity = _identity;
-      if (identity != null) _pqRegistry.forget(identity.pubkey);
-      await _service?.retractPqAnnouncement();
-    }
+    // Either way we republish. Turning post-quantum OFF republishes without a
+    // key: peers stop encapsulating to us immediately, but keep knowing we are
+    // a Nymchat client — retracting outright would send us back to looking
+    // like a Bitchat user and start attracting pointless Bitchat wraps again.
+    await publishPqAnnouncement(force: true);
   }
 
   /// Our own ML-KEM decrypt candidates: current epoch first, then a bounded
@@ -4299,6 +4332,9 @@ class NostrController {
           _pqRegistry.keyFor(recipientPubkey, nowSec: nowSec, enabled: pqOn),
       knownBitchat: _bitchatUsers.contains(recipientPubkey),
       knownNym: _nymUsers.contains(recipientPubkey),
+      provenNymchat:
+          _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
+      mode: _bitchatCompat,
     );
 
     UnsignedEvent? bitchatRumor;

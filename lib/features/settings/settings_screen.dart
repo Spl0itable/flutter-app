@@ -1476,10 +1476,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final nostrCtrl = ref.read(nostrControllerProvider);
     final pqCapable = nostrCtrl.pqCapable;
     final pqWarning = pqCapable
-        ? tr('⚠ All devices using this npub must be updated first. Once '
-            'enabled, other Nymchat clients encrypt to a key that older '
-            'versions of the app can\'t read, so an out-of-date device would '
-            'stop receiving your messages and history.')
+        ? tr('⚠ All devices using this npub must be updated. Other Nymchat '
+            'clients encrypt to a key that older versions of the app can\'t '
+            'read, so an out-of-date device would stop receiving your messages '
+            'and history.')
         : tr('Requires a local key. Browser-extension and remote-signer '
             '(NIP-46) logins can\'t use post-quantum encryption, because the '
             'signer returns a finished NIP-44 payload rather than a key we can '
@@ -1644,6 +1644,32 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             disabled: !pqCapable,
             onChanged: (v) =>
                 unawaited(nostrCtrl.setPqMode(v ? PqMode.on : PqMode.off)),
+          ),
+        ),
+      ),
+      _GroupSpec(
+        text: tr(
+            'Bitchat compatibility Automatic Always Never Bitchat can\'t read '
+            'Nymchat\'s format, so a second copy of each message is normally '
+            'sent in Bitchat\'s format to anyone who might be using it.'),
+        child: FormGroup(
+          label: tr('Bitchat compatibility'),
+          hint: tr('Bitchat can\'t read Nymchat\'s format, so a second copy of '
+              'each message is normally sent in Bitchat\'s format to anyone who '
+              'might be using it. Automatic skips that copy for people whose '
+              'client has identified itself as Nymchat, and still sends it to '
+              'everyone else — so nothing becomes unreachable. Always sends it '
+              'whenever the recipient might be on Bitchat. Never sends only '
+              'Nymchat\'s format, which reveals the least but can\'t reach '
+              'Bitchat at all.'),
+          child: FormSelect<BitchatCompatMode>(
+            value: nostrCtrl.bitchatCompat,
+            items: [
+              (value: BitchatCompatMode.auto, label: tr('Automatic')),
+              (value: BitchatCompatMode.always, label: tr('Always')),
+              (value: BitchatCompatMode.never, label: tr('Never')),
+            ],
+            onChanged: (v) => unawaited(nostrCtrl.setBitchatCompat(v)),
           ),
         ),
       ),

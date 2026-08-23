@@ -93,7 +93,10 @@ class PqAnnouncement {
     this.retracted = false,
   });
 
-  /// Null when [retracted].
+  /// Null when [retracted], and also null for a Nymchat client that cannot or
+  /// will not do post-quantum — post-quantum switched off, or an extension /
+  /// NIP-46 login that cannot seal a hybrid message at all. A KEM-less
+  /// announcement is still a valid Nymchat claim.
   final Uint8List? publicKey;
   final int expiresAt;
   final int epoch;
@@ -123,20 +126,28 @@ class PqAnnouncement {
     final exp = decoded['exp'];
     if (exp is! int) return null;
 
-    if (decoded['retracted'] == true || decoded['pk'] == null) {
+    // An explicit retraction withdraws the whole claim, Nymchat and all.
+    // Nothing emits one today — turning post-quantum off republishes without a
+    // key instead — but a peer that does must be honoured.
+    if (decoded['retracted'] == true) {
       return PqAnnouncement(
           publicKey: null, expiresAt: exp, epoch: 0, retracted: true);
     }
 
-    final pkRaw = decoded['pk'];
-    if (pkRaw is! String) return null;
-    Uint8List pk;
-    try {
-      pk = pq.b64uDecode(pkRaw);
-    } catch (_) {
-      return null;
+    // No `pk` is a valid announcement, not a retraction: a Nymchat client
+    // without post-quantum. Recording it is what stops us sending a pointless
+    // Bitchat wrap.
+    Uint8List? pk;
+    if (decoded['pk'] != null) {
+      final pkRaw = decoded['pk'];
+      if (pkRaw is! String) return null;
+      try {
+        pk = pq.b64uDecode(pkRaw);
+      } catch (_) {
+        return null;
+      }
+      if (pk.length != mlKemPublicKeyLength) return null;
     }
-    if (pk.length != mlKemPublicKeyLength) return null;
 
     final devices = <PqDevice>[];
     final rawDevices = decoded['devices'];
@@ -156,8 +167,11 @@ class PqAnnouncement {
   }
 
   /// Builds the `content` payload for our own announcement.
+  /// Builds the `content` payload for our own announcement. [publicKey] is
+  /// null when we cannot or will not do post-quantum — the announcement still
+  /// goes out, because its presence is what tells peers we run Nymchat.
   static String encode({
-    required Uint8List publicKey,
+    required Uint8List? publicKey,
     required int expiresAt,
     required int epoch,
     required List<PqDevice> devices,
@@ -165,8 +179,12 @@ class PqAnnouncement {
       jsonEncode({
         'v': 1,
         'alg': pqAlgorithm,
+        // Marks this as a Nymchat client regardless of whether a KEM key is
+        // present, so "Nymchat without post-quantum" stays distinguishable
+        // from a retraction.
+        'nym': 1,
         'epoch': epoch,
-        'pk': pq.b64uEncode(publicKey),
+        if (publicKey != null) 'pk': pq.b64uEncode(publicKey),
         'exp': expiresAt,
         'devices': [for (final d in devices) d.toJson()],
       });
@@ -190,18 +208,22 @@ class PqRegistry {
   PqRegistry({this.maxEntries = 5000});
 
   final int maxEntries;
-  final Map<String, ({Uint8List pk, int exp, int epoch})> _keys = {};
+  final Map<String, ({Uint8List? pk, int exp, int epoch})> _keys = {};
 
   /// Ingests a peer's announcement. [content] is the event content; [pubkey]
   /// its (already signature-verified) author.
+  ///
+  /// A KEM-less announcement is recorded, not dropped: it still proves the peer
+  /// runs Nymchat, which is what [isKnownNymchatClient] reports and what stops
+  /// the send path wasting a Bitchat wrap on them.
   void ingest(String pubkey, String content, {required int nowSec}) {
     final ann = PqAnnouncement.parse(content);
     if (ann == null) return;
-    if (ann.retracted || ann.publicKey == null || ann.expiresAt <= nowSec) {
+    if (ann.retracted || ann.expiresAt <= nowSec) {
       _keys.remove(pubkey);
       return;
     }
-    record(pubkey, ann.publicKey!, ann.expiresAt, ann.epoch);
+    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch);
   }
 
   /// Records a key. Also the path our own key takes, so self-addressed wraps
@@ -210,7 +232,7 @@ class PqRegistry {
   /// The cap is enforced here rather than in [ingest] so every write goes
   /// through one bound (Dart's Map preserves insertion order, so the evicted
   /// entry is the earliest-recorded one).
-  void record(String pubkey, Uint8List pk, int exp, int epoch) {
+  void record(String pubkey, Uint8List? pk, int exp, int epoch) {
     _keys[pubkey] = (pk: pk, exp: exp, epoch: epoch);
     while (_keys.length > maxEntries) {
       _keys.remove(_keys.keys.first);
@@ -221,24 +243,40 @@ class PqRegistry {
 
   void clear() => _keys.clear();
 
-  /// A peer's usable ML-KEM public key, or null when we have none, it expired,
-  /// or post-quantum is off for this identity.
-  Uint8List? keyFor(String pubkey, {required int nowSec, required bool enabled}) {
-    if (!enabled) return null;
+  /// The live entry for a peer, or null. Shared by both lookups so expiry is
+  /// enforced in exactly one place.
+  ({Uint8List? pk, int exp, int epoch})? _entry(String pubkey, int nowSec) {
     final rec = _keys[pubkey];
     if (rec == null) return null;
     if (rec.exp <= nowSec) {
       _keys.remove(pubkey);
       return null;
     }
-    return rec.pk;
+    return rec;
   }
 
-  /// Pubkeys we hold live keys for — used to size the group coverage readout
-  /// and to decide whether a self-archive can be post-quantum.
+  /// A peer's usable ML-KEM public key, or null when we have none, it expired,
+  /// their announcement carries no key, or post-quantum is off for us.
+  Uint8List? keyFor(String pubkey, {required int nowSec, required bool enabled}) {
+    if (!enabled) return null;
+    return _entry(pubkey, nowSec)?.pk;
+  }
+
+  /// Whether a peer has published a live capability announcement, i.e. whether
+  /// they are provably running Nymchat.
+  ///
+  /// Deliberately NOT gated on our own post-quantum setting: it answers "which
+  /// client is this?", not "should we use post-quantum?". A peer stays a known
+  /// Nymchat client whether or not either side has post-quantum on.
+  bool isKnownNymchatClient(String pubkey, {required int nowSec}) =>
+      _entry(pubkey, nowSec) != null;
+
+  /// Pubkeys we hold live ML-KEM keys for — used to size the group coverage
+  /// readout and to decide whether a self-archive can be post-quantum. A
+  /// KEM-less entry is just a Nymchat client and does not count.
   List<String> knownPeers({required int nowSec}) => [
         for (final e in _keys.entries)
-          if (e.value.exp > nowSec) e.key
+          if (e.value.exp > nowSec && e.value.pk != null) e.key
       ];
 }
 
@@ -256,13 +294,21 @@ class PqPolicy {
   static bool enabled({required Uint8List? privkey, required PqMode mode}) =>
       capable(privkey: privkey) && mode == PqMode.on;
 
-  /// The default mode on first boot of a post-quantum-capable build.
+  /// The default mode on first boot of a post-quantum-capable build: on, for
+  /// everyone.
   ///
-  /// A fresh install can turn it on safely because no older device can exist
-  /// yet; an upgrade cannot, because one might. [seenBefore] is the PWA's
+  /// The one real cost is on upgrade. Announcing a key makes other Nymchat
+  /// clients encrypt to it, and a SECOND device on the same npub still running
+  /// an older build cannot read that — so it would stop receiving messages
+  /// until it updates. That device is invisible to us (an old build publishes
+  /// no announcement), so rather than default off and leave everyone
+  /// unprotected, we default on and say so once — see [upgradeNoticeNeeded].
+  static PqMode initialMode({required bool seenBefore}) => PqMode.on;
+
+  /// Whether this boot was an upgrade into post-quantum rather than a fresh
+  /// install, and so warrants the one-time notice. [seenBefore] is the
   /// `nym_last_online_ts` check — any prior version wrote it.
-  static PqMode initialMode({required bool seenBefore}) =>
-      seenBefore ? PqMode.off : PqMode.on;
+  static bool upgradeNoticeNeeded({required bool seenBefore}) => seenBefore;
 
   /// Merges [deviceId] into [previous], dropping entries not seen for
   /// [pqDeviceStale] and capping the list. Newest first.
@@ -283,14 +329,29 @@ class PqPolicy {
   }
 }
 
+/// How hard we try to stay readable by Bitchat. Under
+/// Settings > Privacy & Security, beneath quantum-resistant encryption.
+enum BitchatCompatMode {
+  /// Default. Send a Bitchat wrap only to peers we cannot prove are on Nymchat.
+  auto,
+
+  /// Send one to every peer who might be on Bitchat — the behaviour that
+  /// shipped before capability announcements existed.
+  always,
+
+  /// Never send one. Minimum metadata, at the cost of not reaching Bitchat.
+  never,
+}
+
 /// Which transports a 1:1 PM should use. Mirrors the PWA's `pqPmPlan`
-/// (js/modules/pq.js) — both apps must make the same call or a peer receives
-/// a wrap it cannot open, or worse, two copies of the same plaintext.
+/// (js/modules/pq.js) — both apps must make the same call or a peer receives a
+/// wrap it cannot open, or worse, two copies of the same plaintext.
 class PqPmPlan {
   const PqPmPlan({
     required this.kemPublicKey,
     required this.bitchat,
     required this.nym,
+    this.provenNym = false,
   });
 
   /// Non-null when the recipient has a live announced ML-KEM key, which is
@@ -304,29 +365,51 @@ class PqPmPlan {
   /// otherwise).
   final bool nym;
 
+  /// The recipient published a live capability announcement, so they are
+  /// provably running Nymchat. Surfaced for tests and diagnostics.
+  final bool provenNym;
+
   bool get pq => kemPublicKey != null;
 
-  /// Decides the transports for [recipientPubkey].
+  /// Decides the transports for a recipient.
   ///
-  /// Post-quantum REPLACES the classical Nymchat wrap; it never accompanies
-  /// it. Shipping a classical copy of the same plaintext alongside would hand
-  /// a future quantum attacker the easier target and make the UI badge a lie.
+  /// The Bitchat wrap exists to reach someone who might be running Bitchat. A
+  /// live capability announcement ([provenNymchat]) is signed proof they are
+  /// running Nymchat instead, so under [BitchatCompatMode.auto] it settles the
+  /// question and the extra wrap is dropped — no guessing, and nothing is ever
+  /// made undeliverable, because a peer with NO announcement still gets both.
   ///
-  /// That is also why it suppresses the speculative Bitchat wrap. A published,
-  /// signed `nym-pq` announcement is far stronger evidence that a peer runs
-  /// Nymchat than the [knownBitchat] / [knownNym] heuristic, which only learns
-  /// from messages already received — so a peer we have never heard from but
-  /// who HAS announced must not also get a plaintext-equivalent Bitchat copy.
+  /// Note [BitchatCompatMode.always] still drops the Bitchat wrap once a
+  /// post-quantum wrap is going out. That is not a compromise of the setting: a
+  /// Bitchat copy of the same plaintext would hand a future quantum attacker
+  /// the easier target and make the shield badge a lie, and it buys no reach,
+  /// because a peer with an ML-KEM key is demonstrably not on Bitchat.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
     required bool knownNym,
+    bool provenNymchat = false,
+    BitchatCompatMode mode = BitchatCompatMode.auto,
   }) {
     final unknown = !knownBitchat && !knownNym;
+    // Holding a KEM key means we hold their announcement, so it always implies
+    // a proven Nymchat client. Deriving it here rather than trusting the caller
+    // keeps the two arguments from ever disagreeing.
+    final proven = provenNymchat || recipientKemKey != null;
+    final bitchat = switch (mode) {
+      BitchatCompatMode.never => false,
+      BitchatCompatMode.always =>
+        (knownBitchat || unknown) && recipientKemKey == null,
+      BitchatCompatMode.auto => (knownBitchat || unknown) && !proven,
+    };
     return PqPmPlan(
       kemPublicKey: recipientKemKey,
-      bitchat: (knownBitchat || unknown) && recipientKemKey == null,
-      nym: knownNym || unknown || recipientKemKey != null,
+      bitchat: bitchat,
+      // A message must always leave in SOME format. Without the `!bitchat`
+      // term, a known-Bitchat peer under `never` would match none of the other
+      // conditions and the send would silently produce nothing at all.
+      nym: !bitchat || knownNym || unknown || proven,
+      provenNym: proven,
     );
   }
 }

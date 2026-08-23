@@ -145,11 +145,17 @@ void main() {
       expect(PqPolicy.enabled(privkey: sk, mode: PqMode.off), isFalse);
     });
 
-    test('a fresh install defaults on, an upgrade defaults off', () {
-      // An upgrade might have an older device on the same nsec that would be
-      // locked out by a silent switch; a fresh install cannot.
+    test('defaults on for both fresh installs and upgrades', () {
       expect(PqPolicy.initialMode(seenBefore: false), PqMode.on);
-      expect(PqPolicy.initialMode(seenBefore: true), PqMode.off);
+      expect(PqPolicy.initialMode(seenBefore: true), PqMode.on);
+    });
+
+    test('only an upgrade raises the one-time notice', () {
+      // An upgrade might have an older device on the same nsec that would
+      // quietly stop receiving messages; that device publishes nothing, so it
+      // is invisible to us and the user has to be told rather than detected.
+      expect(PqPolicy.upgradeNoticeNeeded(seenBefore: true), isTrue);
+      expect(PqPolicy.upgradeNoticeNeeded(seenBefore: false), isFalse);
     });
 
     test('device roster merges this device and drops stale ones', () {
@@ -249,6 +255,134 @@ void main() {
       ]) {
         final withPq = plan(kem: null, bitchat: combo.$1, nym: combo.$2);
         expect(withPq.pq, isFalse);
+      }
+    });
+  });
+
+  group('capability announcements without a key', () {
+    // The case that motivates splitting the signals: a Nymchat user who has
+    // post-quantum off, or is on an extension login that cannot do it at all.
+    // They are provably not on Bitchat, so the Bitchat wrap is waste.
+    final kemLess = jsonEncode({
+      'v': 1,
+      'alg': 'mlkem768',
+      'nym': 1,
+      'epoch': 0,
+      'exp': 2000000000,
+    });
+
+    test('parses as a valid announcement, not a retraction', () {
+      final ann = PqAnnouncement.parse(kemLess);
+      expect(ann, isNotNull);
+      expect(ann!.retracted, isFalse);
+      expect(ann.publicKey, isNull);
+    });
+
+    test('proves the peer runs Nymchat but offers no key', () {
+      final r = PqRegistry()..ingest(author, kemLess, nowSec: before);
+      expect(r.isKnownNymchatClient(author, nowSec: before), isTrue);
+      expect(r.keyFor(author, nowSec: before, enabled: true), isNull);
+    });
+
+    test('does not count as a post-quantum peer', () {
+      final r = PqRegistry()..ingest(author, kemLess, nowSec: before);
+      expect(r.knownPeers(nowSec: before), isEmpty);
+    });
+
+    test('a KEM-bearing announcement counts as both', () {
+      final r = PqRegistry()
+        ..ingest(author, a['content'] as String, nowSec: before);
+      expect(r.isKnownNymchatClient(author, nowSec: before), isTrue);
+      expect(r.knownPeers(nowSec: before), [author]);
+    });
+
+    test('expiry drops the Nymchat claim too', () {
+      final r = PqRegistry()..ingest(author, kemLess, nowSec: before);
+      expect(r.isKnownNymchatClient(author, nowSec: after), isFalse);
+    });
+
+    test('a retraction still withdraws everything', () {
+      final r = PqRegistry()
+        ..ingest(author, kemLess, nowSec: before)
+        ..ingest(author, a['retractionContent'] as String, nowSec: before);
+      expect(r.isKnownNymchatClient(author, nowSec: before), isFalse);
+    });
+
+    test('capability is not gated on our own post-quantum setting', () {
+      // It answers "which client is this?", not "should we use post-quantum?".
+      final r = PqRegistry()..ingest(author, kemLess, nowSec: before);
+      expect(r.isKnownNymchatClient(author, nowSec: before), isTrue);
+      expect(r.keyFor(author, nowSec: before, enabled: false), isNull);
+    });
+  });
+
+  group('Bitchat compatibility modes', () {
+    final key = unhex(a['kemPublicKey'] as String);
+
+    PqPmPlan plan({
+      Uint8List? kem,
+      bool bitchat = false,
+      bool nym = false,
+      bool proven = false,
+      BitchatCompatMode mode = BitchatCompatMode.auto,
+    }) =>
+        PqPmPlan.decide(
+          recipientKemKey: kem,
+          knownBitchat: bitchat,
+          knownNym: nym,
+          provenNymchat: proven,
+          mode: mode,
+        );
+
+    test('auto: a proven Nymchat peer gets no Bitchat wrap', () {
+      expect(plan(proven: true).bitchat, isFalse);
+    });
+
+    test('always: a proven Nymchat peer still gets one (maximum reach)', () {
+      expect(plan(proven: true, mode: BitchatCompatMode.always).bitchat, isTrue);
+    });
+
+    test('never: no Bitchat wrap at all', () {
+      expect(plan(proven: true, mode: BitchatCompatMode.never).bitchat, isFalse);
+    });
+
+    test('always never pairs a Bitchat copy with a post-quantum wrap', () {
+      // It buys no reach and would void the guarantee.
+      final p = plan(kem: key, mode: BitchatCompatMode.always);
+      expect(p.pq, isTrue);
+      expect(p.bitchat, isFalse);
+    });
+
+    test('a KEM key implies a proven Nymchat client', () {
+      // Callers cannot pass an inconsistent pair.
+      expect(plan(kem: key).provenNym, isTrue);
+    });
+
+    test('auto: an unknown peer keeps the existing dual-send', () {
+      final p = plan();
+      expect(p.bitchat, isTrue);
+      expect(p.nym, isTrue);
+    });
+
+    test('auto: a known Bitchat peer with no announcement still gets one', () {
+      expect(plan(bitchat: true).bitchat, isTrue);
+    });
+
+    test('every mode always sends something', () {
+      // Regression guard: a known-Bitchat peer under `never` once matched no
+      // send condition at all, silently dropping the message.
+      for (final mode in BitchatCompatMode.values) {
+        for (final setup in [
+          () => plan(mode: mode),
+          () => plan(bitchat: true, mode: mode),
+          () => plan(nym: true, mode: mode),
+          () => plan(proven: true, mode: mode),
+          () => plan(kem: key, mode: mode),
+        ]) {
+          final p = setup();
+          expect(p.bitchat || p.nym, isTrue,
+              reason: 'mode $mode produced no transport at all');
+        }
       }
     });
   });

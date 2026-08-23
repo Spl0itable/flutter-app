@@ -1523,8 +1523,11 @@ class NostrService {
   /// signature. The NIP-40 `expiration` tag lets relays drop a stale
   /// announcement on their own, so a downgraded or abandoned device stops
   /// attracting post-quantum messages it cannot read.
+  /// [kemPublicKey] is null for a Nymchat client that cannot or will not do
+  /// post-quantum; the announcement still goes out, because its presence is
+  /// what tells peers we run Nymchat.
   Future<NostrEvent?> publishPqAnnouncement({
-    required Uint8List kemPublicKey,
+    required Uint8List? kemPublicKey,
     required int epoch,
     required List<PqDevice> devices,
   }) async {
@@ -1548,30 +1551,6 @@ class NostrService {
           epoch: epoch,
           devices: devices,
         ),
-      ),
-    );
-    await pool.publish(signed);
-    return signed;
-  }
-
-  /// Supersedes our announcement with a retracted, already-expired one so peers
-  /// stop treating us as post-quantum capable. A replaceable event cannot be
-  /// unpublished, so this is the retraction.
-  Future<NostrEvent?> retractPqAnnouncement() async {
-    final sig = signer;
-    if (sig == null) return null;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final signed = await sig.sign(
-      UnsignedEvent(
-        pubkey: identity.pubkey,
-        createdAt: nowSec,
-        kind: EventKind.appData,
-        tags: [
-          ['d', AppDataTopic.postQuantum],
-          ['t', AppDataTopic.postQuantum],
-          ['expiration', '$nowSec'],
-        ],
-        content: PqAnnouncement.encodeRetraction(nowSec),
       ),
     );
     await pool.publish(signed);
