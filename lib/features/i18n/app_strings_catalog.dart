@@ -830,7 +830,6 @@ const List<String> kAppStringsCatalog = <String>[
   'Sign out',
   'Sign out and disconnect from Nymchat?',
   'Sign up',
-  'Signed native build',
   'Signer connection failed. Check the URI and try again.',
   'Silent',
   'Simple (nym1234)',
@@ -1311,4 +1310,7 @@ const List<String> kAppStringsCatalog = <String>[
   'Nymbot private message credits',
   'Nymbot credits cannot be purchased in this app. Credits are bought from the Nymchat web app in your browser. Credits you already have work here as usual.',
   'Nymbot credits cannot be gifted from this app. Credits are bought from the Nymchat web app in your browser, and can be gifted from there. Credits you already have work here as usual.',
+  // Build integrity panel (about_screen.dart).
+  'Not verified on device',
+  'This app cannot check itself: what runs here is compiled code, not the source, and a check the app performs on itself proves nothing about an app that has been altered. Verify the release you installed against the published build instead, or use the web app, which re-hashes every file it is running against this repository\'s signed attestations.',
 ];

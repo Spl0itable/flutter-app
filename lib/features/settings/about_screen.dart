@@ -210,10 +210,36 @@ String _neventEncode(String id, String author, List<String> relays) {
   return b32.bech32.encode(b32.Bech32('nevent', five), 5000);
 }
 
+/// The build-integrity panel's copy.
+///
+/// The web app re-hashes every file it is running and looks the result up in
+/// the repository's signed build attestations, so its panel reports a real
+/// verdict. A native build cannot do the same thing: what runs on the device is
+/// AOT machine code, not the Dart in `android-ios-app/`, and no computation on
+/// the device relates one to the other. Saying "Signed native build" under a
+/// heading that reads "Build integrity" implied a check that never ran, so the
+/// panel now states what is actually true and points at what a reader can
+/// check for themselves.
+const String kBuildIntegrityLabel = 'Build integrity';
+const String kBuildIntegrityStatus = 'Not verified on device';
+const String kBuildIntegrityNote =
+    'This app cannot check itself: what runs here is compiled code, not the '
+    'source, and a check the app performs on itself proves nothing about an '
+    'app that has been altered. Verify the release you installed against the '
+    'published build instead, or use the web app, which re-hashes every file '
+    'it is running against this repository\'s signed attestations.';
+
+/// Every literal the build-integrity panel shows.
+const List<String> kBuildIntegrityStrings = [
+  kBuildIntegrityLabel,
+  kBuildIntegrityStatus,
+  kBuildIntegrityNote,
+];
+
 /// The About modal (`#aboutModal`, index.html:2118), presented as a centered
 /// `.modal-content`. Layout mirrors the PWA: header (Nymchat + version), build
-/// integrity panel (honest static native state — the web bundle hash check has
-/// no native analogue), the LIVE warrant-canary panel (fetch + Schnorr verify,
+/// integrity panel (a statement of what the app can't establish about itself —
+/// see kBuildIntegrityNote), the LIVE warrant-canary panel (fetch + Schnorr verify,
 /// `runCanaryCheck`), description, external links, divider, and the "Contact
 /// the developer" form.
 class AboutScreen extends ConsumerStatefulWidget {
@@ -500,11 +526,11 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
   }
 
   /// `.about-build` panel (styles-components.css:363-415): white@.04 fill (no
-  /// light override), 12px title/status row, 11px meta + links rows. The web
-  /// bundle-attestation check (`build-verify.js`) has no native analogue (the
-  /// app ships as a signed store binary, not a hashed web bundle), so the
-  /// status is an honest static state — styled like the PWA's w600
-  /// `.about-build-status` — with the same source/provenance links.
+  /// light override), 12px title/status row, 11px note + meta + links rows.
+  /// The web bundle-attestation check (`build-verify.js`) has no native
+  /// analogue — see kBuildIntegrityNote for why — so the panel states that
+  /// plainly, styled like the PWA's w600 `.about-build-status`, and keeps the
+  /// same source/provenance links for a reader to check off-device.
   Widget _buildPanel(NymColors c) {
     return Container(
       margin: const EdgeInsets.only(top: 14),
@@ -518,19 +544,26 @@ class _AboutScreenState extends ConsumerState<AboutScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(tr('Build integrity'),
+              Text(tr(kBuildIntegrityLabel),
                   style: TextStyle(color: c.textDim, fontSize: 12)),
-              // Native ships as a signed store binary; verify via the repo.
               // Unclassed `.about-build-status` inherits `var(--text)`, w600.
-              Text(tr('Signed native build'),
+              Text(tr(kBuildIntegrityStatus),
                   style: TextStyle(
                     color: c.text,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   )),
             ],
+          ),
+          // Say what the app can and cannot establish about itself, rather than
+          // restating a fact next to a heading that reads as a verdict.
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(tr(kBuildIntegrityNote),
+                style: TextStyle(color: c.textDim, fontSize: 11, height: 1.45)),
           ),
           // `.about-build-meta { margin-top: 4px; font-size: 11px }`.
           Padding(
