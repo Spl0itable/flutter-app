@@ -687,7 +687,42 @@ class NostrController {
       // most likely moment a stuck DM finally lands (pms.js
       // `retryPendingDMsOnReconnect`, F02 auto-retry).
       _retryPendingDmsOnReconnect();
+      // (Re)advertise our capability announcement. Driven from the connection
+      // edge itself, NOT from the D1 backfill above — see
+      // [schedulePqAnnouncement] for why that coupling was a bug.
+      schedulePqAnnouncement();
     }
+  }
+
+  Timer? _pqAnnounceTimer;
+
+  /// Schedules our capability announcement for shortly after connecting, at
+  /// most once per pending window.
+  ///
+  /// This used to be the final statement of [_backfillFromD1OnReconnect], which
+  /// made publishing our key contingent on an unrelated archive restore
+  /// succeeding. That function returns early when storage sync is unavailable
+  /// and again on its 30s throttle, and it awaits three restores that can each
+  /// throw — and any one of those paths skipped the announcement entirely.
+  ///
+  /// Nothing surfaces that. The send path still encrypts, still delivers, still
+  /// shows a padlock; it just falls back to classical on BOTH ends, because
+  /// neither peer can find a key that was never published.
+  ///
+  /// Idempotent, so every connect path can call it unconditionally: the pending
+  /// timer collapses duplicate calls, and an announcement that has already gone
+  /// out is throttled by [pqRepublishInterval] inside
+  /// [publishPqAnnouncement].
+  void schedulePqAnnouncement() {
+    if (_pqAnnounceTimer != null) return;
+    // Matches the PWA's PQ_ANNOUNCE_DELAY_MS: long enough for our own existing
+    // announcement to arrive, so the device roster is merged onto what is
+    // already published rather than clobbering it.
+    _pqAnnounceTimer = Timer(const Duration(seconds: 3), () {
+      _pqAnnounceTimer = null;
+      if (_service == null || _identity == null) return;
+      unawaited(publishPqAnnouncement());
+    });
   }
 
   /// Last `_backfillFromD1OnReconnect` run (ms) — the PWA's 30s throttle so a
@@ -752,11 +787,10 @@ class NostrController {
     // After catch-up: re-exchange group ephemeral keys if this client was
     // offline long enough that missed rotations may have expired off relays.
     unawaited(_maybeSendGroupKeyResyncs());
-    // (Re)advertise our post-quantum key. Publishing after catch-up rather than
-    // at connect gives our own existing announcement time to arrive first, so
-    // the device roster is merged onto what is already published instead of
-    // clobbering it.
-    unawaited(publishPqAnnouncement());
+    // (Re)advertise our post-quantum key. Also scheduled straight off the
+    // connection edge, so a failure anywhere above cannot cost us the
+    // announcement — see [schedulePqAnnouncement].
+    schedulePqAnnouncement();
   }
 
   /// Rebuilds the web of trust from D1 (vouch lists are archived under the
@@ -1136,6 +1170,8 @@ class NostrController {
     _deletedIdsPersistTimer = null;
     _pqKeysPersistTimer?.cancel();
     _pqKeysPersistTimer = null;
+    _pqAnnounceTimer?.cancel();
+    _pqAnnounceTimer = null;
     // Flush any pending debounced group-store / read-watermark writes before we
     // drop the identity + app-state handles below (the persist reads both).
     _flushDebouncedPersists();
