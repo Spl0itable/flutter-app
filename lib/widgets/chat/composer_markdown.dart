@@ -15,6 +15,8 @@
 // ([NymFormat] here, `formatMessage` there): same regexes, same precedence. What
 // the field shows is what recipients get.
 
+import 'package:flutter/services.dart'
+    show TextEditingValue, TextInputFormatter, TextSelection;
 import 'package:flutter/painting.dart';
 
 import '../../core/theme/nym_colors.dart';
@@ -51,6 +53,7 @@ class RichRun {
     this.open = '',
     this.close = '',
     this.reveal = const [],
+    this.emptyBody = false,
     this.children = const [],
   });
 
@@ -60,6 +63,7 @@ class RichRun {
         open = '',
         close = '',
         reveal = const [],
+        emptyBody = false,
         children = const [];
 
   final RichRunKind kind;
@@ -77,10 +81,20 @@ class RichRun {
   final String close;
 
   /// Caret ranges (inclusive on both ends) that bring this run's markers back
-  /// into view. An inline run reveals from anywhere inside it; a heading or a
-  /// quote reveals only from its prefix, so typing in the body of one never
-  /// shifts the line; a fence reveals only from its two fence lines.
+  /// into view.
+  ///
+  /// Inline runs reveal from anywhere inside them — where a bold run starts and
+  /// ends is otherwise ambiguous, and typing against its edge needs to be able
+  /// to see it. Block markers never reveal: what a heading, a quote or a code
+  /// block IS reads off its own styling, showing the prefix again would shift
+  /// the line every time the caret passed the start of it, and revealing a
+  /// fence would undo the empty block the user had just opened by typing it.
+  /// [richMarkerDelete] is how those are edited instead.
   final List<List<int>> reveal;
+
+  /// A fenced block with nothing in it yet. It still has to be visible, or
+  /// three backticks would look like they did nothing.
+  final bool emptyBody;
 
   final List<RichRun> children;
 
@@ -98,7 +112,11 @@ class RichRun {
   }
 }
 
-final RegExp _rxFence = RegExp(r'```[\s\S]*?```|```[\s\S]+$');
+// A fenced block, closed or still open. The trailing alternative takes `*`
+// rather than `+` so three backticks on their own are already a block: the
+// composer opens an empty one the moment you type them, the way Slack does,
+// instead of waiting for the first character of code.
+final RegExp _rxFence = RegExp(r'```[\s\S]*?```|```[\s\S]*$');
 
 const List<(String, String)> _linePrefixes = [
   ('h3', '### '),
@@ -216,9 +234,7 @@ void _parseFlow(String text, int from, int to, List<RichRun> out) {
           start: lineStart,
           end: lineEnd,
           open: mark,
-          reveal: [
-            [lineStart, lineStart + mark.length]
-          ],
+          reveal: const [],
           children: _parseInline(text, lineStart + mark.length, lineEnd, 0),
         ));
         handled = true;
@@ -253,10 +269,8 @@ List<RichRun> parseRichFormat(String text) {
       end: end,
       open: '```',
       close: closed ? '```' : '',
-      reveal: [
-        [start, start + 3],
-        if (closed) [innerEnd, end],
-      ],
+      reveal: const [],
+      emptyBody: innerEnd <= start + 3,
       children: innerEnd > start + 3
           ? [RichRun.text(start + 3, innerEnd)]
           : const <RichRun>[],
@@ -265,6 +279,88 @@ List<RichRun> parseRichFormat(String text) {
   }
   if (pos < text.length) _parseFlow(text, pos, text.length, out);
   return out;
+}
+
+/// The edit a Backspace/Delete next to a hidden block marker should make.
+///
+/// A marker painted at zero size has no caret position of its own, so the plain
+/// single-character delete would chew through it invisibly — one press turning
+/// "```" into "``" and the block back into two stray backticks. Instead:
+/// Backspace at the start of a heading's or quote's body removes the prefix,
+/// and either key against a fence unwraps the whole block, keeping the code.
+///
+/// Returns the value to apply, or null to let the plain character delete stand
+/// — which is what happens next to an inline marker, since those are revealed
+/// as real text whenever the caret is against them.
+TextEditingValue? richMarkerDelete(String text, int caret,
+    {required bool forward}) {
+  if (text.isEmpty || caret < 0 || caret > text.length) return null;
+
+  TextEditingValue apply(List<List<int>> ranges, int newCaret) {
+    // Highest offset first so the earlier ranges keep their indices.
+    final sorted = [...ranges]..sort((a, b) => b[0].compareTo(a[0]));
+    var out = text;
+    for (final r in sorted) {
+      out = out.substring(0, r[0]) + out.substring(r[1]);
+    }
+    return TextEditingValue(
+      text: out,
+      selection: TextSelection.collapsed(offset: newCaret),
+    );
+  }
+
+  for (final n in parseRichFormat(text)) {
+    if (n.kind == RichRunKind.line) {
+      final markEnd = n.start + n.open.length;
+      final hit = forward ? caret == n.start : caret == markEnd;
+      if (hit) {
+        return apply([
+          [n.start, markEnd]
+        ], n.start);
+      }
+    } else if (n.kind == RichRunKind.fence) {
+      final openEnd = n.start + n.open.length;
+      final closeStart = n.end - n.close.length;
+      final closed = n.close.isNotEmpty;
+      final hit = forward
+          ? (caret == n.start || (closed && caret == closeStart))
+          : (caret == openEnd || (closed && caret == n.end));
+      if (!hit) continue;
+      return apply([
+        [n.start, openEnd],
+        if (closed) [closeStart, n.end],
+      ], n.start);
+    }
+  }
+  return null;
+}
+
+/// Intercepts a single-character delete that would land inside a hidden block
+/// marker and replaces it with [richMarkerDelete]'s edit. Everything else — a
+/// selection, an insertion, a multi-character replacement — passes through
+/// untouched.
+class RichMarkerDeleteFormatter extends TextInputFormatter {
+  const RichMarkerDeleteFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    if (newValue.text.length != oldValue.text.length - 1) return newValue;
+    if (!oldValue.selection.isValid || !oldValue.selection.isCollapsed) {
+      return newValue;
+    }
+    final caret = oldValue.selection.baseOffset;
+    final next = newValue.selection.baseOffset;
+    final bool forward;
+    if (next == caret - 1) {
+      forward = false;
+    } else if (next == caret) {
+      forward = true;
+    } else {
+      return newValue;
+    }
+    return richMarkerDelete(oldValue.text, caret, forward: forward) ?? newValue;
+  }
 }
 
 /// True when [runs] contains anything to paint. A draft of plain text parses to
@@ -295,7 +391,15 @@ TextStyle richRunStyle(TextStyle base, String type, NymColors c) {
       return base.copyWith(decoration: TextDecoration.lineThrough);
     case 'code':
     case 'codeblock':
-      return base.copyWith(fontFamily: kMonoFont, fontSize: size * 0.92);
+      // `div.message-input .rich-md-code/.rich-md-codeblock` (styles-chat.css):
+      // mono, a shade smaller, on a tinted ground.
+      return base.copyWith(
+        fontFamily: kMonoFont,
+        fontSize: size * 0.92,
+        backgroundColor: c.isLight
+            ? const Color(0x0F000000)
+            : const Color(0x14FFFFFF),
+      );
     case 'h1':
       return base.copyWith(fontWeight: FontWeight.w700, fontSize: size * 1.3);
     case 'h2':
@@ -316,11 +420,17 @@ TextStyle richRunStyle(TextStyle base, String type, NymColors c) {
 /// up no space. Revealed, it is the real thing at the field's own size, dimmed
 /// and stripped of the run's weight, slant and strike so it reads as scaffolding
 /// rather than content.
+///
+/// [keepSpace] is the one exception: the fences of an EMPTY code block are drawn
+/// at full size in transparent ink, so the block still occupies a box the user
+/// can see. There is nothing else in it to give it width, and three backticks
+/// have to look like they did something.
 TextStyle richMarkStyle(TextStyle base, TextStyle fieldStyle, bool revealed,
-    NymColors c) {
+    NymColors c,
+    {bool keepSpace = false}) {
   if (!revealed) {
     return base.copyWith(
-      fontSize: 0.01,
+      fontSize: keepSpace ? (fieldStyle.fontSize ?? 14) : 0.01,
       letterSpacing: 0,
       wordSpacing: 0,
       color: const Color(0x00000000),

@@ -40,6 +40,9 @@ const List<(String, String)> _drafts = [
   ('fence', '```\nlet x = 1;\n```'),
   ('fence with language', '```dart\nvar x = 1;\n```'),
   ('unterminated fence', '```dart\nvar x = 1;'),
+  ('bare fence', '```'),
+  ('empty closed fence', '``````'),
+  ('text then a bare fence', 'intro\n```'),
   ('fence then text', '```\ncode\n```\nafter **that**'),
   ('adjacent markers', '**a**~~b~~'),
   ('empty lines', 'a\n\n**b**\n\nc'),
@@ -94,13 +97,15 @@ List<String> _types(List<RichRun> runs) {
   return out;
 }
 
-/// Everything the user can see: the text of every span that is not painted at
-/// the hidden delimiter's zero size.
+/// Everything the user can read: the text of every span that is neither painted
+/// at the hidden delimiter's zero size nor in transparent ink (the fences of an
+/// empty block keep their width so the block has a box, but stay unreadable).
 String _visibleText(TextSpan root) {
   final buf = StringBuffer();
   void walk(InlineSpan span) {
     if (span is TextSpan) {
-      final hidden = (span.style?.fontSize ?? 14) < 1;
+      final style = span.style;
+      final hidden = (style?.fontSize ?? 14) < 1 || style?.color?.a == 0;
       if (span.text != null && !hidden) buf.write(span.text);
       for (final child in span.children ?? const <InlineSpan>[]) {
         walk(child);
@@ -154,7 +159,6 @@ void main() {
         'some_var_name here',
         'not # a heading',
         '#hashtag',
-        '```',
         'ratio 3:4',
       ]) {
         expect(_types(parseRichFormat(text)), isEmpty, reason: text);
@@ -180,6 +184,138 @@ void main() {
     });
   });
 
+  group('code blocks', () {
+    test('three backticks open a block before there is anything in it', () {
+      // Slack's behaviour: the block appears as you type the fence, not once
+      // you type the first character of code.
+      final runs = parseRichFormat('```');
+      expect(_types(runs), ['codeblock']);
+      expect(runs.single.emptyBody, isTrue);
+      expect(runs.single.close, isEmpty);
+    });
+
+    test('the first character lands inside the block', () {
+      final runs = parseRichFormat('```x');
+      expect(_types(runs), ['codeblock']);
+      expect(runs.single.emptyBody, isFalse);
+    });
+
+    test('an empty closed block is still empty', () {
+      final runs = parseRichFormat('``````');
+      expect(runs.single.emptyBody, isTrue);
+      expect(runs.single.close, '```');
+    });
+
+    test('a fence added in front wraps what follows', () {
+      final runs = parseRichFormat('```code here');
+      expect(_types(runs), ['codeblock']);
+      expect(runs.single.start, 0);
+      expect(runs.single.end, 12);
+    });
+
+    test('a fence added after closes the block', () {
+      final runs = parseRichFormat('```code here```');
+      expect(runs.single.close, '```');
+    });
+
+    test('text before a fence stays outside it', () {
+      final runs = parseRichFormat('intro\n```\ncode');
+      expect(_types(runs), ['codeblock']);
+      expect(runs.last.start, 6);
+    });
+
+    test('two backticks are not a block', () {
+      expect(_types(parseRichFormat('``')), isEmpty);
+    });
+  });
+
+  group('deleting a hidden block marker', () {
+    ({String text, int caret})? del(String t, int c, {bool forward = false}) {
+      final v = richMarkerDelete(t, c, forward: forward);
+      return v == null ? null : (text: v.text, caret: v.selection.baseOffset);
+    }
+
+    test('backspace at the start of a heading removes the whole prefix', () {
+      expect(del('# Title', 2), (text: 'Title', caret: 0));
+      expect(del('### Title', 4), (text: 'Title', caret: 0));
+      expect(del('> quoted', 2), (text: 'quoted', caret: 0));
+    });
+
+    test('forward-delete at the head of the line removes the prefix', () {
+      expect(del('# Title', 0, forward: true), (text: 'Title', caret: 0));
+    });
+
+    test('a heading on a later line is found too', () {
+      expect(del('intro\n# Title', 8), (text: 'intro\nTitle', caret: 6));
+    });
+
+    test('a fence unwraps whole, keeping the code', () {
+      expect(del('```', 3), (text: '', caret: 0));
+      expect(del('```\ncode\n```', 3), (text: '\ncode\n', caret: 0));
+      expect(del('```\ncode\n```', 12), (text: '\ncode\n', caret: 0));
+      expect(del('```\ncode\n```', 0, forward: true), (text: '\ncode\n', caret: 0));
+      expect(del('```code', 3), (text: 'code', caret: 0));
+    });
+
+    test('everywhere else the plain character delete stands', () {
+      // Including next to a revealed inline marker — those are real text the
+      // caret can see and delete one character at a time.
+      expect(del('# Title', 4), isNull);
+      expect(del('# Title', 7), isNull);
+      expect(del('```\ncode\n```', 6), isNull);
+      expect(del('hello', 3), isNull);
+      expect(del('hello', 0), isNull);
+      expect(del('a **bold** b', 4), isNull);
+      expect(del('# Title', 99), isNull);
+      expect(del('', 0), isNull);
+    });
+  });
+
+  group('RichMarkerDeleteFormatter', () {
+    const f = RichMarkerDeleteFormatter();
+
+    TextEditingValue backspaceAt(String text, int caret) {
+      // What the framework hands a formatter for one Backspace press.
+      return f.formatEditUpdate(
+        TextEditingValue(
+            text: text, selection: TextSelection.collapsed(offset: caret)),
+        TextEditingValue(
+          text: text.substring(0, caret - 1) + text.substring(caret),
+          selection: TextSelection.collapsed(offset: caret - 1),
+        ),
+      );
+    }
+
+    test('one press takes the whole marker', () {
+      expect(backspaceAt('# Title', 2).text, 'Title');
+      // Without the formatter this press would leave "#Title" — the prefix
+      // broken but still there, and the heading silently gone.
+      expect(backspaceAt('```', 3).text, '');
+    });
+
+    test('an ordinary backspace is untouched', () {
+      expect(backspaceAt('hello', 5).text, 'hell');
+      expect(backspaceAt('# Title', 7).text, '# Titl');
+    });
+
+    test('typing is untouched', () {
+      const before = TextEditingValue(
+          text: '# Titl', selection: TextSelection.collapsed(offset: 6));
+      const after = TextEditingValue(
+          text: '# Title', selection: TextSelection.collapsed(offset: 7));
+      expect(f.formatEditUpdate(before, after), after);
+    });
+
+    test('deleting a selection is untouched', () {
+      const before = TextEditingValue(
+          text: '# Title',
+          selection: TextSelection(baseOffset: 0, extentOffset: 2));
+      const after = TextEditingValue(
+          text: 'Title', selection: TextSelection.collapsed(offset: 0));
+      expect(f.formatEditUpdate(before, after), after);
+    });
+  });
+
   group('reveal', () {
     test('an inline run reveals from anywhere inside it', () {
       // "a **bold** b" — the run spans [2, 10].
@@ -198,19 +334,24 @@ void main() {
       expect(run.revealedAt(0, 12), isTrue);
     });
 
-    test('a heading reveals only from its prefix', () {
-      final run = parseRichFormat('# A long heading').single;
-      expect(run.revealedAt(0, 0), isTrue);
-      expect(run.revealedAt(2, 2), isTrue);
-      // Typing in the body must not shift the line back and forth.
-      expect(run.revealedAt(8, 8), isFalse);
+    test('a heading never reveals, wherever the caret is', () {
+      // Showing the prefix again would shift the line every time the caret
+      // passed the start of it; what a heading is reads off its styling.
+      const text = '# A long heading';
+      final run = parseRichFormat(text).single;
+      for (var i = 0; i <= text.length; i++) {
+        expect(run.revealedAt(i, i), isFalse, reason: 'caret $i');
+      }
+      expect(run.revealedAt(0, text.length), isFalse);
     });
 
-    test('a fence reveals only from its fence lines', () {
-      final run = parseRichFormat('```\nlots of code here\n```').single;
-      expect(run.revealedAt(1, 1), isTrue);
-      expect(run.revealedAt(10, 10), isFalse);
-      expect(run.revealedAt(24, 24), isTrue);
+    test('a fence never reveals either', () {
+      // Revealing it would undo the empty block the user just opened.
+      const text = '```\nlots of code here\n```';
+      final run = parseRichFormat(text).single;
+      for (var i = 0; i <= text.length; i++) {
+        expect(run.revealedAt(i, i), isFalse, reason: 'caret $i');
+      }
     });
 
     test('no caret means nothing is revealed', () {
@@ -298,6 +439,22 @@ void main() {
       }
     });
 
+    testWidgets('block markers stay hidden even with everything selected',
+        (tester) async {
+      await mount(tester);
+      for (final (text, want) in const [
+        ('# Title', 'Title'),
+        ('> quoted', 'quoted'),
+        ('```\ncode\n```', '\ncode\n'),
+        // The heading prefix goes; the bold delimiters inside it come back.
+        ('# A **bold** heading', 'A **bold** heading'),
+      ]) {
+        final span = paint(text,
+            selection: TextSelection(baseOffset: 0, extentOffset: text.length));
+        expect(_visibleText(span), want, reason: text);
+      }
+    });
+
     testWidgets('a caret inside a run brings its delimiters back',
         (tester) async {
       await mount(tester);
@@ -309,6 +466,49 @@ void main() {
       // Revealing must not change what the field is holding.
       expect(inside.toPlainText(), text);
       expect(inside.toPlainText().length, away.toPlainText().length);
+    });
+
+    testWidgets('an empty block keeps a box the user can see', (tester) async {
+      await mount(tester);
+      final span = paint('```', selection: const TextSelection.collapsed(offset: 3));
+      // Nothing readable...
+      expect(_visibleText(span), isEmpty);
+      // ...but the fence is still painted at full size in transparent ink, so
+      // the block occupies a box instead of collapsing to nothing.
+      TextSpan? fence;
+      void walk(InlineSpan s) {
+        if (s is TextSpan) {
+          if (s.text == '```') fence ??= s;
+          for (final c in s.children ?? const <InlineSpan>[]) {
+            walk(c);
+          }
+        }
+      }
+
+      walk(span);
+      expect(fence, isNotNull);
+      expect(fence!.style?.fontSize, 14);
+      expect(fence!.style?.color?.a, 0);
+      expect(span.toPlainText(), '```');
+    });
+
+    testWidgets('a block with a body hides its fences outright',
+        (tester) async {
+      await mount(tester);
+      final span = paint('```\ncode\n```',
+          selection: const TextSelection.collapsed(offset: 5));
+      TextSpan? fence;
+      void walk(InlineSpan s) {
+        if (s is TextSpan) {
+          if (s.text == '```') fence ??= s;
+          for (final c in s.children ?? const <InlineSpan>[]) {
+            walk(c);
+          }
+        }
+      }
+
+      walk(span);
+      expect(fence!.style?.fontSize, lessThan(1));
     });
 
     testWidgets('an unfocused field reveals nothing', (tester) async {

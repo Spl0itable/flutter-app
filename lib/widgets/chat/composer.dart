@@ -2072,6 +2072,11 @@ class _ComposerState extends ConsumerState<Composer> {
       maxLines: _popout ? 12 : flatMaxLines,
       minLines: 1,
       textInputAction: TextInputAction.newline,
+      // A markdown block marker is painted out of existence, so a plain
+      // Backspace would eat it one invisible character at a time. This takes
+      // the whole marker (or unwraps the whole fence) instead; every other
+      // edit passes straight through.
+      inputFormatters: const [RichMarkerDeleteFormatter()],
       onChanged: (_) {
         _onInputChanged();
         // Emit a typing indicator on real keystrokes (PWA sends kind-69420
@@ -3847,7 +3852,8 @@ class EmojiSentinelController extends TextEditingController {
       }
       final revealed = run.revealedAt(caretStart, caretEnd);
       final inner = richRunStyle(style, run.type, colors);
-      final mark = richMarkStyle(inner, fieldStyle, revealed, colors);
+      final mark = richMarkStyle(inner, fieldStyle, revealed, colors,
+          keepSpace: run.emptyBody);
       if (run.open.isNotEmpty) {
         out.add(TextSpan(text: run.open, style: mark));
       }
