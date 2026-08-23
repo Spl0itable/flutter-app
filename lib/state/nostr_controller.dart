@@ -4557,6 +4557,16 @@ class NostrController {
       );
     }
 
+    // The echo went on screen before the recipient's key was looked up, so it
+    // still reads as classical. Tell it what actually went out.
+    for (final t in rumor.tags) {
+      if (t.length > 1 && t[0] == 'x') {
+        _ref.read(appStateProvider.notifier)
+            .markOwnMessagePq(t[1], pqEncrypted: plan.pq);
+        break;
+      }
+    }
+
     await service.publishPM(
       rumor: rumor,
       recipientPubkey: recipientPubkey,
@@ -4857,6 +4867,13 @@ class NostrController {
         settings: _msgSettings,
         onWrap: _archiveSentWrap,
         kemKeyFor: _pqGroupKeyFor,
+        // The fan-out counts how many members got a post-quantum wrap as it
+        // builds them, which is only knowable during the send. Partial coverage
+        // must not read as protected -- one classical copy of the same
+        // plaintext is all an attacker needs -- so the badge carries the count
+        // rather than a yes/no.
+        onCoverage: (pq, total) => appState.markOwnMessagePq(
+            nymMessageId, coverage: (pq: pq, total: total)),
       );
     }
   }
