@@ -1092,7 +1092,16 @@ class NostrService {
   ///
   /// Events are routed through the normal [onEvent] handler, so the registry
   /// ingests this exactly as it would a pushed announcement.
-  Future<void> fetchPqAnnouncement(String pubkey) async {
+  /// How long to keep listening after EOSE, when the key still has not
+  /// arrived. EOSE completes on a quorum of relays, not all of them, and the
+  /// relays that do NOT carry the announcement are the ones that answer
+  /// instantly — they have nothing to look up. So the quorum can be reached by
+  /// relays that have nothing while the one holding the key is still working,
+  /// and giving up there is how two users who had both published their keys
+  /// went on messaging each other classically.
+  static const Duration pqEoseGrace = Duration(milliseconds: 600);
+
+  Future<void> fetchPqAnnouncement(String pubkey, {bool Function()? found}) async {
     if (!TrustGraph.isHex64(pubkey)) return;
     final sub = pool.subscribe([
       NostrFilter(
@@ -1110,6 +1119,15 @@ class NostrService {
       // The relay sends EOSE after the stored event, but delivery of the event
       // itself is a separate microtask; give it one turn to be ingested.
       await Future<void>.delayed(Duration.zero);
+      // Then keep listening, briefly, for a relay that was slower than the
+      // quorum. Skipped the moment the key is in hand, so a lookup that
+      // succeeded does not sit out the grace period.
+      if (found != null && !found()) {
+        final deadline = DateTime.now().add(pqEoseGrace);
+        while (!found() && DateTime.now().isBefore(deadline)) {
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+        }
+      }
     } catch (_) {
       // A relay that never answers is a normal outcome here.
     } finally {

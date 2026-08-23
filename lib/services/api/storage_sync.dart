@@ -1905,6 +1905,42 @@ class StorageSync {
     return events;
   }
 
+  /// One author's rows out of one archived channel (`channel-get` with an
+  /// `authors` filter).
+  ///
+  /// Separate from [channelGet] because it answers a different question. An
+  /// unfiltered channel read returns the newest 500 events, which is right for
+  /// a feed and wrong for "what did THIS pubkey publish" — the nym-pq channel
+  /// holds one announcement per user, so the peer being asked about could be
+  /// anywhere in the table. It also skips the 60s per-channel throttle, which
+  /// exists to stop a feed being re-pulled and would otherwise make the second
+  /// peer looked up in a minute get nothing.
+  ///
+  /// Returns raw events. The CALLER must verify their signatures: D1 is a
+  /// cache, not an authority.
+  Future<List<Map<String, dynamic>>> channelGetByAuthor(
+    String channel,
+    String author,
+  ) async {
+    if (channel.isEmpty || author.isEmpty) return const [];
+    StorageStream stream;
+    try {
+      stream = await _api.storageStream({
+        'action': 'channel-get',
+        'channel': channel,
+        'authors': [author],
+      });
+    } catch (_) {
+      return const [];
+    }
+    final events = <Map<String, dynamic>>[];
+    for (final item in stream.items) {
+      if (item is! Map) continue;
+      events.add(Map<String, dynamic>.from(item));
+    }
+    return events;
+  }
+
   /// Purges a NIP-09-deleted channel message from the D1 archive
   /// (`channel-delete`, storage.js:1123-1150). A PUBLIC call — the signed
   /// kind-5 [deletionEvent] IS the authorization (the worker verifies its

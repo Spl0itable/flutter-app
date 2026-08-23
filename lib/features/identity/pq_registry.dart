@@ -283,6 +283,62 @@ class PqRegistry {
         for (final e in _keys.entries)
           if (e.value.exp > nowSec && e.value.pk != null) e.key
       ];
+
+  /// The registry as a persistable map: pubkey -> `[pk|null, exp, epoch]`.
+  /// Already-expired entries are left out rather than written and dropped
+  /// again on the way back in. Matches the PWA's `pqKeys` meta record
+  /// (js/modules/persistence.js), field for field.
+  Map<String, dynamic> toJson({required int nowSec}) => {
+        for (final e in _keys.entries)
+          if (e.value.exp > nowSec)
+            e.key: [
+              e.value.pk == null ? null : pq.b64uEncode(e.value.pk!),
+              e.value.exp,
+              e.value.epoch,
+            ],
+      };
+
+  /// Restores peers' announced keys from the last session.
+  ///
+  /// A restored entry is a HINT, never the final word, and the difference
+  /// matters more here than for the other caches this app persists: this is a
+  /// key we ENCRYPT TO. A wrong one does not quietly degrade the message to
+  /// classical, it makes it unreadable — the recipient holds no secret half to
+  /// decapsulate with and the text never opens for them.
+  ///
+  /// Two bounds keep that from happening. Entries past the announcement's own
+  /// expiry are dropped rather than restored, and any fresher announcement —
+  /// pushed by the standing subscription, or fetched from the archive —
+  /// replaces what is here, because [ingest] overwrites unconditionally. Key
+  /// ROTATION is survivable even so: a recipient derives the current epoch and
+  /// [pqPreviousEpochs] before it, so a slightly stale key still opens. What is
+  /// not survivable is a peer who moved from an nsec to a remote signer,
+  /// because they then hold no ML-KEM secret at all — that is what the expiry
+  /// bound is really protecting against.
+  ///
+  /// Anything malformed or wrong-length is skipped entry by entry: a single
+  /// corrupt row must not cost the whole cache.
+  void hydrate(Map<String, dynamic> raw, {required int nowSec}) {
+    for (final entry in raw.entries) {
+      final v = entry.value;
+      if (v is! List || v.length < 3) continue;
+      final exp = v[1];
+      if (exp is! int || exp <= nowSec) continue;
+      final epoch = v[2] is int ? v[2] as int : 0;
+      Uint8List? pk;
+      final pkRaw = v[0];
+      if (pkRaw != null) {
+        if (pkRaw is! String) continue;
+        try {
+          pk = pq.b64uDecode(pkRaw);
+        } catch (_) {
+          continue;
+        }
+        if (pk.length != mlKemPublicKeyLength) continue;
+      }
+      record(entry.key, pk, exp, epoch);
+    }
+  }
 }
 
 /// Policy: whether this identity is capable of, and configured for,
