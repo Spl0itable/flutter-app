@@ -209,6 +209,16 @@ class _ComposerState extends ConsumerState<Composer> {
   /// re-downloading what we just sent up.
   final Map<String, Uint8List> _localMediaPreviews = {};
 
+  /// Every URL we uploaded this session -> whether it is a video.
+  ///
+  /// Blossom is content-addressed and several servers return a bare
+  /// `https://host/<sha256>` with no file extension, which the media regex
+  /// cannot recognise. We know these are media because we just uploaded them,
+  /// so they are matched by identity — see [composerMediaMatches]. Videos are
+  /// included even though [_localMediaPreviews] has no bytes for them, since
+  /// the strip still needs to know they are attachments.
+  final Map<String, bool> _uploadedMedia = {};
+
   /// One entry per file in the current upload batch that hasn't landed yet, so
   /// the strip shows a dimmed placeholder the instant files are picked.
   List<({Uint8List? bytes, bool isVideo})> _uploadingPreviews = const [];
@@ -1451,6 +1461,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // Hand this file's bytes to its hosted URL so the thumbnail carries
         // straight over from placeholder to attachment without flickering.
         if (!isVideo) _localMediaPreviews[url] = bytes;
+        _uploadedMedia[url] = isVideo;
         _uploadingPreviews = _uploadingPreviews.skip(1).toList();
       });
     }
@@ -1594,7 +1605,9 @@ class _ComposerState extends ConsumerState<Composer> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (_uploadProgress != null) _uploadBar(context),
+            // The upload bar now lives inside the composer's panel stack,
+            // immediately under the media strip (see [_formatPanels]), so the
+            // preview of what is uploading sits above its own progress.
             widget.compact
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2246,7 +2259,8 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Drop one attachment from the draft (the ✕ on a thumbnail).
   void _removeAttachment(int index) {
-    final out = removeComposerMedia(_controller.text, index);
+    final out = removeComposerMedia(_controller.text, index,
+        knownMedia: _uploadedMedia);
     _controller.value = TextEditingValue(
       text: out.text,
       selection: TextSelection.collapsed(offset: out.start),
@@ -2260,9 +2274,13 @@ class _ComposerState extends ConsumerState<Composer> {
   /// when nothing is showing so the composer keeps its normal height.
   Widget? _formatPanels(BuildContext context) {
     final c = context.nym;
-    final matches = composerMediaMatches(_controller.text);
+    final matches =
+        composerMediaMatches(_controller.text, knownMedia: _uploadedMedia);
     final panels = <Widget>[];
 
+    // Order matters: the strip goes in FIRST so the preview of what is being
+    // uploaded sits directly above its own progress bar, and the bar drops away
+    // beneath it the moment the upload lands.
     if (matches.isNotEmpty || _uploadingPreviews.isNotEmpty) {
       panels.add(ComposerMediaStrip(
         matches: matches,
@@ -2284,6 +2302,8 @@ class _ComposerState extends ConsumerState<Composer> {
         },
       ));
     }
+
+    if (_uploadProgress != null) panels.add(_uploadBar(context));
 
     if (_formatToolbarOpen && _formatPreviewOpen) {
       final draft = _draftText();

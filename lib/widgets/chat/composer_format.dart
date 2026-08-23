@@ -306,20 +306,51 @@ final RegExp _mediaRx = RegExp(
 );
 const _videoExts = {'mp4', 'webm', 'ogg', 'mov'};
 
-List<ComposerMediaMatch> composerMediaMatches(String value) {
+/// Media URLs in [value], for the composer's attachment strip.
+///
+/// [knownMedia] maps a URL we uploaded this session to whether it is a video.
+/// It exists because the regex can only recognise media by file extension, and
+/// Blossom is content-addressed: several servers hand back a bare
+/// `https://host/<sha256>` with no extension at all. Those are unmistakably
+/// media — we just uploaded them — so they are matched by identity instead of
+/// by shape. Without this the attachment strip empties the moment an upload
+/// completes and the user is left looking at a raw URL.
+List<ComposerMediaMatch> composerMediaMatches(String value,
+    {Map<String, bool>? knownMedia}) {
   if (value.isEmpty) return const [];
-  return _mediaRx.allMatches(value).map((m) {
+  final out = _mediaRx.allMatches(value).map((m) {
     final ext = (m.group(2) ?? '').toLowerCase();
     return ComposerMediaMatch(
         m.group(1)!, m.start, m.start + m.group(1)!.length, _videoExts.contains(ext));
   }).toList();
+  if (knownMedia == null || knownMedia.isEmpty) return out;
+
+  for (final entry in knownMedia.entries) {
+    final url = entry.key;
+    if (url.isEmpty) continue;
+    var i = value.indexOf(url);
+    while (i >= 0) {
+      final end = i + url.length;
+      // A bare URL can be a prefix of an extension-bearing one the regex
+      // already claimed; never report the same span twice.
+      final overlaps = out.any((m) => i < m.end && end > m.start);
+      if (!overlaps) out.add(ComposerMediaMatch(url, i, end, entry.value));
+      i = value.indexOf(url, end);
+    }
+  }
+  // Strip order has to follow the draft, and [removeComposerMedia] indexes into
+  // this list, so position order is load-bearing rather than cosmetic.
+  out.sort((a, b) => a.start.compareTo(b.start));
+  return out;
 }
 
 /// Remove the attachment at [index] from [value], swallowing one adjacent space
 /// so a removal from the middle doesn't leave a double space behind. Returns the
 /// new draft plus the caret offset.
-FormatEdit removeComposerMedia(String value, int index) {
-  final matches = composerMediaMatches(value);
+FormatEdit removeComposerMedia(String value, int index,
+    {Map<String, bool>? knownMedia}) {
+  // Must see the same list the strip rendered, or the ✕ removes the wrong one.
+  final matches = composerMediaMatches(value, knownMedia: knownMedia);
   if (index < 0 || index >= matches.length) {
     return FormatEdit(value, value.length, value.length);
   }
