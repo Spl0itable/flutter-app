@@ -1085,12 +1085,12 @@ class NostrService {
 
   /// Candidate secret keys for unwrap: our identity key plus any registered
   /// ephemeral group keys.
-  List<({Uint8List sk, bool bitchat})> _candidates() {
-    final out = <({Uint8List sk, bool bitchat})>[];
+  List<giftwrap.UnwrapCandidate> _candidates() {
+    final out = <giftwrap.UnwrapCandidate>[];
     final sk = identity.privkey;
-    if (sk != null) out.add((sk: sk, bitchat: true));
+    if (sk != null) out.add(giftwrap.classicalCandidate(sk, bitchat: true));
     for (final esk in _ephemeralSks) {
-      out.add((sk: esk, bitchat: false));
+      out.add(giftwrap.classicalCandidate(esk));
     }
     return out;
   }

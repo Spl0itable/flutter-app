@@ -109,7 +109,7 @@ void main() {
       expect(schnorr.verifyEvent(wrap), isTrue);
 
       final result = await gw.unwrapGiftWrap(wrap, [
-        (sk: recipientSk, bitchat: false),
+        gw.classicalCandidate(recipientSk),
       ]);
       expect(result, isNotNull);
       expect(result!.rumor['content'], 'async wrap contents');
@@ -170,7 +170,7 @@ void main() {
       // Recipient recovers the rumor with their local key, proving the seal was
       // encrypted to them via the remote signer's conversation key.
       final result = await gw.unwrapGiftWrap(wrap, [
-        (sk: recipientSk, bitchat: false),
+        gw.classicalCandidate(recipientSk),
       ]);
       expect(result, isNotNull);
       expect(result!.rumor['content'], 'remote-sealed DM');
@@ -243,7 +243,7 @@ void main() {
       );
 
       final result = await gw.unwrapGiftWrap(wrap, [
-        (sk: friendSk, bitchat: false),
+        gw.classicalCandidate(friendSk),
       ]);
       expect(result, isNotNull);
       expect(result!.rumor['kind'], 25054);

@@ -53,8 +53,15 @@ import 'keys.dart' as keys;
 // ---------------------------------------------------------------------------
 
 /// One unwrap request: the kind-1059 wrap event JSON + the ordered candidate
-/// identities (secret-key hex + per-key bitchat flag), exactly as
+/// identities (secret-key hex, per-key bitchat flag, and the optional ML-KEM
+/// keypair for hybrid post-quantum wraps), exactly as
 /// [giftwrap.unwrapGiftWrap] consumes them.
+///
+/// ML-KEM keys are hex like the secp keys: isolates do not share memory, so
+/// every candidate's bytes are copied into the payload. The 2400-byte ML-KEM
+/// secret key makes each PQ candidate noticeably heavier than a classical one,
+/// which is why callers should pass PQ material only for identities that
+/// actually have it.
 Map<String, dynamic> _encodeUnwrapJob(
   NostrEvent wrap,
   List<giftwrap.UnwrapCandidate> candidates,
@@ -63,16 +70,25 @@ Map<String, dynamic> _encodeUnwrapJob(
       'wrap': wrap.toJson(),
       'cands': [
         for (final c in candidates)
-          {'sk': keys.bytesToHex(c.sk), 'bc': c.bitchat},
+          {
+            'sk': keys.bytesToHex(c.sk),
+            'bc': c.bitchat,
+            if (c.kemSk != null) 'ksk': keys.bytesToHex(c.kemSk!),
+            if (c.kemPk != null) 'kpk': keys.bytesToHex(c.kemPk!),
+          },
       ],
     };
 
 List<giftwrap.UnwrapCandidate> _decodeCandidates(Object? raw) {
   final out = <giftwrap.UnwrapCandidate>[];
   for (final c in (raw as List).cast<Map<String, dynamic>>()) {
+    final ksk = c['ksk'] as String?;
+    final kpk = c['kpk'] as String?;
     out.add((
       sk: keys.hexToBytes(c['sk'] as String),
       bitchat: c['bc'] as bool,
+      kemSk: ksk == null ? null : keys.hexToBytes(ksk),
+      kemPk: kpk == null ? null : keys.hexToBytes(kpk),
     ));
   }
   return out;
@@ -103,7 +119,7 @@ Map<String, dynamic> _encodeWrapJob({
 
 /// `compute` entry point for a batch of unwrap jobs. Returns one result per
 /// job, positionally aligned with the input: each entry is either the decoded
-/// `{seal, rumor, isBitchat}` (as a JSON-able map) or `null` when no candidate
+/// `{seal, rumor, isBitchat, isPq}` (as a JSON-able map) or `null` when no candidate
 /// could decrypt that wrap (a skip — never a throw).
 ///
 /// A failure in one job can only null *its own* slot: each job runs an
@@ -123,6 +139,7 @@ Future<List<Map<String, dynamic>?>> unwrapBatchIsolate(
           'seal': res.seal.toJson(),
           'rumor': res.rumor,
           'isBitchat': res.isBitchat,
+          'isPq': res.isPq,
         };
       }
     } catch (_) {
@@ -175,6 +192,7 @@ typedef UnwrapResult = ({
   NostrEvent seal,
   Map<String, dynamic> rumor,
   bool isBitchat,
+  bool isPq,
 });
 
 UnwrapResult? _decodeUnwrapResult(Map<String, dynamic>? m) {
@@ -183,6 +201,8 @@ UnwrapResult? _decodeUnwrapResult(Map<String, dynamic>? m) {
     seal: NostrEvent.fromJson(m['seal'] as Map<String, dynamic>),
     rumor: (m['rumor'] as Map).cast<String, dynamic>(),
     isBitchat: m['isBitchat'] as bool,
+    // Older payloads (in flight across a hot reload) predate the PQ flag.
+    isPq: m['isPq'] as bool? ?? false,
   );
 }
 
@@ -214,7 +234,7 @@ class CryptoWorker {
   bool _unwrapFlushScheduled = false;
 
   /// Unwraps [wrap] against [candidates] off the main thread, returning the
-  /// recovered `{seal, rumor, isBitchat}` or null if no candidate decrypts it
+  /// recovered `{seal, rumor, isBitchat, isPq}` or null if no candidate decrypts it
   /// (a skip — identical to the synchronous [giftwrap.unwrapGiftWrap]).
   Future<UnwrapResult?> unwrap(
     NostrEvent wrap,
