@@ -1283,8 +1283,6 @@ const List<String> kAppStringsCatalog = <String>[
   'Inline code',
   'Invalid private key. Paste an nsec1… or a 64-character hex key.',
   'Italic',
-  'Nothing to preview yet',
-  'Preview formatting',
   'Quote',
   'Remove attachment',
   'Show hex',
@@ -1299,4 +1297,13 @@ const List<String> kAppStringsCatalog = <String>[
   'Stay Connected in Background Disabled Enabled Keeps relay connections and the Bluetooth mesh running while the app is in the background, so messages arrive without reopening it. Uses more battery. Android shows a permanent notification while it is on; iOS limits how long connections can be held and, with identity encryption on, catches up only while the device has been unlocked at least once since it was powered on.',
   'Keeps relay connections and the Bluetooth mesh running while the app is in the background, so messages arrive without reopening it. Uses more battery. Android shows a permanent notification while it is on; iOS limits how long connections can be held and, with identity encryption on, catches up only while the device has been unlocked at least once since it was powered on.',
   'Keep relay connections and the Bluetooth mesh running while Nymchat is in the background, so messages and notifications arrive without opening it. Uses more battery. On iOS the system decides when a suspended app may catch up, so notifications can lag; with identity encryption on, catch-up works only once the device has been unlocked at least once since it was powered on.',
+  // Post-quantum encryption (crypto_pq_badge.dart, settings_screen.dart).
+  '%d of %d members',
+  'some members',
+  'Quantum-resistant encryption',
+  'Partly quantum-resistant',
+  'This message was quantum-resistant to ',
+  '. The rest haven\'t published a post-quantum key, so their copies used standard NIP-44 encryption only — and because those copies carry the same message, treat this one as classically encrypted overall.',
+  'This message\'s key exchange combined the standard NIP-44 secp256k1 ECDH with ML-KEM-768, a post-quantum key encapsulation mechanism. Both must be broken to recover the message, so it stays confidential against an adversary recording traffic today to decrypt with a future quantum computer. The sender\'s signature is still secp256k1 — this protects confidentiality, not authentication.',
+  'Active for messages with other Nymchat users.',
 ];

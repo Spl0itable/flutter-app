@@ -165,6 +165,40 @@ class _ShieldPainter extends CustomPainter {
 /// one and MITM in real time. What the hybrid key exchange defeats is
 /// harvest-now-decrypt-later, which is the threat that actually exists today —
 /// and overstating it in the UI would be worse than saying nothing.
+/// The popup's copy, named so `kPqPopupStrings` can be checked against the
+/// background-sweep catalog — a string the catalog doesn't carry never gets
+/// translated, and a wording change that silently drops out of it is invisible
+/// until someone reads the popup in another language.
+const String kPqFullTitle = 'Quantum-resistant encryption';
+const String kPqFullBody =
+    "This message's key exchange combined the standard NIP-44 secp256k1 "
+    "ECDH with ML-KEM-768, a post-quantum key encapsulation mechanism. "
+    "Both must be broken to recover the message, so it stays "
+    "confidential against an adversary recording traffic today to "
+    "decrypt with a future quantum computer. The sender's signature is "
+    "still secp256k1 — this protects confidentiality, not "
+    "authentication.";
+const String kPqPartialTitle = 'Partly quantum-resistant';
+const String kPqPartialLead = 'This message was quantum-resistant to ';
+const String kPqPartialCount = '%d of %d members';
+const String kPqPartialSome = 'some members';
+const String kPqPartialTail =
+    ". The rest haven't published a post-quantum key, so their "
+    "copies used standard NIP-44 encryption only — and because "
+    "those copies carry the same message, treat this one as "
+    "classically encrypted overall.";
+
+/// Every literal the popup can show.
+const List<String> kPqPopupStrings = [
+  kPqFullTitle,
+  kPqFullBody,
+  kPqPartialTitle,
+  kPqPartialLead,
+  kPqPartialCount,
+  kPqPartialSome,
+  kPqPartialTail,
+];
+
 void showPqPopup(
   BuildContext context,
   PqBadgeState state, {
@@ -172,29 +206,20 @@ void showPqPopup(
 }) {
   final (title, titleColor, body) = switch (state) {
     PqBadgeState.full => (
-        tr('Quantum-resistant encryption'),
+        tr(kPqFullTitle),
         const Color(0xFF8B7CF6),
-        tr("This message's key exchange combined the standard NIP-44 secp256k1 "
-            "ECDH with ML-KEM-768, a post-quantum key encapsulation mechanism. "
-            "Both must be broken to recover the message, so it stays "
-            "confidential against an adversary recording traffic today to "
-            "decrypt with a future quantum computer. The sender's signature is "
-            "still secp256k1 — this protects confidentiality, not "
-            "authentication."),
+        tr(kPqFullBody),
       ),
     PqBadgeState.partial => (
-        tr('Partly quantum-resistant'),
+        tr(kPqPartialTitle),
         const Color(0xFF9AA0A6),
-        tr("This message was quantum-resistant to ") +
+        tr(kPqPartialLead) +
             (coverage != null
-                ? tr('%d of %d members')
+                ? tr(kPqPartialCount)
                     .replaceFirst('%d', '${coverage.pq}')
                     .replaceFirst('%d', '${coverage.total}')
-                : tr('some members')) +
-            tr(". The rest haven't published a post-quantum key, so their "
-                "copies used standard NIP-44 encryption only — and because "
-                "those copies carry the same message, treat this one as "
-                "classically encrypted overall."),
+                : tr(kPqPartialSome)) +
+            tr(kPqPartialTail),
       ),
   };
 

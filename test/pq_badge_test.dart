@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/theme/nym_colors.dart';
 import 'package:nym_bar/core/theme/nym_theme.dart';
+import 'package:nym_bar/features/i18n/app_strings_catalog.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/widgets/chat/crypto_pq_badge.dart';
 
@@ -139,6 +140,15 @@ void main() {
       });
       expect(back.pqEncrypted, isFalse);
       expect(back.pqCoverage, isNull);
+    });
+  });
+  group('translation', () {
+    test('every string the popup can show is in the sweep catalog', () {
+      // A string missing from the catalog is never swept, so it stays English
+      // in every other language — silently, and only in this one popup.
+      for (final s in kPqPopupStrings) {
+        expect(kAppStringsCatalog, contains(s), reason: s);
+      }
     });
   });
 }
