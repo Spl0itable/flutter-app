@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart' show rootBundle;
 
 import '../../services/api/api_client.dart';
-import '../../services/api/api_config.dart';
 import '../../services/storage/key_value_store.dart';
 import '../translate/translate_service.dart';
 
@@ -183,36 +182,37 @@ class LocalizationService {
   @visibleForTesting
   void resetPackStateForTest() => _packed.clear();
 
-  /// Injectable for tests; null uses a plain client per call.
-  http.Client? packClient;
+  /// Reads one bundled pack. Injectable so tests need no asset bundle.
+  Future<String> Function(String assetKey) packLoader = rootBundle.loadString;
 
   /// The pre-translated pack for [code], merged into the cache.
   ///
-  /// Every user who picked a language used to re-pay for the same ~1300
+  /// Every user who picked a language used to re-pay for the same ~1500
   /// strings, one request each, and watch the interface fill in over tens of
-  /// seconds. The web build ships the finished translations as a flat JSON map
-  /// per language (`/i18n/<lang>.json`, built from the committed cache), so
-  /// this is one request instead — and everything it carries is already in the
-  /// cache by the time the sweep looks.
+  /// seconds. The finished translations now ship with the app as a flat JSON
+  /// map per language (`assets/i18n/<lang>.json`), so switching language is a
+  /// single asset read and everything it carries is already in the cache by the
+  /// time the sweep looks.
+  ///
+  /// Bundled rather than fetched, deliberately. A phone that meshes over
+  /// Bluetooth with the network down still has to be able to switch language,
+  /// and this is the one part of the interface that used to need a server to
+  /// work at all. Flutter reads an asset only when asked, so carrying every
+  /// language costs bundle size rather than memory.
   ///
   /// On-device entries win: a string already translated here is either from the
   /// pack already, or newer than it. Anything the pack lacks — a string added
-  /// since the last `npm run i18n`, or one the extractor could not see — still
-  /// goes through the runtime queues exactly as before, so a missing or
-  /// unreachable pack costs nothing but the old behaviour.
+  /// since the last export, or one the extractor could not see — still goes
+  /// through the runtime queues exactly as before, so a missing or malformed
+  /// pack costs nothing but the old behaviour.
   Future<void> _primeFromPack(String code) async {
     if (code.isEmpty || code == 'en' || !_packed.add(code)) return;
-    final client = packClient;
-    final c = client ?? http.Client();
     try {
-      final res = await c
-          .get(Uri.parse('https://${ApiConfig.apiHost}/i18n/$code.json'))
-          .timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) return;
-      // A language switch during the fetch: those translations belong to a
-      // language that is no longer showing.
+      final raw = await packLoader('assets/i18n/$code.json');
+      // A language switch while the asset was loading: those translations
+      // belong to a language that is no longer showing.
       if (_lang != code) return;
-      final map = jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
+      final map = jsonDecode(raw);
       if (map is! Map) return;
       var added = 0;
       map.forEach((k, v) {
@@ -229,9 +229,8 @@ class LocalizationService {
       _persist();
       onChanged?.call();
     } catch (_) {
-      // Offline, blocked, or malformed — the runtime queues still handle it.
-    } finally {
-      if (client == null) c.close();
+      // No pack for this language yet, or a malformed one — the runtime queues
+      // still handle it, exactly as before packs existed.
     }
   }
 
