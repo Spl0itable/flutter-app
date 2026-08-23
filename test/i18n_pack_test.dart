@@ -1,17 +1,18 @@
-// The pre-translated UI pack.
+// The pre-translated UI packs bundled at assets/i18n/<lang>.json.
 //
 // Picking a language used to re-translate the whole interface on the device,
-// one request per string — around 1300 of them — so the UI filled in over tens
-// of seconds and every user paid for the same work again. The web build now
-// ships the finished translations as one flat JSON map per language, and this
-// fetches it.
+// one request per string — around 1500 of them — so the UI filled in over tens
+// of seconds and every user paid for the same work again. The finished
+// translations now ship with the app, and this reads one.
 //
-// What these pin is that the pack is an OPTIMISATION and never a dependency:
-// a missing, unreachable or malformed pack has to leave the old runtime path
-// exactly as it was, and an on-device translation must never be overwritten by
-// an older one from the pack.
+// What these pin is that the pack is an OPTIMISATION and never a dependency: a
+// missing or malformed pack has to leave the old runtime path exactly as it
+// was, and an on-device translation must never be overwritten by an older one
+// from the pack. That matters most for a language whose pack has not been
+// exported yet — the app must simply behave as it did before packs existed.
 import 'dart:convert';
 
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -25,11 +26,23 @@ Future<KeyValueStore> _store() async {
   return KeyValueStore(await SharedPreferences.getInstance());
 }
 
-/// A JSON response encoded the way a real server sends it. `http.Response`
-/// with a bare String encodes latin-1, which would let a mojibake bug through
-/// the very decode path a translated pack depends on.
-http.Response _json(Object body) =>
-    http.Response.bytes(utf8.encode(jsonEncode(body)), 200);
+/// A pack loader serving [packs] keyed by language code, recording what was
+/// asked for. A code with no entry throws, exactly as `rootBundle.loadString`
+/// does for an asset that is not bundled.
+({Future<String> Function(String) load, List<String> asked}) _loader(
+    Map<String, Object> packs) {
+  final asked = <String>[];
+  return (
+    load: (key) async {
+      asked.add(key);
+      final code = key.split('/').last.replaceAll('.json', '');
+      final pack = packs[code];
+      if (pack == null) throw Exception('Unable to load asset: $key');
+      return pack is String ? pack : jsonEncode(pack);
+    },
+    asked: asked,
+  );
+}
 
 /// An ApiClient whose translate calls always fail, so anything that ends up
 /// translated came from the pack and nowhere else.
@@ -45,33 +58,31 @@ void main() {
   setUp(() async {
     svc = LocalizationService.instance;
     svc.setLanguage('');
-    svc.packClient = null;
     svc.resetPackStateForTest();
     svc.configure(kv: await _store(), language: '', apiClient: _deadProxy());
   });
 
   tearDown(() {
     svc.setLanguage('');
-    svc.packClient = null;
+    svc.packLoader = rootBundle.loadString;
   });
 
-  test('a pack translates without a single proxy call', () async {
-    var fetched = 0;
-    svc.packClient = MockClient((req) async {
-      fetched++;
-      expect(req.url.path, '/i18n/es.json');
-      return _json({'Settings': 'Ajustes', 'Language': 'Idioma'});
+  test('a bundled pack translates without a single proxy call', () async {
+    final l = _loader({
+      'es': {'Settings': 'Ajustes', 'Language': 'Idioma'},
     });
+    svc.packLoader = l.load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(fetched, 1);
+    expect(l.asked, ['assets/i18n/es.json']);
     expect(svc.translate('Settings'), 'Ajustes');
     expect(svc.translate('Language'), 'Idioma');
   });
 
   test('a string the pack lacks still falls through to the old path', () async {
-    svc.packClient = MockClient(
-        (_) async => _json({'Settings': 'Ajustes'}));
+    svc.packLoader = _loader({
+      'es': {'Settings': 'Ajustes'},
+    }).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'Ajustes');
@@ -79,8 +90,9 @@ void main() {
     expect(svc.translate('Some brand new string'), 'Some brand new string');
   });
 
-  test('a missing pack is not an error', () async {
-    svc.packClient = MockClient((_) async => http.Response('', 404));
+  test('a language with no pack exported yet is not an error', () async {
+    // The state every language is in before the first export run.
+    svc.packLoader = _loader({}).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'Settings');
@@ -88,22 +100,23 @@ void main() {
   });
 
   test('a malformed pack is not an error', () async {
-    svc.packClient =
-        MockClient((_) async => http.Response('not json at all', 200));
+    svc.packLoader = _loader({'es': 'not json at all'}).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'Settings');
   });
 
-  test('a network failure is not an error', () async {
-    svc.packClient = MockClient((_) async => throw Exception('offline'));
+  test('a pack that is not an object is not an error', () async {
+    svc.packLoader = _loader({'es': '["a","b"]'}).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'Settings');
   });
 
   test('non-string values in a pack are ignored', () async {
-    svc.packClient = MockClient((_) async => _json({'Settings': 'Ajustes', 'Language': 42, 'Close': ''}));
+    svc.packLoader = _loader({
+      'es': {'Settings': 'Ajustes', 'Language': 42, 'Close': ''},
+    }).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'Ajustes');
@@ -118,50 +131,57 @@ void main() {
     svc.setLanguage('');
     svc.resetPackStateForTest();
     svc.configure(kv: kv, language: '', apiClient: _deadProxy());
-    svc.packClient = MockClient(
-        (_) async => _json({'Settings': 'From-pack'}));
+    svc.packLoader = _loader({
+      'es': {'Settings': 'From-pack'},
+    }).load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(svc.translate('Settings'), 'On-device');
   });
 
-  test('the pack is fetched once per language per session', () async {
-    var fetched = 0;
-    svc.packClient = MockClient((_) async {
-      fetched++;
-      return _json({'Settings': 'Ajustes'});
+  test('the pack is read once per language per session', () async {
+    final l = _loader({
+      'es': {'Settings': 'Ajustes'},
     });
+    svc.packLoader = l.load;
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
     svc.setLanguage('');
     svc.setLanguage('es');
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(fetched, 1);
+    expect(l.asked, hasLength(1));
   });
 
-  test('English fetches nothing', () async {
-    var fetched = 0;
-    svc.packClient = MockClient((_) async {
-      fetched++;
-      return http.Response('{}', 200);
-    });
+  test('English reads nothing', () async {
+    final l = _loader({'en': <String, String>{}});
+    svc.packLoader = l.load;
     svc.setLanguage('en');
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    expect(fetched, 0);
+    expect(l.asked, isEmpty);
   });
 
   test('a pack that lands after a language switch is discarded', () async {
     // Otherwise Spanish strings would appear in a French UI.
-    svc.packClient = MockClient((req) async {
-      // Spanish is slow, French is instant — so the Spanish body arrives after
-      // the switch and must be thrown away.
-      final spanish = req.url.path.endsWith('es.json');
+    svc.packLoader = (key) async {
+      final spanish = key.endsWith('es.json');
       if (spanish) await Future<void>.delayed(const Duration(milliseconds: 60));
-      return _json({'Settings': spanish ? 'Ajustes' : 'Paramètres'});
-    });
+      return jsonEncode({'Settings': spanish ? 'Ajustes' : 'Paramètres'});
+    };
     svc.setLanguage('es');
     svc.setLanguage('fr');
     await Future<void>.delayed(const Duration(milliseconds: 160));
     expect(svc.translate('Settings'), 'Paramètres');
+  });
+
+  test('a pack with non-ASCII text survives the decode', () async {
+    // Most of the 132 languages are not Latin-1, so a decode bug here would be
+    // invisible in English and wrong everywhere else.
+    svc.packLoader = _loader({
+      'ja': {'Settings': '設定', 'Close': '閉じる'},
+    }).load;
+    svc.setLanguage('ja');
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(svc.translate('Settings'), '設定');
+    expect(svc.translate('Close'), '閉じる');
   });
 }

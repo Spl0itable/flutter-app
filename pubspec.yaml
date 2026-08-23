@@ -110,6 +110,11 @@ flutter:
     - assets/images/
     - assets/text/
     - assets/data/
+    # Pre-translated interface packs, one per language. Bundled rather than
+    # fetched so a language switch is instant and works with no network — see
+    # assets/i18n/README.md. Flutter loads an asset only when it is asked for,
+    # so carrying 132 of them costs bundle size, not memory.
+    - assets/i18n/
 
   # Bundled Roboto for the primary UI sans — guarantees correct line metrics on
   # any device (including de-Googled / minimal Android builds whose system font
