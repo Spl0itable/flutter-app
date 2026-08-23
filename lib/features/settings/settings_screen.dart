@@ -39,6 +39,7 @@ import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import 'settings_helpers.dart';
+import '../identity/pq_registry.dart';
 import 'settings_widgets.dart';
 
 /// The Settings modal (`#settingsModal`, docs/specs/02 §5.10, §04-features §9).
@@ -1469,6 +1470,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         '⚠ Audio/video calls and P2P file sharing connect peers directly over '
         'WebRTC, which can reveal your true IP address to the other party. '
         'Use a VPN or Tor to help conceal it.');
+    // Post-quantum: capability is decided by the login type, not a preference.
+    // Extension / NIP-46 signers return a finished NIP-44 payload rather than a
+    // conversation key, so there is nowhere to inject a hybrid one.
+    final nostrCtrl = ref.read(nostrControllerProvider);
+    final pqCapable = nostrCtrl.pqCapable;
+    final pqWarning = pqCapable
+        ? tr('⚠ All devices using this npub must be updated first. Once '
+            'enabled, other Nymchat clients encrypt to a key that older '
+            'versions of the app can\'t read, so an out-of-date device would '
+            'stop receiving your messages and history.')
+        : tr('Requires a local key. Browser-extension and remote-signer '
+            '(NIP-46) logins can\'t use post-quantum encryption, because the '
+            'signer returns a finished NIP-44 payload rather than a key we can '
+            'combine.');
     final dmTtlItems = <({int value, String label})>[
       (value: 3600, label: tr('1 hour')),
       (value: 21600, label: tr('6 hours')),
@@ -1601,6 +1616,34 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             value: s.acceptCalls,
             items: acceptItems,
             onChanged: (v) => _mutate((d) => d.copyWith(acceptCalls: v)),
+          ),
+        ),
+      ),
+      _GroupSpec(
+        text: tr(
+            'Quantum-resistant encryption Disabled Enabled Adds ML-KEM-768 (a '
+            'post-quantum key exchange) alongside the standard NIP‑44 '
+            'secp256k1 ECDH for PMs and group chats with other Nymchat users. '
+            '{warning}',
+            {'warning': pqWarning}),
+        child: FormGroup(
+          label: tr('Quantum-resistant encryption'),
+          hint: tr('Adds ML-KEM-768 (a post-quantum key exchange) alongside '
+              'the standard NIP‑44 secp256k1 ECDH for PMs and group chats with '
+              'other Nymchat users. Both would have to be broken to read a '
+              'message, so traffic recorded today can\'t be decrypted by a '
+              'future quantum computer. Bitchat users and other Nostr clients '
+              'are unaffected — they keep receiving standard NIP‑17.'),
+          warning: pqWarning,
+          child: FormSelect<bool>(
+            value: nostrCtrl.pqMode == PqMode.on,
+            items: [
+              (value: false, label: tr('Disabled')),
+              (value: true, label: tr('Enabled')),
+            ],
+            disabled: !pqCapable,
+            onChanged: (v) =>
+                unawaited(nostrCtrl.setPqMode(v ? PqMode.on : PqMode.off)),
           ),
         ),
       ),
