@@ -219,9 +219,20 @@ class _ComposerState extends ConsumerState<Composer> {
   /// the strip still needs to know they are attachments.
   final Map<String, bool> _uploadedMedia = {};
 
-  /// One entry per file in the current upload batch that hasn't landed yet, so
-  /// the strip shows a dimmed placeholder the instant files are picked.
-  List<({Uint8List? bytes, bool isVideo})> _uploadingPreviews = const [];
+  /// Files attached through the picker, in the order added. This — not the
+  /// draft text — is what decides which media the message carries; the URLs are
+  /// appended when the message is sent.
+  final List<ComposerAttachment> _attachments = [];
+  int _attachmentSeq = 0;
+
+  /// Hosted URLs for the attachments that finished, in order. A tile still
+  /// uploading or failed contributes nothing, so a half-finished batch can
+  /// never put a broken link in a message.
+  List<String> get attachmentUrls =>
+      [for (final a in _attachments) if (a.isDone) a.url];
+
+  bool get hasPendingUploads =>
+      _attachments.any((a) => a.status == ComposerAttachmentStatus.uploading);
 
   /// Translate-dropdown favorites (`nym_translate_favorites`), pinned to the top
   /// of the language list. Loaded once prefs resolve (translate.js:93-99).
@@ -282,7 +293,6 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// MIME of the in-flight upload, so the progress label reads
   /// "Uploading video…" vs "…image…" (F6).
-  String? _uploadMime;
 
   // --- Autocomplete / command palette state --------------------------------
   // The active trigger token at the caret + its rendered content. Mirrors the
@@ -1204,11 +1214,30 @@ class _ComposerState extends ConsumerState<Composer> {
       return;
     }
 
-    // Nothing to send unless there's typed text OR a pending quote (the PWA
-    // allows sending a bare quote: `if (!content && !this.pendingQuote) return`).
-    if (typed.trim().isEmpty && _pendingQuote == null) return;
+    // Sending mid-upload would drop that attachment without saying so: its
+    // tile is still spinning, so it has no URL to contribute yet.
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
 
-    final content = _composeOutgoing(typed);
+    // Attachments live on their tiles, not in the draft, so their URLs are
+    // appended here rather than typed into the input as each upload landed. A
+    // failed tile contributes nothing, so a half-finished batch cannot put a
+    // broken link in the message.
+    final urls = attachmentUrls;
+
+    // Nothing to send unless there's typed text, an attachment, OR a pending
+    // quote (the PWA allows sending a bare quote).
+    if (typed.trim().isEmpty && urls.isEmpty && _pendingQuote == null) return;
+
+    var composed = typed;
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final content = _composeOutgoing(composed);
 
     // Routes through the NostrController: optimistic local echo + relay
     // publish when an identity is live, falling back to local echo otherwise.
@@ -1219,6 +1248,8 @@ class _ComposerState extends ConsumerState<Composer> {
     // quote prepend, messages.js:2363-2364).
     _pushSentHistory(content);
     _controller.clear();
+    // The message carrying them has gone out, so the tiles go with it.
+    _attachments.clear();
     _popout = false;
     _syncPopoutPortal();
     _hideOverlay();
@@ -1294,9 +1325,22 @@ class _ComposerState extends ConsumerState<Composer> {
       _send();
       return;
     }
-    if (typed.trim().isEmpty && _pendingQuote == null) return;
+    // Same attachment handling as [_send] — an anon send drops the tiles too,
+    // so it has to carry their URLs or they are silently lost.
+    if (hasPendingUploads) {
+      _onSystemMessage(
+          tr('Still uploading — send again once the attachments finish.'));
+      return;
+    }
+    final urls = attachmentUrls;
+    if (typed.trim().isEmpty && urls.isEmpty && _pendingQuote == null) return;
     final controller = ref.read(nostrControllerProvider);
-    final content = _composeOutgoing(typed);
+    var composed = typed;
+    if (urls.isNotEmpty) {
+      final needsSpace = composed.isNotEmpty && !composed.endsWith(' ');
+      composed = '$composed${needsSpace ? ' ' : ''}${urls.join(' ')}';
+    }
+    final content = _composeOutgoing(composed);
     // Publish the draft under a FRESH ephemeral keypair (unlinkable to the
     // durable nym), mirroring the normal send's fire-and-forget dispatch.
     controller.sendCurrentPseudonymous(content);
@@ -1304,6 +1348,8 @@ class _ComposerState extends ConsumerState<Composer> {
     // (messages.js:2363-2364) — see [_send].
     _pushSentHistory(content);
     _controller.clear();
+    // The message carrying them has gone out, so the tiles go with it.
+    _attachments.clear();
     _popout = false;
     _syncPopoutPortal();
     _hideOverlay();
@@ -1329,29 +1375,66 @@ class _ComposerState extends ConsumerState<Composer> {
 
   // --- Attachments: image upload (Blossom) + P2P file share -----------------
 
-  /// `#uploadProgress` state (0..1, null = hidden). Mirrors the PWA's progress
-  /// bar shown during `uploadImage` (users.js:971).
-  double? _uploadProgress;
-
-  /// Set by the cancel ✕ (`cancelUpload`) so an in-flight upload, once it
-  /// resolves, is discarded instead of appended (the underlying
-  /// `uploadImage` future isn't cancellable — F11).
+  /// Set by the cancel ✕ so an in-flight upload, once it resolves, is discarded
+  /// instead of kept (the underlying `uploadImage` future isn't cancellable).
   bool _uploadCancelled = false;
 
-  /// 1-based index + total of the current multi-file upload (users.js:1006-1008
-  /// labels "Uploading i of N…" when N>1). 0/0 = single-file (no "of N").
-  int _uploadIndex = 0;
-  int _uploadTotal = 0;
+  /// Drops one attachment (the ✕ on its tile).
+  void _removeAttachment2(ComposerAttachment a) {
+    setState(() => _attachments.remove(a));
+  }
 
-  void _cancelUpload() {
+  /// Everything the message carried has gone out, so the tiles go with it.
+  void clearAttachments() {
+    if (_attachments.isEmpty) return;
+    setState(() => _attachments.clear());
+  }
+
+  /// Uploads one attachment and reflects the outcome on its own tile. Never
+  /// throws: a failure marks that ONE tile retryable and leaves the rest of the
+  /// batch alone.
+  Future<void> _uploadAttachment(ComposerAttachment a) async {
+    final bytes = a.bytes;
+    if (bytes == null || bytes.isEmpty) return;
+    if (mounted) {
+      setState(() {
+        a.status = ComposerAttachmentStatus.uploading;
+        a.error = '';
+      });
+    }
+    String? url;
+    try {
+      url = await ref
+          .read(nostrControllerProvider)
+          .uploadImage(bytes, contentType: a.contentType);
+    } catch (e) {
+      url = null;
+      a.error = e.toString();
+    }
+    if (!mounted) return;
+    if (_uploadCancelled) return;
     setState(() {
-      _uploadCancelled = true;
-      _uploadProgress = null;
-      _uploadMime = null;
-      _uploadIndex = 0;
-      _uploadTotal = 0;
-      _uploadingPreviews = const [];
+      if (url == null || url.isEmpty) {
+        a.status = ComposerAttachmentStatus.failed;
+        if (a.error.isEmpty) a.error = tr('Failed to upload media.');
+        if (a.error.length > 120) a.error = a.error.substring(0, 120);
+      } else {
+        a.status = ComposerAttachmentStatus.done;
+        a.url = url;
+        a.error = '';
+        // Hand this file's bytes to its hosted URL so the thumbnail carries
+        // straight over without flickering or re-fetching what we just sent.
+        if (!a.isVideo) _localMediaPreviews[url] = bytes;
+        _uploadedMedia[url] = a.isVideo;
+      }
     });
+  }
+
+  /// Re-runs one failed upload from the bytes its tile still holds.
+  Future<void> _retryAttachment(ComposerAttachment a) async {
+    if (a.status == ComposerAttachmentStatus.uploading) return;
+    _uploadCancelled = false;
+    await _uploadAttachment(a);
   }
 
   /// Image/Video button (`selectImage` → fileInput `multiple`, accepts image +
@@ -1396,99 +1479,45 @@ class _ComposerState extends ConsumerState<Composer> {
     const maxUpload = 50 * 1024 * 1024; // 50 MB cap (users.js:977)
 
     if (!mounted) return;
-    setState(() {
-      _uploadCancelled = false;
-      _uploadTotal = picked.length;
-      // Dimmed placeholders appear the moment files are picked; each is filled
-      // in with real bytes as the loop reads them, then retired on upload.
-      _uploadingPreviews = [
-        for (final f in picked)
-          (
-            bytes: null,
-            isVideo: (f.mimeType ?? _guessImageMime(f.name))
-                .startsWith('video/')
-          ),
-      ];
-    });
+    _uploadCancelled = false;
 
-    final controller = ref.read(nostrControllerProvider);
-    final urls = <String>[];
-    for (var i = 0; i < picked.length; i++) {
-      if (!mounted || _uploadCancelled) break;
-      final file = picked[i];
-      final Uint8List bytes;
+    // Every picked file becomes a tile immediately, each with its own wheel.
+    // There is no batch-wide progress bar any more: it could only describe the
+    // batch, so with several files in flight it could not say which one it was
+    // waiting on, and it sat on top of the previews while doing it.
+    final fresh = <ComposerAttachment>[];
+    for (final f in picked) {
+      Uint8List bytes;
       try {
-        bytes = await file.readAsBytes();
+        bytes = await f.readAsBytes();
       } catch (_) {
-        continue;
+        continue; // an unreadable pick
       }
       if (bytes.length > maxUpload) {
         _onSystemMessage(tr('Files must be under 50MB.'));
         continue;
       }
-      final contentType = file.mimeType ?? _guessImageMime(file.name);
-      if (!mounted) return;
+      final contentType = f.mimeType ?? _guessImageMime(f.name);
       final isVideo = contentType.startsWith('video/');
-      setState(() {
-        _uploadProgress = 0.1;
-        _uploadMime = contentType;
-        _uploadIndex = i + 1;
-        // Now that the bytes are read, the placeholder can show the real image.
-        if (_uploadingPreviews.isNotEmpty) {
-          _uploadingPreviews = [
-            (bytes: isVideo ? null : bytes, isVideo: isVideo),
-            ..._uploadingPreviews.skip(1),
-          ];
-        }
-      });
-      final url = await controller.uploadImage(
-        bytes,
+      fresh.add(ComposerAttachment(
+        id: ++_attachmentSeq,
+        isVideo: isVideo,
         contentType: contentType,
-        onProgress: (p) {
-          if (mounted && !_uploadCancelled) setState(() => _uploadProgress = p);
-        },
-      );
-      if (!mounted) return;
-      if (_uploadCancelled) break;
-      if (url == null) {
-        _onSystemMessage(tr('Failed to upload media.'));
-        setState(() => _uploadingPreviews = _uploadingPreviews.skip(1).toList());
-        continue;
-      }
-      urls.add(url);
-      setState(() {
-        // Hand this file's bytes to its hosted URL so the thumbnail carries
-        // straight over from placeholder to attachment without flickering.
-        if (!isVideo) _localMediaPreviews[url] = bytes;
-        _uploadedMedia[url] = isVideo;
-        _uploadingPreviews = _uploadingPreviews.skip(1).toList();
-      });
+        // A video's bytes are kept for the retry path even though the 56px
+        // tile cannot draw a frame from them.
+        bytes: bytes,
+      ));
     }
+    if (fresh.isEmpty || !mounted) return;
+    setState(() => _attachments.addAll(fresh));
 
-    if (!mounted) return;
-    final wasCancelled = _uploadCancelled;
-    setState(() {
-      _uploadProgress = null;
-      _uploadMime = null;
-      _uploadCancelled = false;
-      _uploadIndex = 0;
-      _uploadTotal = 0;
-      _uploadingPreviews = const [];
-    });
-    // Drop the results entirely if the user pressed ✕ mid-batch.
-    if (wasCancelled || urls.isEmpty) return;
-    // Append all URLs space-joined (then a trailing space), like the PWA.
-    final existing = _controller.text;
-    // Without the separator a draft ending mid-word would glue onto the first
-    // URL and neither the formatter nor the attachment strip would see it.
-    final needsSpace = existing.isNotEmpty && !existing.endsWith(' ');
-    _controller.text = '$existing${needsSpace ? ' ' : ''}${urls.join(' ')} ';
-    _controller.selection =
-        TextSelection.collapsed(offset: _controller.text.length);
-    // Appended media urls can push past the popout threshold — recompute.
-    _onInputChanged();
-    _focus.requestFocus();
+    for (final a in fresh) {
+      if (!mounted || _uploadCancelled) break;
+      await _uploadAttachment(a);
+    }
+    if (mounted) _focus.requestFocus();
   }
+
 
   /// File button (`selectP2PFile` → p2pFileInput): pick any file and offer it as
   /// a P2P transfer (`shareP2PFile`, p2p.js:86).
@@ -1708,99 +1737,6 @@ class _ComposerState extends ConsumerState<Composer> {
     );
   }
 
-  /// `.upload-progress` — a panel (bg glass-bg, glass border, top corners
-  /// radius-sm, 12px padding, 8px bottom gap) floating above the input with a
-  /// label + cancel ✕ + a thin gradient progress bar (users.js:988-1008).
-  /// Single: "Uploading image..." / "Uploading video..."; multi: "Uploading
-  /// i of N...". The bar fills primary→secondary.
-  Widget _uploadBar(BuildContext context) {
-    final c = context.nym;
-    final isVideo = (_uploadMime ?? '').startsWith('video/');
-    final label = _uploadTotal > 1
-        ? tr('Uploading {i} of {total}...',
-            {'i': _uploadIndex, 'total': _uploadTotal})
-        : (isVideo ? tr('Uploading video...') : tr('Uploading image...'));
-    final fraction = (_uploadProgress ?? 0.1).clamp(0.0, 1.0);
-    // In solid-ui the panel is repainted with --glass-bg (#14141e dark /
-    // opaque #ffffff light — styles-themes-responsive.css:1593-1627, sourced
-    // AFTER the light white@0.92 rule so it wins in both themes).
-    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
-    return Container(
-      // `.upload-progress`: bg literal rgba(20,20,35,0.9) dark
-      // (styles-components.css:1142-1153); `body.light-mode .upload-progress`
-      // → white@0.92 (styles-themes-responsive.css:1179). border 1px glass
-      // (light: black@0.08 = glassBorder), radius-sm top corners, padding 12,
-      // margin-bottom 8.
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: solidUi
-            ? c.glassBg
-            : (c.isLight
-                ? Colors.white.withValues(alpha: 0.92)
-                : const Color(0xE6141423)),
-        border: Border.all(color: c.glassBorder),
-        borderRadius:
-            const BorderRadius.vertical(top: Radius.circular(NymRadius.sm)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(label,
-                    style: TextStyle(color: c.textDim, fontSize: 12)),
-              ),
-              // `.upload-progress-close` (22×22 ✕, radius-sm), cancels the
-              // in-flight upload.
-              Material(
-                type: MaterialType.transparency,
-                borderRadius: NymRadius.rsm,
-                child: InkWell(
-                  onTap: _cancelUpload,
-                  borderRadius: NymRadius.rsm,
-                  child: SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: Center(
-                      child: NymSvgIcon(NymIcons.close,
-                          size: 14, color: c.textDim),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          // `.progress-bar`: height 6, bg rgba(255,255,255,0.05), radius 10;
-          // `.progress-fill`: linear-gradient(90deg, primary, secondary).
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              height: 6,
-              color: Colors.white.withValues(alpha: 0.05),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: FractionallySizedBox(
-                  widthFactor: fraction,
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 300),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(10),
-                      gradient: LinearGradient(
-                        colors: [c.primary, c.secondary],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   /// Collapsed `.input-wrapper` height reserved in-flow while the popout floats
   /// (`--composer-row-base`, ui-context.js:1741 ≈ a single text row + padding).
@@ -2279,10 +2215,12 @@ class _ComposerState extends ConsumerState<Composer> {
     // Order matters: the strip goes in FIRST so the preview of what is being
     // uploaded sits directly above its own progress bar, and the bar drops away
     // beneath it the moment the upload lands.
-    if (matches.isNotEmpty || _uploadingPreviews.isNotEmpty) {
+    if (matches.isNotEmpty || _attachments.isNotEmpty) {
       panels.add(ComposerMediaStrip(
         matches: matches,
-        uploading: _uploadingPreviews,
+        attachments: _attachments,
+        onRemoveAttachment: _removeAttachment2,
+        onRetry: _retryAttachment,
         localPreviews: _localMediaPreviews,
         onRemove: _removeAttachment,
         onOpen: (m) {
@@ -2300,8 +2238,6 @@ class _ComposerState extends ConsumerState<Composer> {
         },
       ));
     }
-
-    if (_uploadProgress != null) panels.add(_uploadBar(context));
 
     if (_formatToolbarOpen) {
       panels.add(FormatToolbar(onTool: _applyFormatTool));
@@ -2545,7 +2481,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // Inert until relays connect (same `sendEnabled` as SEND), then the
         // existing in-upload guard takes over.
         enabled: sendEnabled,
-        onTap: _uploadProgress != null ? null : _pickAndUploadImage,
+        onTap: hasPendingUploads ? null : _pickAndUploadImage,
       ),
       _IconBtn(
         svg: NymIcons.composerFile,
