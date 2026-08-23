@@ -694,8 +694,23 @@ class NostrService {
         },
       ));
     }
-    // Hybrid post-quantum key announcements for the peers we message.
-    if (_pqAuthors.isNotEmpty) {
+    // Hybrid post-quantum key announcements.
+    //
+    // Under D1 this is a live tail only, like every other filter here: history
+    // comes from the archive (`_pqAnnouncementFromD1`) and a discovery miss
+    // additionally fetches the single peer it needs. Asking the relays for one
+    // announcement per author made this the one filter that backfilled in
+    // proxy-pool mode, on every reconnect and every subscription rebuild.
+    if (d1Available) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.appData],
+        since: nowSec,
+        limit: 1,
+        tags: {
+          't': [AppDataTopic.postQuantum],
+        },
+      ));
+    } else if (_pqAuthors.isNotEmpty) {
       filters.add(NostrFilter(
         kinds: [EventKind.appData],
         authors: _pqAuthors,

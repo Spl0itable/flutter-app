@@ -2538,6 +2538,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
         dup.senderVerified = true;
         changed = true;
       }
+      // Same upgrade-only rule as the verification lock above: a message whose
+      // classical copy arrived first must not keep claiming it is not
+      // quantum-resistant once its hybrid copy lands. Never downgrades — the
+      // Bitchat copy of the same text arriving later says nothing about how the
+      // Nymchat one was sealed.
+      if (m.pqEncrypted && !dup.pqEncrypted) {
+        dup.pqEncrypted = true;
+        changed = true;
+      }
+      if (m.pqCoverage != null && dup.pqCoverage == null) {
+        dup.pqCoverage = m.pqCoverage;
+        changed = true;
+      }
       if (changed) _scheduleEmit();
       return;
     }

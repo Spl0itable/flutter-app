@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Each released version corresponds to a tag on
 [github.com/Spl0itable/NYM](https://github.com/Spl0itable/NYM/releases).
 
+## [3.74.534] - 2026-08-23
+
+### Fixed
+- The quantum-resistant badge now updates as soon as a message is sent or
+  upgraded, instead of staying blank until the app was reopened.
+- A message that arrived conventionally encrypted and was later delivered
+  quantum-resistant now shows that straight away, matching how the sender
+  verification mark already behaved.
+- Your own settings, message archive and self-addressed copies are sealed to a
+  key this device can always reopen. Another device on the same account could
+  previously seal them to a key this one had never held, leaving them
+  permanently unreadable.
+- Key announcements are no longer re-fetched in bulk from relays on every
+  reconnect; they are read from the archive, as everything else already was.
+
 ## [3.74.533] - 2026-08-23
 
 ### Fixed
