@@ -252,20 +252,33 @@ void main() {
     test('a fence unwraps whole, keeping the code', () {
       expect(del('```', 3), (text: '', caret: 0));
       expect(del('```\ncode\n```', 3), (text: '\ncode\n', caret: 0));
-      expect(del('```\ncode\n```', 12), (text: '\ncode\n', caret: 0));
+      expect(del('```\ncode\n```', 12), (text: '\ncode\n', caret: 6));
       expect(del('```\ncode\n```', 0, forward: true), (text: '\ncode\n', caret: 0));
       expect(del('```code', 3), (text: 'code', caret: 0));
     });
 
+    test('an inline run unwraps whole, keeping the text', () {
+      // Same reason a fence does: the markers are hidden, so a plain Backspace
+      // would eat one half of the pair and leave the other as literal text.
+      expect(del('a **bold** b', 4), (text: 'a bold b', caret: 2));
+      expect(del('a **bold** b', 10), (text: 'a bold b', caret: 6));
+      expect(del('a **bold** b', 2, forward: true), (text: 'a bold b', caret: 2));
+      expect(del('a **bold** b', 8, forward: true), (text: 'a bold b', caret: 6));
+      expect(del('a *it* b', 3), (text: 'a it b', caret: 2));
+      expect(del('a ~~s~~ b', 4), (text: 'a s b', caret: 2));
+      expect(del('a `c` b', 3), (text: 'a c b', caret: 2));
+      // Innermost first: one press drops one level of formatting, not both.
+      expect(del('**a *b* c**', 5), (text: '**a b c**', caret: 4));
+    });
+
     test('everywhere else the plain character delete stands', () {
-      // Including next to a revealed inline marker — those are real text the
-      // caret can see and delete one character at a time.
       expect(del('# Title', 4), isNull);
       expect(del('# Title', 7), isNull);
       expect(del('```\ncode\n```', 6), isNull);
       expect(del('hello', 3), isNull);
       expect(del('hello', 0), isNull);
-      expect(del('a **bold** b', 4), isNull);
+      // Mid-body, with no marker adjacent.
+      expect(del('a **bold** b', 6), isNull);
       expect(del('# Title', 99), isNull);
       expect(del('', 0), isNull);
     });
@@ -317,21 +330,21 @@ void main() {
   });
 
   group('reveal', () {
-    test('an inline run reveals from anywhere inside it', () {
-      // "a **bold** b" — the run spans [2, 10].
-      final run = parseRichFormat('a **bold** b')[1];
+    test('an inline run never reveals, wherever the caret is', () {
+      // It used to reveal from anywhere inside its span [2, 10] — and while
+      // you are typing a run the caret is always inside it, so the markers
+      // were on screen for the whole time it took to write.
+      const text = 'a **bold** b';
+      final run = parseRichFormat(text)[1];
       expect(run.type, 'bold');
-      expect(run.revealedAt(0, 0), isFalse);
-      expect(run.revealedAt(1, 1), isFalse);
-      expect(run.revealedAt(2, 2), isTrue); // arriving at the run's edge
-      expect(run.revealedAt(6, 6), isTrue);
-      expect(run.revealedAt(10, 10), isTrue);
-      expect(run.revealedAt(11, 11), isFalse);
+      for (var i = 0; i <= text.length; i++) {
+        expect(run.revealedAt(i, i), isFalse, reason: 'caret $i');
+      }
     });
 
-    test('a selection across a run reveals it', () {
+    test('a selection across a run does not reveal it either', () {
       final run = parseRichFormat('a **bold** b')[1];
-      expect(run.revealedAt(0, 12), isTrue);
+      expect(run.revealedAt(0, 12), isFalse);
     });
 
     test('a heading never reveals, wherever the caret is', () {
@@ -439,15 +452,15 @@ void main() {
       }
     });
 
-    testWidgets('block markers stay hidden even with everything selected',
+    testWidgets('markers stay hidden even with everything selected',
         (tester) async {
       await mount(tester);
       for (final (text, want) in const [
         ('# Title', 'Title'),
         ('> quoted', 'quoted'),
         ('```\ncode\n```', '\ncode\n'),
-        // The heading prefix goes; the bold delimiters inside it come back.
-        ('# A **bold** heading', 'A **bold** heading'),
+        // The heading prefix goes, and so do the bold delimiters inside it.
+        ('# A **bold** heading', 'A bold heading'),
       ]) {
         final span = paint(text,
             selection: TextSelection(baseOffset: 0, extentOffset: text.length));
@@ -455,17 +468,21 @@ void main() {
       }
     });
 
-    testWidgets('a caret inside a run brings its delimiters back',
+    testWidgets('no caret position brings a run\'s delimiters back',
         (tester) async {
       await mount(tester);
       const text = 'a **bold** b';
-      final away = paint(text, selection: const TextSelection.collapsed(offset: 0));
-      expect(_visibleText(away), 'a bold b');
-      final inside = paint(text, selection: const TextSelection.collapsed(offset: 6));
-      expect(_visibleText(inside), text);
-      // Revealing must not change what the field is holding.
-      expect(inside.toPlainText(), text);
-      expect(inside.toPlainText().length, away.toPlainText().length);
+      // The regression this guards: typing "**bold**" leaves the caret at
+      // offset 10, inside the run, and the field used to show the asterisks
+      // there — so the markers were on screen for the whole time it took to
+      // write the run.
+      for (final offset in const [0, 3, 5, 6, 10, 12]) {
+        final span =
+            paint(text, selection: TextSelection.collapsed(offset: offset));
+        expect(_visibleText(span), 'a bold b', reason: 'caret at $offset');
+        // ...and what the field is holding never changes.
+        expect(span.toPlainText(), text, reason: 'caret at $offset');
+      }
     });
 
     testWidgets('an empty block keeps a box the user can see', (tester) async {

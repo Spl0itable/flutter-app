@@ -4108,6 +4108,66 @@ class NostrController {
   /// what makes them post-quantum capable (features/identity/pq_registry.dart).
   final PqRegistry _pqRegistry = PqRegistry();
 
+  /// In-flight and recently-failed announcement lookups, so two sends racing
+  /// for the same new peer open one subscription rather than two, and a peer
+  /// who simply has no announcement is not re-queried on every send.
+  final Map<String, Future<void>> _pqLookups = {};
+  final Map<String, int> _pqLookupMisses = {};
+
+  /// How long a miss is trusted. Long enough that the send path is not
+  /// re-querying constantly, short enough to pick up a peer who upgrades
+  /// mid-conversation.
+  static const int _pqMissTtlMs = 10 * 60 * 1000;
+
+  /// Cap on a single prefetch sweep, so opening a large group does not fire one
+  /// subscription per member.
+  static const int _pqPrefetchMax = 60;
+
+  /// Makes sure we have looked for [pubkey]'s announcement at least once before
+  /// deciding how to encrypt to them. Resolves either way — a peer with no
+  /// announcement is a normal outcome, not an error.
+  Future<void> ensurePqAnnouncement(String pubkey) {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return Future<void>.value();
+    if (!PqPolicy.enabled(privkey: identity.privkey, mode: _pqMode)) {
+      return Future<void>.value();
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final nowSec = nowMs ~/ 1000;
+    if (_pqRegistry.isKnownNymchatClient(pubkey, nowSec: nowSec)) {
+      return Future<void>.value();
+    }
+    final existing = _pqLookups[pubkey];
+    if (existing != null) return existing;
+    final missedAt = _pqLookupMisses[pubkey];
+    if (missedAt != null && nowMs - missedAt < _pqMissTtlMs) {
+      return Future<void>.value();
+    }
+    final f = service.fetchPqAnnouncement(pubkey).whenComplete(() {
+      _pqLookups.remove(pubkey);
+      final sec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (!_pqRegistry.isKnownNymchatClient(pubkey, nowSec: sec)) {
+        _pqLookupMisses[pubkey] = DateTime.now().millisecondsSinceEpoch;
+      } else {
+        _pqLookupMisses.remove(pubkey);
+      }
+    });
+    _pqLookups[pubkey] = f;
+    return f;
+  }
+
+  /// Warms the announcements for everyone in a conversation, so the key is
+  /// already in hand by the time the first message is sent.
+  void prefetchPqAnnouncements(Iterable<String> pubkeys) {
+    var n = 0;
+    for (final pk in pubkeys) {
+      if (!TrustGraph.isHex64(pk)) continue;
+      if (++n > _pqPrefetchMax) break;
+      unawaited(ensurePqAnnouncement(pk));
+    }
+  }
+
   /// Whether this identity sends post-quantum and advertises itself as able to
   /// receive it. Loaded from prefs at boot; see [PqPolicy.initialMode] for why
   /// an upgrade defaults off.
@@ -4301,6 +4361,14 @@ class NostrController {
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
+
+    // Make sure we have looked for their announcement at least once before
+    // deciding. Opening the conversation already kicks this off, so this
+    // normally resolves straight off the cache; it matters for the paths that
+    // send without opening anything, and for the first message of a brand new
+    // thread — whose conversation entry does not exist yet, so the critical
+    // subscription has not been rebuilt around them.
+    await ensurePqAnnouncement(recipientPubkey);
 
     // Which transports this recipient gets. See PqPmPlan.decide for why
     // post-quantum replaces rather than accompanies the others.
@@ -9150,11 +9218,22 @@ class NostrController {
     // registry. Keyed by the member's REAL pubkey — the announcement is
     // published by the identity, not the rotating ephemeral key the classical
     // leg encrypts to.
-    groups.kemKeyFor = (memberPubkey) => _pqRegistry.keyFor(
-          memberPubkey,
-          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-          enabled: pqEnabled,
-        );
+    groups.kemKeyFor = (memberPubkey) {
+      final key = _pqRegistry.keyFor(
+        memberPubkey,
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        enabled: pqEnabled,
+      );
+      // A member we hold nothing for may simply never have been asked about: a
+      // group joined since we connected is not in the critical subscription's
+      // author list, and only a PM conversation change rebuilds it. Look them
+      // up in the background so the next message covers them. The fan-out
+      // cannot wait on this — it is building wraps for the whole roster right
+      // now — so this message still goes classical to that member, and the
+      // shield reports partial coverage, which is the truth.
+      if (key == null) unawaited(ensurePqAnnouncement(memberPubkey));
+      return key;
+    };
   }
 
   void _refreshEphemeralSubscriptions() {
