@@ -4334,10 +4334,16 @@ class NostrController {
   /// history. Outbound messages have no such hazard: the recipient decapsulates.
   Uint8List? pqSelfKey() {
     if (!pqSelfEnabled) return null;
-    final self = _identity?.pubkey;
-    if (self == null) return null;
-    return _pqRegistry.keyFor(self,
-        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000, enabled: true);
+    // DERIVED, not read from the registry. The registry entry is whatever
+    // epoch was last announced -- possibly by another device on this nsec, at
+    // an epoch this one has never held -- while decryption only ever tries
+    // pqSelfCandidateKeys(), which walks OUR epoch and the few before it.
+    // Taking the announced key could seal our own settings and archive to a key
+    // we cannot open, and that failure is silent and total: the blob is simply
+    // unreadable ever after. Deriving keeps both sides on the same key by
+    // construction, and works from the first save rather than only once the
+    // announcement has landed.
+    return _pqSelfKeys()?.publicKey;
   }
 
   /// A group member's announced ML-KEM key, or null. Keyed by their REAL
