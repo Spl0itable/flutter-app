@@ -17,6 +17,7 @@ import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/nip44.dart' as nip44;
 import '../../core/crypto/pow.dart';
 import '../../core/crypto/schnorr.dart' as schnorr;
+import '../../features/identity/pq_registry.dart';
 import '../../features/messages/trust_graph.dart';
 import '../../models/channel.dart' as ch;
 import '../../models/nostr_event.dart';
@@ -462,11 +463,13 @@ class NostrService {
     bool channelMode = true,
     Iterable<String> vouchAuthors = const [],
     Iterable<String> profileAuthors = const [],
+    Iterable<String> pqAuthors = const [],
   }) async {
     _handlers = handlers;
     _channelMode = channelMode;
     _vouchAuthors = _sanitizeVouchAuthors(vouchAuthors);
     _profileAuthors = List<String>.unmodifiable(profileAuthors);
+    _pqAuthors = _sanitizeVouchAuthors(pqAuthors);
     _wireProxyFallback();
     pool.connectAll();
 
@@ -495,6 +498,12 @@ class NostrService {
   /// `!settings.groupChatPMOnlyMode` (relays.js:2488) — gates every
   /// public-channel filter out of the critical set.
   bool _channelMode = true;
+
+  /// Authors whose post-quantum key announcements we watch: our conversation
+  /// partners, group members and ourselves. Unlike the vouch list — a broadcast
+  /// web of trust — PQ keys are only needed for peers we actually message, so
+  /// this filter is scoped rather than fetched wholesale (pq.js / relays.js).
+  List<String> _pqAuthors = const [];
 
   /// DIRECT-mode vouch REQ authors: the current trust graph's pubkeys
   /// (`this.nymchatPubkeys`, relays.js:2538-2542), hex64-filtered and capped
@@ -678,6 +687,17 @@ class NostrService {
         },
       ));
     }
+    // Hybrid post-quantum key announcements for the peers we message.
+    if (_pqAuthors.isNotEmpty) {
+      filters.add(NostrFilter(
+        kinds: [EventKind.appData],
+        authors: _pqAuthors,
+        limit: _pqAuthors.length,
+        tags: {
+          't': [AppDataTopic.postQuantum],
+        },
+      ));
+    }
     // NIP-30 custom emoji packs: real-time + limit:1 under D1 (history via the
     // D1 emoji restore); else discover up to 300 (relays.js:2546-2548).
     filters.add(NostrFilter(
@@ -725,6 +745,7 @@ class NostrService {
     bool? channelMode,
     Iterable<String>? vouchAuthors,
     Iterable<String>? profileAuthors,
+    Iterable<String>? pqAuthors,
   }) {
     var changed = false;
     if (channelMode != null && channelMode != _channelMode) {
@@ -742,6 +763,13 @@ class NostrService {
       final next = List<String>.unmodifiable(profileAuthors);
       if (!listEquals(next, _profileAuthors)) {
         _profileAuthors = next;
+        changed = true;
+      }
+    }
+    if (pqAuthors != null) {
+      final next = _sanitizeVouchAuthors(pqAuthors);
+      if (!listEquals(next, _pqAuthors)) {
+        _pqAuthors = next;
         changed = true;
       }
     }
@@ -1453,6 +1481,70 @@ class NostrService {
           ['t', AppDataTopic.vouches],
         ],
         content: jsonEncode(vouchedPubkeys),
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
+  /// Publishes our kind-30078 `nym-pq` announcement: the ML-KEM-768 public key
+  /// other Nymchat clients encapsulate to. Mirrors the PWA's
+  /// `publishPqAnnouncement` (js/modules/pq.js).
+  ///
+  /// The event's signature is what binds the KEM key to this Nostr identity —
+  /// an attacker cannot substitute their own without also forging a secp256k1
+  /// signature. The NIP-40 `expiration` tag lets relays drop a stale
+  /// announcement on their own, so a downgraded or abandoned device stops
+  /// attracting post-quantum messages it cannot read.
+  Future<NostrEvent?> publishPqAnnouncement({
+    required Uint8List kemPublicKey,
+    required int epoch,
+    required List<PqDevice> devices,
+  }) async {
+    final sig = signer;
+    if (sig == null) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final exp = nowSec + pqTtl.inSeconds;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.appData,
+        tags: [
+          ['d', AppDataTopic.postQuantum],
+          ['t', AppDataTopic.postQuantum],
+          ['expiration', '$exp'],
+        ],
+        content: PqAnnouncement.encode(
+          publicKey: kemPublicKey,
+          expiresAt: exp,
+          epoch: epoch,
+          devices: devices,
+        ),
+      ),
+    );
+    await pool.publish(signed);
+    return signed;
+  }
+
+  /// Supersedes our announcement with a retracted, already-expired one so peers
+  /// stop treating us as post-quantum capable. A replaceable event cannot be
+  /// unpublished, so this is the retraction.
+  Future<NostrEvent?> retractPqAnnouncement() async {
+    final sig = signer;
+    if (sig == null) return null;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final signed = await sig.sign(
+      UnsignedEvent(
+        pubkey: identity.pubkey,
+        createdAt: nowSec,
+        kind: EventKind.appData,
+        tags: [
+          ['d', AppDataTopic.postQuantum],
+          ['t', AppDataTopic.postQuantum],
+          ['expiration', '$nowSec'],
+        ],
+        content: PqAnnouncement.encodeRetraction(nowSec),
       ),
     );
     await pool.publish(signed);
