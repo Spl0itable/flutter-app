@@ -21,6 +21,19 @@ Each released version corresponds to a tag on
 - Key lookups check the archive before fanning out to relays, and wait past
   the first "nothing here" answer, both of which could leave a conversation
   classical between two capable clients.
+- Your own sent message shows its quantum-resistant badge immediately, instead
+  of staying unmarked until the app was restarted and the chat reopened.
+- Group messages now report how many members received a quantum-resistant copy.
+- The attachment preview no longer disappears when its upload finishes.
+- Media translated on demand is no longer asked for a language you already
+  chose when you first opened the app.
+
+### Changed
+- Attachments are now shown as tiles you can remove or retry individually, each
+  with its own progress wheel, replacing the single upload bar that covered the
+  previews and could not say which file it was waiting on. A failed upload keeps
+  its file so one tap retries it, and the links are added to the message when
+  you send rather than typed into the box as each upload lands.
 
 ## [3.73.533] - 2026-08-22
 
