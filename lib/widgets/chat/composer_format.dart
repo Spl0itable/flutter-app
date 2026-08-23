@@ -1,12 +1,15 @@
-// composer_format.dart — the composer's optional WYSIWYG affordances: a
-// formatting toolbar that writes the markdown for the user, a live preview of
-// the rendered result, and thumbnail previews of the images/videos attached to
-// the draft (shown BEFORE send so the user can confirm what they picked).
+// composer_format.dart — the composer's WYSIWYG affordances: a formatting
+// toolbar that writes the markdown for the user, and thumbnail previews of the
+// images/videos attached to the draft (shown BEFORE send so the user can
+// confirm what they picked).
+//
+// There is no preview panel: the field renders the formatting itself, with the
+// markers hidden (composer_markdown.dart).
 //
 // Mirrors the PWA's `js/modules/rich-compose.js` one-for-one: the same toolbar
-// set, the same markdown transforms, the same `nym_format_toolbar` /
-// `nym_format_preview` preference keys, and the same panel stack above the
-// input (attachments → preview → toolbar → field).
+// set, the same markdown transforms, the same `nym_format_toolbar` preference
+// key, and the same panel stack above the input (attachments → upload bar →
+// toolbar → field).
 //
 // The draft on the wire stays plain markdown — the format every client parses
 // via NymFormat — so nothing here changes what is sent, only how it is composed.
@@ -22,10 +25,9 @@ import '../../features/i18n/i18n.dart';
 import '../../features/messages/format/message_content.dart' show proxiedMedia;
 import '../nym_icons.dart' show NymSvgIcon;
 
-/// Persisted toolbar/preview visibility. Same localStorage keys as the PWA so a
-/// user who turns the toolbar on there finds it on here once settings sync.
+/// Persisted toolbar visibility. Same localStorage key as the PWA so a user who
+/// turns the toolbar on there finds it on here once settings sync.
 const String kFormatToolbarKey = 'nym_format_toolbar';
-const String kFormatPreviewKey = 'nym_format_preview';
 
 /// How a tool rewrites the draft.
 enum FormatToolKind { wrap, linePrefix, codeBlock }
@@ -432,55 +434,43 @@ class _FormatInputButtonState extends State<FormatInputButton> {
 
 /// `.format-toolbar` — the row of markdown tools plus the preview toggle.
 class FormatToolbar extends StatelessWidget {
-  const FormatToolbar({
-    super.key,
-    required this.onTool,
-    required this.previewOpen,
-    required this.onTogglePreview,
-  });
+  const FormatToolbar({super.key, required this.onTool});
 
   final void Function(FormatTool tool) onTool;
-  final bool previewOpen;
-  final VoidCallback onTogglePreview;
 
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
+    // Same shell as the autocomplete dropdown (autocomplete_dropdown.dart): it
+    // sits in the same slot above the field and should read as the same
+    // surface — opaque `--glass-bg` under solid-ui, bg-tertiary in glass mode,
+    // rounded across the top only, `--shadow-lg`.
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: c.bgTertiary,
+        color: c.glassBg.a == 1.0 ? c.glassBg : c.bgTertiary,
         border: Border.all(color: c.glassBorder),
-        borderRadius: NymRadius.rmd,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        boxShadow: [
+          BoxShadow(
+            color:
+                c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+            blurRadius: 32,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final tool in kFormatTools)
-              _FormatToolButton(tool: tool, onTap: () => onTool(tool)),
-            Container(
-              width: 1,
-              height: 16,
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              color: c.glassBorder,
-            ),
-            _FormatToolButton(
-              tool: const FormatTool(
-                id: 'preview',
-                kind: FormatToolKind.wrap,
-                token: '',
-                label: 'Preview formatting',
-                svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
-                    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-                    '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>'
-                    '<circle cx="12" cy="12" r="3"/></svg>',
-              ),
-              active: previewOpen,
-              onTap: onTogglePreview,
-            ),
-          ],
+      child: ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final tool in kFormatTools)
+                _FormatToolButton(tool: tool, onTap: () => onTool(tool)),
+            ],
+          ),
         ),
       ),
     );
@@ -488,15 +478,10 @@ class FormatToolbar extends StatelessWidget {
 }
 
 class _FormatToolButton extends StatefulWidget {
-  const _FormatToolButton({
-    required this.tool,
-    required this.onTap,
-    this.active = false,
-  });
+  const _FormatToolButton({required this.tool, required this.onTap});
 
   final FormatTool tool;
   final VoidCallback onTap;
-  final bool active;
 
   @override
   State<_FormatToolButton> createState() => _FormatToolButtonState();
@@ -509,7 +494,7 @@ class _FormatToolButtonState extends State<_FormatToolButton> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final tool = widget.tool;
-    final lit = widget.active || _hover;
+    final lit = _hover;
     final color = lit ? c.primary : c.textDim;
 
     Widget child;
@@ -568,13 +553,11 @@ class _FormatToolButtonState extends State<_FormatToolButton> {
             height: 26,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: widget.active
-                  ? c.primaryA(0.15)
-                  : (_hover
-                      ? (c.isLight
-                          ? Colors.black.withValues(alpha: 0.06)
-                          : Colors.white.withValues(alpha: 0.08))
-                      : null),
+              color: _hover
+                  ? (c.isLight
+                      ? Colors.black.withValues(alpha: 0.06)
+                      : Colors.white.withValues(alpha: 0.08))
+                  : null,
               borderRadius: BorderRadius.circular(4),
             ),
             child: child,
