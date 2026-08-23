@@ -1514,6 +1514,11 @@ class NostrService {
     return signed;
   }
 
+  /// created_at of the last `nym-pq` announcement we published, so a rapid
+  /// republish cannot tie on the second and be dropped by the relay's
+  /// replacement tie-break.
+  int _lastPqTs = 0;
+
   /// Publishes our kind-30078 `nym-pq` announcement: the ML-KEM-768 public key
   /// other Nymchat clients encapsulate to. Mirrors the PWA's
   /// `publishPqAnnouncement` (js/modules/pq.js).
@@ -1533,7 +1538,20 @@ class NostrService {
   }) async {
     final sig = signer;
     if (sig == null) return null;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Kind 30078 is addressable (NIP-01): the relay keeps one event per
+    // (kind, pubkey, d-tag), so this replaces our previous announcement in
+    // place rather than adding a second one.
+    //
+    // Replacement is decided by created_at, and on a TIE the relay keeps the
+    // lexically-lower event id — so a republish landing in the same second as
+    // the last one can be silently dropped, leaving peers on a stale key. A
+    // key rotation immediately after a boot publish is exactly that case.
+    // Same monotonic floor [publishProfile] uses for kind 0.
+    final nowSec = max(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      _lastPqTs + 1,
+    );
+    _lastPqTs = nowSec;
     final exp = nowSec + pqTtl.inSeconds;
     final signed = await sig.sign(
       UnsignedEvent(
