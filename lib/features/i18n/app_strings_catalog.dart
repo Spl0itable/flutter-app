@@ -1305,6 +1305,9 @@ const List<String> kAppStringsCatalog = <String>[
   '. The rest haven\'t published a post-quantum key, so their copies used standard NIP-44 encryption only — and because those copies carry the same message, treat this one as classically encrypted overall.',
   'This message\'s key exchange combined the standard NIP-44 secp256k1 ECDH with ML-KEM-768, a post-quantum key encapsulation mechanism. Both must be broken to recover the message, so it stays confidential against an adversary recording traffic today to decrypt with a future quantum computer. The sender\'s signature is still secp256k1 — this protects confidentiality, not authentication.',
   'Active for messages with other Nymchat users.',
+  'No contact has published a post-quantum key yet, so messages are still going out on standard encryption. This turns on by itself as soon as one does.',
+  'Currently in use with {count} contacts.',
+  'Currently in use with 1 contact.',
   // Nymbot credits on a platform that can't sell them (bot_credits_modal.dart).
   'NYMBOT CREDITS',
   'Nymbot private message credits',

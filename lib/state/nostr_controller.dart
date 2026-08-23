@@ -4157,6 +4157,13 @@ class NostrController {
     return f;
   }
 
+  /// How many contacts we hold a live post-quantum key for. Surfaced in
+  /// settings so the status line can report what is actually happening rather
+  /// than only what this device is capable of.
+  int get pqKnownPeerCount => _pqRegistry
+      .knownPeers(nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000)
+      .length;
+
   /// Warms the announcements for everyone in a conversation, so the key is
   /// already in hand by the time the first message is sent.
   void prefetchPqAnnouncements(Iterable<String> pubkeys) {
