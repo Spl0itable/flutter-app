@@ -16,6 +16,7 @@ import '../../core/crypto/isolate_verifier.dart';
 import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/nip44.dart' as nip44;
 import '../../core/crypto/pow.dart';
+import '../../core/crypto/pq.dart' as pq;
 import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../features/identity/pq_registry.dart';
 import '../../features/messages/trust_graph.dart';
@@ -2177,40 +2178,76 @@ class NostrService {
     final rumorJson = jsonEncode(rumorMap);
     if (utf8.encode(rumorJson).length > 65535) return null;
 
-    // Seal (kind 13) encrypted + signed by the active signer, backdated
-    // created_at like every NIP-59 seal (`randomNow`).
-    final sealContent = await sig.nip44Encrypt(self, rumorJson);
-    final seal = await sig.sign(
-      UnsignedEvent(
-        pubkey: self,
-        createdAt: giftwrap.randomNow(),
-        kind: 13,
-        tags: const [],
-        content: sealContent,
-      ),
-    );
-    final sealJson = jsonEncode(seal.toJson());
-    if (utf8.encode(sealJson).length > 65535) return null;
-
-    // Wrap (kind 1059) by a fresh ephemeral key with the nym-sync outer tags.
-    final ephSk = keys.generatePrivateKey();
-    final ckWrap = nip44.getConversationKey(ephSk, self);
     final outerD = sha256.convert(utf8.encode('$self:$dTag')).toString();
-    final wrapped = schnorr.finalizeEvent(
-      UnsignedEvent(
-        pubkey: keys.getPublicKeyHex(ephSk),
-        createdAt: giftwrap.randomNow(),
-        kind: EventKind.giftWrap,
-        tags: [
-          ['p', self],
-          ['d', outerD],
-          ['k', 'nym-sync'],
-        ],
-        content: nip44.encrypt(sealJson, ckWrap),
-      ),
-      ephSk,
+
+    // Builds both layers with whichever encryption is in play. Null when the
+    // sealed plaintext outgrows what NIP-44 can carry, or the frame outgrows
+    // what relays take.
+    Future<NostrEvent?> build(
+      Future<String> Function(String plaintext) seal,
+      String Function(String plaintext, Uint8List ephSk) wrap,
+    ) async {
+      final sealed = await sig.sign(
+        UnsignedEvent(
+          pubkey: self,
+          createdAt: giftwrap.randomNow(),
+          kind: 13,
+          tags: const [],
+          content: await seal(rumorJson),
+        ),
+      );
+      final sealJson = jsonEncode(sealed.toJson());
+      if (utf8.encode(sealJson).length > 65535) return null;
+      final ephSk = keys.generatePrivateKey();
+      final wrapped = schnorr.finalizeEvent(
+        UnsignedEvent(
+          pubkey: keys.getPublicKeyHex(ephSk),
+          createdAt: giftwrap.randomNow(),
+          kind: EventKind.giftWrap,
+          tags: [
+            ['p', self],
+            ['d', outerD],
+            ['k', 'nym-sync'],
+          ],
+          content: wrap(sealJson, ephSk),
+        ),
+        ephSk,
+      );
+      if (jsonEncode(['EVENT', wrapped.toJson()]).length > 65000) return null;
+      return wrapped;
+    }
+
+    // Settings are a self-addressed gift wrap like any other, and they carry
+    // more about a user than most single messages do — the conversation list,
+    // the group keys, the history categories. Left classical they would be the
+    // weakest thing on the relay: readable by anyone who breaks secp256k1,
+    // regardless of how carefully the messages themselves were sealed.
+    //
+    // Only with a local nsec. An extension or NIP-46 signer returns a finished
+    // NIP-44 payload rather than a conversation key, so there is no hybrid one
+    // to derive (PqPolicy.capable).
+    final ownSk = identity.privkey;
+    final selfKem = _pqSelfKeys.isEmpty ? null : _pqSelfKeys.first;
+    if (ownSk != null && selfKem != null) {
+      final wrapped = await build(
+        (pt) async => pq.pqEncrypt(pt, ownSk, self, selfKem.kemPk),
+        (pt, ephSk) => pq.pqEncrypt(pt, ephSk, self, selfKem.kemPk),
+      );
+      if (wrapped != null) {
+        await pool.publishDm(wrapped);
+        return wrapped;
+      }
+      // The hybrid costs ~1.5 KB a layer for the KEM ciphertext, which a
+      // category already close to the relay cap cannot absorb. Losing the sync
+      // entirely would be a worse trade than losing the post-quantum layer, so
+      // an oversized one falls back rather than going unpublished.
+    }
+
+    final wrapped = await build(
+      (pt) => sig.nip44Encrypt(self, pt),
+      (pt, ephSk) => nip44.encrypt(pt, nip44.getConversationKey(ephSk, self)),
     );
-    if (jsonEncode(['EVENT', wrapped.toJson()]).length > 65000) return null;
+    if (wrapped == null) return null;
     await pool.publishDm(wrapped);
     return wrapped;
   }

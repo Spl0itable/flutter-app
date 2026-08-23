@@ -9119,6 +9119,10 @@ class NostrController {
     // Refreshed alongside the ephemeral keys so a rotation or a login change
     // takes effect on the same tick.
     service.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
+    // The D1 settings blob holds the same content as the relay wrap beside it,
+    // so it takes the same keys — protecting one without the other protects
+    // neither.
+    _storageSync?.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
     // Group fan-out resolves each member's announced ML-KEM key through the
     // registry. Keyed by the member's REAL pubkey — the announcement is
     // published by the identity, not the rotating ephemeral key the classical

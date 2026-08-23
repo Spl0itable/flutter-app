@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' show sha256;
 
 import '../../core/constants/storage_keys.dart';
 import '../../models/settings.dart';
+import '../../core/crypto/pq.dart' as pq;
 import '../nostr/event_signer.dart';
 import '../storage/key_value_store.dart';
 import 'api_client.dart';
@@ -2234,17 +2236,69 @@ class StorageSync {
     _authBuilder = builder;
   }
 
+  /// Our ML-KEM keypairs (current epoch first, then the window of previous
+  /// ones), supplied by the controller. Empty until post-quantum is up, and
+  /// permanently empty for a login that cannot do it.
+  List<({Uint8List kemSk, Uint8List kemPk})> _pqSelfKeys = const [];
+
+  void setPqSelfKeys(List<({Uint8List kemSk, Uint8List kemPk})> keys) {
+    _pqSelfKeys = List.unmodifiable(keys);
+  }
+
+  /// The D1 blob holds the same conversation list, group keys and history
+  /// categories as the relay gift wrap beside it, so protecting one without the
+  /// other protects neither. With a local nsec this is the hybrid; there is no
+  /// size cap to work around, since D1 takes the blob whatever it weighs.
+  ///
+  /// An extension or NIP-46 signer returns a finished NIP-44 payload rather
+  /// than a conversation key, so there is no hybrid one to derive — those
+  /// logins stay classical by construction (PqPolicy.capable).
   Future<String?> _encryptToSelf(String plaintext) async {
     try {
-      return await _signer.nip44Encrypt(_pubkey, plaintext);
+      final signer = _signer;
+      final selfKem = _pqSelfKeys.isEmpty ? null : _pqSelfKeys.first;
+      if (signer is LocalSigner && selfKem != null) {
+        try {
+          return pq.pqEncrypt(
+              plaintext, signer.privkey, _pubkey, selfKem.kemPk);
+        } catch (_) {
+          // Fall through to NIP-44 rather than losing the write.
+        }
+      }
+      return await signer.nip44Encrypt(_pubkey, plaintext);
     } catch (_) {
       return null;
     }
   }
 
+  /// Reads either form. A blob written before this device had a post-quantum
+  /// key, or by a device signing with an extension, is still plain NIP-44 — the
+  /// `pq1.` prefix says which, so both stay readable and nothing needs
+  /// migrating. A rotated key is handled by trying every epoch still derivable
+  /// from the nsec.
   Future<String?> _decryptFromSelf(String ciphertext) async {
     try {
-      return await _signer.nip44Decrypt(_pubkey, ciphertext);
+      final signer = _signer;
+      if (pq.isPqPayload(ciphertext)) {
+        if (signer is! LocalSigner) return null;
+        for (final k in _pqSelfKeys) {
+          try {
+            return pq.pqDecrypt(
+              ciphertext,
+              _pubkey,
+              pq.PqIdentity(
+                privkey: signer.privkey,
+                kemSecretKey: k.kemSk,
+                kemPublicKey: k.kemPk,
+              ),
+            );
+          } catch (_) {
+            // Wrong epoch — try the next.
+          }
+        }
+        return null;
+      }
+      return await signer.nip44Decrypt(_pubkey, ciphertext);
     } catch (_) {
       return null;
     }
