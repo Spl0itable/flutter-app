@@ -1,28 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:http/http.dart' as http;
-
 import '../../services/api/api_client.dart';
 
 /// On-demand message translation routed through the backend `/api/proxy`
 /// worker (`?action=translate`), exactly like the PWA (`translate.js`
-/// `_doTranslate`). The proxy is always tried first, because it keeps the
-/// user's IP away from Google Translate — that is the whole reason it exists.
+/// `_doTranslate`). The models run on our own infrastructure, so the text of a
+/// private message never reaches a third party.
 ///
-/// It can also fail for reasons that have nothing to do with this user. Google
-/// rate-limits the `gtx` endpoint by caller IP, and a Cloudflare Worker
-/// egresses from an address shared with every other Worker in its colo, so a
-/// busy colo starts collecting HTTP 429 and the proxy returns 502 for everyone
-/// behind it. Translation then stayed broken here while the same message
-/// translated fine in the browser, because the PWA falls back to a direct
-/// request and this app did not.
-///
-/// So it falls back now, matching the PWA. The trade-off is explicit and worth
-/// stating: a direct request reaches Google from the user's own address rather
-/// than the proxy's. That address is not rate-limited, which is exactly why the
-/// fallback works — and it is visible to Google, which is exactly why it is a
-/// fallback and not the default.
+/// There is no fallback any more, and its removal is the point rather than a
+/// regression. It existed because the proxy's own upstream WAS Google, which
+/// rate-limits by caller IP: a Worker egresses from an address shared with
+/// every other Worker in its colo, so a busy colo returned 502 for everyone
+/// behind it while the same request from a phone succeeded. Reaching around
+/// the proxy fixed that by handing Google the plaintext of a message the user
+/// chose to keep private. Now the proxy is the only thing that can translate,
+/// so a failure is reported instead of routed around.
 ///
 /// [translate] mirrors the PWA's `_translatePreservingMentions`
 /// (`translate.js:292-328`) — the function BOTH the inline message-translate
@@ -36,19 +29,8 @@ import '../../services/api/api_client.dart';
 /// Lazy network: nothing runs until [translate] is awaited. The [ApiClient] is
 /// injectable for tests (it accepts a mock `http.Client`).
 class TranslateService {
-  TranslateService({ApiClient? api, http.Client? directClient})
-      : _api = api,
-        _directClient = directClient;
+  TranslateService({ApiClient? api}) : _api = api;
   final ApiClient? _api;
-
-  /// Injectable transport for the direct fallback (tests only; null in the app,
-  /// where each call opens and closes its own).
-  final http.Client? _directClient;
-
-  /// The endpoint the proxy itself calls server-side, so a fallback returns the
-  /// same translation the proxy would have.
-  static const String _directEndpoint =
-      'https://translate.googleapis.com/translate_a/single';
 
   /// One emoji "unit" (the PWA's `_shieldEmojis` regex, `translate.js:278`;
   /// identical to `_EMOJI_UNIT` ported at `message_content.dart:308-314`): a
@@ -169,84 +151,41 @@ class TranslateService {
     String targetLang,
   ) async {
     final body = chunk.length > 5000 ? chunk.substring(0, 5000) : chunk;
+    final TranslateResult res;
     try {
-      final res = await api.translate(body, targetLang, source: 'auto');
-      return TranslationResult(
-        translatedText: res.translatedText,
-        detectedLanguage:
-            res.detectedLanguage.isEmpty ? 'auto' : res.detectedLanguage,
-      );
-    } catch (_) {
-      // The proxy failed for THIS request. That is not the same as the proxy
-      // being down, and it is usually not about this user at all — see the
-      // class doc. Try direct rather than failing the translation
-      // (`_doTranslate`'s catch, translate.js).
-      return translateDirect(body, targetLang, client: _directClient);
+      res = await api.translate(body, targetLang, source: 'auto');
+    } on ApiException catch (e) {
+      // Surface the backend's own sentence rather than "ApiException(translate:
+      // HTTP 502)". It already writes one for a person to read, and the detail
+      // that is not for them — which model refused and why — never leaves the
+      // worker's log.
+      throw TranslateException(_backendMessage(e));
     }
-  }
-
-  /// Google Translate without the proxy in front. Public so the fallback can be
-  /// tested on its own, and injectable for the same reason.
-  ///
-  /// Sends the request from the caller's own address. Reserved for the case
-  /// where the proxy could not answer — see the class doc for why that happens
-  /// and what it costs.
-  static Future<TranslationResult> translateDirect(
-    String text,
-    String targetLang, {
-    http.Client? client,
-  }) async {
-    final own = client == null;
-    final c = client ?? http.Client();
-    try {
-      final uri = Uri.parse(_directEndpoint).replace(queryParameters: {
-        'client': 'gtx',
-        'sl': 'auto',
-        'tl': targetLang,
-        'dt': 't',
-        'q': text.length > 5000 ? text.substring(0, 5000) : text,
-      });
-      final res = await c.get(uri).timeout(const Duration(seconds: 8));
-      if (res.statusCode != 200) {
-        throw TranslateException(
-            'Translation failed: Google Translate returned ${res.statusCode}');
-      }
-      final data = jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true));
-      final parsed = _parseDirect(data);
-      if (parsed == null) {
-        throw const TranslateException(
-            'Translation failed: unrecognised response');
-      }
-      return parsed;
-    } on TranslateException {
-      rethrow;
-    } on TimeoutException {
-      throw const TranslateException('Translation failed: timeout');
-    } catch (e) {
-      throw TranslateException('Translation failed: $e');
-    } finally {
-      if (own) c.close();
+    // An empty body with a success status is a failure wearing a success's
+    // clothes: it would replace the message with nothing.
+    if (res.translatedText.trim().isEmpty) {
+      throw const TranslateException('Translation failed: empty result');
     }
-  }
-
-  /// `[[["translated","original",null,null,10],...],null,"detected"]` — the
-  /// same shape the proxy parses server-side (`parseTranslateSingle`,
-  /// proxy.js). Returns null for anything else rather than guessing.
-  static TranslationResult? _parseDirect(dynamic data) {
-    if (data is! List || data.isEmpty || data[0] is! List) return null;
-    final segments = data[0] as List;
-    final buf = StringBuffer();
-    for (final seg in segments) {
-      if (seg is List && seg.isNotEmpty && seg[0] is String) {
-        buf.write(seg[0] as String);
-      }
-    }
-    final detected =
-        data.length > 2 && data[2] is String ? data[2] as String : 'auto';
     return TranslationResult(
-      translatedText: buf.toString(),
-      detectedLanguage: detected.isEmpty ? 'auto' : detected,
+      translatedText: res.translatedText,
+      detectedLanguage:
+          res.detectedLanguage.isEmpty ? 'auto' : res.detectedLanguage,
     );
+  }
+
+  /// The human-readable reason out of a failed proxy call, or a plain fallback
+  /// when the body is not the JSON we expect.
+  static String _backendMessage(ApiException e) {
+    try {
+      final decoded = jsonDecode(e.body);
+      if (decoded is Map && decoded['error'] is String) {
+        final msg = (decoded['error'] as String).trim();
+        if (msg.isNotEmpty) return msg;
+      }
+    } catch (_) {
+      // Not JSON — fall through.
+    }
+    return 'Translation is unavailable right now';
   }
 
   /// Replaces every emoji unit with an `EMJ<n>EMJ` placeholder so the upstream
