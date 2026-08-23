@@ -29,8 +29,10 @@ Widget _host(Widget child) => MaterialApp(
 
 void main() {
   group('badge state', () {
-    test('a classical message shows no shield', () {
-      expect(pqBadgeStateFor(pqEncrypted: false), isNull);
+    test('a classical message says so rather than showing nothing', () {
+      // No badge is ambiguous: it could equally mean "not quantum-resistant",
+      // "the indicator is broken", or "this build lacks the feature".
+      expect(pqBadgeStateFor(pqEncrypted: false), PqBadgeState.classical);
     });
 
     test('a post-quantum PM shows the full shield', () {
@@ -49,10 +51,29 @@ void main() {
           PqBadgeState.partial);
     });
 
-    test('a group with no post-quantum members shows no shield', () {
+    test('a group no member could receive post-quantum says classical', () {
       expect(
           pqBadgeStateFor(pqEncrypted: true, pqCoverage: (pq: 0, total: 10)),
-          isNull);
+          PqBadgeState.classical);
+    });
+
+    test('every encrypted message resolves to exactly one state', () {
+      // Whether a shield belongs at all is the CALLER's decision (see
+      // `_pqState` in message_row.dart, which returns null for a public
+      // channel message — plaintext on the relay, where a shield of any kind
+      // would imply an encryption it does not have). This function itself
+      // always answers.
+      for (final cov in <({int pq, int total})?>[
+        null,
+        (pq: 0, total: 10),
+        (pq: 8, total: 10),
+        (pq: 10, total: 10),
+      ]) {
+        for (final enc in [true, false]) {
+          expect(pqBadgeStateFor(pqEncrypted: enc, pqCoverage: cov),
+              isA<PqBadgeState>(), reason: 'cov=$cov enc=$enc');
+        }
+      }
     });
 
     test('coverage overrides an optimistic pqEncrypted flag', () {

@@ -1301,6 +1301,8 @@ const List<String> kAppStringsCatalog = <String>[
   'some members',
   'Quantum-resistant encryption',
   'Partly quantum-resistant',
+  'Not quantum-resistant',
+  'This message is end-to-end encrypted with the standard NIP-44 secp256k1 key exchange, and nobody but the participants can read it today. It has no post-quantum layer, so an adversary recording it now could decrypt it with a future quantum computer. Messages sent before either side upgraded stay this way permanently — the ciphertext already exists and cannot be re-sealed. New messages go quantum-resistant automatically once both sides have published a post-quantum key.',
   'This message was quantum-resistant to ',
   '. The rest haven\'t published a post-quantum key, so their copies used standard NIP-44 encryption only — and because those copies carry the same message, treat this one as classically encrypted overall.',
   'This message\'s key exchange combined the standard NIP-44 secp256k1 ECDH with ML-KEM-768, a post-quantum key encapsulation mechanism. Both must be broken to recover the message, so it stays confidential against an adversary recording traffic today to decrypt with a future quantum computer. The sender\'s signature is still secp256k1 — this protects confidentiality, not authentication.',
