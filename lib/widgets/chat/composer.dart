@@ -33,7 +33,7 @@ import '../../features/groups/group_logic.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/dev_nsec_modal.dart';
 import '../../features/messages/format/message_content.dart'
-    show InlineEmojiText, MessageContent, openFullscreenMedia, proxiedMedia;
+    show InlineEmojiText, openFullscreenMedia, proxiedMedia;
 import '../../features/messages/format/nym_format.dart' show NymFormat;
 import '../../features/messages/inline_network_image.dart';
 import '../../features/nymbot/nymbot_models.dart';
@@ -48,6 +48,7 @@ import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../context_menu/interaction_hooks.dart';
 import 'composer_format.dart';
+import 'composer_markdown.dart';
 import 'message_row.dart' show GroupInfoMember, encodeGroupInfoSystemMessage;
 
 /// Session-wide per-conversation unsent drafts — the PWA's app-level
@@ -202,12 +203,21 @@ class _ComposerState extends ConsumerState<Composer> {
   // formatting a message never requires knowing the syntax (`#formatInputBtn` /
   // `.format-toolbar`, rich-compose.js). The draft itself stays plain markdown.
   bool _formatToolbarOpen = false;
-  bool _formatPreviewOpen = false;
 
   /// Bytes of media attached this session, keyed by the hosted URL they were
   /// uploaded to — lets the attachment strip draw a thumbnail without
   /// re-downloading what we just sent up.
   final Map<String, Uint8List> _localMediaPreviews = {};
+
+  /// Every URL we uploaded this session -> whether it is a video.
+  ///
+  /// Blossom is content-addressed and several servers return a bare
+  /// `https://host/<sha256>` with no file extension, which the media regex
+  /// cannot recognise. We know these are media because we just uploaded them,
+  /// so they are matched by identity — see [composerMediaMatches]. Videos are
+  /// included even though [_localMediaPreviews] has no bytes for them, since
+  /// the strip still needs to know they are attachments.
+  final Map<String, bool> _uploadedMedia = {};
 
   /// One entry per file in the current upload batch that hasn't landed yet, so
   /// the strip shows a dimmed placeholder the instant files are picked.
@@ -655,6 +665,9 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   void _onFocusChanged() {
+    // The markdown markers in the field follow the caret, and a field nobody is
+    // typing in has no caret to follow.
+    _controller.composerFocused = _focus.hasFocus;
     if (mounted) setState(() {});
   }
 
@@ -676,14 +689,10 @@ class _ComposerState extends ConsumerState<Composer> {
     _prefs = prefs;
     _recents = EmojiRecentsStore(prefs).load();
     _translateFavorites = _loadTranslateFavorites(prefs);
-    // Toolbar/preview visibility persist under the same keys the PWA uses.
+    // Toolbar visibility persists under the same key the PWA uses.
     final toolbar = prefs.getBool(kFormatToolbarKey) ?? false;
-    final preview = prefs.getBool(kFormatPreviewKey) ?? false;
-    if (mounted && (toolbar != _formatToolbarOpen || preview != _formatPreviewOpen)) {
-      setState(() {
-        _formatToolbarOpen = toolbar;
-        _formatPreviewOpen = preview;
-      });
+    if (mounted && toolbar != _formatToolbarOpen) {
+      setState(() => _formatToolbarOpen = toolbar);
     }
     return prefs;
   }
@@ -1451,6 +1460,7 @@ class _ComposerState extends ConsumerState<Composer> {
         // Hand this file's bytes to its hosted URL so the thumbnail carries
         // straight over from placeholder to attachment without flickering.
         if (!isVideo) _localMediaPreviews[url] = bytes;
+        _uploadedMedia[url] = isVideo;
         _uploadingPreviews = _uploadingPreviews.skip(1).toList();
       });
     }
@@ -1594,7 +1604,9 @@ class _ComposerState extends ConsumerState<Composer> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (_uploadProgress != null) _uploadBar(context),
+            // The upload bar now lives inside the composer's panel stack,
+            // immediately under the media strip (see [_formatPanels]), so the
+            // preview of what is uploading sits above its own progress.
             widget.compact
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2060,6 +2072,11 @@ class _ComposerState extends ConsumerState<Composer> {
       maxLines: _popout ? 12 : flatMaxLines,
       minLines: 1,
       textInputAction: TextInputAction.newline,
+      // A markdown block marker is painted out of existence, so a plain
+      // Backspace would eat it one invisible character at a time. This takes
+      // the whole marker (or unwraps the whole fence) instead; every other
+      // edit passes straight through.
+      inputFormatters: const [RichMarkerDeleteFormatter()],
       onChanged: (_) {
         _onInputChanged();
         // Emit a typing indicator on real keystrokes (PWA sends kind-69420
@@ -2214,12 +2231,6 @@ class _ComposerState extends ConsumerState<Composer> {
     await prefs.setBool(kFormatToolbarKey, _formatToolbarOpen);
   }
 
-  Future<void> _toggleFormatPreview() async {
-    setState(() => _formatPreviewOpen = !_formatPreviewOpen);
-    final prefs = await _ensurePrefs();
-    await prefs.setBool(kFormatPreviewKey, _formatPreviewOpen);
-  }
-
   /// Rewrite the draft with [tool] applied to the current selection (or the word
   /// under the caret when nothing is selected), then restore focus so the user
   /// can keep typing inside the delimiters that were just inserted.
@@ -2246,7 +2257,8 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Drop one attachment from the draft (the ✕ on a thumbnail).
   void _removeAttachment(int index) {
-    final out = removeComposerMedia(_controller.text, index);
+    final out = removeComposerMedia(_controller.text, index,
+        knownMedia: _uploadedMedia);
     _controller.value = TextEditingValue(
       text: out.text,
       selection: TextSelection.collapsed(offset: out.start),
@@ -2256,13 +2268,17 @@ class _ComposerState extends ConsumerState<Composer> {
   }
 
   /// The panel stack that sits between the quote/edit chip and the field:
-  /// attachments on top, then the live preview, then the toolbar. Returns null
-  /// when nothing is showing so the composer keeps its normal height.
+  /// attachments on top, then the upload bar, then the toolbar. There is no
+  /// preview panel — the field renders the formatting itself. Returns null when
+  /// nothing is showing so the composer keeps its normal height.
   Widget? _formatPanels(BuildContext context) {
-    final c = context.nym;
-    final matches = composerMediaMatches(_controller.text);
+    final matches =
+        composerMediaMatches(_controller.text, knownMedia: _uploadedMedia);
     final panels = <Widget>[];
 
+    // Order matters: the strip goes in FIRST so the preview of what is being
+    // uploaded sits directly above its own progress bar, and the bar drops away
+    // beneath it the moment the upload lands.
     if (matches.isNotEmpty || _uploadingPreviews.isNotEmpty) {
       panels.add(ComposerMediaStrip(
         matches: matches,
@@ -2285,38 +2301,10 @@ class _ComposerState extends ConsumerState<Composer> {
       ));
     }
 
-    if (_formatToolbarOpen && _formatPreviewOpen) {
-      final draft = _draftText();
-      panels.add(Container(
-        constraints: const BoxConstraints(maxHeight: 140),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: c.bgTertiary,
-          border: Border.all(color: c.glassBorder),
-          borderRadius: NymRadius.rmd,
-        ),
-        child: SingleChildScrollView(
-          child: draft.trim().isEmpty
-              ? Text(
-                  tr('Nothing to preview yet'),
-                  style: TextStyle(
-                      color: c.textDim,
-                      fontSize: 12,
-                      fontStyle: FontStyle.italic),
-                )
-              // The very same renderer the message list uses, so the preview is
-              // a faithful "what you get".
-              : MessageContent(content: draft),
-        ),
-      ));
-    }
+    if (_uploadProgress != null) panels.add(_uploadBar(context));
 
     if (_formatToolbarOpen) {
-      panels.add(FormatToolbar(
-        onTool: _applyFormatTool,
-        previewOpen: _formatPreviewOpen,
-        onTogglePreview: _toggleFormatPreview,
-      ));
+      panels.add(FormatToolbar(onTool: _applyFormatTool));
     }
 
     if (panels.isEmpty) return null;
@@ -3780,11 +3768,28 @@ class EmojiSentinelController extends TextEditingController {
     _nextSentinel = _kSentinelBase;
   }
 
-  /// Paints the editing text: each sentinel char becomes the custom-emoji image
-  /// (the SAME construction [InlineEmojiText] / the message `CustomEmojiNode` use
-  /// — `InlineNetworkImage(url: proxiedMedia(url, emoji:true), …)` so the composer
-  /// emoji is pixel-identical to the rendered-message one), every other run is a
-  /// normal [TextSpan] using the passed [style].
+  /// Whether the field owning this controller has focus. Drives nothing but the
+  /// markdown markers: they follow the caret, and a field nobody is typing in
+  /// has no caret to follow, so they stay hidden. Set from the composer's focus
+  /// listener.
+  bool get composerFocused => _composerFocused;
+  bool _composerFocused = false;
+  set composerFocused(bool value) {
+    if (_composerFocused == value) return;
+    _composerFocused = value;
+    notifyListeners();
+  }
+
+  /// Paints the editing text: markdown renders as formatted text with its
+  /// delimiters hidden (see composer_markdown.dart), and each sentinel char
+  /// becomes the custom-emoji image (the SAME construction [InlineEmojiText] /
+  /// the message `CustomEmojiNode` use — `InlineNetworkImage(url:
+  /// proxiedMedia(url, emoji:true), …)` so the composer emoji is pixel-identical
+  /// to the rendered-message one). Every other run is a normal [TextSpan].
+  ///
+  /// The spans always cover the draft character for character — a hidden
+  /// delimiter is painted at zero size rather than dropped — so the offsets the
+  /// field reports keep addressing [text], which is what gets sent.
   @override
   TextSpan buildTextSpan({
     required BuildContext context,
@@ -3792,18 +3797,90 @@ class EmojiSentinelController extends TextEditingController {
     required bool withComposing,
   }) {
     final src = text;
-    // Fast path: no sentinel of either kind → defer to the framework's default
-    // (also keeps composing-region underlines intact while typing plain text).
-    if ((_sentinelToCode.isEmpty && _sentinelToMention.isEmpty) ||
-        !_rxSentinel.hasMatch(src)) {
+    final hasSentinel = (_sentinelToCode.isNotEmpty ||
+            _sentinelToMention.isNotEmpty) &&
+        _rxSentinel.hasMatch(src);
+    // Never restyle mid-composition: the framework's own span carries the
+    // composing-region underline, and an IME has enough to contend with.
+    final composing =
+        withComposing && value.composing.isValid && !value.composing.isCollapsed;
+    final runs = composing ? const <RichRun>[] : parseRichFormat(src);
+    final formatted = hasRichFormat(runs);
+    // Fast path: nothing to paint → defer to the framework's default (also keeps
+    // composing-region underlines intact while typing plain text).
+    if (!hasSentinel && !formatted) {
       return super.buildTextSpan(
           context: context, style: style, withComposing: withComposing);
     }
     final baseStyle = style ?? const TextStyle();
+    final children = <InlineSpan>[];
+    if (formatted) {
+      final sel = value.selection;
+      final caret = _composerFocused && sel.isValid ? sel : null;
+      _emitRuns(
+        runs: runs,
+        src: src,
+        style: baseStyle,
+        fieldStyle: baseStyle,
+        colors: context.nym,
+        caretStart: caret?.start ?? -1,
+        caretEnd: caret?.end ?? -1,
+        out: children,
+      );
+    } else {
+      _emitPlain(src, 0, src.length, baseStyle, children);
+    }
+    return TextSpan(style: baseStyle, children: children);
+  }
+
+  /// Walks the parse tree, layering each run's style and emitting its delimiters
+  /// around its children.
+  void _emitRuns({
+    required List<RichRun> runs,
+    required String src,
+    required TextStyle style,
+    required TextStyle fieldStyle,
+    required NymColors colors,
+    required int caretStart,
+    required int caretEnd,
+    required List<InlineSpan> out,
+  }) {
+    for (final run in runs) {
+      if (run.isText) {
+        _emitPlain(src, run.start, run.end, style, out);
+        continue;
+      }
+      final revealed = run.revealedAt(caretStart, caretEnd);
+      final inner = richRunStyle(style, run.type, colors);
+      final mark = richMarkStyle(inner, fieldStyle, revealed, colors,
+          keepSpace: run.emptyBody);
+      if (run.open.isNotEmpty) {
+        out.add(TextSpan(text: run.open, style: mark));
+      }
+      _emitRuns(
+        runs: run.children,
+        src: src,
+        style: inner,
+        fieldStyle: fieldStyle,
+        colors: colors,
+        caretStart: caretStart,
+        caretEnd: caretEnd,
+        out: out,
+      );
+      if (run.close.isNotEmpty) {
+        out.add(TextSpan(text: run.close, style: mark));
+      }
+    }
+  }
+
+  /// `src[from, to)` as spans: sentinels become their emoji image or mention
+  /// chip, everything else is one [TextSpan] in [baseStyle].
+  void _emitPlain(String src, int from, int to, TextStyle baseStyle,
+      List<InlineSpan> children) {
+    if (to <= from) return;
     // 1.4× the font size, square — `div.message-input .custom-emoji
     // { width/height: 1.4em }` (styles-chat.css:1703-1708).
     final side = (baseStyle.fontSize ?? 14) * 1.4;
-    final children = <InlineSpan>[];
     final buf = StringBuffer();
 
     void flushText() {
@@ -3812,7 +3889,7 @@ class EmojiSentinelController extends TextEditingController {
       buf.clear();
     }
 
-    for (final rune in src.runes) {
+    for (final rune in src.substring(from, to).runes) {
       final isSentinel = rune >= _kSentinelBase && rune <= _kSentinelEnd;
       final chStr = isSentinel ? String.fromCharCode(rune) : null;
       final code = chStr == null ? null : _sentinelToCode[chStr];
@@ -3864,7 +3941,6 @@ class EmojiSentinelController extends TextEditingController {
       ));
     }
     flushText();
-    return TextSpan(style: baseStyle, children: children);
   }
 }
 

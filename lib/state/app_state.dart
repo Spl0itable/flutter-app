@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1254,6 +1255,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// 719, 1815).
   final Map<String, int> _leftGroupTimes = <String, int>{};
 
+  /// Random per-session component of every optimistic message id.
+  ///
+  /// [_localSeq] restarts at 0 on every launch, so an id built from the counter
+  /// alone (`_optim_3`) names a DIFFERENT message in each session. Anything
+  /// still keyed by that id from a previous run — a reaction, most importantly
+  /// — would silently re-attach to whatever message happened to be the fourth
+  /// send this time, in whatever conversation it belonged to. Mixing in a
+  /// per-session nonce makes placeholder ids unique for all time, so a stale
+  /// key can never find a new home.
+  final String _sessionNonce = () {
+    final r = Random.secure();
+    return List.generate(4, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
+        .join();
+  }();
+
   int _nextLocalSeq() => _localSeq++;
   int _nextIngestSeq() => _ingestSeq++;
 
@@ -1906,6 +1922,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (matchIdx >= 0) {
       final ex = list[matchIdx];
       _unindexMessage(ex);
+      final placeholderId = ex.id;
       ex.id = m.id;
       ex.optimistic = false;
       ex.deliveryStatus = DeliveryStatus.sent;
@@ -1916,6 +1933,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
       if (m.ms > 0) ex.ms = m.ms;
       _indexMessage(key, ex);
+      // Carry over any reaction that landed while this row still wore its
+      // placeholder id — someone reacting before our own echo came back. The
+      // PWA does the same on its own id swap (`_migrateReactionKey`,
+      // messages.js:1161). Without it the reaction silently disappears from
+      // the message it belongs to.
+      _migrateReactionKey(placeholderId, ex.id);
       // A read receipt can beat our own optimistic echo's reconciliation: the
       // reader acks the published event id while our placeholder still carries
       // its `_optim_*` id, so the buffered readers had no own message to mirror
@@ -2222,6 +2245,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     _recomputeReactionTally(messageId);
     _scheduleEmit();
+  }
+
+  /// Moves reaction state from [oldId] to [newId], merging into anything
+  /// already there, and recomputes both tallies.
+  ///
+  /// Used when an optimistic row adopts its real event id: a reaction that
+  /// arrived in the gap was filed under the placeholder, and would otherwise be
+  /// orphaned there — invisible on the message it targets, and left behind in
+  /// the store.
+  void _migrateReactionKey(String oldId, String newId) {
+    if (oldId.isEmpty || newId.isEmpty || oldId == newId) return;
+    final from = _reactors.remove(oldId);
+    if (from == null || from.isEmpty) return;
+    final into = _reactors.putIfAbsent(newId, () => {});
+    from.forEach((emoji, reactors) {
+      into.putIfAbsent(emoji, () => {}).addAll(reactors);
+    });
+    // The dedup keys embed the message id, so re-file them too or a later
+    // add/remove for the same (emoji, reactor) would compare against nothing
+    // and could re-apply out of order.
+    final stale = _reactionLastAction.keys
+        .where((k) => k.startsWith('$oldId:'))
+        .toList();
+    for (final k in stale) {
+      final ts = _reactionLastAction.remove(k);
+      if (ts != null) _reactionLastAction['$newId:${k.substring(oldId.length + 1)}'] = ts;
+    }
+    _recomputeReactionTally(oldId);
+    _recomputeReactionTally(newId);
   }
 
   /// Rebuilds [AppState.reactions] for [messageId] from the reactor map, marking
@@ -4297,6 +4349,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// the reactor map and recomputes tallies (boot from CacheStore).
   void hydrateReactions(Map<String, List<dynamic>> entriesByMessage) {
     entriesByMessage.forEach((messageId, entries) {
+      // Drop placeholder-keyed entries written by earlier builds. Their ids are
+      // session-local, so restoring one would graft a stranger's reaction onto
+      // an unrelated message of ours — see [_sessionNonce].
+      if (messageId.startsWith('_optim_')) return;
       final byEmoji = _reactors.putIfAbsent(messageId, () => {});
       for (final e in entries) {
         if (e is! List || e.length < 2) continue;
@@ -4319,6 +4375,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
   Map<String, List<dynamic>> reactionEntriesSnapshot() {
     final out = <String, List<dynamic>>{};
     _reactors.forEach((messageId, byEmoji) {
+      // An unreconciled placeholder id means nothing in the next session, and
+      // persisting it is what let a reaction cross message and conversation
+      // boundaries. Messages themselves are already filtered this way on the
+      // way to disk (nostr_controller `_optim_` guards); reactions were not.
+      if (messageId.startsWith('_optim_')) return;
       final entries = <dynamic>[];
       byEmoji.forEach((emoji, reactors) {
         entries.add([
@@ -4534,7 +4595,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final author = authorOverride ?? state.selfNym;
 
     final m = Message(
-      id: '_optim_${_nextLocalSeq().toRadixString(36)}',
+      id: '_optim_${_sessionNonce}_${_nextLocalSeq().toRadixString(36)}',
       pubkey: pubkey,
       author: author,
       content: trimmed,
@@ -4682,6 +4743,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // no-op on it (the ingest merge path already does this — see
       // [_ingestChannelMessage]).
       _unindexMessage(m);
+      final placeholderId = m.id;
       m.id = realId;
       if (realCreatedAt != null && realCreatedAt > 0) {
         m.createdAt = realCreatedAt;
@@ -4690,6 +4752,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (realMs != null && realMs > 0) m.ms = realMs;
       m.optimistic = false;
       _indexMessage(key, m);
+      // Carry over a reaction that landed while this row still wore its
+      // placeholder id — the same swap the ingest merge path performs.
+      _migrateReactionKey(placeholderId, m.id);
       // Collapse any stale FAILED placeholder of the same content left by an
       // earlier failed send the user retyped — the channel dual-bubble the user
       // reported (see [_dropFailedOptimisticTwins]). This is the common ordering:
