@@ -4135,11 +4135,21 @@ class NostrController {
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nowSec = nowMs ~/ 1000;
-    if (_pqRegistry.isKnownNymchatClient(pubkey, nowSec: nowSec)) {
+    // Only an entry WITH A KEY ends the search. A keyless one says "this is a
+    // Nymchat client that published no post-quantum key" — true when we
+    // recorded it, and recorded for a week. A peer who was on an older build,
+    // or signed in with an extension, and has since switched to their nsec
+    // would go on getting classical messages for the rest of that week if this
+    // returned early on the stale answer. The point of this lookup is the key,
+    // so not having one is a reason to look again, not to stop.
+    if (_pqRegistry.keyFor(pubkey, nowSec: nowSec, enabled: true) != null) {
       return Future<void>.value();
     }
     final existing = _pqLookups[pubkey];
     if (existing != null) return existing;
+    // Re-checking is rate-limited rather than free: a peer who really has no
+    // key — a Bitchat user, a signer login — must not be re-queried on every
+    // send.
     final missedAt = _pqLookupMisses[pubkey];
     if (missedAt != null && nowMs - missedAt < _pqMissTtlMs) {
       return Future<void>.value();
@@ -4147,7 +4157,10 @@ class NostrController {
     final f = service.fetchPqAnnouncement(pubkey).whenComplete(() {
       _pqLookups.remove(pubkey);
       final sec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      if (!_pqRegistry.isKnownNymchatClient(pubkey, nowSec: sec)) {
+      // A lookup that came back without a key counts as a miss, so the rate
+      // limit applies to it — otherwise a keyless peer would be re-queried on
+      // every send now that a keyless entry no longer stops the search.
+      if (_pqRegistry.keyFor(pubkey, nowSec: sec, enabled: true) == null) {
         _pqLookupMisses[pubkey] = DateTime.now().millisecondsSinceEpoch;
       } else {
         _pqLookupMisses.remove(pubkey);
