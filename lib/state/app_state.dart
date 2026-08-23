@@ -4783,6 +4783,27 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
   }
 
+  /// Records what encryption an own message actually went out under, on the
+  /// optimistic echo that is already on screen.
+  ///
+  /// The echo is created before the send path knows: the recipient's key is
+  /// looked up, and for a group the fan-out counts coverage as it builds the
+  /// wraps. Without this the badge waits for our own self-copy to round-trip
+  /// and be unwrapped, so a sent message reads as classical until the app is
+  /// restarted and the conversation reopened.
+  void markOwnMessagePq(String nymMessageId,
+      {bool? pqEncrypted, ({int pq, int total})? coverage}) {
+    for (final list in state.messages.values) {
+      final idx = list.indexWhere(
+          (m) => m.isOwn && m.nymMessageId == nymMessageId);
+      if (idx < 0) continue;
+      if (pqEncrypted != null) list[idx].pqEncrypted = pqEncrypted;
+      if (coverage != null) list[idx].pqCoverage = coverage;
+      _scheduleEmit();
+      return;
+    }
+  }
+
   /// Injects a centered system/action pill into a conversation's message flow,
   /// mirroring `displaySystemMessage(content, type)` (`messages.js:1511`). Routes
   /// to [storageKey] when given, else the active view. Pass [action] for the

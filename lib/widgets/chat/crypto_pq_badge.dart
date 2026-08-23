@@ -141,10 +141,16 @@ class _ShieldPainter extends CustomPainter {
     final orbitRect = Rect.fromCenter(
         center: const Offset(12, 12), width: 12.4, height: 5.2);
     final orbit = Path()..addOval(orbitRect);
-    final rotated = orbit.transform((Matrix4.identity()
-          ..translateByDouble(12.0, 12.0, 0.0, 1.0)
-          ..rotateZ(-32 * 3.1415926535897932 / 180)
-          ..translateByDouble(-12.0, -12.0, 0.0, 1.0))
+    // Composed by multiplication rather than the mutating helpers: the
+    // translate/scale ones are deprecated on current SDKs and their
+    // replacements do not exist on the oldest this package supports
+    // (pubspec: sdk ^3.6.0), so either spelling breaks one end of the range.
+    // These constructors are stable across all of it.
+    const rotateAbout = 12.0;
+    final rotated = orbit.transform((Matrix4.translationValues(
+                rotateAbout, rotateAbout, 0.0) *
+            Matrix4.rotationZ(-32 * 3.1415926535897932 / 180) *
+            Matrix4.translationValues(-rotateAbout, -rotateAbout, 0.0))
         .storage);
 
     if (state == PqBadgeState.partial) {

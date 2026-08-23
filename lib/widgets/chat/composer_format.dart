@@ -568,27 +568,65 @@ class _FormatToolButtonState extends State<_FormatToolButton> {
   }
 }
 
+/// What an attachment is doing. The tile renders from this, so the wheel is
+/// per file rather than one bar for the batch.
+enum ComposerAttachmentStatus { uploading, done, failed }
+
+/// One file the user attached, with its own lifecycle.
+///
+/// This — not the draft text — is what decides which media a message carries.
+/// URLs used to be appended to the input as each upload landed and the strip
+/// parsed them back out, which is what made a finished upload's preview vanish
+/// and put a wall of links in front of the user mid-sentence.
+class ComposerAttachment {
+  ComposerAttachment({
+    required this.id,
+    required this.isVideo,
+    required this.contentType,
+    this.bytes,
+    this.status = ComposerAttachmentStatus.uploading,
+    this.url = '',
+    this.error = '',
+  });
+
+  final int id;
+  final bool isVideo;
+  final String contentType;
+
+  /// Read once and kept, so a failed upload can be retried without re-picking.
+  Uint8List? bytes;
+  ComposerAttachmentStatus status;
+  String url;
+  String error;
+
+  bool get isDone => status == ComposerAttachmentStatus.done && url.isNotEmpty;
+}
+
 /// `.media-preview-strip` — a horizontal row of attachment thumbnails with a ✕
-/// on each, plus dimmed placeholders for uploads still in flight.
+/// on each. An in-flight upload spins on its own tile; a failed one turns into
+/// its own retry button.
 class ComposerMediaStrip extends StatelessWidget {
   const ComposerMediaStrip({
     super.key,
     required this.matches,
-    required this.uploading,
+    required this.attachments,
     required this.onRemove,
     required this.onOpen,
+    this.onRemoveAttachment,
+    this.onRetry,
     this.localPreviews = const {},
   });
 
-  /// Attachments currently referenced by the draft.
+  /// Attachments currently referenced by the draft (a pasted or typed URL).
   final List<ComposerMediaMatch> matches;
 
-  /// One entry per in-flight upload: the bytes already read for the upload plus
-  /// whether the file is a video.
-  final List<({Uint8List? bytes, bool isVideo})> uploading;
+  /// Files attached through the picker, in the order they were added.
+  final List<ComposerAttachment> attachments;
 
   final void Function(int index) onRemove;
   final void Function(ComposerMediaMatch match) onOpen;
+  final void Function(ComposerAttachment a)? onRemoveAttachment;
+  final void Function(ComposerAttachment a)? onRetry;
 
   /// Hosted URL → the bytes we uploaded, for media attached this session.
   /// Previewing from those bytes avoids re-downloading what we just sent up and
@@ -612,7 +650,8 @@ class ComposerMediaStrip extends StatelessWidget {
           children: [
             for (var i = 0; i < matches.length; i++)
               Padding(
-                padding: EdgeInsets.only(right: i == matches.length - 1 && uploading.isEmpty ? 0 : 6),
+                padding: EdgeInsets.only(
+                    right: i == matches.length - 1 && attachments.isEmpty ? 0 : 6),
                 child: _MediaThumb(
                   url: matches[i].url,
                   bytes: localPreviews[matches[i].url],
@@ -621,15 +660,20 @@ class ComposerMediaStrip extends StatelessWidget {
                   onOpen: () => onOpen(matches[i]),
                 ),
               ),
-            for (var i = 0; i < uploading.length; i++)
+            for (var i = 0; i < attachments.length; i++)
               Padding(
                 padding:
-                    EdgeInsets.only(right: i == uploading.length - 1 ? 0 : 6),
+                    EdgeInsets.only(right: i == attachments.length - 1 ? 0 : 6),
                 child: _MediaThumb(
-                  url: '',
-                  bytes: uploading[i].bytes,
-                  isVideo: uploading[i].isVideo,
-                  uploading: true,
+                  url: attachments[i].url,
+                  bytes: attachments[i].bytes,
+                  isVideo: attachments[i].isVideo,
+                  status: attachments[i].status,
+                  error: attachments[i].error,
+                  onRemove: onRemoveAttachment == null
+                      ? null
+                      : () => onRemoveAttachment!(attachments[i]),
+                  onRetry: onRetry == null ? null : () => onRetry!(attachments[i]),
                 ),
               ),
           ],
@@ -646,7 +690,9 @@ class _MediaThumb extends StatelessWidget {
     required this.isVideo,
     this.onRemove,
     this.onOpen,
-    this.uploading = false,
+    this.onRetry,
+    this.status = ComposerAttachmentStatus.done,
+    this.error = '',
   });
 
   final String url;
@@ -654,7 +700,12 @@ class _MediaThumb extends StatelessWidget {
   final bool isVideo;
   final VoidCallback? onRemove;
   final VoidCallback? onOpen;
-  final bool uploading;
+  final VoidCallback? onRetry;
+  final ComposerAttachmentStatus status;
+  final String error;
+
+  bool get _uploading => status == ComposerAttachmentStatus.uploading;
+  bool get _failed => status == ComposerAttachmentStatus.failed;
 
   @override
   Widget build(BuildContext context) {
@@ -692,10 +743,12 @@ class _MediaThumb extends StatelessWidget {
       );
     }
 
-    return GestureDetector(
-      onTap: uploading ? null : onOpen,
+    final tile = GestureDetector(
+      // A failed tile IS the retry control, so one file failing never costs the
+      // user the rest of the batch.
+      onTap: _uploading ? null : (_failed ? onRetry : onOpen),
       child: MouseRegion(
-        cursor: uploading ? MouseCursor.defer : SystemMouseCursors.click,
+        cursor: _uploading ? MouseCursor.defer : SystemMouseCursors.click,
         child: SizedBox(
           width: 56,
           height: 56,
@@ -705,8 +758,8 @@ class _MediaThumb extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 Container(color: Colors.black.withValues(alpha: 0.25)),
-                Opacity(opacity: uploading ? 0.4 : 1.0, child: media),
-                if (uploading)
+                Opacity(opacity: _uploading || _failed ? 0.4 : 1.0, child: media),
+                if (_uploading)
                   const Center(
                     child: SizedBox(
                       width: 18,
@@ -714,7 +767,23 @@ class _MediaThumb extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   ),
-                if (!uploading && onRemove != null)
+                if (_failed)
+                  Center(
+                    child: Icon(Icons.refresh_rounded,
+                        size: 20, color: c.danger),
+                  ),
+                if (_failed)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: c.danger, width: 1.5),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!_uploading && onRemove != null)
                   Positioned(
                     top: 2,
                     right: 2,
@@ -740,6 +809,16 @@ class _MediaThumb extends StatelessWidget {
           ),
         ),
       ),
+    );
+
+    // The reason rides on the tile, not in a toast naming a file already off
+    // screen.
+    if (!_failed) return tile;
+    return Tooltip(
+      message: error.isEmpty
+          ? tr('Tap to retry')
+          : '$error — ${tr('Tap to retry')}',
+      child: tile,
     );
   }
 
