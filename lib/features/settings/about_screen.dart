@@ -65,11 +65,16 @@ Future<String?> _fetchLiveVersion() async {
 /// the Android build check reads (`SIGN_WITH` in the publish workflow, shown as
 /// the developer on zapstore.dev/apps/com.nym.bar).
 ///
-/// Empty until it is filled in, and the panel says the check is unconfigured
-/// rather than reporting the build as unverified. It has to be pinned: anyone
-/// can publish a kind-3063 event claiming any hash, so an unpinned lookup would
-/// accept a hash from whoever wrote to the relay last.
-const String kZapstorePublisherPubkey = '';
+/// The same key that signs the warrant canary, deliberately: one key to trust,
+/// published in two places, and a reader who has verified one has verified the
+/// other. Kept as its own constant rather than an alias so that if the two ever
+/// diverge, changing one does not silently change the other.
+///
+/// It has to be pinned. Zapstore's relay is public, so anyone can publish a
+/// kind-3063 event claiming any hash; an unpinned lookup would accept whatever
+/// was written to the relay last.
+const String kZapstorePublisherPubkey =
+    'd49a9023a21dba1b3c8306ca369bf3243d8b44b8f0b6d1196607f7b0990fa8df';
 
 /// Warrant-canary source + pinned developer pubkey (canary-verify.js:5-6).
 const String _kCanaryUrl =
