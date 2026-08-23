@@ -64,6 +64,27 @@ void main() {
     });
   });
 
+  // A message whose classical copy arrived first must upgrade in place once its
+  // hybrid copy lands -- the same rule the verification lock already follows.
+  group('dedup upgrades the shield', () {
+    final appState = File('lib/state/app_state.dart').readAsStringSync();
+
+    test('a later post-quantum copy upgrades the row', () {
+      expect(appState.contains('m.pqEncrypted && !dup.pqEncrypted'), isTrue);
+    });
+
+    test('and coverage carries over when the row had none', () {
+      expect(appState.contains('m.pqCoverage != null && dup.pqCoverage == null'),
+          isTrue);
+    });
+
+    // Upgrade-only: the Bitchat copy of the same text arriving later says
+    // nothing about how the Nymchat one was sealed.
+    test('it never downgrades', () {
+      expect(appState.contains('dup.pqEncrypted = false'), isFalse);
+    });
+  });
+
   // The wiring: both send paths must write the result back onto the echo, and
   // the group one must take the fan-out's own count rather than guessing.
   group('send paths write back', () {
