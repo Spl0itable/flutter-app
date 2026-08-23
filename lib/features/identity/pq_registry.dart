@@ -283,6 +283,54 @@ class PqPolicy {
   }
 }
 
+/// Which transports a 1:1 PM should use. Mirrors the PWA's `pqPmPlan`
+/// (js/modules/pq.js) — both apps must make the same call or a peer receives
+/// a wrap it cannot open, or worse, two copies of the same plaintext.
+class PqPmPlan {
+  const PqPmPlan({
+    required this.kemPublicKey,
+    required this.bitchat,
+    required this.nym,
+  });
+
+  /// Non-null when the recipient has a live announced ML-KEM key, which is
+  /// proof they can decrypt a hybrid wrap.
+  final Uint8List? kemPublicKey;
+
+  /// Also send a Bitchat-format wrap.
+  final bool bitchat;
+
+  /// Send the Nymchat-format wrap (post-quantum when [pq], classical
+  /// otherwise).
+  final bool nym;
+
+  bool get pq => kemPublicKey != null;
+
+  /// Decides the transports for [recipientPubkey].
+  ///
+  /// Post-quantum REPLACES the classical Nymchat wrap; it never accompanies
+  /// it. Shipping a classical copy of the same plaintext alongside would hand
+  /// a future quantum attacker the easier target and make the UI badge a lie.
+  ///
+  /// That is also why it suppresses the speculative Bitchat wrap. A published,
+  /// signed `nym-pq` announcement is far stronger evidence that a peer runs
+  /// Nymchat than the [knownBitchat] / [knownNym] heuristic, which only learns
+  /// from messages already received — so a peer we have never heard from but
+  /// who HAS announced must not also get a plaintext-equivalent Bitchat copy.
+  static PqPmPlan decide({
+    required Uint8List? recipientKemKey,
+    required bool knownBitchat,
+    required bool knownNym,
+  }) {
+    final unknown = !knownBitchat && !knownNym;
+    return PqPmPlan(
+      kemPublicKey: recipientKemKey,
+      bitchat: (knownBitchat || unknown) && recipientKemKey == null,
+      nym: knownNym || unknown || recipientKemKey != null,
+    );
+  }
+}
+
 /// Our own ML-KEM keys for the current epoch plus a bounded window of previous
 /// ones, so a wrap sent just before a rotation still opens. Ordered
 /// newest-first, matching the PWA's `pqSelfCandidates`.

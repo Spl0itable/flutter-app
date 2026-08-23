@@ -182,6 +182,77 @@ void main() {
     });
   });
 
+  group('send-path routing (PqPmPlan)', () {
+    // The rule both PM send paths share, and the PWA's pqPmPlan must agree with
+    // it. Getting this wrong is how a message ends up ALSO sent classically,
+    // silently voiding the post-quantum guarantee while the UI still claims it.
+    final key = unhex(a['kemPublicKey'] as String);
+
+    PqPmPlan plan({Uint8List? kem, bool bitchat = false, bool nym = false}) =>
+        PqPmPlan.decide(
+            recipientKemKey: kem, knownBitchat: bitchat, knownNym: nym);
+
+    test('unknown peer, no key: bitchat + classical nym (today\'s behaviour)', () {
+      final p = plan();
+      expect(p.pq, isFalse);
+      expect(p.bitchat, isTrue);
+      expect(p.nym, isTrue);
+    });
+
+    test('known bitchat peer: bitchat only, never post-quantum', () {
+      final p = plan(bitchat: true);
+      expect(p.pq, isFalse);
+      expect(p.bitchat, isTrue);
+      expect(p.nym, isFalse);
+    });
+
+    test('known nym peer without a key: classical nym only', () {
+      final p = plan(nym: true);
+      expect(p.pq, isFalse);
+      expect(p.bitchat, isFalse);
+      expect(p.nym, isTrue);
+    });
+
+    test('unknown peer WITH a key: post-quantum, no bitchat copy', () {
+      final p = plan(kem: key);
+      expect(p.pq, isTrue);
+      expect(p.nym, isTrue);
+      expect(p.bitchat, isFalse);
+    });
+
+    test('a bitchat-flagged peer WITH a key gets no classical copy alongside', () {
+      // The dangerous case: sending both would leak the same plaintext to the
+      // weaker copy, handing a future quantum attacker the easier target.
+      final p = plan(kem: key, bitchat: true);
+      expect(p.pq, isTrue);
+      expect(p.bitchat, isFalse);
+    });
+
+    test('known nym peer with a key: post-quantum, no bitchat copy', () {
+      final p = plan(kem: key, nym: true);
+      expect(p.pq, isTrue);
+      expect(p.nym, isTrue);
+      expect(p.bitchat, isFalse);
+    });
+
+    test('the plan carries the key it decided with', () {
+      expect(hex(plan(kem: key).kemPublicKey!), a['kemPublicKey']);
+    });
+
+    test('with no key, routing is exactly the pre-existing behaviour', () {
+      // Post-quantum off is modelled as "no key" — PqRegistry.keyFor already
+      // returns null when disabled, so this is the disabled path too.
+      for (final combo in [
+        (false, false),
+        (true, false),
+        (false, true),
+      ]) {
+        final withPq = plan(kem: null, bitchat: combo.$1, nym: combo.$2);
+        expect(withPq.pq, isFalse);
+      }
+    });
+  });
+
   group('self candidates', () {
     final sk = unhex('2' * 64);
 

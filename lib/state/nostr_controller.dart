@@ -9,15 +9,19 @@ import '../core/crypto/bech32_codec.dart' as bech32;
 import '../core/crypto/key_format.dart' show normalizePubkeyInput;
 import '../core/crypto/bitchat.dart' as bitchat;
 import '../core/crypto/keys.dart' as keys;
+import '../core/crypto/ml_kem.dart';
 import '../core/crypto/pow.dart' as pow;
+import '../core/crypto/pq.dart' as pq;
 import '../core/crypto/schnorr.dart' as schnorr;
 import '../core/constants/event_kinds.dart';
 import '../core/constants/relays.dart';
 import '../core/constants/storage_keys.dart';
 import '../core/theme/nym_colors.dart';
 import '../core/utils/nym_utils.dart';
+import '../services/api/api_config.dart';
 import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
+import '../features/identity/pq_registry.dart';
 import '../features/mesh/ghost_mode.dart';
 import '../features/mesh/mesh_controller.dart';
 import '../features/commands/command_handler.dart';
@@ -358,6 +362,10 @@ class NostrController {
         secretWrite: _ref.read(identityVaultProvider).secretSet,
       );
 
+      // Post-quantum policy has to be resolved before the first send, and its
+      // first-boot default depends on whether this is an upgrade.
+      _loadPqSettings();
+
       // NIP-46 remote-signer login: restore the persisted session and build a
       // remote signer (no local key). Mirrors the PWA's `signEvent` dispatch by
       // `nostrLoginMethod === 'nip46'` (Identity has pubkey=remotePubkey,
@@ -512,6 +520,7 @@ class NostrController {
         profileAuthors: [
           for (final c in bootState.pmConversations) c.pubkey,
         ],
+        pqAuthors: _pqAuthorList(),
       );
 
       // Live gift-wrap REQ over the restored ephemeral pubkeys (the PWA's
@@ -554,9 +563,12 @@ class NostrController {
       _ref.read(appStateProvider.notifier).onPMConversationAdded = (_) {
         final svc = _service;
         if (svc == null) return;
-        svc.updateCriticalInputs(profileAuthors: [
-          for (final c in _ref.read(appStateProvider).pmConversations) c.pubkey,
-        ]);
+        svc.updateCriticalInputs(
+          profileAuthors: [
+            for (final c in _ref.read(appStateProvider).pmConversations) c.pubkey,
+          ],
+          pqAuthors: _pqAuthorList(),
+        );
       };
 
       // Cross-device storage sync (`/api/storage`). Durable = logged-in
@@ -740,6 +752,11 @@ class NostrController {
     // After catch-up: re-exchange group ephemeral keys if this client was
     // offline long enough that missed rotations may have expired off relays.
     unawaited(_maybeSendGroupKeyResyncs());
+    // (Re)advertise our post-quantum key. Publishing after catch-up rather than
+    // at connect gives our own existing announcement time to arrive first, so
+    // the device roster is merged onto what is already published instead of
+    // clobbering it.
+    unawaited(publishPqAnnouncement());
   }
 
   /// Rebuilds the web of trust from D1 (vouch lists are archived under the
@@ -1467,6 +1484,8 @@ class NostrController {
       final topic = event.tagValue('t');
       if (topic == AppDataTopic.vouches) {
         _ingestVouch(event);
+      } else if (topic == AppDataTopic.postQuantum) {
+        _ingestPqAnnouncement(event);
       } else if (topic == AppDataTopic.poll || topic == AppDataTopic.pollVote) {
         // Live polls/votes from the critical REQ's poll filter (relays.js:
         // 2533-2535) route through the same store ingest the D1 archive
@@ -3038,6 +3057,7 @@ class NostrController {
       wrapId: u.wrapId,
       selfPubkey: self,
       senderVerified: u.senderVerified,
+      pqEncrypted: u.isPq,
     );
     if (m == null) return;
     // Resolve the display author against the users map — the PWA's
@@ -3132,6 +3152,7 @@ class NostrController {
       eventKind: EventKind.giftWrap,
       nymMessageId: nymMessageId,
       senderVerified: u.senderVerified,
+      pqEncrypted: u.isPq,
       deliveryStatus: isOwn ? DeliveryStatus.sent : DeliveryStatus.delivered,
     );
   }
@@ -4083,6 +4104,168 @@ class NostrController {
   /// they get a NIP-17 wrap. An UNKNOWN peer (in neither set) gets BOTH.
   final Set<String> _nymUsers = <String>{};
 
+  /// Announced ML-KEM keys, keyed by pubkey. Holding one for a peer is exactly
+  /// what makes them post-quantum capable (features/identity/pq_registry.dart).
+  final PqRegistry _pqRegistry = PqRegistry();
+
+  /// Whether this identity sends post-quantum and advertises itself as able to
+  /// receive it. Loaded from prefs at boot; see [PqPolicy.initialMode] for why
+  /// an upgrade defaults off.
+  PqMode _pqMode = PqMode.off;
+
+  /// Wall-clock of our last announcement publish, for the daily republish.
+  int _pqLastPublishMs = 0;
+
+  /// Devices carried by our own announcement, so a republish merges onto the
+  /// existing roster rather than clobbering it.
+  List<PqDevice> _pqDevices = const [];
+
+  PqMode get pqMode => _pqMode;
+
+  /// True when post-quantum is both possible and switched on.
+  bool get pqEnabled =>
+      PqPolicy.enabled(privkey: _identity?.privkey, mode: _pqMode);
+
+  /// Post-quantum requires sealing with our own secret key, so extension and
+  /// NIP-46 logins are classical by construction, not by choice.
+  bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey);
+
+  /// Whose post-quantum announcements we watch: our conversation partners,
+  /// group members and ourselves. Unlike the vouch list — a broadcast web of
+  /// trust — post-quantum keys are only needed for peers we actually message,
+  /// so this is scoped rather than fetched wholesale.
+  List<String> _pqAuthorList() {
+    if (!pqCapable) return const [];
+    final out = <String>{};
+    final self = _identity?.pubkey;
+    if (self != null) out.add(self);
+    final state = _ref.read(appStateProvider);
+    for (final c in state.pmConversations) {
+      out.add(c.pubkey);
+    }
+    for (final g in _ref.read(groupsProvider)) {
+      out.addAll(g.members);
+    }
+    return out.toList();
+  }
+
+  /// Ingests a peer's (already signature-verified) `nym-pq` announcement.
+  void _ingestPqAnnouncement(NostrEvent event) {
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    _pqRegistry.ingest(event.pubkey, event.content, nowSec: nowSec);
+    if (event.pubkey == _identity?.pubkey) {
+      final ann = PqAnnouncement.parse(event.content);
+      if (ann != null && !ann.retracted) _pqDevices = ann.devices;
+    }
+  }
+
+  /// Our ML-KEM keypair for the current epoch, or null when we can't derive one.
+  MlKemKeyPair? _pqSelfKeys() {
+    final privkey = _identity?.privkey;
+    if (privkey == null) return null;
+    return pq.pqKeypairFromPrivkey(privkey, _pqEpoch);
+  }
+
+  int _pqEpoch = 0;
+
+  /// Loads the persisted post-quantum settings. On first boot of a
+  /// post-quantum-capable build the default comes from [PqPolicy.initialMode]:
+  /// a fresh install can turn it on safely because no older device can exist
+  /// yet, an upgrade cannot because one might.
+  void _loadPqSettings() {
+    final kv = _ref.read(keyValueStoreProvider);
+    final stored = kv.getString(StorageKeys.pqMode);
+    if (stored == 'on') {
+      _pqMode = PqMode.on;
+    } else if (stored == 'off') {
+      _pqMode = PqMode.off;
+    } else {
+      // `nym_last_online_ts` is written by every prior version, so its presence
+      // marks this as an upgrade rather than a fresh install.
+      final seenBefore = kv.getString('nym_last_online_ts') != null;
+      _pqMode = PqPolicy.initialMode(seenBefore: seenBefore);
+      unawaited(_persistPqMode(_pqMode));
+    }
+    _pqEpoch = int.tryParse(kv.getString(StorageKeys.pqEpoch) ?? '') ?? 0;
+  }
+
+  Future<void> _persistPqMode(PqMode mode) async {
+    await _ref
+        .read(keyValueStoreProvider)
+        .setString(StorageKeys.pqMode, mode == PqMode.on ? 'on' : 'off');
+  }
+
+  /// A stable per-device id for the announcement roster. Random, not derived
+  /// from anything identifying — it only distinguishes our own devices from
+  /// each other in a list only we can act on.
+  Future<String> _pqDeviceId() async {
+    final kv = _ref.read(keyValueStoreProvider);
+    final existing = kv.getString(StorageKeys.pqDeviceId);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final bytes = keys.randomBytes(4);
+    final id = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await kv.setString(StorageKeys.pqDeviceId, id);
+    return id;
+  }
+
+  /// Publishes (or republishes) our announcement, merging this device into the
+  /// roster. No-op when post-quantum is off — turning it off retracts instead.
+  Future<void> publishPqAnnouncement({bool force = false}) async {
+    if (!pqEnabled) return;
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+    if (!force &&
+        _pqLastPublishMs != 0 &&
+        DateTime.now().millisecondsSinceEpoch - _pqLastPublishMs <
+            pqRepublishInterval.inMilliseconds) {
+      return;
+    }
+    final keys = _pqSelfKeys();
+    if (keys == null) return;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final devices = PqPolicy.mergeDeviceRoster(
+        _pqDevices, await _pqDeviceId(), ApiConfig.appVersion, nowSec: nowSec);
+    final signed = await service.publishPqAnnouncement(
+      kemPublicKey: keys.publicKey,
+      epoch: _pqEpoch,
+      devices: devices,
+    );
+    if (signed == null) return;
+    _pqDevices = devices;
+    _pqLastPublishMs = DateTime.now().millisecondsSinceEpoch;
+    // Record our own key so self-addressed wraps resolve through the same
+    // lookup as everyone else's.
+    _pqRegistry.record(
+        identity.pubkey, keys.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
+  }
+
+  /// Turns post-quantum on or off for this identity. Disabling publishes a
+  /// retraction rather than going quiet: a replaceable event cannot be
+  /// unpublished, and peers would otherwise keep sending wraps our other
+  /// devices can't read.
+  Future<void> setPqMode(PqMode mode) async {
+    if (_pqMode == mode) return;
+    _pqMode = mode;
+    await _persistPqMode(mode);
+    if (mode == PqMode.on) {
+      await publishPqAnnouncement(force: true);
+    } else {
+      _pqLastPublishMs = 0;
+      final identity = _identity;
+      if (identity != null) _pqRegistry.forget(identity.pubkey);
+      await _service?.retractPqAnnouncement();
+    }
+  }
+
+  /// Our own ML-KEM decrypt candidates: current epoch first, then a bounded
+  /// window of previous ones so a wrap sent just before a rotation still opens.
+  List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidateKeys() {
+    final privkey = _identity?.privkey;
+    if (privkey == null) return const [];
+    return pqSelfCandidates(privkey, _pqEpoch);
+  }
+
   /// Publishes a 1:1 PM in the transport(s) the peer understands (PWA
   /// `sendNIP17PM` dual-send, pms.js:326-372). A known-bitchat peer gets a
   /// `bitchat1:` wrap, a known-nym peer a NIP-17 wrap, and an unknown peer BOTH.
@@ -4098,12 +4281,19 @@ class NostrController {
     final identity = _identity;
     if (service == null || identity == null) return;
 
-    final isKnownBitchat = _bitchatUsers.contains(recipientPubkey);
-    final isKnownNym = _nymUsers.contains(recipientPubkey);
-    final isUnknown = !isKnownBitchat && !isKnownNym;
+    // Which transports this recipient gets. See PqPmPlan.decide for why
+    // post-quantum replaces rather than accompanies the others.
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final pqOn = PqPolicy.enabled(privkey: identity.privkey, mode: _pqMode);
+    final plan = PqPmPlan.decide(
+      recipientKemKey:
+          _pqRegistry.keyFor(recipientPubkey, nowSec: nowSec, enabled: pqOn),
+      knownBitchat: _bitchatUsers.contains(recipientPubkey),
+      knownNym: _nymUsers.contains(recipientPubkey),
+    );
 
     UnsignedEvent? bitchatRumor;
-    if (isKnownBitchat || isUnknown) {
+    if (plan.bitchat) {
       // The bitchat rumor's content is a `bitchat1:` packet; it carries the SAME
       // `nymMessageId` (`x` tag) as the nym rumor so a peer's reaction/receipt
       // matches across both formats (pms.js:339-346).
@@ -4136,7 +4326,10 @@ class NostrController {
       settings: _msgSettings,
       onWrap: onWrap,
       bitchatRumor: bitchatRumor,
-      sendNymWrap: isKnownNym || isUnknown,
+      sendNymWrap: plan.nym,
+      recipientKemPublicKey: plan.kemPublicKey,
+      selfKemPublicKey:
+          _pqRegistry.keyFor(identity.pubkey, nowSec: nowSec, enabled: pqOn),
     );
   }
 
@@ -8918,6 +9111,9 @@ class NostrController {
       ...groups.allEphemeralSecretKeys(),
       ..._ref.read(ghostModeProvider).secretKeys,
     ]);
+    // Refreshed alongside the ephemeral keys so a rotation or a login change
+    // takes effect on the same tick.
+    service.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
   }
 
   void _refreshEphemeralSubscriptions() {

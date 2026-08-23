@@ -66,9 +66,15 @@ class GiftWrapUnwrapped {
     required this.rumor,
     required this.senderVerified,
     required this.isBitchat,
+    this.isPq = false,
     this.rawWrap,
     this.fromArchive = false,
   });
+
+  /// True when this wrap arrived over the hybrid post-quantum transport.
+  /// Orthogonal to [senderVerified]: that is authentication, this is
+  /// confidentiality.
+  final bool isPq;
 
   /// True when this wrap was replayed from the D1 archive (`pm-get` boot /
   /// reconnect restore) rather than arriving live off a relay — the PWA's
@@ -1116,11 +1122,30 @@ class NostrService {
   List<giftwrap.UnwrapCandidate> _candidates() {
     final out = <giftwrap.UnwrapCandidate>[];
     final sk = identity.privkey;
-    if (sk != null) out.add(giftwrap.classicalCandidate(sk, bitchat: true));
+    if (sk != null) {
+      // Our identity key paired with each ML-KEM epoch, newest first, so a
+      // wrap sent just before a rotation still opens. These come first because
+      // unwrapGiftWrap picks the transport by inspecting the payload — a
+      // classical wrap simply falls through them to the classical candidate.
+      for (final k in _pqSelfKeys) {
+        out.add((sk: sk, bitchat: false, kemSk: k.kemSk, kemPk: k.kemPk));
+      }
+      out.add(giftwrap.classicalCandidate(sk, bitchat: true));
+    }
+    // Group ephemeral keys stay classical: v1 hybridizes groups through the
+    // identity ML-KEM key, leaving the rotating secp keys exactly as they were.
     for (final esk in _ephemeralSks) {
       out.add(giftwrap.classicalCandidate(esk));
     }
     return out;
+  }
+
+  /// Our ML-KEM keypairs (current epoch + a bounded window of previous ones),
+  /// supplied by the controller so rotated-key post-quantum wraps decrypt.
+  List<({Uint8List kemSk, Uint8List kemPk})> _pqSelfKeys = const [];
+
+  void setPqSelfKeys(List<({Uint8List kemSk, Uint8List kemPk})> keys) {
+    _pqSelfKeys = List.unmodifiable(keys);
   }
 
   /// Registered ephemeral secret keys (current + previous group keys) supplied
@@ -1202,7 +1227,7 @@ class NostrService {
     if (res == null) return;
 
     await _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
-        fromArchive: fromArchive, isBitchat: res.isBitchat);
+        fromArchive: fromArchive, isBitchat: res.isBitchat, isPq: res.isPq);
   }
 
   /// True when [wrap] is addressed (`['p', …]`) to our identity pubkey (vs an
@@ -1243,6 +1268,7 @@ class NostrService {
     NostrEvent seal,
     Map<String, dynamic> rumor, {
     required bool isBitchat,
+    bool isPq = false,
     bool fromArchive = false,
   }) async {
     // We successfully decrypted this wrap — record its id so a later archive
@@ -1282,6 +1308,7 @@ class NostrService {
       rumor: emitRumor,
       senderVerified: senderVerified,
       isBitchat: isBitchat,
+      isPq: isPq,
       rawWrap: wrap.toJson(),
       fromArchive: fromArchive,
     ));
@@ -1693,10 +1720,16 @@ class NostrService {
   /// indistinguishable from the synchronous path. For a NIP-46 remote signer
   /// the **seal** must round-trip the network (`nip44_encrypt` + `sign_event`),
   /// so that path stays on [giftwrap.nip59WrapAsync] as before.
+  /// [recipientKemPublicKey], when non-null, selects the hybrid post-quantum
+  /// wrap. It is only ever non-null for a local signer: a NIP-46 signer returns
+  /// a finished NIP-44 payload rather than a conversation key, so there is no
+  /// way to inject a hybrid one and those logins stay classical by
+  /// construction.
   Future<NostrEvent?> _buildWrap(
     UnsignedEvent rumor,
     String recipientPubkey, {
     int? expiration,
+    Uint8List? recipientKemPublicKey,
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -1706,6 +1739,7 @@ class NostrService {
         senderPrivkey: sig.privkey,
         recipientPubkey: recipientPubkey,
         expiration: expiration,
+        recipientKemPk: recipientKemPublicKey,
       );
     }
     // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer still
@@ -1746,9 +1780,10 @@ class NostrService {
     UnsignedEvent rumor,
     String recipientPubkey, {
     int? expiration,
+    Uint8List? recipientKemPublicKey,
   }) async {
-    final wrap =
-        await _buildWrap(rumor, recipientPubkey, expiration: expiration);
+    final wrap = await _buildWrap(rumor, recipientPubkey,
+        expiration: expiration, recipientKemPublicKey: recipientKemPublicKey);
     if (wrap == null) return null;
     // Gift wraps (kind 1059) publish via DM_EVENT so the proxy gives them
     // priority to the default relays (relays.js `sendDMToRelays`). In direct
@@ -1775,6 +1810,8 @@ class NostrService {
     void Function(NostrEvent wrap)? onWrap,
     UnsignedEvent? bitchatRumor,
     bool sendNymWrap = true,
+    Uint8List? recipientKemPublicKey,
+    Uint8List? selfKemPublicKey,
   }) async {
     if (signer == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -1796,13 +1833,19 @@ class NostrService {
     // never receives the wrap at all in pool mode (relays carry no history;
     // their next `pm-get` restore is the only delivery path).
     if (sendNymWrap) {
-      final recipientWrap =
-          await _wrapAndPublish(rumor, recipientPubkey, expiration: expiration);
+      final recipientWrap = await _wrapAndPublish(rumor, recipientPubkey,
+          expiration: expiration,
+          recipientKemPublicKey: recipientKemPublicKey);
       if (recipientWrap != null) onWrap?.call(recipientWrap);
     }
     if (recipientPubkey != identity.pubkey) {
-      final selfWrap =
-          await _wrapAndPublish(rumor, identity.pubkey, expiration: expiration);
+      // The self-addressed copy is post-quantum whenever we are, otherwise it
+      // would be the weakest link: an attacker who breaks secp256k1 could read
+      // the whole archive regardless of how the outbound copy was sealed. Our
+      // own ML-KEM key is nsec-derived, so every device sharing the nsec opens
+      // it.
+      final selfWrap = await _wrapAndPublish(rumor, identity.pubkey,
+          expiration: expiration, recipientKemPublicKey: selfKemPublicKey);
       if (selfWrap != null) onWrap?.call(selfWrap);
     }
     return true;

@@ -103,12 +103,18 @@ Map<String, dynamic> _encodeWrapJob({
   required Uint8List senderPrivkey,
   required String recipientPubkey,
   int? expiration,
+  Uint8List? recipientKemPk,
 }) =>
     {
       'rumor': rumor.toJson(),
       'sk': keys.bytesToHex(senderPrivkey),
       'rcpt': recipientPubkey,
       if (expiration != null) 'exp': expiration,
+      // Present only when this recipient has announced an ML-KEM key; its
+      // presence is what selects the hybrid post-quantum wrap inside the
+      // isolate. Per-job rather than per-batch so one group fan-out can mix
+      // post-quantum and classical recipients in a single hop.
+      if (recipientKemPk != null) 'rkem': keys.bytesToHex(recipientKemPk),
     };
 
 // ---------------------------------------------------------------------------
@@ -172,12 +178,24 @@ List<Map<String, dynamic>?> wrapBatchIsolate(
             .toList(),
         content: (rumorMap['content'] ?? '') as String,
       );
-      final wrap = giftwrap.nip59Wrap(
-        rumor: rumor,
-        senderPrivkey: keys.hexToBytes(job['sk'] as String),
-        recipientPubkey: job['rcpt'] as String,
-        expiration: job['exp'] as int?,
-      );
+      final senderPrivkey = keys.hexToBytes(job['sk'] as String);
+      final recipientPubkey = job['rcpt'] as String;
+      final expiration = job['exp'] as int?;
+      final rkem = job['rkem'] as String?;
+      final wrap = rkem == null
+          ? giftwrap.nip59Wrap(
+              rumor: rumor,
+              senderPrivkey: senderPrivkey,
+              recipientPubkey: recipientPubkey,
+              expiration: expiration,
+            )
+          : giftwrap.pqNip59Wrap(
+              rumor: rumor,
+              senderPrivkey: senderPrivkey,
+              recipientPubkey: recipientPubkey,
+              recipientKemPublicKey: keys.hexToBytes(rkem),
+              expiration: expiration,
+            );
       out[i] = wrap.toJson();
     } catch (_) {
       out[i] = null;
@@ -310,11 +328,15 @@ class CryptoWorker {
   /// null only if that recipient's wrap failed (so the caller skips it).
   ///
   /// The ephemeral wrap key for each recipient is generated inside the isolate.
+  /// [recipientKemPks], when supplied, maps a recipient pubkey to the ML-KEM
+  /// key to encapsulate to. Recipients absent from the map get a classical
+  /// wrap, so one group fan-out can mix both in a single isolate hop.
   Future<List<NostrEvent?>> wrapMany({
     required UnsignedEvent rumor,
     required Uint8List senderPrivkey,
     required List<String> recipientPubkeys,
     int? expiration,
+    Map<String, Uint8List>? recipientKemPks,
   }) async {
     if (recipientPubkeys.isEmpty) return const <NostrEvent?>[];
     final jobs = <Map<String, dynamic>>[
@@ -324,6 +346,7 @@ class CryptoWorker {
           senderPrivkey: senderPrivkey,
           recipientPubkey: pk,
           expiration: expiration,
+          recipientKemPk: recipientKemPks?[pk],
         ),
     ];
 
@@ -350,12 +373,15 @@ class CryptoWorker {
     required Uint8List senderPrivkey,
     required String recipientPubkey,
     int? expiration,
+    Uint8List? recipientKemPk,
   }) async {
     final out = await wrapMany(
       rumor: rumor,
       senderPrivkey: senderPrivkey,
       recipientPubkeys: [recipientPubkey],
       expiration: expiration,
+      recipientKemPks:
+          recipientKemPk == null ? null : {recipientPubkey: recipientKemPk},
     );
     return out.isEmpty ? null : out.first;
   }
