@@ -7,8 +7,11 @@
 // byte-for-byte what the user will send, so every offset the field reports and
 // every offset the toolbar computes still address the same string.
 //
-// A marker that cannot be seen also cannot be edited, so a run reveals its
-// markers again while the caret is inside it (see `reveal` below).
+// No marker is ever shown. An INCOMPLETE construct is still plain text, so
+// typing "**" gives the feedback that something was opened; the markers vanish
+// at the keystroke that closes the run. A marker that cannot be seen also
+// cannot be edited by hand, so deleting one is handled structurally instead —
+// see [richMarkerDelete].
 //
 // The grammar is a direct port of `_richParseFormat` in the PWA's
 // `js/modules/rich-compose.js`, which in turn mirrors the message renderer
@@ -83,13 +86,19 @@ class RichRun {
   /// Caret ranges (inclusive on both ends) that bring this run's markers back
   /// into view.
   ///
-  /// Inline runs reveal from anywhere inside them — where a bold run starts and
-  /// ends is otherwise ambiguous, and typing against its edge needs to be able
-  /// to see it. Block markers never reveal: what a heading, a quote or a code
-  /// block IS reads off its own styling, showing the prefix again would shift
-  /// the line every time the caret passed the start of it, and revealing a
-  /// fence would undo the empty block the user had just opened by typing it.
-  /// [richMarkerDelete] is how those are edited instead.
+  /// Nothing reveals. Inline runs used to bring their markers back whenever the
+  /// caret was anywhere inside them, and while you are typing a run the caret
+  /// is always inside it — so the field showed "**bold**" for the whole time it
+  /// took to write, and only hid the asterisks once the caret moved away. That
+  /// is a preview, not a WYSIWYG composer. Block markers never revealed for
+  /// their own reasons: what a heading, a quote or a code block IS reads off
+  /// its own styling, showing the prefix again would shift the line every time
+  /// the caret passed the start of it, and revealing a fence would undo the
+  /// empty block the user had just opened by typing it.
+  ///
+  /// Kept as a list rather than deleted outright so the renderer stays
+  /// data-driven and one line from being able to reveal something again.
+  /// [richMarkerDelete] is how markers are edited.
   final List<List<int>> reveal;
 
   /// A fenced block with nothing in it yet. It still has to be visible, or
@@ -201,9 +210,7 @@ List<RichRun> _parseInline(String text, int from, int to, int depth) {
       end: end,
       open: spec.open,
       close: spec.close,
-      reveal: [
-        [start, end]
-      ],
+      reveal: const [],
       children: spec.leaf
           ? (innerEnd > innerStart
               ? [RichRun.text(innerStart, innerEnd)]
@@ -281,17 +288,22 @@ List<RichRun> parseRichFormat(String text) {
   return out;
 }
 
-/// The edit a Backspace/Delete next to a hidden block marker should make.
+/// The edit a Backspace/Delete next to a hidden marker should make.
 ///
 /// A marker painted at zero size has no caret position of its own, so the plain
 /// single-character delete would chew through it invisibly — one press turning
-/// "```" into "``" and the block back into two stray backticks. Instead:
-/// Backspace at the start of a heading's or quote's body removes the prefix,
-/// and either key against a fence unwraps the whole block, keeping the code.
+/// "```" into "``" and the block back into two stray backticks, or "**bold**"
+/// into "*bold**", which re-parses as something the user never asked for.
+/// Instead the delete acts on the construct: Backspace at the start of a
+/// heading's or quote's body removes the prefix, and either key against the
+/// edge of a fence or an inline run unwraps it, keeping the text inside.
 ///
-/// Returns the value to apply, or null to let the plain character delete stand
-/// — which is what happens next to an inline marker, since those are revealed
-/// as real text whenever the caret is against them.
+/// Unwrapping removes BOTH markers. Taking only the one the caret is against
+/// would leave the other stranded as literal text, so a single Backspace would
+/// both strip the formatting and leave "**" behind to be deleted separately.
+///
+/// Returns the value to apply, or null to let the plain character delete
+/// stand.
 TextEditingValue? richMarkerDelete(String text, int caret,
     {required bool forward}) {
   if (text.isEmpty || caret < 0 || caret > text.length) return null;
@@ -309,7 +321,19 @@ TextEditingValue? richMarkerDelete(String text, int caret,
     );
   }
 
-  for (final n in parseRichFormat(text)) {
+  // Innermost first, so the tightest formatting at the caret is the one that
+  // comes off: in "***x***" a Backspace should drop one level, not both.
+  final nodes = <RichRun>[];
+  void walk(List<RichRun> list) {
+    for (final n in list) {
+      walk(n.children);
+      nodes.add(n);
+    }
+  }
+
+  walk(parseRichFormat(text));
+
+  for (final n in nodes) {
     if (n.kind == RichRunKind.line) {
       final markEnd = n.start + n.open.length;
       final hit = forward ? caret == n.start : caret == markEnd;
@@ -318,18 +342,22 @@ TextEditingValue? richMarkerDelete(String text, int caret,
           [n.start, markEnd]
         ], n.start);
       }
-    } else if (n.kind == RichRunKind.fence) {
+    } else if (n.kind == RichRunKind.fence || n.kind == RichRunKind.inline) {
+      if (n.open.isEmpty) continue;
       final openEnd = n.start + n.open.length;
-      final closeStart = n.end - n.close.length;
       final closed = n.close.isNotEmpty;
-      final hit = forward
-          ? (caret == n.start || (closed && caret == closeStart))
-          : (caret == openEnd || (closed && caret == n.end));
-      if (!hit) continue;
+      final closeStart = closed ? n.end - n.close.length : n.end;
+      // The caret sits at one of the run's two inner edges — the only two
+      // places a hidden marker is adjacent to visible text — or just outside.
+      final atEnd = forward ? caret == closeStart : caret == n.end;
+      final atStart = forward ? caret == n.start : caret == openEnd;
+      if (!atStart && !(closed && atEnd)) continue;
+      // Keep the caret where the text it was against ended up.
+      final newCaret = atEnd ? n.start + (closeStart - openEnd) : n.start;
       return apply([
         [n.start, openEnd],
         if (closed) [closeStart, n.end],
-      ], n.start);
+      ], newCaret);
     }
   }
   return null;

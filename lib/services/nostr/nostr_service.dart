@@ -1076,6 +1076,48 @@ class NostrService {
     return sub;
   }
 
+  /// Cap on how long a one-shot announcement lookup waits before giving up and
+  /// letting the message go classical — which is the behaviour that was there
+  /// before, not a new failure mode.
+  static const Duration pqLookupTimeout = Duration(milliseconds: 2500);
+
+  /// Fetches one peer's post-quantum announcement now, rather than waiting for
+  /// the critical subscription to be rebuilt around them.
+  ///
+  /// That rebuild only happens once a PM conversation entry exists, and it is
+  /// debounced 750ms on top — but the entry for a brand new conversation is
+  /// not created until the first message has already been sent. So the key was
+  /// never in hand for the message that needed it, and the shield never
+  /// appeared on it.
+  ///
+  /// Events are routed through the normal [onEvent] handler, so the registry
+  /// ingests this exactly as it would a pushed announcement.
+  Future<void> fetchPqAnnouncement(String pubkey) async {
+    if (!TrustGraph.isHex64(pubkey)) return;
+    final sub = pool.subscribe([
+      NostrFilter(
+        kinds: [EventKind.appData],
+        authors: [pubkey],
+        limit: 1,
+        tags: {
+          't': [AppDataTopic.postQuantum],
+        },
+      ),
+    ]);
+    final s = sub.events.listen((e) => _handlers?.onEvent?.call(e));
+    try {
+      await sub.eose.timeout(pqLookupTimeout, onTimeout: () => null);
+      // The relay sends EOSE after the stored event, but delivery of the event
+      // itself is a separate microtask; give it one turn to be ingested.
+      await Future<void>.delayed(Duration.zero);
+    } catch (_) {
+      // A relay that never answers is a normal outcome here.
+    } finally {
+      await s.cancel();
+      sub.close();
+    }
+  }
+
   /// Adds ephemeral group pubkeys as additional `#p` gift-wrap subscriptions so
   /// rotated-key group messages reach us. Best-effort; auto-managed by the
   /// controller as keys rotate.

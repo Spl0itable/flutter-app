@@ -20,23 +20,39 @@ enum PqBadgeState {
   /// a classical copy of the same plaintext, breaking secp256k1 reveals the
   /// message.
   partial,
+
+  /// Encrypted, but with no post-quantum layer at all.
+  ///
+  /// Shown rather than omitted because NO badge is ambiguous: a missing shield
+  /// could equally mean the message is not quantum-resistant, that the
+  /// indicator is broken, or that this build lacks the feature, and the reader
+  /// cannot tell which. Saying so plainly is the point of a security
+  /// indicator, and it is what makes the shield's absence meaningful when it
+  /// does appear.
+  classical,
 }
 
-/// Resolves the shield state for a message, or null when no shield should show.
+/// Resolves the shield state for a message.
+///
+/// Never null for an encrypted message: one of the three states always
+/// applies. Callers decide whether the message is encrypted at all — a public
+/// channel message is plaintext on the relay, and a shield of any kind there
+/// would imply an encryption it does not have (see `_pqState` in
+/// message_row.dart).
 ///
 /// [pqCoverage] is the group fan-out's (post-quantum, total) member counts;
 /// when present it OVERRIDES [pqEncrypted], because an optimistic per-message
 /// flag must never outrank what actually went on the wire.
-PqBadgeState? pqBadgeStateFor({
+PqBadgeState pqBadgeStateFor({
   required bool pqEncrypted,
   ({int pq, int total})? pqCoverage,
 }) {
   final cov = pqCoverage;
   if (cov != null && cov.total > 0) {
-    if (cov.pq == 0) return null;
+    if (cov.pq == 0) return PqBadgeState.classical;
     return cov.pq == cov.total ? PqBadgeState.full : PqBadgeState.partial;
   }
-  return pqEncrypted ? PqBadgeState.full : null;
+  return pqEncrypted ? PqBadgeState.full : PqBadgeState.classical;
 }
 
 /// The `.crypto-pq-badge` shield shown next to the verification lock.
@@ -61,11 +77,15 @@ class CryptoPqBadge extends StatelessWidget {
 
   final double size;
 
-  /// `#8B7CF6` for full coverage; partial drops to the neutral grey (and a
-  /// dashed outline below) because it is a weaker guarantee, not an error.
-  Color get _color => state == PqBadgeState.full
-      ? const Color(0xFF8B7CF6)
-      : const Color(0xFF9AA0A6);
+  /// `#8B7CF6` for full coverage; the other two drop to a neutral grey — and
+  /// deliberately not the lock's error red. Partial is a weaker guarantee and
+  /// classical is the encryption everyone had until recently; neither is a
+  /// failure. Classical is dimmed further so the three read as one scale.
+  Color get _color => switch (state) {
+        PqBadgeState.full => const Color(0xFF8B7CF6),
+        PqBadgeState.partial => const Color(0xFF9AA0A6),
+        PqBadgeState.classical => const Color(0xFF9AA0A6).withValues(alpha: 0.65),
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -131,6 +151,13 @@ class _ShieldPainter extends CustomPainter {
       // `stroke-dasharray: 3 2` — reads as "not fully closed" at a glance.
       _strokeDashed(canvas, shield, paint);
       _strokeDashed(canvas, rotated, paint);
+    } else if (state == PqBadgeState.classical) {
+      // Same silhouette, so the three states read as one scale rather than
+      // three unrelated icons — but struck through, and WITHOUT the orbit:
+      // the orbit is the post-quantum part, so drawing one here would be the
+      // one thing this badge exists to deny.
+      canvas.drawPath(shield, paint);
+      canvas.drawLine(const Offset(5.5, 5), const Offset(18.5, 18), paint);
     } else {
       canvas.drawPath(shield, paint);
       canvas.drawPath(rotated, paint);
@@ -182,6 +209,15 @@ const String kPqPartialTitle = 'Partly quantum-resistant';
 const String kPqPartialLead = 'This message was quantum-resistant to ';
 const String kPqPartialCount = '%d of %d members';
 const String kPqPartialSome = 'some members';
+const String kPqClassicalTitle = 'Not quantum-resistant';
+const String kPqClassicalBody =
+    'This message is end-to-end encrypted with the standard NIP-44 secp256k1 '
+    'key exchange, and nobody but the participants can read it today. It has '
+    'no post-quantum layer, so an adversary recording it now could decrypt it '
+    'with a future quantum computer. Messages sent before either side '
+    'upgraded stay this way permanently — the ciphertext already exists and '
+    'cannot be re-sealed. New messages go quantum-resistant automatically '
+    'once both sides have published a post-quantum key.';
 const String kPqPartialTail =
     ". The rest haven't published a post-quantum key, so their "
     "copies used standard NIP-44 encryption only — and because "
@@ -197,6 +233,8 @@ const List<String> kPqPopupStrings = [
   kPqPartialCount,
   kPqPartialSome,
   kPqPartialTail,
+  kPqClassicalTitle,
+  kPqClassicalBody,
 ];
 
 void showPqPopup(
@@ -220,6 +258,11 @@ void showPqPopup(
                     .replaceFirst('%d', '${coverage.total}')
                 : tr(kPqPartialSome)) +
             tr(kPqPartialTail),
+      ),
+    PqBadgeState.classical => (
+        tr(kPqClassicalTitle),
+        const Color(0xFF9AA0A6),
+        tr(kPqClassicalBody),
       ),
   };
 

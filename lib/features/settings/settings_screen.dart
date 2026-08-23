@@ -62,11 +62,26 @@ const String kPqStatusUnavailable =
     'Not available. Post-quantum encryption needs the ML-KEM implementation, '
     'which did not load.';
 
+/// What this device can do and what is actually happening are different
+/// questions, and the line above only ever answered the first. It read
+/// "Active" while every message was still going out classically, because no
+/// peer's key had ever been fetched — so the one indicator that should have
+/// caught that said everything was fine.
+const String kPqReachNone =
+    'No contact has published a post-quantum key yet, so messages are still '
+    'going out on standard encryption. This turns on by itself as soon as one '
+    'does.';
+const String kPqReachSome = 'Currently in use with {count} contacts.';
+const String kPqReachOne = 'Currently in use with 1 contact.';
+
 /// Every literal the post-quantum status line can show.
 const List<String> kPqStatusStrings = [
   kPqStatusFull,
   kPqStatusSendOnly,
   kPqStatusUnavailable,
+  kPqReachNone,
+  kPqReachSome,
+  kPqReachOne,
 ];
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -1495,10 +1510,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final nostrCtrl = ref.read(nostrControllerProvider);
     final pqCapable = nostrCtrl.pqCapable;
     final pqSendOnly = !pqCapable && nostrCtrl.pqEnabled;
+    final pqPeers = nostrCtrl.pqKnownPeerCount;
+    final pqReach = pqPeers == 0
+        ? tr(kPqReachNone)
+        : pqPeers == 1
+            ? tr(kPqReachOne)
+            : tr(kPqReachSome, {'count': '$pqPeers'});
     final pqStatus = pqCapable
-        ? tr(kPqStatusFull)
+        ? '${tr(kPqStatusFull)} $pqReach'
         : pqSendOnly
-            ? tr(kPqStatusSendOnly)
+            ? '${tr(kPqStatusSendOnly)} $pqReach'
             : tr(kPqStatusUnavailable);
     final dmTtlItems = <({int value, String label})>[
       (value: 3600, label: tr('1 hour')),
