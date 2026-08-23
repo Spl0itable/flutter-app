@@ -1718,11 +1718,12 @@ class NostrService {
   /// indistinguishable from the synchronous path. For a NIP-46 remote signer
   /// the **seal** must round-trip the network (`nip44_encrypt` + `sign_event`),
   /// so that path stays on [giftwrap.nip59WrapAsync] as before.
-  /// [recipientKemPublicKey], when non-null, selects the hybrid post-quantum
-  /// wrap. It is only ever non-null for a local signer: a NIP-46 signer returns
-  /// a finished NIP-44 payload rather than a conversation key, so there is no
-  /// way to inject a hybrid one and those logins stay classical by
-  /// construction.
+  /// [recipientKemPublicKey], when non-null, makes the wrap hybrid. A local
+  /// signer hybridizes both layers; a remote one hybridizes the WRAP only,
+  /// because a signer returns a finished NIP-44 payload rather than a
+  /// conversation key and the seal has nowhere to mix the KEM secret in. The
+  /// wrap is the layer that matters — it is what a recorder stores, and
+  /// reaching the seal means breaking it first.
   Future<NostrEvent?> _buildWrap(
     UnsignedEvent rumor,
     String recipientPubkey, {
@@ -1740,13 +1741,14 @@ class NostrService {
         recipientKemPk: recipientKemPublicKey,
       );
     }
-    // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer still
-    // uses a fresh local ephemeral key.
+    // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer uses a
+    // fresh local ephemeral key, which is ours, so it can still be hybrid.
     return giftwrap.nip59WrapAsync(
       rumor: rumor,
       senderSigner: sig,
       recipientPubkey: recipientPubkey,
       expiration: expiration,
+      recipientKemPublicKey: recipientKemPublicKey,
     );
   }
 
@@ -1921,14 +1923,19 @@ class NostrService {
       return true;
     }
 
-    // Remote (NIP-46) signer: no local secret key, so no hybrid sealing — this
-    // path is classical by construction, and reports zero coverage.
+    // Remote (NIP-46) signer: the seal goes through the signer and cannot be
+    // hybrid, but the wrap's ephemeral key is ours, so it still can be — and
+    // the wrap is the layer a recorder stores. Coverage is counted the same
+    // way, since the protection against that threat is the same.
+    var remotePq = 0;
     for (final pk in recipients) {
-      final wrap =
-          await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
+      final kem = kemKeyFor?.call(pk);
+      if (kem != null) remotePq++;
+      final wrap = await _wrapAndPublish(rumor, encryptTo(pk),
+          expiration: expiration, recipientKemPublicKey: kem);
       if (wrap != null) onWrap?.call(wrap);
     }
-    onCoverage?.call(0, recipients.length);
+    onCoverage?.call(remotePq, recipients.length);
     return true;
   }
 

@@ -50,6 +50,25 @@ import 'settings_widgets.dart';
 ///
 /// Each control's label text, option order and option labels are copied
 /// verbatim from `index.html`'s `#settingsModal` markup.
+/// The post-quantum status line, named so a test can hold the translation
+/// catalog to it — a caveat only English speakers can read is not a caveat.
+const String kPqStatusFull = 'Active for messages with other Nymchat users.';
+const String kPqStatusSendOnly =
+    'Active for messages you send to other Nymchat users. Messages you receive, '
+    'and your own synced settings and history, stay on standard encryption: '
+    'your signer holds the key they would have to be derived from, and won\'t '
+    'do the post-quantum half. Logging in with your nsec covers both directions.';
+const String kPqStatusUnavailable =
+    'Not available. Post-quantum encryption needs the ML-KEM implementation, '
+    'which did not load.';
+
+/// Every literal the post-quantum status line can show.
+const List<String> kPqStatusStrings = [
+  kPqStatusFull,
+  kPqStatusSendOnly,
+  kPqStatusUnavailable,
+];
+
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({
     super.key,
@@ -1469,16 +1488,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         '⚠ Audio/video calls and P2P file sharing connect peers directly over '
         'WebRTC, which can reveal your true IP address to the other party. '
         'Use a VPN or Tor to help conceal it.');
-    // Post-quantum: capability is decided by the login type, not a preference.
-    // Extension / NIP-46 signers return a finished NIP-44 payload rather than a
-    // conversation key, so there is nowhere to inject a hybrid one.
+    // Post-quantum: what is possible is decided by the login type, not a
+    // preference — and sending and receiving are different questions. A signer
+    // login can hybridize the WRAP it builds itself, but cannot decapsulate,
+    // so it sends post-quantum and receives classical. See PqPolicy.
     final nostrCtrl = ref.read(nostrControllerProvider);
     final pqCapable = nostrCtrl.pqCapable;
+    final pqSendOnly = !pqCapable && nostrCtrl.pqEnabled;
     final pqStatus = pqCapable
-        ? tr('Active for messages with other Nymchat users.')
-        : tr('Not available. Browser-extension and remote-signer (NIP-46) '
-            'logins can\'t use it, because the signer returns a finished '
-            'NIP-44 payload rather than a key we can combine.');
+        ? tr(kPqStatusFull)
+        : pqSendOnly
+            ? tr(kPqStatusSendOnly)
+            : tr(kPqStatusUnavailable);
     final dmTtlItems = <({int value, String label})>[
       (value: 3600, label: tr('1 hour')),
       (value: 21600, label: tr('6 hours')),

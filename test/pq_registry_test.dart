@@ -133,11 +133,13 @@ void main() {
   group('policy', () {
     final sk = unhex('1' * 64);
 
-    test('a local key is required to be capable', () {
+    test('a local key is required to RECEIVE', () {
       expect(PqPolicy.capable(privkey: sk), isTrue);
-      // Extension / NIP-46: no local secret key, so no hybrid sealing.
+      // Extension / NIP-46: no local secret key, so no ML-KEM keypair to
+      // decapsulate with. Sending is a separate question — see the
+      // 'send vs receive capability' group below.
       expect(PqPolicy.capable(privkey: null), isFalse);
-      expect(PqPolicy.enabled(privkey: null, mode: PqMode.on), isFalse);
+      expect(PqPolicy.selfEnabled(privkey: null, mode: PqMode.on), isFalse);
     });
 
     test('enabled requires both capability and the mode', () {
@@ -431,6 +433,44 @@ void main() {
         } catch (_) {/* try the next epoch */}
       }
       expect(recovered, 'pre-rotation');
+    });
+  });
+
+  group('send vs receive capability', () {
+    // The two are different questions, and the difference is exactly what an
+    // extension / NIP-46 login can and cannot do.
+    //
+    // A NIP-17 message is a SEAL under the identity key inside a WRAP under a
+    // throwaway key the client generates itself. Only the seal needs the
+    // signer, so such a login can still hybridize the wrap — and the wrap is
+    // what a recorder stores, so that already defeats harvest-now-decrypt-later.
+    // Receiving is another matter: the ML-KEM keypair derives from the nsec,
+    // and opening a message means decapsulating with its secret half.
+    final nsec = Uint8List.fromList(List.generate(32, (i) => i + 1));
+
+    test('an nsec login does both', () {
+      expect(PqPolicy.capable(privkey: nsec), isTrue);
+      expect(PqPolicy.sendCapable(), isTrue);
+      expect(PqPolicy.enabled(privkey: nsec, mode: PqMode.on), isTrue);
+      expect(PqPolicy.selfEnabled(privkey: nsec, mode: PqMode.on), isTrue);
+    });
+
+    test('a signer login sends but cannot receive', () {
+      expect(PqPolicy.capable(privkey: null), isFalse);
+      expect(PqPolicy.enabled(privkey: null, mode: PqMode.on), isTrue);
+    });
+
+    test('and never encrypts its own copies post-quantum', () {
+      // Self-wraps, the archive and synced settings are addressed to US, so
+      // encapsulating to a key we cannot decapsulate with would lock this
+      // device out of its own history — permanently.
+      expect(PqPolicy.selfEnabled(privkey: null, mode: PqMode.on), isFalse);
+    });
+
+    test('the escape hatch still turns everything off', () {
+      expect(PqPolicy.enabled(privkey: nsec, mode: PqMode.off), isFalse);
+      expect(PqPolicy.enabled(privkey: null, mode: PqMode.off), isFalse);
+      expect(PqPolicy.selfEnabled(privkey: nsec, mode: PqMode.off), isFalse);
     });
   });
 }

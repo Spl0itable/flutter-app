@@ -156,11 +156,24 @@ NostrEvent pqNip59Wrap({
 /// For a [LocalSigner] this produces output indistinguishable from [nip59Wrap]
 /// (same seal author = sender pubkey, same NIP-44 conversation key), so the
 /// existing sync callers and tests are unaffected.
+/// [recipientKemPublicKey], when non-null, makes the WRAP layer hybrid.
+///
+/// The seal cannot be: a signer returns a finished NIP-44 payload rather than a
+/// conversation key, so there is nowhere to mix the KEM secret in. The wrap's
+/// ephemeral key is ours, generated here, so that layer can be — and it is the
+/// layer that matters. What a recorder stores is the wrap; reaching the seal at
+/// all means breaking it first, so a hybrid wrap already defeats
+/// harvest-now-decrypt-later. The seal's classical encryption is only reachable
+/// by someone who has ALREADY broken the post-quantum layer.
+///
+/// unwrapGiftWrap accepts a hybrid wrap around a classical seal, so this is
+/// readable by every shipped build with no version gate.
 Future<NostrEvent> nip59WrapAsync({
   required UnsignedEvent rumor,
   required EventSigner senderSigner,
   required String recipientPubkey,
   int? expiration,
+  Uint8List? recipientKemPublicKey,
 }) async {
   final senderPub = senderSigner.pubkey;
   final rumorMap = _buildRumorMap(rumor, senderPub);
@@ -180,18 +193,21 @@ Future<NostrEvent> nip59WrapAsync({
 
   // Wrap (kind 1059) — fresh local ephemeral key (local NIP-44 + schnorr).
   final ephSk = generatePrivateKey();
-  final ckWrap = nip44.getConversationKey(ephSk, recipientPubkey);
   final tags = <List<String>>[
     ['p', recipientPubkey],
     if (expiration != null && expiration != 0) ['expiration', '$expiration'],
   ];
+  final sealJson = jsonEncode(seal.toJson());
+  final content = recipientKemPublicKey != null
+      ? pq.pqEncrypt(sealJson, ephSk, recipientPubkey, recipientKemPublicKey)
+      : nip44.encrypt(sealJson, nip44.getConversationKey(ephSk, recipientPubkey));
   return finalizeEvent(
     UnsignedEvent(
       pubkey: getPublicKeyHex(ephSk),
       createdAt: randomNow(),
       kind: 1059,
       tags: tags,
-      content: nip44.encrypt(jsonEncode(seal.toJson()), ckWrap),
+      content: content,
     ),
     ephSk,
   );

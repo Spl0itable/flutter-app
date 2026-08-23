@@ -10,6 +10,7 @@ import 'package:nym_bar/features/i18n/i18n.dart';
 import 'package:nym_bar/features/i18n/language_select.dart';
 import 'package:nym_bar/features/i18n/localization_service.dart';
 import 'package:nym_bar/features/settings/about_screen.dart';
+import 'package:nym_bar/features/settings/settings_screen.dart';
 import 'package:nym_bar/services/api/api_client.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 
@@ -81,6 +82,15 @@ void main() {
     test('is populated with the app\'s direct tr() literals', () {
       expect(kAppStringsCatalog.length, greaterThan(500));
       for (final s in const ['Settings', 'Language', 'Show original']) {
+        expect(kAppStringsCatalog, contains(s), reason: s);
+      }
+    });
+
+    test('carries the post-quantum status copy', () {
+      // The send-only line is the one that matters: it is the caveat telling a
+      // signer-login user what is and is not protected, and a caveat only
+      // English speakers can read is not a caveat.
+      for (final s in kPqStatusStrings) {
         expect(kAppStringsCatalog, contains(s), reason: s);
       }
     });

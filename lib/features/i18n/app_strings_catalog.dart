@@ -1325,4 +1325,7 @@ const List<String> kAppStringsCatalog = <String>[
   'This app cannot check itself here: what runs is compiled code, not the source, and iOS re-signs and encrypts each download so a hash computed on the device matches nothing published. Verify the release you installed against the published build instead, or use the web app, which re-hashes every file it is running against this repository\'s signed attestations.',
   'Installed APK',
   'Signing certificate',
+  // Post-quantum status line (settings_screen.dart).
+  'Active for messages you send to other Nymchat users. Messages you receive, and your own synced settings and history, stay on standard encryption: your signer holds the key they would have to be derived from, and won\'t do the post-quantum half. Logging in with your nsec covers both directions.',
+  'Not available. Post-quantum encryption needs the ML-KEM implementation, which did not load.',
 ];

@@ -290,13 +290,36 @@ class PqRegistry {
 class PqPolicy {
   const PqPolicy._();
 
-  /// Post-quantum requires sealing with our own secret key. Extension and
-  /// NIP-46 signers hand back a finished NIP-44 payload rather than a
-  /// conversation key, so there is no way to inject a hybrid one — those logins
-  /// stay classical by construction, not by choice.
+  /// Whether we can RECEIVE post-quantum messages, and therefore whether we
+  /// announce an ML-KEM key for peers to encapsulate to.
+  ///
+  /// Needs the nsec: the ML-KEM keypair derives from it, and opening a message
+  /// means decapsulating with its secret half. An extension or NIP-46 signer
+  /// holds the nsec and will not do ML-KEM, so those logins cannot receive.
   static bool capable({required Uint8List? privkey}) => privkey != null;
 
+  /// Whether we can SEND post-quantum, which is a weaker requirement.
+  ///
+  /// A NIP-17 message is a SEAL under our identity key inside a WRAP under a
+  /// throwaway key we generate ourselves on every send. Only the seal needs the
+  /// signer, so a remote one can still hybridize the wrap — and the wrap is
+  /// what a recorder stores, so that already defeats harvest-now-decrypt-later.
+  /// The seal's classical encryption is only reachable by someone who has
+  /// ALREADY broken the post-quantum layer.
+  ///
+  /// Deliberately not symmetric with [capable]: such a login sends
+  /// post-quantum but still receives classical. Half a conversation, and worth
+  /// having — a recorded outbound message is still a recorded message.
+  static bool sendCapable() => true;
+
   static bool enabled({required Uint8List? privkey, required PqMode mode}) =>
+      sendCapable() && mode == PqMode.on;
+
+  /// Whether copies addressed to OURSELVES — self-wraps, the archive, synced
+  /// settings — can be post-quantum. They are addressed to us, so this is the
+  /// receive-side question: encapsulating to a key we cannot decapsulate with
+  /// would lock this device out of its own history.
+  static bool selfEnabled({required Uint8List? privkey, required PqMode mode}) =>
       capable(privkey: privkey) && mode == PqMode.on;
 
   /// Post-quantum is on for anyone who can do it. Kept as a function so the

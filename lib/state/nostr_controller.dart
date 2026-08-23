@@ -4135,9 +4135,29 @@ class NostrController {
   bool get pqEnabled =>
       PqPolicy.enabled(privkey: _identity?.privkey, mode: _pqMode);
 
-  /// Post-quantum requires sealing with our own secret key, so extension and
-  /// NIP-46 logins are classical by construction, not by choice.
+  /// Whether we can RECEIVE post-quantum — needs the nsec, since the ML-KEM
+  /// keypair derives from it. Extension and NIP-46 logins can send but not
+  /// receive; see PqPolicy.
   bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey);
+
+  /// Whether copies addressed to ourselves can be post-quantum.
+  bool get pqSelfEnabled =>
+      PqPolicy.selfEnabled(privkey: _identity?.privkey, mode: _pqMode);
+
+  /// Our own ML-KEM key, for copies addressed to OURSELVES.
+  ///
+  /// Null unless we can decapsulate, which is not the same question as whether
+  /// a key exists. A second device holding the nsec may have announced one for
+  /// this npub; encapsulating to it from an extension or NIP-46 login — which
+  /// cannot derive its secret half — would lock THIS device out of its own
+  /// history. Outbound messages have no such hazard: the recipient decapsulates.
+  Uint8List? pqSelfKey() {
+    if (!pqSelfEnabled) return null;
+    final self = _identity?.pubkey;
+    if (self == null) return null;
+    return _pqRegistry.keyFor(self,
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000, enabled: true);
+  }
 
   /// A group member's announced ML-KEM key, or null. Keyed by their REAL
   /// pubkey — the announcement is published by the identity, not by the
@@ -4153,7 +4173,7 @@ class NostrController {
   /// trust — post-quantum keys are only needed for peers we actually message,
   /// so this is scoped rather than fetched wholesale.
   List<String> _pqAuthorList() {
-    if (!pqCapable) return const [];
+    if (!pqEnabled) return const [];
     final out = <String>{};
     final self = _identity?.pubkey;
     if (self != null) out.add(self);
@@ -4331,8 +4351,7 @@ class NostrController {
       bitchatRumor: bitchatRumor,
       sendNymWrap: plan.nym,
       recipientKemPublicKey: plan.kemPublicKey,
-      selfKemPublicKey:
-          _pqRegistry.keyFor(identity.pubkey, nowSec: nowSec, enabled: pqOn),
+      selfKemPublicKey: pqSelfKey(),
     );
   }
 
@@ -9119,6 +9138,10 @@ class NostrController {
     // Refreshed alongside the ephemeral keys so a rotation or a login change
     // takes effect on the same tick.
     service.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
+    // Announcements are needed to SEND, which a signer login can now do, so the
+    // watch list follows the send gate — without a peer's announcement there is
+    // no key to encapsulate to.
+
     // The D1 settings blob holds the same content as the relay wrap beside it,
     // so it takes the same keys — protecting one without the other protects
     // neither.
