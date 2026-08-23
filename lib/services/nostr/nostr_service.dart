@@ -1854,12 +1854,30 @@ class NostrService {
   /// Publishes a group rumor: one gift wrap per [recipients], each encrypted to
   /// the supplied per-member [encryptTo] pubkey (ephemeral when known).
   /// (docs/specs/03 §4.3)
+  /// [kemKeyFor], when supplied, returns the member's announced ML-KEM key or
+  /// null. Because each member already gets an independent wrap, a group can
+  /// mix post-quantum and classical recipients with no protocol change and no
+  /// negotiation — which is what keeps mixed Nymchat/Bitchat groups working.
+  ///
+  /// The two legs use different keys on purpose: the classical ECDH goes to the
+  /// member's rotating ephemeral pubkey (via [encryptTo]), keeping the metadata
+  /// protection that rotation buys, while the KEM leg encapsulates to their
+  /// long-lived identity ML-KEM key. Security is max(classical, PQ), so the
+  /// rotation still delivers its forward secrecy against classical attackers
+  /// while the KEM leg delivers harvest-now-decrypt-later protection.
+  ///
+  /// Returns the post-quantum coverage of the fan-out via [onCoverage]: a group
+  /// message counts as protected only when EVERY member got a post-quantum
+  /// wrap, since one classical copy of the same plaintext is enough for an
+  /// attacker.
   Future<bool> publishGroupMessage({
     required UnsignedEvent rumor,
     required List<String> recipients,
     required String Function(String memberPubkey) encryptTo,
     MessagingSettings settings = const MessagingSettings(),
     void Function(NostrEvent wrap)? onWrap,
+    Uint8List? Function(String memberPubkey)? kemKeyFor,
+    void Function(int pqCount, int total)? onCoverage,
   }) async {
     final sig = signer;
     if (sig == null) return false;
@@ -1874,11 +1892,26 @@ class NostrService {
     // the per-recipient loop.
     if (sig is LocalSigner) {
       final targets = [for (final pk in recipients) encryptTo(pk)];
+      // Keyed by the ENCRYPTION target (the ephemeral pubkey), because that is
+      // what wrapMany looks jobs up by — while the key itself comes from the
+      // member's real pubkey, which is what published the announcement.
+      final kemByTarget = <String, Uint8List>{};
+      var pqCount = 0;
+      if (kemKeyFor != null) {
+        for (var i = 0; i < recipients.length; i++) {
+          final k = kemKeyFor(recipients[i]);
+          if (k != null) {
+            kemByTarget[targets[i]] = k;
+            pqCount++;
+          }
+        }
+      }
       final wraps = await _cryptoWorker.wrapMany(
         rumor: rumor,
         senderPrivkey: sig.privkey,
         recipientPubkeys: targets,
         expiration: expiration,
+        recipientKemPks: kemByTarget.isEmpty ? null : kemByTarget,
       );
       for (final wrap in wraps) {
         if (wrap != null) {
@@ -1886,14 +1919,18 @@ class NostrService {
           onWrap?.call(wrap);
         }
       }
+      onCoverage?.call(pqCount, recipients.length);
       return true;
     }
 
+    // Remote (NIP-46) signer: no local secret key, so no hybrid sealing — this
+    // path is classical by construction, and reports zero coverage.
     for (final pk in recipients) {
       final wrap =
           await _wrapAndPublish(rumor, encryptTo(pk), expiration: expiration);
       if (wrap != null) onWrap?.call(wrap);
     }
+    onCoverage?.call(0, recipients.length);
     return true;
   }
 

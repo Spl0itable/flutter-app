@@ -253,6 +253,27 @@ void main() {
     });
   });
 
+  group('group coverage', () {
+    test('only full coverage counts as post-quantum', () {
+      expect(groupIsProtected((pq: 10, total: 10)), isTrue);
+    });
+    test('partial coverage does NOT count', () {
+      // One classical copy of the same plaintext is enough for an attacker, so
+      // "8 of 10" must not render as protected.
+      expect(groupIsProtected((pq: 8, total: 10)), isFalse);
+      expect(groupIsProtected((pq: 9, total: 10)), isFalse);
+    });
+    test('zero coverage does not count', () {
+      expect(groupIsProtected((pq: 0, total: 10)), isFalse);
+    });
+    test('an empty group is not protected', () {
+      expect(groupIsProtected((pq: 0, total: 0)), isFalse);
+    });
+    test('unknown coverage is not protected', () {
+      expect(groupIsProtected(null), isFalse);
+    });
+  });
+
   group('self candidates', () {
     final sk = unhex('2' * 64);
 
@@ -286,3 +307,9 @@ void main() {
     });
   });
 }
+
+// Group coverage: a group message is post-quantum only when EVERY member got a
+// post-quantum wrap. Partial coverage must not read as protected — one
+// classical copy of the same plaintext is all an attacker needs.
+bool groupIsProtected(({int pq, int total})? coverage) =>
+    coverage != null && coverage.total > 0 && coverage.pq == coverage.total;

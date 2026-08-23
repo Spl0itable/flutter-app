@@ -4130,6 +4130,15 @@ class NostrController {
   /// NIP-46 logins are classical by construction, not by choice.
   bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey);
 
+  /// A group member's announced ML-KEM key, or null. Keyed by their REAL
+  /// pubkey — the announcement is published by the identity, not by the
+  /// rotating ephemeral key the classical leg encrypts to.
+  Uint8List? _pqGroupKeyFor(String memberPubkey) => _pqRegistry.keyFor(
+        memberPubkey,
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        enabled: pqEnabled,
+      );
+
   /// Whose post-quantum announcements we watch: our conversation partners,
   /// group members and ourselves. Unlike the vouch list — a broadcast web of
   /// trust — post-quantum keys are only needed for peers we actually message,
@@ -4620,6 +4629,7 @@ class NostrController {
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
         onWrap: _archiveSentWrap,
+        kemKeyFor: _pqGroupKeyFor,
       );
     }
   }
@@ -6179,6 +6189,7 @@ class NostrController {
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
         onWrap: _archiveSentWrap,
+        kemKeyFor: _pqGroupKeyFor,
       );
       return true;
     }
@@ -9114,6 +9125,15 @@ class NostrController {
     // Refreshed alongside the ephemeral keys so a rotation or a login change
     // takes effect on the same tick.
     service.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
+    // Group fan-out resolves each member's announced ML-KEM key through the
+    // registry. Keyed by the member's REAL pubkey — the announcement is
+    // published by the identity, not the rotating ephemeral key the classical
+    // leg encrypts to.
+    groups.kemKeyFor = (memberPubkey) => _pqRegistry.keyFor(
+          memberPubkey,
+          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          enabled: pqEnabled,
+        );
   }
 
   void _refreshEphemeralSubscriptions() {
@@ -10605,6 +10625,7 @@ class NostrController {
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
         settings: _msgSettings,
         onWrap: _archiveSentWrap,
+        kemKeyFor: _pqGroupKeyFor,
       );
       return;
     }
