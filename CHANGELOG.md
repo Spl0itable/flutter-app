@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Each released version corresponds to a tag on
 [github.com/Spl0itable/NYM](https://github.com/Spl0itable/NYM/releases).
 
+## [3.74.533] - 2026-08-23
+
+### Fixed
+- Post-quantum keys are now announced on a first connect, not only after a
+  reconnect, so a newly signed-in account is discoverable straight away.
+- The announcement no longer rides the tail of the archive restore, which
+  could skip it for a whole session when that restore was throttled or failed.
+- Peers' announced keys survive a relaunch, so the first message after a
+  restart is post-quantum instead of falling back to classical while
+  discovery re-runs.
+- Key lookups check the archive before fanning out to relays, and wait past
+  the first "nothing here" answer, both of which could leave a conversation
+  classical between two capable clients.
+
 ## [3.73.533] - 2026-08-22
 
 ### Added
