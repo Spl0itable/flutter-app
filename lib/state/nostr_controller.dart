@@ -4122,21 +4122,6 @@ class NostrController {
 
   PqMode get pqMode => _pqMode;
 
-  /// How hard we try to stay readable by Bitchat. Independent of [pqMode]: it
-  /// governs whether a second, Bitchat-readable copy of each message goes out,
-  /// which matters whether or not post-quantum is in use.
-  BitchatCompatMode _bitchatCompat = BitchatCompatMode.auto;
-
-  BitchatCompatMode get bitchatCompat => _bitchatCompat;
-
-  Future<void> setBitchatCompat(BitchatCompatMode mode) async {
-    if (_bitchatCompat == mode) return;
-    _bitchatCompat = mode;
-    await _ref
-        .read(keyValueStoreProvider)
-        .setString(StorageKeys.bitchatCompat, mode.name);
-  }
-
   /// True when this install was upgraded into post-quantum rather than starting
   /// with it, and the user has not been told yet.
   bool get pqUpgradeNoticePending =>
@@ -4207,32 +4192,21 @@ class NostrController {
   /// yet, an upgrade cannot because one might.
   void _loadPqSettings() {
     final kv = _ref.read(keyValueStoreProvider);
-    final stored = kv.getString(StorageKeys.pqMode);
-    if (stored == 'on') {
-      _pqMode = PqMode.on;
-    } else if (stored == 'off') {
-      _pqMode = PqMode.off;
-    } else {
-      // `nym_last_online_ts` is written by every prior version, so its presence
-      // marks this as an upgrade rather than a fresh install.
-      final seenBefore = kv.getString('nym_last_online_ts') != null;
-      _pqMode = PqPolicy.initialMode(seenBefore: seenBefore);
-      unawaited(_persistPqMode(_pqMode));
-      if (PqPolicy.upgradeNoticeNeeded(seenBefore: seenBefore)) {
+    // Post-quantum is on for anyone who can do it. The only thing that reads
+    // this key is the undocumented escape hatch; nothing writes it.
+    _pqMode =
+        kv.getString(StorageKeys.pqMode) == 'off' ? PqMode.off : PqMode.on;
+    // `nym_last_online_ts` is written by every prior version, so its presence
+    // marks this as an upgrade rather than a fresh install — and only an
+    // upgrade can strand an older device on the same npub.
+    if (kv.getString(StorageKeys.pqUpgradeSeen) == null) {
+      unawaited(kv.setString(StorageKeys.pqUpgradeSeen, '1'));
+      if (PqPolicy.upgradeNoticeNeeded(
+          seenBefore: kv.getString('nym_last_online_ts') != null)) {
         unawaited(kv.setString(StorageKeys.pqUpgradeNotice, 'pending'));
       }
     }
     _pqEpoch = int.tryParse(kv.getString(StorageKeys.pqEpoch) ?? '') ?? 0;
-    _bitchatCompat = BitchatCompatMode.values.firstWhere(
-      (m) => m.name == kv.getString(StorageKeys.bitchatCompat),
-      orElse: () => BitchatCompatMode.auto,
-    );
-  }
-
-  Future<void> _persistPqMode(PqMode mode) async {
-    await _ref
-        .read(keyValueStoreProvider)
-        .setString(StorageKeys.pqMode, mode == PqMode.on ? 'on' : 'off');
   }
 
   /// A stable per-device id for the announcement roster. Random, not derived
@@ -4285,21 +4259,6 @@ class NostrController {
         identity.pubkey, keys?.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
   }
 
-  /// Turns post-quantum on or off for this identity. Disabling publishes a
-  /// retraction rather than going quiet: a replaceable event cannot be
-  /// unpublished, and peers would otherwise keep sending wraps our other
-  /// devices can't read.
-  Future<void> setPqMode(PqMode mode) async {
-    if (_pqMode == mode) return;
-    _pqMode = mode;
-    await _persistPqMode(mode);
-    // Either way we republish. Turning post-quantum OFF republishes without a
-    // key: peers stop encapsulating to us immediately, but keep knowing we are
-    // a Nymchat client — retracting outright would send us back to looking
-    // like a Bitchat user and start attracting pointless Bitchat wraps again.
-    await publishPqAnnouncement(force: true);
-  }
-
   /// Our own ML-KEM decrypt candidates: current epoch first, then a bounded
   /// window of previous ones so a wrap sent just before a rotation still opens.
   List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidateKeys() {
@@ -4334,7 +4293,6 @@ class NostrController {
       knownNym: _nymUsers.contains(recipientPubkey),
       provenNymchat:
           _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
-      mode: _bitchatCompat,
     );
 
     UnsignedEvent? bitchatRumor;

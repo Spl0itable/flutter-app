@@ -145,7 +145,7 @@ void main() {
       expect(PqPolicy.enabled(privkey: sk, mode: PqMode.off), isFalse);
     });
 
-    test('defaults on for both fresh installs and upgrades', () {
+    test('post-quantum is on with no setting to enable', () {
       expect(PqPolicy.initialMode(seenBefore: false), PqMode.on);
       expect(PqPolicy.initialMode(seenBefore: true), PqMode.on);
     });
@@ -316,7 +316,10 @@ void main() {
     });
   });
 
-  group('Bitchat compatibility modes', () {
+  group('Bitchat wrap suppression', () {
+    // No setting: a live announcement proves the peer is not on Bitchat, so
+    // the extra copy is dropped. Anyone we cannot prove gets exactly what they
+    // got before post-quantum existed.
     final key = unhex(a['kemPublicKey'] as String);
 
     PqPmPlan plan({
@@ -324,33 +327,36 @@ void main() {
       bool bitchat = false,
       bool nym = false,
       bool proven = false,
-      BitchatCompatMode mode = BitchatCompatMode.auto,
     }) =>
         PqPmPlan.decide(
           recipientKemKey: kem,
           knownBitchat: bitchat,
           knownNym: nym,
           provenNymchat: proven,
-          mode: mode,
         );
 
-    test('auto: a proven Nymchat peer gets no Bitchat wrap', () {
+    test('a proven Nymchat peer gets no Bitchat wrap', () {
       expect(plan(proven: true).bitchat, isFalse);
     });
 
-    test('always: a proven Nymchat peer still gets one (maximum reach)', () {
-      expect(plan(proven: true, mode: BitchatCompatMode.always).bitchat, isTrue);
-    });
-
-    test('never: no Bitchat wrap at all', () {
-      expect(plan(proven: true, mode: BitchatCompatMode.never).bitchat, isFalse);
-    });
-
-    test('always never pairs a Bitchat copy with a post-quantum wrap', () {
-      // It buys no reach and would void the guarantee.
-      final p = plan(kem: key, mode: BitchatCompatMode.always);
+    test('a post-quantum wrap is never paired with a Bitchat copy', () {
+      final p = plan(kem: key);
       expect(p.pq, isTrue);
       expect(p.bitchat, isFalse);
+    });
+
+    test('a known Bitchat peer with no announcement still gets one', () {
+      expect(plan(bitchat: true).bitchat, isTrue);
+    });
+
+    test('an announcement overrides a stale bitchat flag', () {
+      expect(plan(bitchat: true, proven: true).bitchat, isFalse);
+    });
+
+    test('an unknown peer keeps the pre-existing dual-send', () {
+      final p = plan();
+      expect(p.bitchat, isTrue);
+      expect(p.nym, isTrue);
     });
 
     test('a KEM key implies a proven Nymchat client', () {
@@ -358,31 +364,18 @@ void main() {
       expect(plan(kem: key).provenNym, isTrue);
     });
 
-    test('auto: an unknown peer keeps the existing dual-send', () {
-      final p = plan();
-      expect(p.bitchat, isTrue);
-      expect(p.nym, isTrue);
-    });
-
-    test('auto: a known Bitchat peer with no announcement still gets one', () {
-      expect(plan(bitchat: true).bitchat, isTrue);
-    });
-
-    test('every mode always sends something', () {
-      // Regression guard: a known-Bitchat peer under `never` once matched no
-      // send condition at all, silently dropping the message.
-      for (final mode in BitchatCompatMode.values) {
-        for (final setup in [
-          () => plan(mode: mode),
-          () => plan(bitchat: true, mode: mode),
-          () => plan(nym: true, mode: mode),
-          () => plan(proven: true, mode: mode),
-          () => plan(kem: key, mode: mode),
-        ]) {
-          final p = setup();
-          expect(p.bitchat || p.nym, isTrue,
-              reason: 'mode $mode produced no transport at all');
-        }
+    test('every peer state produces at least one transport', () {
+      // A silent no-send is the worst failure here: no error, no retry, the
+      // message simply never exists.
+      for (final setup in [
+        () => plan(),
+        () => plan(bitchat: true),
+        () => plan(nym: true),
+        () => plan(proven: true),
+        () => plan(kem: key),
+      ]) {
+        final p = setup();
+        expect(p.bitchat || p.nym, isTrue);
       }
     });
   });

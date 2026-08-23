@@ -39,7 +39,6 @@ import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import 'settings_helpers.dart';
-import '../identity/pq_registry.dart';
 import 'settings_widgets.dart';
 
 /// The Settings modal (`#settingsModal`, docs/specs/02 §5.10, §04-features §9).
@@ -1475,15 +1474,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // conversation key, so there is nowhere to inject a hybrid one.
     final nostrCtrl = ref.read(nostrControllerProvider);
     final pqCapable = nostrCtrl.pqCapable;
-    final pqWarning = pqCapable
-        ? tr('⚠ All devices using this npub must be updated. Other Nymchat '
-            'clients encrypt to a key that older versions of the app can\'t '
-            'read, so an out-of-date device would stop receiving your messages '
-            'and history.')
-        : tr('Requires a local key. Browser-extension and remote-signer '
-            '(NIP-46) logins can\'t use post-quantum encryption, because the '
-            'signer returns a finished NIP-44 payload rather than a key we can '
-            'combine.');
+    final pqStatus = pqCapable
+        ? tr('Active for messages with other Nymchat users.')
+        : tr('Not available. Browser-extension and remote-signer (NIP-46) '
+            'logins can\'t use it, because the signer returns a finished '
+            'NIP-44 payload rather than a key we can combine.');
     final dmTtlItems = <({int value, String label})>[
       (value: 3600, label: tr('1 hour')),
       (value: 21600, label: tr('6 hours')),
@@ -1619,57 +1614,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
       ),
+      // Read-only status, not a setting: post-quantum is simply how Nymchat
+      // talks to Nymchat. Shown anyway so the security posture is visible, and
+      // so an extension / NIP-46 login is told WHY it is classical rather than
+      // left to wonder — that is a property of the login, not a preference.
       _GroupSpec(
         text: tr(
-            'Quantum-resistant encryption Disabled Enabled Adds ML-KEM-768 (a '
-            'post-quantum key exchange) alongside the standard NIP‑44 '
-            'secp256k1 ECDH for PMs and group chats with other Nymchat users. '
-            '{warning}',
-            {'warning': pqWarning}),
+            'Quantum-resistant encryption {status} Private messages and group '
+            'chats with other Nymchat users add ML-KEM-768 (a post-quantum key '
+            'exchange) alongside the standard NIP‑44 secp256k1 ECDH.',
+            {'status': pqStatus}),
         child: FormGroup(
           label: tr('Quantum-resistant encryption'),
-          hint: tr('Adds ML-KEM-768 (a post-quantum key exchange) alongside '
-              'the standard NIP‑44 secp256k1 ECDH for PMs and group chats with '
-              'other Nymchat users. Both would have to be broken to read a '
-              'message, so traffic recorded today can\'t be decrypted by a '
-              'future quantum computer. Bitchat users and other Nostr clients '
-              'are unaffected — they keep receiving standard NIP‑17.'),
-          warning: pqWarning,
-          child: FormSelect<bool>(
-            value: nostrCtrl.pqMode == PqMode.on,
-            items: [
-              (value: false, label: tr('Disabled')),
-              (value: true, label: tr('Enabled')),
-            ],
-            disabled: !pqCapable,
-            onChanged: (v) =>
-                unawaited(nostrCtrl.setPqMode(v ? PqMode.on : PqMode.off)),
-          ),
-        ),
-      ),
-      _GroupSpec(
-        text: tr(
-            'Bitchat compatibility Automatic Always Never Bitchat can\'t read '
-            'Nymchat\'s format, so a second copy of each message is normally '
-            'sent in Bitchat\'s format to anyone who might be using it.'),
-        child: FormGroup(
-          label: tr('Bitchat compatibility'),
-          hint: tr('Bitchat can\'t read Nymchat\'s format, so a second copy of '
-              'each message is normally sent in Bitchat\'s format to anyone who '
-              'might be using it. Automatic skips that copy for people whose '
-              'client has identified itself as Nymchat, and still sends it to '
-              'everyone else — so nothing becomes unreachable. Always sends it '
-              'whenever the recipient might be on Bitchat. Never sends only '
-              'Nymchat\'s format, which reveals the least but can\'t reach '
-              'Bitchat at all.'),
-          child: FormSelect<BitchatCompatMode>(
-            value: nostrCtrl.bitchatCompat,
-            items: [
-              (value: BitchatCompatMode.auto, label: tr('Automatic')),
-              (value: BitchatCompatMode.always, label: tr('Always')),
-              (value: BitchatCompatMode.never, label: tr('Never')),
-            ],
-            onChanged: (v) => unawaited(nostrCtrl.setBitchatCompat(v)),
+          hint: tr('Private messages and group chats with other Nymchat users '
+              'add ML-KEM-768 (a post-quantum key exchange) alongside the '
+              'standard NIP‑44 secp256k1 ECDH, so both would have to be broken '
+              'to read a message and traffic recorded today can\'t be decrypted '
+              'by a future quantum computer. This is automatic and has no '
+              'setting. Bitchat users and other Nostr clients keep receiving '
+              'standard NIP‑17 exactly as before.'),
+          child: Text(
+            pqStatus,
+            style: TextStyle(
+              color: context.nym.text.withValues(alpha: 0.85),
+              fontSize: 13,
+            ),
           ),
         ),
       ),

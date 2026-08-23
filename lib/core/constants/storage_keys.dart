@@ -11,7 +11,7 @@ class StorageKeys {
   static const pqEpoch = 'nym_pq_epoch';
   static const pqDeviceId = 'nym_pq_device_id';
   static const pqUpgradeNotice = 'nym_pq_upgrade_notice';
-  static const bitchatCompat = 'nym_bitchat_compat';
+  static const pqUpgradeSeen = 'nym_pq_upgrade_seen';
 
   // Identity / login
   static const nostrLoginMethod = 'nym_nostr_login_method';

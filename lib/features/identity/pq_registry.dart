@@ -56,7 +56,12 @@ const Duration pqDeviceStale = Duration(days: 30);
 const int pqPreviousEpochs = 3;
 
 /// Whether this identity sends post-quantum and advertises itself as able to
-/// receive it. Mirrors the PWA's `_pqMode`.
+/// receive it.
+///
+/// There is no user setting: post-quantum is simply how Nymchat talks to
+/// Nymchat. This exists only as an undocumented escape hatch (the PWA's
+/// `nym_pq_mode`), so a field bug can be defused for affected users without an
+/// emergency release. Nothing in the app writes it.
 enum PqMode { on, off }
 
 /// One device listed in our own announcement. Informational only — it never
@@ -294,15 +299,8 @@ class PqPolicy {
   static bool enabled({required Uint8List? privkey, required PqMode mode}) =>
       capable(privkey: privkey) && mode == PqMode.on;
 
-  /// The default mode on first boot of a post-quantum-capable build: on, for
-  /// everyone.
-  ///
-  /// The one real cost is on upgrade. Announcing a key makes other Nymchat
-  /// clients encrypt to it, and a SECOND device on the same npub still running
-  /// an older build cannot read that — so it would stop receiving messages
-  /// until it updates. That device is invisible to us (an old build publishes
-  /// no announcement), so rather than default off and leave everyone
-  /// unprotected, we default on and say so once — see [upgradeNoticeNeeded].
+  /// Post-quantum is on for anyone who can do it. Kept as a function so the
+  /// escape hatch has somewhere to live.
   static PqMode initialMode({required bool seenBefore}) => PqMode.on;
 
   /// Whether this boot was an upgrade into post-quantum rather than a fresh
@@ -327,20 +325,6 @@ class PqPolicy {
     out.sort((a, b) => b.seenAt.compareTo(a.seenAt));
     return out.length > max ? out.sublist(0, max) : out;
   }
-}
-
-/// How hard we try to stay readable by Bitchat. Under
-/// Settings > Privacy & Security, beneath quantum-resistant encryption.
-enum BitchatCompatMode {
-  /// Default. Send a Bitchat wrap only to peers we cannot prove are on Nymchat.
-  auto,
-
-  /// Send one to every peer who might be on Bitchat — the behaviour that
-  /// shipped before capability announcements existed.
-  always,
-
-  /// Never send one. Minimum metadata, at the cost of not reaching Bitchat.
-  never,
 }
 
 /// Which transports a 1:1 PM should use. Mirrors the PWA's `pqPmPlan`
@@ -373,41 +357,42 @@ class PqPmPlan {
 
   /// Decides the transports for a recipient.
   ///
-  /// The Bitchat wrap exists to reach someone who might be running Bitchat. A
-  /// live capability announcement ([provenNymchat]) is signed proof they are
-  /// running Nymchat instead, so under [BitchatCompatMode.auto] it settles the
-  /// question and the extra wrap is dropped — no guessing, and nothing is ever
-  /// made undeliverable, because a peer with NO announcement still gets both.
+  /// There is no setting. Nymchat-to-Nymchat is post-quantum; anyone we cannot
+  /// prove is on Nymchat gets exactly what they got before post-quantum
+  /// existed. The whole rule is one question — has this peer published a
+  /// capability announcement ([provenNymchat])? — because that announcement is
+  /// signed and cannot be faked, whereas inferring the client from public
+  /// activity would occasionally be wrong, and being wrong here means sending
+  /// someone a message their app cannot open, with no error and no retry.
   ///
-  /// Note [BitchatCompatMode.always] still drops the Bitchat wrap once a
-  /// post-quantum wrap is going out. That is not a compromise of the setting: a
-  /// Bitchat copy of the same plaintext would hand a future quantum attacker
-  /// the easier target and make the shield badge a lie, and it buys no reach,
-  /// because a peer with an ML-KEM key is demonstrably not on Bitchat.
+  /// A post-quantum wrap is never accompanied by a Bitchat copy of the same
+  /// plaintext: it would hand a future quantum attacker the easier target and
+  /// make the shield badge a lie, and it buys no reach, because a peer with an
+  /// ML-KEM key is demonstrably not on Bitchat. That falls out of the rule
+  /// rather than being a special case — holding a key implies holding the
+  /// announcement.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
     required bool knownNym,
     bool provenNymchat = false,
-    BitchatCompatMode mode = BitchatCompatMode.auto,
   }) {
     final unknown = !knownBitchat && !knownNym;
     // Holding a KEM key means we hold their announcement, so it always implies
     // a proven Nymchat client. Deriving it here rather than trusting the caller
     // keeps the two arguments from ever disagreeing.
     final proven = provenNymchat || recipientKemKey != null;
-    final bitchat = switch (mode) {
-      BitchatCompatMode.never => false,
-      BitchatCompatMode.always =>
-        (knownBitchat || unknown) && recipientKemKey == null,
-      BitchatCompatMode.auto => (knownBitchat || unknown) && !proven,
-    };
+    // The Bitchat wrap exists to reach someone who MIGHT be running Bitchat. A
+    // live announcement proves they are not, so it is dropped; without one we
+    // cannot tell, so it is sent.
+    final bitchat = (knownBitchat || unknown) && !proven;
     return PqPmPlan(
       kemPublicKey: recipientKemKey,
       bitchat: bitchat,
-      // A message must always leave in SOME format. Without the `!bitchat`
-      // term, a known-Bitchat peer under `never` would match none of the other
-      // conditions and the send would silently produce nothing at all.
+      // Invariant: a message must always leave in SOME format. The other terms
+      // happen to cover every case today, but a silent no-send is such a bad
+      // failure — no error, no retry, the message simply never exists — that
+      // the guard stays.
       nym: !bitchat || knownNym || unknown || proven,
       provenNym: proven,
     );
