@@ -329,9 +329,14 @@ class StorageSync {
       flat['leftGroupTimes'] = _kvJsonMap(kv, StorageKeys.leftGroupTimes);
       // Lightning address is cached per-pubkey (`nym_lightning_address_<pk>`,
       // zaps.js:234); the PWA syncs `this.lightningAddress` (null when unset).
+      // Falls back to the global key, the same order the boot read uses
+      // (nostr_controller.dart:185-186). Reading only the per-pubkey one meant
+      // that whenever it was missing but the global was set, this published a
+      // null over the address another device had saved.
       flat['lightningAddress'] = selfPubkey == null
-          ? null
-          : kv.getString(StorageKeys.lightningAddressFor(selfPubkey));
+          ? kv.getString(StorageKeys.lightningAddressGlobal)
+          : kv.getString(StorageKeys.lightningAddressFor(selfPubkey)) ??
+              kv.getString(StorageKeys.lightningAddressGlobal);
       flat['powDifficulty'] =
           kv.getInt(StorageKeys.powDifficulty, defaultValue: 0);
       // keypairMode is deliberately NOT synced: it says whether THIS device

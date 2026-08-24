@@ -12,6 +12,7 @@
 // key and it is only reported as broken when NONE survives: a list of channel
 // names and a list of pubkeys accept different shapes, and a value rejected for
 // being malformed is not the same as a value that was dropped.
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/models/settings.dart';
@@ -37,6 +38,23 @@ final _candidates = <Object>[
   'probe', // a plain channel or geohash name
   'en', // a language tag
 ];
+
+/// String settings whose value is parsed into an enum or checked against a
+/// fixed set, so the probe has to use a REAL alternative — an invented one
+/// would be rejected by the apply and read as a bug that isn't there. Every
+/// other string setter is an unvalidated pass-through, so an arbitrary
+/// non-empty value exercises it honestly.
+const _validAlternatives = <String, String>{
+  'theme': 'cyber', // NymThemeKey.id
+  'colorMode': 'light', // ColorMode.name
+  'readReceiptsScope': 'pms', // Settings.indicatorScopes
+  'typingIndicatorsScope': 'groups',
+  'swipeLeftAction': 'react', // validSwipeActions
+  'swipeRightAction': 'zap',
+};
+
+/// A string value no default uses, for the pass-through setters.
+const _stringProbe = 'probe-value';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -67,6 +85,7 @@ void main() {
     probeContainer.dispose();
 
     final broken = <String>[];
+    final skipped = <String>[];
     var probed = 0;
 
     for (final entry in baseline.entries) {
@@ -74,18 +93,30 @@ void main() {
       final base = entry.value;
       if (key == 'v' || _derivedFrom.containsKey(key)) continue;
 
-      // Values to try for this key. Strings are left alone — most are enum ids,
-      // and inventing one would be rejected by the apply guards and read as a
-      // bug that isn't there.
+      // Values to try for this key. Strings use a real alternative where the
+      // value is parsed or validated (see _validAlternatives) and an arbitrary
+      // non-empty one elsewhere, since those setters are pass-throughs.
       final tries = <Object>[
         if (base is bool) !base,
         if (base is int) base + 7,
+        if (base is String)
+          _validAlternatives[key] ??
+              (base == _stringProbe ? 'probe-value-2' : _stringProbe),
         if (base is List && base.isEmpty)
           for (final c in _candidates) <dynamic>[c],
         if (base is Map && base.isEmpty)
           for (final c in _candidates) <String, dynamic>{'$c': 1700000000},
+        // Keys whose DEFAULT is already non-empty need a mutation derived from
+        // it, or they would go unprobed — which is how a clobber hides.
+        if (base is List && base.isNotEmpty) base.reversed.toList(),
+        if (base is Map && base.isNotEmpty)
+          {for (final e in base.entries) e.key: 'probe-${e.value}'},
+        if (base == null) _stringProbe,
       ];
-      if (tries.isEmpty) continue;
+      if (tries.isEmpty) {
+        skipped.add('$key (${base.runtimeType})');
+        continue;
+      }
       probed++;
 
       Object? lastGot;
@@ -111,7 +142,15 @@ void main() {
       if (!survived) broken.add('  $key: sent ${tries.first}, published back $lastGot');
     }
 
-    expect(probed, greaterThan(20), reason: 'the probe must cover real ground');
+    // Guards against the probe quietly shrinking: if a future change makes
+    // values un-probeable, this fails rather than passing vacuously.
+    debugPrint('round-trip probed $probed of ${baseline.length} published keys');
+    debugPrint('not probed: ${skipped.join(', ')}');
+    expect(skipped, isEmpty,
+        reason: 'every published key must be probed — an unprobed key is '
+            'exactly where a clobber hides');
+    expect(probed, greaterThanOrEqualTo(55),
+        reason: 'the probe must cover nearly every published key');
     expect(
       broken,
       isEmpty,
