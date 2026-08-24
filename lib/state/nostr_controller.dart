@@ -4566,7 +4566,7 @@ class NostrController {
   // ===========================================================================
   // The post-quantum root secret (docs/PQ-ROOT-SPEC.md §1, §5, §6, §7). Not
   // derivable, so it has to be carried: held locally and moved to the user's
-  // other devices by code or passphrase wrap.
+  // other devices by code.
 
   /// This identity's root secret, or null when this device holds none.
   Uint8List? _pqRoot;
@@ -4702,30 +4702,6 @@ class NostrController {
     _pushPqKeysToPeers();
     await publishPqAnnouncement(force: true);
     return true;
-  }
-
-  /// Adopts the root from the account's passphrase wrap. Returns false on a
-  /// wrong passphrase, a missing wrap, or a record we never read.
-  Future<bool> unlockPqRootWithPassphrase(String passphrase) async {
-    final wrap = _storageSync?.pqRootRecord?.wrapOfType(pqRootWrapPassphrase);
-    if (wrap == null) return false;
-    final root = await pqRootUnwrapWithPassphrase(wrap, passphrase);
-    if (root == null) return false;
-    if (!await _persistPqRoot(root)) return false;
-    _pushPqKeysToPeers();
-    await publishPqAnnouncement(force: true);
-    return true;
-  }
-
-  /// Adds or replaces the passphrase wrap, keeping every other recovery path.
-  /// Throws [ArgumentError] when the passphrase fails the §5.2 floor.
-  Future<bool> setPqRootPassphrase(String passphrase) async {
-    final root = _pqRoot;
-    final sync = _storageSync;
-    if (root == null || sync == null) return false;
-    final wrap = await pqRootWrapWithPassphrase(root, passphrase);
-    final record = sync.pqRootRecord ?? const PqRootRecord();
-    return sync.pqRootRecordSet(record.withWrap(wrap));
   }
 
   /// Re-pushes our ML-KEM keys, so a link taking effect mid-session does not

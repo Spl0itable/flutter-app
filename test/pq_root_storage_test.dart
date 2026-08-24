@@ -22,8 +22,6 @@ final String _pub = getPublicKeyHex(_priv);
 final LocalSigner _signer = LocalSigner(_priv);
 final Uint8List _root = Uint8List.fromList(List<int>.filled(32, 0x5a));
 
-String _hex(List<int> b) =>
-    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
 
 /// StorageSync over an in-memory D1. [fail] makes every request throw, which
 /// is what an offline boot looks like.
@@ -79,7 +77,9 @@ void main() {
     test('the wraps row is written classically, never pq1.', () async {
       final d1 = <String, String>{};
       final sync = _syncOver(d1, root: _root);
-      final wrap = await pqRootWrapWithPassphrase(_root, 'correct battery 42!');
+      // Any wrap will do here: these assert how the ROW is sealed, not what is
+      // in the wrap. Mobile has no wrap-minting path (no platform PRF).
+      const wrap = PqRootWrap(type: pqRootWrapPasskey, blob: 'enc:v1:AAAA:BBBB');
 
       expect(await sync.pqRootRecordSet(const PqRootRecord().withWrap(wrap)),
           isTrue);
@@ -108,7 +108,9 @@ void main() {
 
     test('a device holding NO root can still read the row', () async {
       final d1 = <String, String>{};
-      final wrap = await pqRootWrapWithPassphrase(_root, 'correct battery 42!');
+      // Any wrap will do here: these assert how the ROW is sealed, not what is
+      // in the wrap. Mobile has no wrap-minting path (no platform PRF).
+      const wrap = PqRootWrap(type: pqRootWrapPasskey, blob: 'enc:v1:AAAA:BBBB');
       await _syncOver(d1, root: _root)
           .pqRootRecordSet(const PqRootRecord().withWrap(wrap));
 
@@ -118,11 +120,10 @@ void main() {
       expect(fresh.pqRootRowPresent, isTrue);
       final record = fresh.pqRootRecord;
       expect(record, isNotNull);
-      final recovered = await pqRootUnwrapWithPassphrase(
-          record!.wrapOfType(pqRootWrapPassphrase)!, 'correct battery 42!');
-      expect(_hex(recovered!), _hex(_root),
-          reason: 'the AES-GCM wrap is what the quantum adversary cannot '
-              'open, so the classical outer seal costs nothing');
+      // The wrap survives the round trip intact. Its AES-GCM is what a
+      // quantum adversary cannot open, so the classical outer seal costs
+      // nothing.
+      expect(record!.wrapOfType(pqRootWrapPasskey)?.blob, wrap.blob);
     });
 
     test('the row is not offered as a settings section to apply', () async {
@@ -134,7 +135,6 @@ void main() {
       expect(offers.where((o) => o.section.contains('pq-root')), isEmpty);
     });
   });
-
   group('§5.3 the root reaches the first settings read of a launch', () {
     test('a root-sealed row opens without any setPqSelfKeys hand-off',
         () async {

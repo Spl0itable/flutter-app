@@ -8,27 +8,19 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:cryptography/cryptography.dart';
 
 import '../../core/crypto/bech32_codec.dart';
-import '../../core/crypto/keys.dart';
 import '../../core/crypto/pq.dart' as pq;
 
 /// The settings category the wraps live in. The ONE category that may never be
 /// sealed to the root-derived key — spec §5.1, it would be a circular lock.
 const String pqRootCategory = 'nymchat-pq-root';
 
-/// PBKDF2-HMAC-SHA256 iterations for the passphrase wrap (spec §5). Pinned.
-const int pqRootPbkdf2Iterations = 310000;
-
-/// Passphrase-wrap salt: 16 random bytes, stored in the clear beside the wrap.
+/// Wrap salt: 16 random bytes, stored in the clear beside the wrap.
 const int pqRootSaltLength = 16;
 
-/// Minimum passphrase length (spec §5.2).
-const int pqRootMinPassphraseLength = 12;
-
-/// Wrap-type discriminators inside a [PqRootRecord].
-const String pqRootWrapPassphrase = 'passphrase';
+// Only the manual code path is implemented on mobile; a passkey wrap needs
+// platform PRF APIs. Records carrying one are parsed and ignored.
 const String pqRootWrapPasskey = 'passkey';
 
 /// The root as its `nympq1…` display / clipboard / QR form (spec §1). Key
@@ -70,94 +62,8 @@ bool pqRootMatchesAnnouncedKey(
 }
 
 // -----------------------------------------------------------------------------
-// Passphrase policy (spec §5.2)
-// -----------------------------------------------------------------------------
-
-/// The long-but-guessable tail a length floor alone lets through (spec §5.2).
-const List<String> pqRootCommonPassphrases = [
-  'password',
-  'password1',
-  'password123',
-  'passw0rd123',
-  'passwordpassword',
-  '123456789012',
-  '1234567890123',
-  '12345678901234',
-  '123456789012345',
-  '1234567890abc',
-  'qwertyuiop123',
-  'qwertyuiopasdf',
-  'qwertyuiop[]\\',
-  'letmein123456',
-  'iloveyou12345',
-  'administrator',
-  'trustno1trustno1',
-  'welcome123456',
-  'monkeymonkey1',
-  'football123456',
-  'baseball123456',
-  'dragondragon1',
-  'sunshine12345',
-  'princess12345',
-  'superman12345',
-  'michaeljordan',
-  'thisisapassword',
-  'correcthorsebatterystaple',
-  'abcdefghijkl',
-  'abcdefghijklm',
-  'aaaaaaaaaaaa',
-  'zxcvbnmasdfgh',
-  'p@ssw0rd12345',
-  'changemenow12',
-  'qazwsxedcrfv',
-];
-
-/// Why [passphrase] may not wrap the root, or null when it may. User-facing.
-String? pqRootPassphraseProblem(String passphrase) {
-  if (passphrase.length < pqRootMinPassphraseLength) {
-    return 'Use at least $pqRootMinPassphraseLength characters.';
-  }
-  final lower = passphrase.toLowerCase();
-  if (pqRootCommonPassphrases.contains(lower)) {
-    return 'That is one of the most common passwords. Choose another.';
-  }
-  // Long but near-characterless; the common list cannot enumerate these.
-  if (passphrase.split('').toSet().length < 4) {
-    return 'Too repetitive — use a longer, more varied phrase.';
-  }
-  return null;
-}
-
-/// Coarse 0-4 score for the strength meter. Not a boundary —
-/// [pqRootPassphraseProblem] is.
-int pqRootPassphraseStrength(String passphrase) {
-  if (passphrase.isEmpty) return 0;
-  var classes = 0;
-  if (RegExp(r'[a-z]').hasMatch(passphrase)) classes++;
-  if (RegExp(r'[A-Z]').hasMatch(passphrase)) classes++;
-  if (RegExp(r'[0-9]').hasMatch(passphrase)) classes++;
-  if (RegExp(r'[^a-zA-Z0-9]').hasMatch(passphrase)) classes++;
-  final unique = passphrase.split('').toSet().length;
-  var score = 0;
-  if (passphrase.length >= 12) score++;
-  if (passphrase.length >= 16) score++;
-  if (passphrase.length >= 24) score++;
-  if (classes >= 3) score++;
-  if (unique < 6) score = score > 1 ? 1 : score;
-  if (pqRootPassphraseProblem(passphrase) != null) score = 0;
-  return score > 4 ? 4 : score;
-}
-
-// -----------------------------------------------------------------------------
 // Wrap format
 // -----------------------------------------------------------------------------
-
-final _pbkdf2 = Pbkdf2(
-  macAlgorithm: Hmac.sha256(),
-  iterations: pqRootPbkdf2Iterations,
-  bits: 256,
-);
-final _aes = AesGcm.with256bits();
 
 /// One recovery path for the root: an AES-GCM-256 ciphertext plus its public
 /// KDF parameters. [blob] reuses the identity vault's `enc:v1:` envelope.
@@ -170,7 +76,7 @@ class PqRootWrap {
     this.extra = const {},
   });
 
-  /// [pqRootWrapPassphrase], [pqRootWrapPasskey], or a future type.
+  /// [pqRootWrapPasskey], or a future type.
   final String type;
 
   /// `enc:v1:<b64 iv>:<b64 ciphertext||tag>`.
@@ -275,92 +181,6 @@ class PqRootRecord {
     } catch (_) {
       return null;
     }
-  }
-}
-
-/// AES-GCM-256 encrypt of [root] under [key], in the shared `enc:v1:` envelope.
-Future<String> _sealRoot(SecretKey key, Uint8List root,
-    {Uint8List? nonce}) async {
-  final iv = nonce ?? _aes.newNonce();
-  final box = await _aes.encrypt(root, secretKey: key, nonce: iv);
-  final ct = Uint8List.fromList([...box.cipherText, ...box.mac.bytes]);
-  return 'enc:v1:${base64.encode(iv)}:${base64.encode(ct)}';
-}
-
-/// Inverse of [_sealRoot]. Throws on a wrong key (GCM tag failure) or a
-/// malformed envelope.
-Future<Uint8List> _openRoot(SecretKey key, String blob) async {
-  final parts = blob.split(':');
-  if (parts.length != 4 || parts[0] != 'enc' || parts[1] != 'v1') {
-    throw const FormatException('bad pq root wrap');
-  }
-  final iv = base64.decode(parts[2]);
-  final all = base64.decode(parts[3]);
-  if (all.length <= 16) throw const FormatException('bad pq root wrap');
-  final clear = await _aes.decrypt(
-    SecretBox(all.sublist(0, all.length - 16),
-        nonce: iv, mac: Mac(all.sublist(all.length - 16))),
-    secretKey: key,
-  );
-  return Uint8List.fromList(clear);
-}
-
-/// Wraps [root]: PBKDF2-HMAC-SHA256 over a fresh 16-byte salt, then
-/// AES-GCM-256. The passphrase only ever wraps, never seeds (spec §5.2).
-///
-/// Throws [ArgumentError] when the passphrase fails
-/// [pqRootPassphraseProblem]. [salt] / [nonce] are for test vectors only.
-Future<PqRootWrap> pqRootWrapWithPassphrase(
-  Uint8List root,
-  String passphrase, {
-  Uint8List? salt,
-  Uint8List? nonce,
-}) async {
-  if (root.length != pq.pqRootLength) {
-    throw ArgumentError('pq root must be ${pq.pqRootLength} bytes');
-  }
-  final problem = pqRootPassphraseProblem(passphrase);
-  if (problem != null) throw ArgumentError(problem);
-  final s = salt ?? randomBytes(pqRootSaltLength);
-  final key = await _pbkdf2.deriveKey(
-    secretKey: SecretKey(utf8.encode(passphrase)),
-    nonce: s,
-  );
-  return PqRootWrap(
-    type: pqRootWrapPassphrase,
-    salt: base64.encode(s),
-    iterations: pqRootPbkdf2Iterations,
-    blob: await _sealRoot(key, root, nonce: nonce),
-  );
-}
-
-/// Recovers the root, or null on a wrong passphrase or a malformed wrap — the
-/// two are deliberately indistinguishable.
-Future<Uint8List?> pqRootUnwrapWithPassphrase(
-  PqRootWrap wrap,
-  String passphrase,
-) async {
-  if (wrap.type != pqRootWrapPassphrase) return null;
-  final saltB64 = wrap.salt;
-  if (saltB64 == null) return null;
-  try {
-    final kdf = wrap.iterations == null ||
-            wrap.iterations == pqRootPbkdf2Iterations
-        ? _pbkdf2
-        : Pbkdf2(
-            macAlgorithm: Hmac.sha256(),
-            iterations: wrap.iterations!,
-            bits: 256,
-          );
-    final key = await kdf.deriveKey(
-      secretKey: SecretKey(utf8.encode(passphrase)),
-      nonce: base64.decode(saltB64),
-    );
-    final root = await _openRoot(key, wrap.blob);
-    if (root.length != pq.pqRootLength) return null;
-    return root;
-  } catch (_) {
-    return null;
   }
 }
 

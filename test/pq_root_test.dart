@@ -127,92 +127,6 @@ void main() {
     });
   });
 
-  group('§5 passphrase wrap', () {
-    test('round-trips, and the wrap carries the pinned parameters', () async {
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      expect(wrap.type, pqRootWrapPassphrase);
-      expect(wrap.iterations, 310000);
-      expect(pqRootPbkdf2Iterations, 310000);
-      expect(base64.decode(wrap.salt!).length, 16);
-      expect(pqRootSaltLength, 16);
-      expect(wrap.blob.startsWith('enc:v1:'), isTrue);
-      final back =
-          await pqRootUnwrapWithPassphrase(wrap, 'correct battery 42!');
-      expect(_hex(back!), _hex(root));
-    });
-
-    test('a wrong passphrase yields null, not a wrong root', () async {
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      expect(await pqRootUnwrapWithPassphrase(wrap, 'correct battery 43!'),
-          isNull);
-    });
-
-    test('a tampered ciphertext is rejected by the GCM tag', () async {
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      final parts = wrap.blob.split(':');
-      final ct = base64.decode(parts[3]);
-      ct[0] ^= 0xff;
-      final tampered = PqRootWrap(
-        type: wrap.type,
-        salt: wrap.salt,
-        iterations: wrap.iterations,
-        blob: 'enc:v1:${parts[2]}:${base64.encode(ct)}',
-      );
-      expect(await pqRootUnwrapWithPassphrase(tampered, 'correct battery 42!'),
-          isNull);
-    });
-
-    test('each wrap gets a fresh salt', () async {
-      final a = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      final b = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      expect(a.salt, isNot(b.salt));
-      expect(a.blob, isNot(b.blob));
-    });
-
-    // §5.2: the passphrase only ever WRAPS the root, it never becomes the seed.
-    test('the passphrase never becomes the key material', () async {
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      final recovered =
-          (await pqRootUnwrapWithPassphrase(wrap, 'correct battery 42!'))!;
-      expect(_hex(recovered), _hex(root),
-          reason: 'the root stays 256 bits whatever the passphrase is');
-    });
-  });
-
-  group('§5.2 passphrase floor', () {
-    test('shorter than 12 characters is refused', () {
-      expect(pqRootMinPassphraseLength, 12);
-      expect(pqRootPassphraseProblem('short11chars'), isNull);
-      expect(pqRootPassphraseProblem('short1char'), isNotNull);
-      expect(pqRootPassphraseProblem('1234'), isNotNull,
-          reason: 'a PIN is explicitly not offered for this wrap');
-    });
-
-    test('a long common password is still refused', () {
-      expect(pqRootPassphraseProblem('correcthorsebatterystaple'), isNotNull);
-      expect(pqRootPassphraseProblem('Password123'.toLowerCase()), isNotNull);
-    });
-
-    test('a long but near-characterless string is refused', () {
-      expect(pqRootPassphraseProblem('aaaaaaaaaaaaaaaaaaaa'), isNotNull);
-    });
-
-    test('wrapping refuses a passphrase below the floor', () {
-      expect(() => pqRootWrapWithPassphrase(root, 'short'),
-          throwsA(isA<ArgumentError>()));
-    });
-
-    test('strength rises with length and variety and floors at 0', () {
-      expect(pqRootPassphraseStrength(''), 0);
-      expect(pqRootPassphraseStrength('short'), 0);
-      expect(pqRootPassphraseStrength('aaaaaaaaaaaaaaaa'), 0);
-      expect(pqRootPassphraseStrength('correct battery 42!'),
-          greaterThan(pqRootPassphraseStrength('twelvechars1')));
-      expect(pqRootPassphraseStrength('Tr0ub4dor & 3 horses in a field'),
-          lessThanOrEqualTo(4));
-    });
-  });
-
   group('the record', () {
     test('an empty record is meaningful and round-trips', () {
       const rec = PqRootRecord();
@@ -224,42 +138,42 @@ void main() {
     });
 
     test('wraps round-trip through JSON', () async {
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
+      const wrap = PqRootWrap(type: pqRootWrapPasskey, salt: 'c2FsdA', blob: 'enc:v1:AAAA:BBBB');
       final rec = const PqRootRecord().withWrap(wrap);
       final back = PqRootRecord.decode(rec.encode())!;
-      final w = back.wrapOfType(pqRootWrapPassphrase)!;
+      final w = back.wrapOfType(pqRootWrapPasskey)!;
       expect(w.blob, wrap.blob);
       expect(w.salt, wrap.salt);
       expect(w.iterations, wrap.iterations);
-      expect(_hex((await pqRootUnwrapWithPassphrase(w, 'correct battery 42!'))!),
-          _hex(root));
+      expect(w.blob, wrap.blob);
     });
 
     // Dropping another client's wrap silently loses a way into the account.
     test('a wrap type this build does not understand survives a rewrite',
         () async {
+      // A type no build understands yet: it must survive our rewrite intact.
       const foreign = PqRootWrap(
-        type: 'passkey',
+        type: 'some-future-path',
         blob: 'enc:v1:AAAA:BBBB',
         extra: {'credId': 'abc'},
       );
       final rec = const PqRootRecord().withWrap(foreign);
-      final wrap = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
+      const wrap = PqRootWrap(type: pqRootWrapPasskey, salt: 'c2FsdA', blob: 'enc:v1:AAAA:BBBB');
       final rewritten =
           PqRootRecord.decode(rec.encode())!.withWrap(wrap);
       final back = PqRootRecord.decode(rewritten.encode())!;
       expect(back.wraps.length, 2);
-      final kept = back.wrapOfType('passkey')!;
+      final kept = back.wrapOfType('some-future-path')!;
       expect(kept.blob, 'enc:v1:AAAA:BBBB');
       expect(kept.extra['credId'], 'abc');
     });
 
     test('replacing a wrap of the same type does not duplicate it', () async {
-      final a = await pqRootWrapWithPassphrase(root, 'correct battery 42!');
-      final b = await pqRootWrapWithPassphrase(root, 'another one entirely');
+      const a = PqRootWrap(type: pqRootWrapPasskey, blob: 'enc:v1:AAAA:1111');
+      const b = PqRootWrap(type: pqRootWrapPasskey, blob: 'enc:v1:AAAA:2222');
       final rec = const PqRootRecord().withWrap(a).withWrap(b);
       expect(rec.wraps.length, 1);
-      expect(rec.wrapOfType(pqRootWrapPassphrase)!.blob, b.blob);
+      expect(rec.wrapOfType(pqRootWrapPasskey)!.blob, b.blob);
     });
 
     test('junk does not parse as a record', () {
