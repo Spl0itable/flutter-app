@@ -120,6 +120,10 @@ class StorageSync {
       'transparencyEnabled',
       'columnsWallpaper',
       'sidebarSectionOrder',
+      // The PWA files this under `appearance`. Absent here it landed in
+      // `misc`, so the same setting lived in two categories and whichever was
+      // written last won -- which is a change reverting for no visible reason.
+      'uiLanguage',
     ],
     'privacy': [
       'blockedUsers',
@@ -160,6 +164,11 @@ class StorageSync {
       'notifyFriendsOnly',
       'syncMLSHistory',
       'seenCalls',
+      // As with uiLanguage above: the PWA files these under `messaging`.
+      'autoTranslate',
+      'autoTranslateChannels',
+      'autoTranslatePMs',
+      'autoTranslateGroups',
     ],
     'channels': [
       'pinnedChannels',
@@ -864,16 +873,28 @@ class StorageSync {
     }
     if (_rumorByteSize(payload) > _maxRumorBytes) return false;
 
+    payload = _mergeUnknownSectionKeys(dTag, payload);
     final json = jsonEncode(payload);
     if (_publishedSectionJson[dTag] == json) return false; // unchanged
-    _publishedSectionJson[dTag] = json;
 
     final ok = await _setSettingsCategory(
       d1Category(dTag),
       jsonEncode(_withCat(payload, dTag)),
     );
-    // Relay wrap is best-effort and independent of the D1 result (the PWA
-    // fire-and-forgets `_saveSettingsBlobToD1` before wrapping).
+    // Recorded as published only AFTER it actually is. Marking first meant a
+    // write that failed -- a network blip, an oversized row, a signer that
+    // could not authenticate -- still counted as done, and because the marker
+    // lives as long as this StorageSync, every later save short-circuited on
+    // it. The section was then never retried, so the change survived until the
+    // next launch and reverted to whatever D1 still held.
+    if (!ok) {
+      _publishedSectionJson.remove(dTag);
+      return false;
+    }
+    _publishedSectionJson[dTag] = json;
+
+    // Relay wrap is best-effort and independent of the D1 result: D1 is the
+    // source the restore reads back from.
     final wrapPublisher = _syncWrapPublisher;
     if (wrapPublisher != null) {
       try {
@@ -883,6 +904,30 @@ class StorageSync {
       }
     }
     return ok;
+  }
+
+  /// The most recent inbound payload per settings category.
+  final Map<String, Map<String, dynamic>> _lastInboundSections = {};
+
+  /// Overlays this client's own section payload onto the last one we read for
+  /// that category, so keys we do not know about survive our write.
+  ///
+  /// A write REPLACES the whole category row, and the two clients do not build
+  /// an identical key set -- each has settings the other has no concept of --
+  /// so whichever wrote last silently deleted the other's keys and that setting
+  /// reverted to its default on the next launch. Only keys absent from our own
+  /// payload are carried forward, so this can never resurrect a value the user
+  /// just changed.
+  Map<String, dynamic> _mergeUnknownSectionKeys(
+      String dTag, Map<String, dynamic> payload) {
+    final prev = _lastInboundSections[dTag];
+    if (prev == null || prev.isEmpty) return payload;
+    final out = Map<String, dynamic>.from(payload);
+    for (final e in prev.entries) {
+      if (e.key == 'v' || e.key == '__cat') continue;
+      out.putIfAbsent(e.key, () => e.value);
+    }
+    return out;
   }
 
   /// The most recent inbound `nymchat-notifications` payload decoded by
@@ -1305,6 +1350,9 @@ class StorageSync {
             ? payload['__cat'] as String
             : e.key.toString();
         payload.remove('__cat');
+        // Keep the raw inbound payload so a later write can carry forward keys
+        // THIS client does not know about — see _mergeUnknownSectionKeys.
+        _lastInboundSections[realCat] = Map<String, dynamic>.from(payload);
         decoded.add(_DecodedCategory(
           category: realCat,
           payload: payload,
@@ -1464,6 +1512,9 @@ class StorageSync {
             ? payload['__cat'] as String
             : e.key.toString();
         payload.remove('__cat');
+        // Keep the raw inbound payload so a later write can carry forward keys
+        // THIS client does not know about — see _mergeUnknownSectionKeys.
+        _lastInboundSections[realCat] = Map<String, dynamic>.from(payload);
         if (realCat == 'nymchat-notifications') {
           // Cache for carry-forward in [notificationsWrapSet], same as
           // [settingsGet] — this refresh path sees the shared row too.
