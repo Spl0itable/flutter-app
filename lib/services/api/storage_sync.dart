@@ -143,7 +143,6 @@ class StorageSync {
       'showStatus',
       'powDifficulty',
       'encryptAtRestPreferred',
-      'keypairMode',
     ],
     'messaging': [
       'groupChatPMOnlyMode',
@@ -335,8 +334,12 @@ class StorageSync {
           : kv.getString(StorageKeys.lightningAddressFor(selfPubkey));
       flat['powDifficulty'] =
           kv.getInt(StorageKeys.powDifficulty, defaultValue: 0);
-      flat['keypairMode'] =
-          kv.getString(StorageKeys.keypairMode) ?? 'persistent';
+      // keypairMode is deliberately NOT synced: it says whether THIS device
+      // regenerates its keypair each session, which is a property of this
+      // device's identity handling rather than a preference to carry across
+      // them -- sendSettingsTransfer already strips it for that reason.
+      // Neither client ever applied an inbound value, so syncing it only meant
+      // each device rewrote the other's into the shared row on every save.
       // Non-sensitive "I protect my identity key at rest" hint — no key
       // material ever syncs (settings.js:160-164).
       flat['encryptAtRestPreferred'] =

@@ -9549,6 +9549,11 @@ class NostrController {
                   : const <String>[],
               closedTimes,
             );
+        // The merge lands in app state, but the OUTBOUND payload reads these
+        // from KV. Without this the next save republishes the pre-merge set —
+        // usually empty — over the D1 row, reopening on every device the
+        // conversations the user closed on this one.
+        _persistClosedPMs();
       } catch (_) {}
     }
     // Left-group state (app.js:6549-6561) — KV union + live-store merge.
@@ -9670,6 +9675,16 @@ class NostrController {
   /// echo but a deliberate "give me their settings" action, so the fields that
   /// otherwise defend a local choice against a stale blob (the Quick React
   /// emoji) apply unconditionally.
+  /// Test seam for the cross-device round trip: apply an inbound payload the
+  /// way a real settings-get would, so a test can then rebuild the outbound
+  /// payload and prove nothing was dropped or reset. A key this device
+  /// publishes but cannot apply is a key it overwrites on every other device.
+  @visibleForTesting
+  void applySyncedSettingsForTest(Map<String, dynamic> p) {
+    _applySyncedSettingsAdditive(p);
+    _applySyncedSettings(p);
+  }
+
   void _applySyncedSettings(
     Map<String, dynamic> p, {
     bool userAcceptedTransfer = false,
@@ -10175,6 +10190,9 @@ class NostrController {
           closedPMs is List ? closedPMs.whereType<String>() : const <String>[],
           closedTimes,
         );
+        // See the additive twin: app state is not what the outbound payload
+        // reads, so an unpersisted merge is republished away on the next save.
+        _persistClosedPMs();
       } catch (_) {}
     }
 
