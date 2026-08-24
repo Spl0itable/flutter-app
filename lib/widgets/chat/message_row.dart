@@ -397,6 +397,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return pqBadgeStateFor(
       pqEncrypted: message.pqEncrypted,
       pqCoverage: message.pqCoverage,
+      isGroup: message.isGroup,
     );
   }
 
