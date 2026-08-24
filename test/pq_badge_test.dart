@@ -57,6 +57,27 @@ void main() {
           PqBadgeState.classical);
     });
 
+    // The badge is a claim about the MESSAGE, and a group message is a fan-out
+    // of the same plaintext: one classical copy anywhere defeats it. Our own
+    // copy's transport is one wrap out of many and cannot support "full".
+    // Received group messages never carry a count -- only the sender counts the
+    // fan-out -- and a sent one can render before its count lands, so this is
+    // the ordinary case, not an edge one.
+    test('a group message with NO coverage count is partial, never full', () {
+      expect(pqBadgeStateFor(pqEncrypted: true, isGroup: true),
+          PqBadgeState.partial);
+    });
+
+    test('a PM is still full on our own copy, having no fan-out', () {
+      expect(pqBadgeStateFor(pqEncrypted: true, isGroup: false),
+          PqBadgeState.full);
+    });
+
+    test('a classical group message is still classical, not partial', () {
+      expect(pqBadgeStateFor(pqEncrypted: false, isGroup: true),
+          PqBadgeState.classical);
+    });
+
     test('every encrypted message resolves to exactly one state', () {
       // Whether a shield belongs at all is the CALLER's decision (see
       // `_pqState` in message_row.dart, which returns null for a public

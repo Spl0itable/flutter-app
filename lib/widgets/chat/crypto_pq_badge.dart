@@ -46,13 +46,23 @@ enum PqBadgeState {
 PqBadgeState pqBadgeStateFor({
   required bool pqEncrypted,
   ({int pq, int total})? pqCoverage,
+  bool isGroup = false,
 }) {
   final cov = pqCoverage;
   if (cov != null && cov.total > 0) {
     if (cov.pq == 0) return PqBadgeState.classical;
     return cov.pq == cov.total ? PqBadgeState.full : PqBadgeState.partial;
   }
-  return pqEncrypted ? PqBadgeState.full : PqBadgeState.classical;
+  // `pqEncrypted` is OUR copy's transport, and in a group that is one wrap out
+  // of many. The same plaintext went to every member, so one classical copy is
+  // all an attacker needs — our own copy being post-quantum says nothing about
+  // whether the message is. Without a coverage count the honest answer is
+  // "partly", never "full": full is a claim about the whole fan-out and only a
+  // count that reaches every member can support it. Received group messages
+  // carry no count at all (only the sender counts the fan-out), and a sent one
+  // can be rendered before its count lands.
+  if (pqEncrypted) return isGroup ? PqBadgeState.partial : PqBadgeState.full;
+  return PqBadgeState.classical;
 }
 
 /// The `.crypto-pq-badge` shield shown next to the verification lock.
