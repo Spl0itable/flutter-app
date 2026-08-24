@@ -2360,6 +2360,19 @@ class StorageSync {
     _pqSelfKeys = List.unmodifiable(keys);
   }
 
+  /// Whether NEW self-addressed blobs may be sealed hybrid, i.e. whether every
+  /// device on this account can decapsulate (PqPolicy.allDevicesCapable).
+  ///
+  /// Separate from [_pqSelfKeys] because it gates only writes: the keys stay in
+  /// place so blobs already written hybrid keep opening. Defaults false so a
+  /// boot that has not yet resolved the roster cannot seal a blob another
+  /// device would be locked out of.
+  bool _pqSealToSelf = false;
+
+  void setPqSealToSelf(bool enabled) {
+    _pqSealToSelf = enabled;
+  }
+
   /// The D1 blob holds the same conversation list, group keys and history
   /// categories as the relay gift wrap beside it, so protecting one without the
   /// other protects neither. With a local nsec this is the hybrid; there is no
@@ -2368,11 +2381,15 @@ class StorageSync {
   /// An extension or NIP-46 signer returns a finished NIP-44 payload rather
   /// than a conversation key, so there is no hybrid one to derive — those
   /// logins stay classical by construction (PqPolicy.capable).
+  ///
+  /// It also stays classical when ANOTHER device on the account is one of those
+  /// logins ([setPqSealToSelf]): that device holds no secret to derive from, so
+  /// a hybrid blob would lock it out of its own settings silently and for good.
   Future<String?> _encryptToSelf(String plaintext) async {
     try {
       final signer = _signer;
       final selfKem = _pqSelfKeys.isEmpty ? null : _pqSelfKeys.first;
-      if (signer is LocalSigner && selfKem != null) {
+      if (_pqSealToSelf && signer is LocalSigner && selfKem != null) {
         try {
           return pq.pqEncrypt(
               plaintext, signer.privkey, _pubkey, selfKem.kemPk);

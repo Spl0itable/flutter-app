@@ -575,6 +575,10 @@ class NostrController {
       // (loginMethod != null, the PWA's `isNostrLoggedIn()`); ephemeral
       // identities skip the durable PM archive. All calls are best-effort.
       _initStorageSync(identity, signer);
+      // Resolve the seal policy before anything can save: it defaults to
+      // "don't seal hybrid", and a single-device account (the common case)
+      // must not be left on that default.
+      unawaited(_pqDeviceId().then((_) => _refreshPqSealPolicy()));
       unawaited(_bootStorageSync());
 
       // PWA `applyNostrLogin` → `fetchProfileDirect(self)` (app.js:5531): restore
@@ -4380,7 +4384,12 @@ class NostrController {
     _pqRegistry.ingest(event.pubkey, event.content, nowSec: nowSec);
     if (event.pubkey == _identity?.pubkey) {
       final ann = PqAnnouncement.parse(event.content);
-      if (ann != null && !ann.retracted) _pqDevices = ann.devices;
+      if (ann != null && !ann.retracted) {
+        // This is how we learn another device is on the account at all, so the
+        // seal policy has to be re-evaluated the moment its roster lands.
+        _pqDevices = ann.devices;
+        _refreshPqSealPolicy();
+      }
     }
     _schedulePersistPqKeys();
   }
@@ -4446,12 +4455,17 @@ class NostrController {
   Future<String> _pqDeviceId() async {
     final kv = _ref.read(keyValueStoreProvider);
     final existing = kv.getString(StorageKeys.pqDeviceId);
-    if (existing != null && existing.isNotEmpty) return existing;
+    if (existing != null && existing.isNotEmpty) {
+      return _pqDeviceIdCached = existing;
+    }
     final bytes = keys.randomBytes(4);
     final id = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
     await kv.setString(StorageKeys.pqDeviceId, id);
-    return id;
+    return _pqDeviceIdCached = id;
   }
+
+  /// [_pqDeviceId]'s answer, kept for the synchronous seal-policy check.
+  String? _pqDeviceIdCached;
 
   /// Publishes (or republishes) our announcement, merging this device into the
   /// roster. No-op when post-quantum is off — turning it off retracts instead.
@@ -4474,8 +4488,10 @@ class NostrController {
     // A KEM key only when we can actually use one.
     final keys = pqEnabled ? _pqSelfKeys() : null;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final selfDeviceId = await _pqDeviceId();
     final devices = PqPolicy.mergeDeviceRoster(
-        _pqDevices, await _pqDeviceId(), ApiConfig.appVersion, nowSec: nowSec);
+        _pqDevices, selfDeviceId, ApiConfig.appVersion,
+        nowSec: nowSec, capable: _identity?.privkey != null);
     final signed = await service.publishPqAnnouncement(
       kemPublicKey: keys?.publicKey,
       epoch: _pqEpoch,
@@ -4483,12 +4499,33 @@ class NostrController {
     );
     if (signed == null) return;
     _pqDevices = devices;
+    _refreshPqSealPolicy();
     _pqLastPublishMs = DateTime.now().millisecondsSinceEpoch;
     // Record our own entry so self-addressed wraps resolve through the same
     // lookup as everyone else's.
     _pqRegistry.record(
         identity.pubkey, keys?.publicKey, nowSec + pqTtl.inSeconds, _pqEpoch);
     _schedulePersistPqKeys();
+  }
+
+  /// Tells the storage layer whether new self-addressed blobs may go hybrid.
+  ///
+  /// A blob is encapsulated to a key derived from the nsec, so a device signed
+  /// in with an extension or a NIP-46 signer cannot open one — it would run on
+  /// defaults forever, and never see the settings-changed ping either. Sealing
+  /// classical while such a device is on the account is exactly the encryption
+  /// these blobs had before the hybrid, so nothing is lost that was ever there.
+  ///
+  /// Gates writes only: blobs already sealed hybrid keep opening, because the
+  /// decrypt candidates are untouched.
+  void _refreshPqSealPolicy() {
+    final capable = _identity?.privkey != null &&
+        PqPolicy.allDevicesCapable(
+          _pqDevices,
+          _pqDeviceIdCached ?? '',
+          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        );
+    _storageSync?.setPqSealToSelf(capable);
   }
 
   /// Our own ML-KEM decrypt candidates: current epoch first, then a bounded

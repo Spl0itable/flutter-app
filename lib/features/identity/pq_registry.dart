@@ -64,17 +64,39 @@ const int pqPreviousEpochs = 3;
 /// emergency release. Nothing in the app writes it.
 enum PqMode { on, off }
 
-/// One device listed in our own announcement. Informational only — it never
-/// gates decryption; it exists so the settings screen can say which devices
-/// have actually been seen running a post-quantum-capable build.
+/// One device listed in our own announcement. It lets the settings screen say
+/// which devices have actually been seen running a post-quantum-capable build,
+/// and its [PqDevice.postQuantumCapable] flag decides whether copies addressed
+/// to the account may be sealed hybrid at all ([PqPolicy.allDevicesCapable]).
+/// It never gates DECRYPTION — anything already sealed stays readable.
 class PqDevice {
-  const PqDevice({required this.id, required this.version, required this.seenAt});
+  const PqDevice({
+    required this.id,
+    required this.version,
+    required this.seenAt,
+    this.postQuantumCapable = false,
+  });
 
   final String id;
   final String version;
   final int seenAt;
 
-  Map<String, dynamic> toJson() => {'id': id, 'ver': version, 'ts': seenAt};
+  /// Whether this device can DECAPSULATE — i.e. holds a local nsec rather than
+  /// delegating to an extension or a NIP-46 signer. Decides whether copies
+  /// addressed to the account may go hybrid at all; see
+  /// [PqPolicy.allDevicesCapable].
+  ///
+  /// Defaults false, which is also what an entry from a build before the flag
+  /// existed decodes to: unknown must not read as capable, because guessing
+  /// that way is what locks a device out of its own settings.
+  final bool postQuantumCapable;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'ver': version,
+        'ts': seenAt,
+        'pq': postQuantumCapable ? 1 : 0,
+      };
 
   static PqDevice? fromJson(dynamic raw) {
     if (raw is! Map) return null;
@@ -84,6 +106,7 @@ class PqDevice {
       id: id,
       version: raw['ver'] is String ? raw['ver'] as String : '',
       seenAt: raw['ts'] is int ? raw['ts'] as int : 0,
+      postQuantumCapable: raw['pq'] == 1,
     );
   }
 }
@@ -394,15 +417,46 @@ class PqPolicy {
     String deviceId,
     String version, {
     required int nowSec,
+    bool capable = false,
     int max = 16,
   }) {
     final out = [
       for (final d in previous)
         if (d.id != deviceId && (nowSec - d.seenAt) < pqDeviceStale.inSeconds) d,
-      PqDevice(id: deviceId, version: version, seenAt: nowSec),
+      PqDevice(
+          id: deviceId,
+          version: version,
+          seenAt: nowSec,
+          postQuantumCapable: capable),
     ];
     out.sort((a, b) => b.seenAt.compareTo(a.seenAt));
     return out.length > max ? out.sublist(0, max) : out;
+  }
+
+  /// Whether EVERY device on this account can open a hybrid copy addressed to
+  /// the account.
+  ///
+  /// A self-addressed blob is encapsulated to an ML-KEM key derived from the
+  /// nsec. A device signed in with an extension or a NIP-46 remote signer holds
+  /// no secret to derive from — it can only ask the signer for NIP-44 — so it
+  /// can open neither the settings blob nor the sync ping, and it silently runs
+  /// on defaults forever.
+  ///
+  /// An empty roster means no evidence of a second device, not a missing
+  /// answer: a single-device account is the common case and must not be
+  /// downgraded by it. Stale entries stop counting, so a device that is gone
+  /// does not hold the account back for good.
+  static bool allDevicesCapable(
+    List<PqDevice> devices,
+    String selfDeviceId, {
+    required int nowSec,
+  }) {
+    for (final d in devices) {
+      if (d.id == selfDeviceId) continue;
+      if ((nowSec - d.seenAt) >= pqDeviceStale.inSeconds) continue;
+      if (!d.postQuantumCapable) return false;
+    }
+    return true;
   }
 }
 

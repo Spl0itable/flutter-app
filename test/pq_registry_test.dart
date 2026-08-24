@@ -268,6 +268,75 @@ void main() {
     });
   });
 
+  // A self-addressed blob is encapsulated to a key derived from the nsec. A
+  // device signed in with an extension or a NIP-46 signer holds no secret to
+  // derive from, so a hybrid blob locks it out of its own settings and the sync
+  // ping -- silently, and for good.
+  group('all-devices gate', () {
+    const now = 1800000000;
+    PqDevice dev(String id, {required bool pq, int? seenAt}) => PqDevice(
+        id: id, version: 'v1', seenAt: seenAt ?? now, postQuantumCapable: pq);
+
+    test('an empty roster is no evidence of a second device', () {
+      // The single-device account is the common case and must not be
+      // downgraded by the absence of an answer.
+      expect(PqPolicy.allDevicesCapable(const [], 'me', nowSec: now), isTrue);
+    });
+
+    test('all-capable devices allow the hybrid', () {
+      expect(
+          PqPolicy.allDevicesCapable(
+              [dev('me', pq: true), dev('other', pq: true)], 'me',
+              nowSec: now),
+          isTrue);
+    });
+
+    test('one signer-only device closes the gate', () {
+      expect(
+          PqPolicy.allDevicesCapable(
+              [dev('me', pq: true), dev('extension', pq: false)], 'me',
+              nowSec: now),
+          isFalse);
+    });
+
+    test('our own entry never gates us', () {
+      expect(PqPolicy.allDevicesCapable([dev('me', pq: false)], 'me', nowSec: now),
+          isTrue);
+    });
+
+    test('a stale device stops holding the account back', () {
+      expect(
+          PqPolicy.allDevicesCapable(
+              [dev('gone', pq: false, seenAt: now - pqDeviceStale.inSeconds - 1)],
+              'me',
+              nowSec: now),
+          isTrue);
+    });
+
+    test('a device from a build without the flag counts as incapable', () {
+      // Guessing "capable" is what locks a device out of its own settings; the
+      // cost of guessing the other way is the encryption these blobs had
+      // before the hybrid, and it heals as devices update.
+      final old = PqDevice.fromJson({'id': 'old', 'ver': 'v3.74.500', 'ts': now});
+      expect(old!.postQuantumCapable, isFalse);
+      expect(PqPolicy.allDevicesCapable([old], 'me', nowSec: now), isFalse);
+    });
+
+    test('the capability flag survives a roster round-trip', () {
+      final roster = PqPolicy.mergeDeviceRoster([], 'me', 'v3',
+          nowSec: now, capable: true);
+      final back = PqDevice.fromJson(roster.single.toJson());
+      expect(back!.postQuantumCapable, isTrue);
+      expect(
+          PqDevice.fromJson(
+                  PqPolicy.mergeDeviceRoster([], 'me', 'v3', nowSec: now)
+                      .single
+                      .toJson())!
+              .postQuantumCapable,
+          isFalse);
+    });
+  });
+
   group('send-path routing (PqPmPlan)', () {
     // The rule both PM send paths share, and the PWA's pqPmPlan must agree with
     // it. Getting this wrong is how a message ends up ALSO sent classically,
