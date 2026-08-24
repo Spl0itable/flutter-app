@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart' show sha256;
 import '../../core/constants/storage_keys.dart';
 import '../../models/settings.dart';
 import '../../core/crypto/pq.dart' as pq;
+import '../../features/identity/pq_registry.dart' show pqSelfCandidates;
 import '../nostr/event_signer.dart';
 import '../storage/key_value_store.dart';
 import 'api_client.dart';
@@ -2368,6 +2369,36 @@ class StorageSync {
     _pqSelfKeys = List.unmodifiable(keys);
   }
 
+  /// The ML-KEM keypairs to try, DERIVING them when the controller has not
+  /// handed any over yet.
+  ///
+  /// The hand-off is not ordered against the boot settings read: its only
+  /// caller runs inside the group-sync apply, which happens after settingsGet
+  /// has already returned. So the first read of a launch saw an empty list,
+  /// every post-quantum row failed to open, and the session carried on with
+  /// defaults -- which the next save then published over those rows.
+  ///
+  /// Deriving removes the ordering question rather than re-answering it: the
+  /// keypair is a pure function of the nsec and the epoch, which is exactly how
+  /// the web client gets its own (`pqSelfKeys()`), so there is no window in
+  /// which we hold the nsec but cannot open our own blob.
+  List<({Uint8List kemSk, Uint8List kemPk})> _pqSelfKeyCandidates() {
+    if (_pqSelfKeys.isNotEmpty) return _pqSelfKeys;
+    final signer = _signer;
+    if (signer is! LocalSigner) return const [];
+    final cached = _derivedPqSelfKeys;
+    if (cached != null) return cached;
+    try {
+      return _derivedPqSelfKeys = pqSelfCandidates(signer.privkey, 0);
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Cache for [_pqSelfKeyCandidates] — ML-KEM keygen is not free, and the
+  /// decrypt path runs once per stored category.
+  List<({Uint8List kemSk, Uint8List kemPk})>? _derivedPqSelfKeys;
+
   /// Whether NEW self-addressed blobs may be sealed hybrid, i.e. whether every
   /// device on this account can decapsulate (PqPolicy.allDevicesCapable).
   ///
@@ -2396,7 +2427,8 @@ class StorageSync {
   Future<String?> _encryptToSelf(String plaintext) async {
     try {
       final signer = _signer;
-      final selfKem = _pqSelfKeys.isEmpty ? null : _pqSelfKeys.first;
+      final candidates = _pqSelfKeyCandidates();
+      final selfKem = candidates.isEmpty ? null : candidates.first;
       if (_pqSealToSelf && signer is LocalSigner && selfKem != null) {
         try {
           return pq.pqEncrypt(
@@ -2421,7 +2453,7 @@ class StorageSync {
       final signer = _signer;
       if (pq.isPqPayload(ciphertext)) {
         if (signer is! LocalSigner) return null;
-        for (final k in _pqSelfKeys) {
+        for (final k in _pqSelfKeyCandidates()) {
           try {
             return pq.pqDecrypt(
               ciphertext,
