@@ -9040,7 +9040,7 @@ class NostrController {
     _settingsHydratedFallback ??=
         Timer(const Duration(seconds: 10), _releaseOnboardingGate);
     // `_mergeRemoteSettings` marks hydration in its own `finally`.
-    await _mergeRemoteSettings(sync);
+    await _mergeRemoteSettingsWithRetry(sync);
     await _restorePmArchive(sync);
     // Profile-zap backfill for ourselves (relays.js:2819-2820:
     // `_backfillZapReceiptsFromD1([this.pubkey], 'profile')`) — profile
@@ -9183,6 +9183,31 @@ class NostrController {
   /// idempotent and heals any local KV drift — and the stored sync ts only
   /// ADVANCES monotonically. Marks settings hydration complete afterwards so
   /// deferred outbound saves may flush (see [_markSettingsHydrated]).
+  /// How many times a failed boot `settings-get` is retried, and the backoff
+  /// between attempts (2s, 4s, 8s, 16s).
+  static const int _settingsLoadMaxRetries = 4;
+
+  /// Boot settings restore with a bounded retry.
+  ///
+  /// A failed load keeps the outbound-save gate shut, which is right — this
+  /// device must not publish its defaults over rows it never read — but it also
+  /// means every settings change the user makes is silently dropped until a
+  /// load succeeds. The only retry was the reconnect edge, which never arrives
+  /// in a session that connects once and stays up, so a single flaky request at
+  /// launch cost the user every change they made afterwards.
+  Future<void> _mergeRemoteSettingsWithRetry(StorageSync sync) async {
+    for (var attempt = 0; attempt <= _settingsLoadMaxRetries; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(Duration(milliseconds: 2000 << (attempt - 1)));
+        // Logout or an identity switch replaces the sync client; drop out
+        // rather than restoring the previous account's settings over it.
+        if (_storageSync != sync) return;
+      }
+      await _mergeRemoteSettings(sync);
+      if (!_settingsGetFailed) return;
+    }
+  }
+
   Future<void> _mergeRemoteSettings(StorageSync sync) async {
     try {
       final result = await sync.settingsGet();

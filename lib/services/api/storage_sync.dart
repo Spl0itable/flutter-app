@@ -1316,8 +1316,12 @@ class StorageSync {
   ///
   /// Mirrors `settingsLoadFromD1`: each category's blob is decrypted, the real
   /// category recovered from `__cat`, the section blobs applied oldest-to-newest
-  /// (newest values win). Returns null on any failure / no record so the caller
-  /// keeps the device-local settings. The caller is responsible for honoring
+  /// (newest values win). Returns null ONLY when the load genuinely failed —
+  /// the request threw, or rows exist that a signer we do not control could not
+  /// open — so the caller keeps the outbound-save gate shut. An account with
+  /// nothing stored, or with rows unreadable by a local nsec, comes back as an
+  /// empty result: there is nothing to clobber, and the device must be able to
+  /// save. The caller is responsible for honoring
   /// `nym_last_settings_sync_ts` (only apply when [SettingsLoadResult.newestTs]
   /// exceeds the stored sync ts).
   Future<SettingsLoadResult?> settingsGet() async {
@@ -1335,11 +1339,13 @@ class StorageSync {
     if (cats is! Map) return null;
 
     final decoded = <_DecodedCategory>[];
+    var storedBlobs = 0;
     for (final e in cats.entries) {
       final entry = e.value;
       if (entry is! Map) continue;
       final blob = entry['blob'];
       if (blob is! String || blob.isEmpty) continue;
+      storedBlobs++;
       final updatedAt = (entry['updatedAt'] as num?)?.toInt() ?? 0;
       try {
         final plain = await _decryptFromSelf(blob);
@@ -1362,7 +1368,29 @@ class StorageSync {
         // Skip an undecryptable/corrupt category.
       }
     }
-    if (decoded.isEmpty) return null;
+    if (decoded.isEmpty) {
+      // Null means "the load FAILED", and the caller keeps the outbound-save
+      // gate shut on it so this device cannot publish its defaults over rows it
+      // never read. Two of the three ways to arrive here are not failures, and
+      // returning null for them left the gate shut for the whole session: the
+      // user changed a setting, nothing was written, and it came back as the
+      // default on the next launch.
+      //
+      //  * Nothing stored at all — a fresh account, which MUST be able to save.
+      //  * Rows that exist but do not open. With a local nsec that is final:
+      //    decryption is pure computation over keys derived from it and every
+      //    epoch we can still derive has been tried. Rows we can never read
+      //    protect nothing, so guarding them only strands the account; let the
+      //    next save replace them.
+      //
+      // Only an undecryptable row under a signer we do not control is genuinely
+      // transient — a locked or briefly unavailable signer looks exactly like
+      // this — so that one still reports failure and is retried on reconnect.
+      if (storedBlobs == 0 || _signer is LocalSigner) {
+        return const SettingsLoadResult(payload: {}, newestTs: 0);
+      }
+      return null;
+    }
 
     // N26: pull the cross-device notification read-state wrap (a separate
     // category from the settings sections) so the caller can merge its seen-keys.
