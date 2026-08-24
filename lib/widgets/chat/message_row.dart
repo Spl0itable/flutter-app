@@ -2803,7 +2803,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // translated in the language chosen at signup, cached across launches, and
     // following a later language change. The stored message keeps the English
     // source, so nothing is frozen into the conversation.
-    displayContent = localizeBotWelcome(message.id, displayContent);
+    // Scoped at the call site as well as inside: only the synthetic
+    // `nymbot-welcome…` row is app copy. Every other message is something a
+    // person wrote and must render byte-for-byte as authored.
+    if (message.id.startsWith(kNymbotWelcomeIdPrefix)) {
+      displayContent = localizeBotWelcome(message.id, displayContent);
+    }
     // Nymbot answers with canonical command names; show them in the vocabulary
     // this device actually accepts.
     if (message.isBot ||
