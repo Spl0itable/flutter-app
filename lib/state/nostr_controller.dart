@@ -22,6 +22,7 @@ import '../services/api/api_config.dart';
 import '../features/calls/call_providers.dart';
 import '../features/commands/action_rate_limit.dart';
 import '../features/identity/pq_registry.dart';
+import '../features/identity/pq_root.dart';
 import '../features/mesh/ghost_mode.dart';
 import '../features/mesh/mesh_controller.dart';
 import '../features/commands/command_handler.dart';
@@ -391,6 +392,11 @@ class NostrController {
       }
       _identity = identity;
       _signer = signer;
+
+      // The post-quantum root (PQ-ROOT-SPEC §5.3), before anything derives a
+      // key or seals a blob. Vault-encrypted at rest, so it arrives via
+      // [unlockedSecrets] exactly as the nsec does.
+      await _loadPqRoot(unlockedSecrets: unlockedSecrets);
 
       // Durable login (nsec/NIP-46): never surface the boot chain's leftover
       // auto-ephemeral / derived nick as the account's name — the PWA seeds
@@ -1350,6 +1356,14 @@ class NostrController {
     // Allow a fresh identity to boot again on this provider instance.
     _started = false;
 
+    // The root dies with the identity (spec §5.3). [PanicWipe] sweeps the
+    // stored copy; this drops the in-memory one.
+    _pqRoot = null;
+    _pqRootLocked = false;
+    try {
+      await SecureStore().remove(SecretKeys.pqRoot);
+    } catch (_) {}
+
     // Reset the visible store + identity-scoped UI state to the empty shell.
     _ref.read(appStateProvider.notifier).reset();
     try {
@@ -1435,6 +1449,9 @@ class NostrController {
         await secure.remove(s);
       } catch (_) {}
     }
+    // The loop above removed the stored root; drop the in-memory copy too.
+    _pqRoot = null;
+    _pqRootLocked = false;
 
     // 3) Reset the in-memory store + identity-scoped UI state.
     _ref.read(appStateProvider.notifier).reset();
@@ -4417,10 +4434,13 @@ class NostrController {
     });
   }
 
-  /// Our ML-KEM keypair for the current epoch, or null when we can't derive one.
+  /// Our ML-KEM keypair for the current epoch, root-seeded when we hold a root
+  /// and nsec-seeded otherwise (an unlinked device, and all v1 data).
   MlKemKeyPair? _pqSelfKeys() {
     final privkey = _identity?.privkey;
     if (privkey == null) return null;
+    final root = _pqRoot;
+    if (root != null) return pq.pqKeypairFromRoot(root, _pqEpoch);
     return pq.pqKeypairFromPrivkey(privkey, _pqEpoch);
   }
 
@@ -4479,6 +4499,10 @@ class NostrController {
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return;
+    // Spec §7: a device that cannot open the account's root publishes nothing.
+    // The announcement is replaceable, so a v1 republish would clobber the v2
+    // one and send every peer back to a key the other devices no longer use.
+    if (_pqRootLocked) return;
     if (!force &&
         _pqLastPublishMs != 0 &&
         DateTime.now().millisecondsSinceEpoch - _pqLastPublishMs <
@@ -4496,6 +4520,8 @@ class NostrController {
       kemPublicKey: keys?.publicKey,
       epoch: _pqEpoch,
       devices: devices,
+      // Only a genuinely root-seeded key may claim `src:"root"`.
+      rootSeeded: keys != null && _pqRoot != null,
     );
     if (signed == null) return;
     _pqDevices = devices;
@@ -4533,7 +4559,181 @@ class NostrController {
   List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidateKeys() {
     final privkey = _identity?.privkey;
     if (privkey == null) return const [];
-    return pqSelfCandidates(privkey, _pqEpoch);
+    // Root-derived first; the nsec-derived half is permanent (spec §4).
+    return pqSelfCandidates(privkey, _pqEpoch, root: _pqRoot);
+  }
+
+  // ===========================================================================
+  // The post-quantum root secret (docs/PQ-ROOT-SPEC.md §1, §5, §6, §7). Not
+  // derivable, so it has to be carried: held locally and moved to the user's
+  // other devices by code or passphrase wrap.
+
+  /// This identity's root secret, or null when this device holds none.
+  Uint8List? _pqRoot;
+
+  /// The account has a root and this device cannot open it. Fully usable, and
+  /// completely silent (§7).
+  bool _pqRootLocked = false;
+
+  /// Whether this device holds the root.
+  bool get pqRootHeld => _pqRoot != null;
+
+  /// Whether this device must be linked before it can take part.
+  bool get pqRootLinkNeeded => _pqRootLocked;
+
+  /// The root as its `nympq1…` code, shown beside the nsec.
+  String? get pqRootCode {
+    final root = _pqRoot;
+    return root == null ? null : pqRootToCode(root);
+  }
+
+  /// A root was generated here and the user has not seen the code yet (§6.4).
+  bool get pqRootBackupPending =>
+      _ref.read(keyValueStoreProvider).getString(StorageKeys.pqRootBackupNotice) ==
+      'pending';
+
+  Future<void> dismissPqRootBackupNotice() async =>
+      _ref.read(keyValueStoreProvider).remove(StorageKeys.pqRootBackupNotice);
+
+  /// Reads the locally-held root (§5.3), so linking is once per device rather
+  /// than once per launch. With the vault on, the plaintext arrives in
+  /// [unlockedSecrets]; a blob we cannot open reads as no root, i.e. silence.
+  Future<Uint8List?> _loadPqRoot({Map<String, String>? unlockedSecrets}) async {
+    final cached = _pqRoot;
+    if (cached != null) return cached;
+    String? raw = unlockedSecrets?[SecretKeys.pqRoot];
+    if (raw == null || raw.isEmpty) {
+      try {
+        raw = await SecureStore().get(SecretKeys.pqRoot);
+      } catch (_) {
+        return null;
+      }
+    }
+    if (raw == null || raw.isEmpty) return null;
+    final root = pqRootFromCode(raw);
+    if (root == null) return null;
+    return _pqRoot = root;
+  }
+
+  /// Persists the root through the vault, so it is encrypted at rest exactly
+  /// as the nsec is. False when the write failed; do not treat that as adopted.
+  Future<bool> _persistPqRoot(Uint8List root) async {
+    try {
+      await _ref.read(identityVaultProvider).secretSet(
+            SecretKeys.pqRoot,
+            pqRootToCode(root),
+          );
+      _pqRoot = root;
+      _pqRootLocked = false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Generation and adoption (spec §6), once the boot settings read settled.
+  Future<void> _ensurePqRoot() async {
+    final sync = _storageSync;
+    final identity = _identity;
+    if (sync == null || identity == null) return;
+    if (PanicWipe.inProgress) return;
+
+    // The order of these questions is the safety property; it lives in one
+    // pure, tested function rather than in this method's control flow.
+    final action = pqRootDecide(
+      durableIdentity: sync.durableIdentity,
+      hasLocalKey: identity.privkey != null,
+      recordLoadSucceeded: sync.pqRootLoadSucceeded,
+      recordPresent: sync.pqRootRowPresent,
+      holdRoot: _pqRoot != null,
+    );
+
+    switch (action) {
+      case PqRootAction.wait:
+      case PqRootAction.ready:
+        return;
+
+      case PqRootAction.publishRecord:
+        // A previous launch generated the root but could not publish the
+        // record; without it another device generates a rival root.
+        await sync.pqRootRecordSet(const PqRootRecord());
+        return;
+
+      case PqRootAction.awaitLink:
+        // §6.3 — do NOT generate, do NOT announce; prompt the user to link.
+        _pqRootLocked = true;
+        return;
+
+      case PqRootAction.generate:
+        // §6.4. The record is published BEFORE the root is persisted: a root
+        // we kept but failed to publish is worse than no root at all.
+        final root = pq.pqGenerateRoot();
+        if (!await sync.pqRootRecordSet(const PqRootRecord())) return;
+        if (!await _persistPqRoot(root)) return;
+        try {
+          await _ref
+              .read(keyValueStoreProvider)
+              .setString(StorageKeys.pqRootBackupNotice, 'pending');
+        } catch (_) {}
+        _pushPqKeysToPeers();
+        await publishPqAnnouncement(force: true);
+        return;
+    }
+  }
+
+  /// Adopts a pasted `nympq1…` code (§5's manual path, and the way out of §7
+  /// silence). Rejected when it does not reproduce our announced key.
+  Future<bool> linkPqRootFromCode(String code) async {
+    final root = pqRootFromCode(code);
+    if (root == null) return false;
+    final self = _identity?.pubkey;
+    if (self != null) {
+      final announced = _pqRegistry.keyFor(
+        self,
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        enabled: true,
+      );
+      if (announced != null &&
+          !pqRootMatchesAnnouncedKey(root, announced, _pqEpoch)) {
+        return false;
+      }
+    }
+    if (!await _persistPqRoot(root)) return false;
+    _pushPqKeysToPeers();
+    await publishPqAnnouncement(force: true);
+    return true;
+  }
+
+  /// Adopts the root from the account's passphrase wrap. Returns false on a
+  /// wrong passphrase, a missing wrap, or a record we never read.
+  Future<bool> unlockPqRootWithPassphrase(String passphrase) async {
+    final wrap = _storageSync?.pqRootRecord?.wrapOfType(pqRootWrapPassphrase);
+    if (wrap == null) return false;
+    final root = await pqRootUnwrapWithPassphrase(wrap, passphrase);
+    if (root == null) return false;
+    if (!await _persistPqRoot(root)) return false;
+    _pushPqKeysToPeers();
+    await publishPqAnnouncement(force: true);
+    return true;
+  }
+
+  /// Adds or replaces the passphrase wrap, keeping every other recovery path.
+  /// Throws [ArgumentError] when the passphrase fails the §5.2 floor.
+  Future<bool> setPqRootPassphrase(String passphrase) async {
+    final root = _pqRoot;
+    final sync = _storageSync;
+    if (root == null || sync == null) return false;
+    final wrap = await pqRootWrapWithPassphrase(root, passphrase);
+    final record = sync.pqRootRecord ?? const PqRootRecord();
+    return sync.pqRootRecordSet(record.withWrap(wrap));
+  }
+
+  /// Re-pushes our ML-KEM keys, so a link taking effect mid-session does not
+  /// leave the send and storage paths on the old nsec-derived key.
+  void _pushPqKeysToPeers() {
+    final candidates = pqCapable ? pqSelfCandidateKeys() : const <({Uint8List kemSk, Uint8List kemPk})>[];
+    _service?.setPqSelfKeys(candidates);
+    _storageSync?.setPqSelfKeys(candidates);
   }
 
   /// Publishes a 1:1 PM in the transport(s) the peer understands (PWA
@@ -8323,6 +8523,9 @@ class NostrController {
           url: StorageSync.storageUrl(),
           signer: signer,
         ));
+    // The root must reach the FIRST settings read of a launch, so it is pulled
+    // rather than handed over — same reason _pqSelfKeyCandidates derives.
+    sync.setPqRootProvider(_loadPqRoot);
 
     // Activate the WS-first storage transport (the PWA's persistent `/api`
     // socket). Reads in [StorageSync] now try `wss://<host>/api` FIRST and fall
@@ -9078,6 +9281,9 @@ class NostrController {
         Timer(const Duration(seconds: 10), _releaseOnboardingGate);
     // `_mergeRemoteSettings` marks hydration in its own `finally`.
     await _mergeRemoteSettingsWithRetry(sync);
+    // Root generation / adoption. Needs the settings read to have settled:
+    // only a completed read distinguishes "no record" from "could not look".
+    await _ensurePqRoot();
     await _restorePmArchive(sync);
     // Profile-zap backfill for ourselves (relays.js:2819-2820:
     // `_backfillZapReceiptsFromD1([this.pubkey], 'profile')`) — profile

@@ -189,3 +189,34 @@ Uint8List pqDeriveSeed(Uint8List privkey, int epoch) {
 /// The ML-KEM identity keypair for [privkey] at [epoch].
 MlKemKeyPair pqKeypairFromPrivkey(Uint8List privkey, int epoch) =>
     mlKem768.keygen(pqDeriveSeed(privkey, epoch));
+
+// v2: the independently-seeded root secret. See docs/PQ-ROOT-SPEC.md.
+//
+// v1 seeds ML-KEM from the nsec, so breaking secp256k1 also yields the
+// post-quantum key. v2 seeds from 32 CSPRNG bytes instead. The v1 path stays
+// forever: everything sealed under it must remain readable (spec §4).
+
+/// Domain separator for deriving the ML-KEM seed from a root secret. Differs
+/// from [pqSeedSalt] so a root and an nsec can never derive the same keypair.
+const String pqRootSeedSalt = 'nym-pq-root-v2';
+
+/// Length of the root secret, in bytes.
+const int pqRootLength = 32;
+
+/// A fresh root secret. Generated once per identity.
+Uint8List pqGenerateRoot() => randomBytes(pqRootLength);
+
+/// Deterministic ML-KEM seed from a root secret.
+Uint8List pqRootDeriveSeed(Uint8List root, int epoch) {
+  if (root.length != pqRootLength) {
+    throw ArgumentError('pq root must be $pqRootLength bytes');
+  }
+  final prk = nip44.hkdfExtract(
+      Uint8List.fromList(utf8.encode(pqRootSeedSalt)), root);
+  return nip44.hkdfExpand(
+      prk, Uint8List.fromList(utf8.encode('mlkem768/epoch/$epoch')), 64);
+}
+
+/// The ML-KEM identity keypair for [root] at [epoch].
+MlKemKeyPair pqKeypairFromRoot(Uint8List root, int epoch) =>
+    mlKem768.keygen(pqRootDeriveSeed(root, epoch));

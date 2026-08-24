@@ -9,6 +9,7 @@ import '../../core/constants/storage_keys.dart';
 import '../../models/settings.dart';
 import '../../core/crypto/pq.dart' as pq;
 import '../../features/identity/pq_registry.dart' show pqSelfCandidates;
+import '../../features/identity/pq_root.dart';
 import '../nostr/event_signer.dart';
 import '../storage/key_value_store.dart';
 import 'api_client.dart';
@@ -947,6 +948,63 @@ class StorageSync {
   /// forward instead of zeroing another device's synced bell state.
   Map<String, dynamic>? _lastInboundNotifications;
 
+  // The post-quantum root record (docs/PQ-ROOT-SPEC.md §5.1, §6).
+
+  /// The decrypted `nymchat-pq-root` payload from the last settings read.
+  Map<String, dynamic>? _lastInboundPqRoot;
+
+  /// Whether a settings read has actually COMPLETED this session. "No record"
+  /// and "could not look" mean opposite things to spec §6.
+  bool _pqRootLoadSucceeded = false;
+
+  /// Whether the account HAS a root record, decided from the D1 column list —
+  /// a row we cannot decrypt is still proof a root exists.
+  bool _pqRootRowPresent = false;
+
+  bool get pqRootLoadSucceeded => _pqRootLoadSucceeded;
+
+  /// True when the account is known to have a root record already.
+  bool get pqRootRowPresent => _pqRootRowPresent;
+
+  /// The parsed record, or null when there is none / it did not open.
+  PqRootRecord? get pqRootRecord {
+    final raw = _lastInboundPqRoot;
+    return raw == null ? null : PqRootRecord.fromJson(raw);
+  }
+
+  /// Notes the pq-root row's presence from the cleartext D1 column list, under
+  /// either the hashed column or the bare routing name.
+  void _notePqRootColumns(Map<dynamic, dynamic> cats) {
+    _pqRootLoadSucceeded = true;
+    final hashed = d1Category(pqRootCategory);
+    for (final k in cats.keys) {
+      final name = k.toString();
+      if (name != hashed && name != pqRootCategory) continue;
+      final entry = cats[k];
+      if (entry is! Map) continue;
+      final blob = entry['blob'];
+      if (blob is String && blob.isNotEmpty) {
+        _pqRootRowPresent = true;
+        return;
+      }
+    }
+  }
+
+  /// Publishes the root record. Forced classical: sealing this row to a key
+  /// derived from the root it carries is a circular lock (spec §5.1).
+  Future<bool> pqRootRecordSet(PqRootRecord record) async {
+    final ok = await _setSettingsCategory(
+      d1Category(pqRootCategory),
+      jsonEncode(_withCat(record.toJson(), pqRootCategory)),
+      allowPq: false,
+    );
+    if (ok) {
+      _lastInboundPqRoot = record.toJson();
+      _pqRootRowPresent = true;
+    }
+    return ok;
+  }
+
   /// Publishes the cross-device notification wrap — the PWA's
   /// `nymchat-notifications` category, byte-shaped like the PWA payload
   /// `{notificationHistory, notificationLastReadTime, seenNotifications?}`
@@ -1295,13 +1353,15 @@ class StorageSync {
   /// (the PWA persists this in localStorage as `nym_settings_hash_*`).
   final Map<String, String> _lastSettingsHash = {};
 
-  Future<bool> _setSettingsCategory(String category, String plaintext) async {
+  /// [allowPq] false forces the classical seal. Only [pqRootCategory] needs it.
+  Future<bool> _setSettingsCategory(String category, String plaintext,
+      {bool allowPq = true}) async {
     try {
       final hash = _sha256Hex('$_pubkey|$plaintext');
       final hashKey = '${_pubkey}_$category';
       if (_lastSettingsHash[hashKey] == hash) return false; // unchanged
 
-      final blob = await _encryptToSelf(plaintext);
+      final blob = await _encryptToSelf(plaintext, allowPq: allowPq);
       if (blob == null) return false;
 
       final body = <String, dynamic>{
@@ -1346,6 +1406,7 @@ class StorageSync {
     }
     final cats = data['categories'];
     if (cats is! Map) return null;
+    _notePqRootColumns(cats);
 
     final decoded = <_DecodedCategory>[];
     var storedBlobs = 0;
@@ -1368,6 +1429,10 @@ class StorageSync {
         // Keep the raw inbound payload so a later write can carry forward keys
         // THIS client does not know about — see _mergeUnknownSectionKeys.
         _lastInboundSections[realCat] = Map<String, dynamic>.from(payload);
+        if (realCat == pqRootCategory) {
+          _lastInboundPqRoot = Map<String, dynamic>.of(payload);
+          _pqRootRowPresent = true;
+        }
         decoded.add(_DecodedCategory(
           category: realCat,
           payload: payload,
@@ -1532,6 +1597,7 @@ class StorageSync {
     }
     final cats = data['categories'];
     if (cats is! Map) return const [];
+    _notePqRootColumns(cats);
 
     final decoded = <_DecodedCategory>[];
     for (final e in cats.entries) {
@@ -1556,6 +1622,10 @@ class StorageSync {
           // Cache for carry-forward in [notificationsWrapSet], same as
           // [settingsGet] — this refresh path sees the shared row too.
           _lastInboundNotifications = Map<String, dynamic>.of(payload);
+        }
+        if (realCat == pqRootCategory) {
+          _lastInboundPqRoot = Map<String, dynamic>.of(payload);
+          _pqRootRowPresent = true;
         }
         decoded.add(_DecodedCategory(
           category: realCat,
@@ -2382,17 +2452,44 @@ class StorageSync {
   /// keypair is a pure function of the nsec and the epoch, which is exactly how
   /// the web client gets its own (`pqSelfKeys()`), so there is no window in
   /// which we hold the nsec but cannot open our own blob.
-  List<({Uint8List kemSk, Uint8List kemPk})> _pqSelfKeyCandidates() {
+  ///
+  /// The ROOT has the same ordering hazard, so it is pulled through
+  /// [_pqRootProvider] (a secure-storage read, not a hand-off) rather than
+  /// handed over late. Order is root-derived then nsec-derived; the
+  /// nsec-derived tail is permanent (spec §4).
+  Future<List<({Uint8List kemSk, Uint8List kemPk})>>
+      _pqSelfKeyCandidates() async {
+    final root = await _pqRoot();
     if (_pqSelfKeys.isNotEmpty) return _pqSelfKeys;
     final signer = _signer;
     if (signer is! LocalSigner) return const [];
     final cached = _derivedPqSelfKeys;
     if (cached != null) return cached;
     try {
-      return _derivedPqSelfKeys = pqSelfCandidates(signer.privkey, 0);
+      return _derivedPqSelfKeys =
+          pqSelfCandidates(signer.privkey, 0, root: root);
     } catch (_) {
       return const [];
     }
+  }
+
+  /// Reads the identity's root secret, once per instance. Null means the
+  /// nsec-derived candidates are the whole list, i.e. v1 behaviour.
+  Future<Uint8List?> Function()? _pqRootProvider;
+  Future<Uint8List?>? _pqRootFuture;
+
+  /// Supplies the root lazily. A provider, not a setter: a setter would have
+  /// to be called before the boot settings read, which is what broke before.
+  void setPqRootProvider(Future<Uint8List?> Function() provider) {
+    _pqRootProvider = provider;
+    _pqRootFuture = null;
+    _derivedPqSelfKeys = null;
+  }
+
+  Future<Uint8List?> _pqRoot() {
+    final provider = _pqRootProvider;
+    if (provider == null) return Future.value(null);
+    return _pqRootFuture ??= provider().catchError((_) => null);
   }
 
   /// Cache for [_pqSelfKeyCandidates] — ML-KEM keygen is not free, and the
@@ -2424,12 +2521,17 @@ class StorageSync {
   /// It also stays classical when ANOTHER device on the account is one of those
   /// logins ([setPqSealToSelf]): that device holds no secret to derive from, so
   /// a hybrid blob would lock it out of its own settings silently and for good.
-  Future<String?> _encryptToSelf(String plaintext) async {
+  ///
+  /// [allowPq] false is the [pqRootCategory] escape hatch — spec §5.1.
+  Future<String?> _encryptToSelf(String plaintext,
+      {bool allowPq = true}) async {
     try {
       final signer = _signer;
-      final candidates = _pqSelfKeyCandidates();
+      final candidates = allowPq
+          ? await _pqSelfKeyCandidates()
+          : const <({Uint8List kemSk, Uint8List kemPk})>[];
       final selfKem = candidates.isEmpty ? null : candidates.first;
-      if (_pqSealToSelf && signer is LocalSigner && selfKem != null) {
+      if (allowPq && _pqSealToSelf && signer is LocalSigner && selfKem != null) {
         try {
           return pq.pqEncrypt(
               plaintext, signer.privkey, _pubkey, selfKem.kemPk);
@@ -2453,7 +2555,7 @@ class StorageSync {
       final signer = _signer;
       if (pq.isPqPayload(ciphertext)) {
         if (signer is! LocalSigner) return null;
-        for (final k in _pqSelfKeyCandidates()) {
+        for (final k in await _pqSelfKeyCandidates()) {
           try {
             return pq.pqDecrypt(
               ciphertext,

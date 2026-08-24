@@ -119,6 +119,8 @@ class PqAnnouncement {
     required this.epoch,
     this.devices = const [],
     this.retracted = false,
+    this.version = 1,
+    this.src,
   });
 
   /// Null when [retracted], and also null for a Nymchat client that cannot or
@@ -133,6 +135,18 @@ class PqAnnouncement {
   /// A replaceable event cannot be unpublished, so turning post-quantum off
   /// supersedes the announcement with a retracted, already-expired one.
   final bool retracted;
+
+  /// Payload version: 1 is nsec-derived, 2 carries [src].
+  final int version;
+
+  /// Where the announced key was seeded from; only `"root"` means the identity
+  /// root secret. Null for v1 and for anything unrecognised.
+  final String? src;
+
+  /// Whether the announced key is root-seeded, i.e. real HNDL protection.
+  /// Needs BOTH `v:2` and `src == "root"` — spec §3 requires an unknown `src`
+  /// to read as legacy.
+  bool get rootSeeded => version >= 2 && src == 'root';
 
   /// Parses an announcement's `content`. Returns null for anything malformed,
   /// wrong-algorithm, or carrying a wrong-length key — a bad announcement must
@@ -186,11 +200,14 @@ class PqAnnouncement {
       }
     }
 
+    final rawSrc = decoded['src'];
     return PqAnnouncement(
       publicKey: pk,
       expiresAt: exp,
       epoch: decoded['epoch'] is int ? decoded['epoch'] as int : 0,
       devices: devices,
+      version: decoded['v'] is int ? decoded['v'] as int : 1,
+      src: rawSrc is String ? rawSrc : null,
     );
   }
 
@@ -198,14 +215,18 @@ class PqAnnouncement {
   /// Builds the `content` payload for our own announcement. [publicKey] is
   /// null when we cannot or will not do post-quantum — the announcement still
   /// goes out, because its presence is what tells peers we run Nymchat.
+  ///
+  /// [rootSeeded] promotes the payload to `v:2` + `src:"root"`; without it the
+  /// v1 payload stays byte-identical to what earlier builds emitted.
   static String encode({
     required Uint8List? publicKey,
     required int expiresAt,
     required int epoch,
     required List<PqDevice> devices,
+    bool rootSeeded = false,
   }) =>
       jsonEncode({
-        'v': 1,
+        'v': rootSeeded ? 2 : 1,
         'alg': pqAlgorithm,
         // Marks this as a Nymchat client regardless of whether a KEM key is
         // present, so "Nymchat without post-quantum" stays distinguishable
@@ -214,6 +235,7 @@ class PqAnnouncement {
         'epoch': epoch,
         if (publicKey != null) 'pk': pq.b64uEncode(publicKey),
         'exp': expiresAt,
+        if (rootSeeded) 'src': 'root',
         'devices': [for (final d in devices) d.toJson()],
       });
 
@@ -535,9 +557,22 @@ class PqPmPlan {
 /// Our own ML-KEM keys for the current epoch plus a bounded window of previous
 /// ones, so a wrap sent just before a rotation still opens. Ordered
 /// newest-first, matching the PWA's `pqSelfCandidates`.
+///
+/// With a [root], root-derived epochs come first (new writes use those), then
+/// the nsec-derived ones. The nsec-derived tail is PERMANENT, not a migration
+/// window — spec §4; dropping it is data loss.
 List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidates(
-    Uint8List privkey, int epoch) {
+  Uint8List privkey,
+  int epoch, {
+  Uint8List? root,
+}) {
   final out = <({Uint8List kemSk, Uint8List kemPk})>[];
+  if (root != null) {
+    for (var e = epoch; e >= 0 && e > epoch - 1 - pqPreviousEpochs; e--) {
+      final kp = pq.pqKeypairFromRoot(root, e);
+      out.add((kemSk: kp.secretKey, kemPk: kp.publicKey));
+    }
+  }
   for (var e = epoch; e >= 0 && e > epoch - 1 - pqPreviousEpochs; e--) {
     final kp = pq.pqKeypairFromPrivkey(privkey, e);
     out.add((kemSk: kp.secretKey, kemPk: kp.publicKey));

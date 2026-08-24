@@ -1607,10 +1607,12 @@ class NostrService {
   /// [kemPublicKey] is null for a Nymchat client that cannot or will not do
   /// post-quantum; the announcement still goes out, because its presence is
   /// what tells peers we run Nymchat.
+  /// [rootSeeded] marks the payload `v:2` + `src:"root"` (PQ-ROOT-SPEC §3).
   Future<NostrEvent?> publishPqAnnouncement({
     required Uint8List? kemPublicKey,
     required int epoch,
     required List<PqDevice> devices,
+    bool rootSeeded = false,
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -1644,6 +1646,7 @@ class NostrService {
           expiresAt: exp,
           epoch: epoch,
           devices: devices,
+          rootSeeded: rootSeeded,
         ),
       ),
     );

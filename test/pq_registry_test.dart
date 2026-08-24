@@ -620,6 +620,114 @@ void main() {
       expect(PqPolicy.selfEnabled(privkey: nsec, mode: PqMode.off), isFalse);
     });
   });
+
+  // PQ-ROOT-SPEC §3. `src` is the only thing separating a key an adversary can
+  // reconstruct from the npub from one they cannot, so leniency here is a bug.
+  group('announcement v2 (src)', () {
+    final pk = pq.pqKeypairFromRoot(unhex('5a' * 32), 0).publicKey;
+
+    String encoded({required bool rootSeeded}) => PqAnnouncement.encode(
+          publicKey: pk,
+          expiresAt: 2000000000,
+          epoch: 0,
+          devices: const [],
+          rootSeeded: rootSeeded,
+        );
+
+    test('a root-seeded announcement is v:2 with src:"root"', () {
+      final json =
+          jsonDecode(encoded(rootSeeded: true)) as Map<String, dynamic>;
+      expect(json['v'], 2);
+      expect(json['src'], 'root');
+      expect(json['alg'], 'mlkem768');
+      expect(json['nym'], 1);
+      final ann = PqAnnouncement.parse(encoded(rootSeeded: true))!;
+      expect(ann.rootSeeded, isTrue);
+      expect(hex(ann.publicKey!), hex(pk));
+    });
+
+    // An unlinked device must keep emitting exactly what it emitted before.
+    test('a legacy announcement stays v:1 and carries no src', () {
+      final json =
+          jsonDecode(encoded(rootSeeded: false)) as Map<String, dynamic>;
+      expect(json['v'], 1);
+      expect(json.containsKey('src'), isFalse);
+      expect(PqAnnouncement.parse(encoded(rootSeeded: false))!.rootSeeded,
+          isFalse);
+    });
+
+    test('the PWA fixture, which predates v2, reads as legacy', () {
+      expect(PqAnnouncement.parse(a['content'] as String)!.rootSeeded, isFalse);
+    });
+
+    // "Parsers MUST treat an unknown `src` as legacy, never as root."
+    for (final variant in <String, dynamic>{
+      'src omitted': null,
+      'src is another word': 'nsec',
+      'src is a future value': 'kyber-root-v3',
+      'src is the empty string': '',
+      'src is not a string': 1,
+      'src is a list': ['root'],
+      'src is capitalised': 'Root',
+      'src has whitespace': ' root',
+    }.entries) {
+      test('v:2 but ${variant.key} → legacy', () {
+        final content = jsonEncode({
+          'v': 2,
+          'alg': 'mlkem768',
+          'nym': 1,
+          'epoch': 0,
+          'pk': pq.b64uEncode(pk),
+          'exp': 2000000000,
+          if (variant.value != null) 'src': variant.value,
+          'devices': const [],
+        });
+        final ann = PqAnnouncement.parse(content);
+        expect(ann, isNotNull, reason: 'it is still a valid announcement');
+        expect(ann!.rootSeeded, isFalse, reason: variant.key);
+      });
+    }
+
+    test('v:1 claiming src:"root" is still legacy', () {
+      final content = jsonEncode({
+        'v': 1,
+        'alg': 'mlkem768',
+        'nym': 1,
+        'epoch': 0,
+        'pk': pq.b64uEncode(pk),
+        'exp': 2000000000,
+        'src': 'root',
+        'devices': const [],
+      });
+      expect(PqAnnouncement.parse(content)!.rootSeeded, isFalse,
+          reason: 'both halves are required: v:2 AND src=="root"');
+    });
+
+    test('a v:2 announcement keeps parsing everything v:1 did', () {
+      final content = PqAnnouncement.encode(
+        publicKey: pk,
+        expiresAt: 2000000000,
+        epoch: 4,
+        devices: const [
+          PqDevice(id: 'aa11bb22', version: 'v9', seenAt: 1700000000,
+              postQuantumCapable: true)
+        ],
+        rootSeeded: true,
+      );
+      final ann = PqAnnouncement.parse(content)!;
+      expect(ann.epoch, 4);
+      expect(ann.expiresAt, 2000000000);
+      expect(ann.devices.single.id, 'aa11bb22');
+      expect(ann.devices.single.postQuantumCapable, isTrue);
+      expect(ann.rootSeeded, isTrue);
+    });
+
+    test('a retraction is never root-seeded', () {
+      final ann = PqAnnouncement.parse(PqAnnouncement.encodeRetraction(1))!;
+      expect(ann.retracted, isTrue);
+      expect(ann.rootSeeded, isFalse);
+    });
+  });
 }
 
 // Group coverage: a group message is post-quantum only when EVERY member got a
