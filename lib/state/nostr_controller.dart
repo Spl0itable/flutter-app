@@ -9675,6 +9675,30 @@ class NostrController {
   /// echo but a deliberate "give me their settings" action, so the fields that
   /// otherwise defend a local choice against a stale blob (the Quick React
   /// emoji) apply unconditionally.
+  /// Keys the user changed locally that have not reached D1 yet.
+  ///
+  /// The D1 apply is deliberately unconditional — it heals local KV drift — but
+  /// the boot read can take many seconds (it retries with backoff), and the user
+  /// can change a setting inside that window. Applying the older stored blob
+  /// then undoes the change they just made, and the pending publish afterwards
+  /// carries the OVERWRITTEN value, so it is lost on this device and on every
+  /// other one: "I changed it, it showed, I reloaded, it was gone".
+  ///
+  /// A local edit that predates nothing cannot be healed by a blob it predates,
+  /// so those keys are skipped for one apply and cleared once published.
+  final Set<String> _locallyDirtySections = {};
+
+  /// Records that a local settings edit is outstanding. Called from the same
+  /// hook that schedules the publish, so the two can never drift apart.
+  void _markSettingsDirty() {
+    // Section-level rather than key-level: the publish is per section, so a
+    // section is clean again exactly when its write lands.
+    _locallyDirtySections.addAll(StorageSync.syncedSectionKeys.keys);
+  }
+
+  @visibleForTesting
+  void markSettingsDirtyForTest() => _markSettingsDirty();
+
   /// Test seam for the cross-device round trip: apply an inbound payload the
   /// way a real settings-get would, so a test can then rebuild the outbound
   /// payload and prove nothing was dropped or reset. A key this device
@@ -9685,10 +9709,31 @@ class NostrController {
     _applySyncedSettings(p);
   }
 
+  /// Strips the keys of any section with an unpublished local edit, so a stored
+  /// blob that predates the user's change cannot undo it. Additive categories
+  /// (lists, read state, group data) are untouched: those merge rather than
+  /// replace, so they cannot lose a local change.
+  Map<String, dynamic> _withoutLocallyDirtyKeys(Map<String, dynamic> p) {
+    if (_locallyDirtySections.isEmpty) return p;
+    final drop = <String>{
+      for (final section in _locallyDirtySections)
+        ...?StorageSync.syncedSectionKeys[section],
+    };
+    if (drop.isEmpty) return p;
+    return {
+      for (final e in p.entries)
+        if (!drop.contains(e.key)) e.key: e.value,
+    };
+  }
+
   void _applySyncedSettings(
-    Map<String, dynamic> p, {
+    Map<String, dynamic> pRaw, {
     bool userAcceptedTransfer = false,
   }) {
+    // A transfer the user explicitly accepted is a deliberate overwrite, so it
+    // outranks anything pending locally. Everything else must not undo an edit
+    // it predates — see [_locallyDirtySections].
+    final p = userAcceptedTransfer ? pRaw : _withoutLocallyDirtyKeys(pRaw);
     final c = _ref.read(settingsProvider.notifier);
     void str(String key, void Function(String) set) {
       final v = p[key];
@@ -10375,6 +10420,10 @@ class NostrController {
   /// "Settings will not sync across devices"). Deferred (one pending flush)
   /// until the boot settings restore has landed — see [_settingsHydrated].
   void syncSettings() {
+    // Recorded before any early return: the edit is already in local KV by the
+    // time this runs, so a blob that predates it must not win even when the
+    // publish itself is deferred or skipped.
+    _markSettingsDirty();
     final sync = _storageSync;
     if (sync == null) return;
     if (!_settingsHydrated) {
@@ -10422,6 +10471,10 @@ class NostrController {
       // thread it in explicitly so it rides the `channels` section like the PWA
       // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.
       final appState = _ref.read(appStateProvider.notifier);
+      // The local edits are on their way to D1, so the next inbound blob is no
+      // longer older than they are. Cleared BEFORE the write so an edit made
+      // while it is in flight re-marks and survives the following apply.
+      _locallyDirtySections.clear();
       await sync.settingsSet(
         _ref.read(settingsProvider),
         pinnedLandingChannelJson:
