@@ -28,28 +28,20 @@ enum PqBadgeState {
   /// message.
   partial,
 
-  /// Encrypted, but with no post-quantum layer at all.
-  ///
-  /// Shown rather than omitted because NO badge is ambiguous: a missing shield
-  /// could equally mean the message is not quantum-resistant, that the
-  /// indicator is broken, or that this build lacks the feature, and the reader
-  /// cannot tell which. Saying so plainly is the point of a security
-  /// indicator, and it is what makes the shield's absence meaningful when it
-  /// does appear.
+  /// Encrypted, but with no post-quantum layer at all. Shown rather than
+  /// omitted: a missing shield is ambiguous between "unprotected", "broken",
+  /// and "this build lacks the feature".
   classical,
 }
 
-/// Resolves the shield state for a message.
+/// Resolves the shield state for a message. Never null for an encrypted one.
 ///
-/// Never null for an encrypted message: one of the three states always
-/// applies. Callers decide whether the message is encrypted at all — a public
-/// channel message is plaintext on the relay, and a shield of any kind there
-/// would imply an encryption it does not have (see `_pqState` in
-/// message_row.dart).
+/// Callers decide whether a shield belongs at all — a public channel message
+/// is plaintext on the relay (see `_pqState` in message_row.dart).
 ///
-/// [pqCoverage] is the group fan-out's (post-quantum, total) member counts;
-/// when present it OVERRIDES [pqEncrypted], because an optimistic per-message
-/// flag must never outrank what actually went on the wire.
+/// [pqCoverage] is the fan-out's (post-quantum, total) member counts and
+/// OVERRIDES [pqEncrypted]: an optimistic send-time flag must never outrank
+/// what went on the wire. [pqRoot] caps the result at [PqBadgeState.legacy].
 PqBadgeState pqBadgeStateFor({
   required bool pqEncrypted,
   bool pqRoot = false,
@@ -62,14 +54,10 @@ PqBadgeState pqBadgeStateFor({
     if (cov.pq != cov.total) return PqBadgeState.partial;
     return pqRoot ? PqBadgeState.full : PqBadgeState.legacy;
   }
-  // `pqEncrypted` is OUR copy's transport, and in a group that is one wrap out
-  // of many. The same plaintext went to every member, so one classical copy is
-  // all an attacker needs — our own copy being post-quantum says nothing about
-  // whether the message is. Without a coverage count the honest answer is
-  // "partly", never "full": full is a claim about the whole fan-out and only a
-  // count that reaches every member can support it. Received group messages
-  // carry no count at all (only the sender counts the fan-out), and a sent one
-  // can be rendered before its count lands.
+  // In a group, `pqEncrypted` is one wrap out of many, and the same plaintext
+  // went to every member. Without a coverage count the honest answer is
+  // "partly": a received group message never carries one, and a sent one can
+  // render before it lands.
   if (pqEncrypted) {
     if (isGroup) return PqBadgeState.partial;
     return pqRoot ? PqBadgeState.full : PqBadgeState.legacy;
@@ -213,18 +201,12 @@ class _ShieldPainter extends CustomPainter {
       old.state != state || old.color != color;
 }
 
-/// The post-quantum info popup, reached by tapping the shield.
+/// The post-quantum info popup's copy. Names the primitives and states the
+/// limit: confidentiality, not authentication — signatures are still
+/// secp256k1.
 ///
-/// The copy names the actual primitives and states the limit plainly: this
-/// protects confidentiality, not authentication. Signatures are still
-/// secp256k1, so an adversary who already had a quantum computer could forge
-/// one and MITM in real time. What the hybrid key exchange defeats is
-/// harvest-now-decrypt-later, which is the threat that actually exists today —
-/// and overstating it in the UI would be worse than saying nothing.
-/// The popup's copy, named so `kPqPopupStrings` can be checked against the
-/// background-sweep catalog — a string the catalog doesn't carry never gets
-/// translated, and a wording change that silently drops out of it is invisible
-/// until someone reads the popup in another language.
+/// Each string is named so `kPqPopupStrings` can be checked against the
+/// sweep catalog; one the catalog does not carry is never translated.
 const String kPqFullTitle = 'Quantum-resistant encryption';
 const String kPqFullBody =
     "This message's key exchange combined the standard NIP-44 secp256k1 "

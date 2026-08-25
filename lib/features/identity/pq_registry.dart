@@ -472,18 +472,11 @@ class PqPolicy {
   }
 
   /// Whether EVERY device on this account can open a hybrid copy addressed to
-  /// the account.
+  /// the account. One that cannot runs on defaults forever, silently.
   ///
-  /// A self-addressed blob is encapsulated to an ML-KEM key derived from the
-  /// nsec. A device signed in with an extension or a NIP-46 remote signer holds
-  /// no secret to derive from — it can only ask the signer for NIP-44 — so it
-  /// can open neither the settings blob nor the sync ping, and it silently runs
-  /// on defaults forever.
-  ///
-  /// An empty roster means no evidence of a second device, not a missing
-  /// answer: a single-device account is the common case and must not be
-  /// downgraded by it. Stale entries stop counting, so a device that is gone
-  /// does not hold the account back for good.
+  /// An empty roster means no second device, not a missing answer. Stale
+  /// entries stop counting, so a device that is gone does not hold the
+  /// account back for good.
   static bool allDevicesCapable(
     List<PqDevice> devices,
     String selfDeviceId, {
@@ -528,20 +521,14 @@ class PqPmPlan {
 
   /// Decides the transports for a recipient.
   ///
-  /// There is no setting. Nymchat-to-Nymchat is post-quantum; anyone we cannot
-  /// prove is on Nymchat gets exactly what they got before post-quantum
-  /// existed. The whole rule is one question — has this peer published a
-  /// capability announcement ([provenNymchat])? — because that announcement is
-  /// signed and cannot be faked, whereas inferring the client from public
-  /// activity would occasionally be wrong, and being wrong here means sending
-  /// someone a message their app cannot open, with no error and no retry.
+  /// No setting. The whole rule is one question — has this peer published a
+  /// signed capability announcement ([provenNymchat])? — because inferring the
+  /// client from public activity would sometimes be wrong, and wrong here
+  /// means a message their app cannot open, silently.
   ///
-  /// A post-quantum wrap is never accompanied by a Bitchat copy of the same
-  /// plaintext: it would hand a future quantum attacker the easier target and
-  /// make the shield badge a lie, and it buys no reach, because a peer with an
-  /// ML-KEM key is demonstrably not on Bitchat. That falls out of the rule
-  /// rather than being a special case — holding a key implies holding the
-  /// announcement.
+  /// A post-quantum wrap never carries a Bitchat copy of the same plaintext:
+  /// that would hand a quantum attacker the easier target and buys no reach.
+  /// It falls out of the rule rather than being a special case.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
