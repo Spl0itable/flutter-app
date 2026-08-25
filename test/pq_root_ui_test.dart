@@ -261,6 +261,63 @@ void main() {
     });
   });
 
+  // The report that found the generation bug: the modal said "no recovery
+  // code yet" while settings said "Active ... with 2 contacts", on an account
+  // minutes old.
+  group('the settings status matches the recovery-code panel', () {
+    final screen =
+        File('lib/features/settings/settings_screen.dart').readAsStringSync();
+
+    test('plain Active requires a root, not merely an nsec', () {
+      expect(screen.contains('pqCapable && pqRootHeld'), isTrue);
+      expect(screen.contains('kPqStatusNoRoot'), isTrue);
+    });
+
+    test('and the green is reserved for that same state', () {
+      expect(screen.contains('color: pqCapable && pqRootHeld'), isTrue);
+    });
+
+    test('the no-root line is translatable', () {
+      expect(screen.contains('kPqStatusNoRoot,'), isTrue,
+          reason: 'it must be in kPqStatusStrings for the sweep');
+      expect(
+          kAppStringsCatalog.any(
+              (s) => s.startsWith('Active, but on the older key')),
+          isTrue);
+    });
+  });
+
+  // A root we generated but could not publish is recoverable; one we threw
+  // away is not.
+  group('a generated root is kept even if its record does not publish', () {
+    final ctrl = File('lib/state/nostr_controller.dart').readAsStringSync();
+    // To the NEXT method, not to the first `return;` — the persist guard is
+    // itself a return, and slicing there cuts the branch in half.
+    final branch = ctrl.substring(ctrl.indexOf('case PqRootAction.generate:'));
+    final body =
+        branch.substring(0, branch.indexOf('Future<bool> linkPqRootFromCode'));
+
+    test('it is persisted before the record is published', () {
+      final persist = body.indexOf('_persistPqRoot(root)');
+      final publish = body.indexOf('pqRootRecordSet(');
+      expect(persist, greaterThan(-1));
+      expect(publish, greaterThan(-1));
+      expect(persist, lessThan(publish));
+    });
+
+    test('and a failed publish does not discard it', () {
+      expect(body.contains('if (!await sync.pqRootRecordSet'), isFalse,
+          reason: 'publishRecord retries on the next boot; losing the root '
+              'leaves the account with no post-quantum at all');
+    });
+
+    test('overlapping runs cannot mint two roots', () {
+      expect(ctrl.contains('if (_pqRootInFlight) return;'), isTrue);
+      expect(ctrl.contains('_pqRootInFlight = true;'), isTrue);
+      expect(ctrl.contains('_pqRootInFlight = false;'), isTrue);
+    });
+  });
+
   group('every new string is translatable', () {
     // A string missing from the catalog stays English in every other language,
     // silently, and only in this one panel.
