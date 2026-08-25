@@ -645,12 +645,21 @@ class PqPmPlan {
     // a proven Nymchat client. Deriving it here rather than trusting the caller
     // keeps the two arguments from ever disagreeing.
     final proven = provenNymchat || recipientKemKey != null;
-    // The Bitchat wrap exists to reach someone who MIGHT be running Bitchat. A
-    // live announcement proves they are not, so it is dropped; without one we
-    // cannot tell, so it is sent.
-    final bitchat = (knownBitchat || unknown) && !proven;
+    // Never the combined format. A peer that announced only `pk` is handed no
+    // key at all and receives ordinary NIP-44, which every client can read —
+    // protection is what an old peer costs us, never delivery.
+    final usableKem = recipientAcceptsLayered ? recipientKemKey : null;
+    // The Bitchat wrap exists to reach someone who MIGHT be running Bitchat,
+    // and only a signed announcement proves they are not.
+    //
+    // This used to also drop the wrap for a peer merely CLASSIFIED as Nymchat
+    // — inference from traffic, not proof. A Bitchat client that echoes our
+    // `x` tag back flips that bit and the peer silently stops receiving
+    // anything we send. The announcement is signed and cannot be faked, so it
+    // is the only thing allowed to suppress the wrap.
+    final bitchat = !proven;
     return PqPmPlan(
-      kemPublicKey: recipientKemKey,
+      kemPublicKey: usableKem,
       bitchat: bitchat,
       // Invariant: a message must always leave in SOME format. The other terms
       // happen to cover every case today, but a silent no-send is such a bad
@@ -658,7 +667,7 @@ class PqPmPlan {
       // the guard stays.
       nym: !bitchat || knownNym || unknown || proven,
       provenNym: proven,
-      layered: recipientKemKey != null && recipientAcceptsLayered,
+      layered: usableKem != null,
     );
   }
 }

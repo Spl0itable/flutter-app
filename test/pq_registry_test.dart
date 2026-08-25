@@ -349,9 +349,16 @@ void main() {
     // silently voiding the post-quantum guarantee while the UI still claims it.
     final key = unhex(a['kemPublicKey'] as String);
 
-    PqPmPlan plan({Uint8List? kem, bool bitchat = false, bool nym = false}) =>
+    // A peer holding a key is a CURRENT peer: they announced pk2. A peer that
+    // announced only `pk` is modelled with layered:false, and is now sent no
+    // post-quantum wrap at all.
+    PqPmPlan plan({Uint8List? kem, bool bitchat = false, bool nym = false,
+            bool layered = true}) =>
         PqPmPlan.decide(
-            recipientKemKey: kem, knownBitchat: bitchat, knownNym: nym);
+            recipientKemKey: kem,
+            recipientAcceptsLayered: layered,
+            knownBitchat: bitchat,
+            knownNym: nym);
 
     test('unknown peer, no key: bitchat + classical nym (today\'s behaviour)', () {
       final p = plan();
@@ -367,10 +374,12 @@ void main() {
       expect(p.nym, isFalse);
     });
 
-    test('known nym peer without a key: classical nym only', () {
+    // Classification is inference, not proof — a Bitchat client echoing our
+    // `x` tag back sets it. Only a signed announcement suppresses the wrap.
+    test('known nym peer without a key still gets the Bitchat copy', () {
       final p = plan(nym: true);
       expect(p.pq, isFalse);
-      expect(p.bitchat, isFalse);
+      expect(p.bitchat, isTrue);
       expect(p.nym, isTrue);
     });
 
@@ -485,6 +494,7 @@ void main() {
     }) =>
         PqPmPlan.decide(
           recipientKemKey: kem,
+          recipientAcceptsLayered: true,
           knownBitchat: bitchat,
           knownNym: nym,
           provenNymchat: proven,
