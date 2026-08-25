@@ -1913,9 +1913,12 @@ class NostrService {
   ///
   /// Bitchat interop (PWA `sendNIP17PM`, pms.js:326-372): when [bitchatRumor] is
   /// non-null a parallel `bitchat1:`-encoded gift wrap is ALSO published so a
-  /// bitchat-app peer can decrypt us (sent for known-bitchat AND unknown peers).
-  /// [sendNymWrap] gates the NIP-17 recipient wrap (false for a known-bitchat-
-  /// only peer). The self-copy is ALWAYS NIP-17 so own messages restore across
+  /// bitchat-app peer can decrypt us (sent for every peer whose signed
+  /// announcement does not prove they are running Nymchat).
+  /// [sendNymWrap] gates the NIP-17 recipient wrap. `PqPmPlan` never clears it
+  /// any more — every recipient gets a Nymchat wrap, post-quantum or classical
+  /// — and it stays only so a caller with no recipient to reach (a self-copy)
+  /// can say so. The self-copy is ALWAYS NIP-17 so own messages restore across
   /// devices, and only NIP-17 wraps are reported via [onWrap] for D1
   /// archive/deposit — the PWA never deposits bitchat wraps (relay-only).
   Future<bool> publishPM({

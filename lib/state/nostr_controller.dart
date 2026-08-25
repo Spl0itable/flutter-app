@@ -3120,9 +3120,26 @@ class NostrController {
       pqRootFor: (peer) => pqSealRootVerdict(peer) == true,
     );
     if (m == null) return;
+    // Our OWN message, rebuilt from a wrap. The only wrap of it we can receive
+    // is the self-addressed archive copy, sealed to OUR key — so `u.isPq`
+    // describes our archive, never how the message reached the recipient. Ask
+    // the recipient instead, which is the question the send path asked. Without
+    // this, every message sent to a Bitchat peer came back from the archive
+    // (cache cleared, a second device, a D1 restore) marked "Quantum-resistant,
+    // legacy key": pqEncrypted true off our own key, pqRoot false because the
+    // PEER has none.
+    if (m.isOwn) {
+      final peer = m.conversationPubkey ?? m.pubkey;
+      final layered = _pqRegistry.acceptsLayered(peer,
+          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          enabled: PqPolicy.enabled(
+              privkey: _identity?.privkey, mode: _pqMode));
+      m.pqEncrypted = layered;
+      m.pqRoot = layered && pqSealRootVerdict(peer) == true;
+    }
     // The announcement may still be in flight; fill the verdict in rather
     // than leaving the opening message of a conversation marked legacy.
-    if (u.isPq) _resolvePqRootVerdict(m.conversationPubkey ?? m.pubkey,
+    if (m.pqEncrypted) _resolvePqRootVerdict(m.conversationPubkey ?? m.pubkey,
         m.nymMessageId);
     // Resolve the display author against the users map — the PWA's
     // `author: isOwn ? this.nym : this.getNymFromPubkey(senderPubkey)`
