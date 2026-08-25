@@ -3117,9 +3117,13 @@ class NostrController {
       selfPubkey: self,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
-      pqRootFor: pqSealIsRootSeeded,
+      pqRootFor: (peer) => pqSealRootVerdict(peer) == true,
     );
     if (m == null) return;
+    // The announcement may still be in flight; fill the verdict in rather
+    // than leaving the opening message of a conversation marked legacy.
+    if (u.isPq) _resolvePqRootVerdict(m.conversationPubkey ?? m.pubkey,
+        m.nymMessageId);
     // Resolve the display author against the users map — the PWA's
     // `author: isOwn ? this.nym : this.getNymFromPubkey(senderPubkey)`
     // (pms.js:1258 via the `peerName` resolution at :1321). `mapPmRumor` is
@@ -3197,6 +3201,7 @@ class NostrController {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final createdAt = createdAtRaw > nowSec + 60 ? nowSec : createdAtRaw;
     final isOwn = senderPubkey == self;
+    if (u.isPq) _resolvePqRootVerdict(senderPubkey, nymMessageId);
     return Message(
       id: u.wrapId.isNotEmpty ? u.wrapId : (nymMessageId ?? ''),
       author: _nymFor(senderPubkey),
@@ -3213,7 +3218,7 @@ class NostrController {
       nymMessageId: nymMessageId,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
-      pqRoot: u.isPq && pqSealIsRootSeeded(senderPubkey),
+      pqRoot: u.isPq && pqSealRootVerdict(senderPubkey) == true,
       deliveryStatus: isOwn ? DeliveryStatus.sent : DeliveryStatus.delivered,
     );
   }
@@ -4391,6 +4396,31 @@ class NostrController {
   bool pqSealIsRootSeeded(String peerPubkey) =>
       _pqRoot != null && pqPeerIsRootSeeded(peerPubkey);
 
+  /// Same question, able to answer "not yet known".
+  ///
+  /// The first message from a new peer arrives before their announcement does,
+  /// and treating that absence as legacy marked the opening message of every
+  /// conversation legacy until a second one arrived. Unknown is not legacy.
+  bool? pqSealRootVerdict(String peerPubkey) {
+    if (_pqRoot == null) return false; // our own half settles it
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    if (!_pqRegistry.isKnownNymchatClient(peerPubkey, nowSec: nowSec)) {
+      return null;
+    }
+    return pqPeerIsRootSeeded(peerPubkey);
+  }
+
+  /// Fills a pending verdict in once the announcement lands, then repaints
+  /// that row. No-op when we already know.
+  void _resolvePqRootVerdict(String peerPubkey, String? nymMessageId) {
+    if (nymMessageId == null) return;
+    if (pqSealRootVerdict(peerPubkey) != null) return;
+    unawaited(ensurePqAnnouncement(peerPubkey).then((_) {
+      if (pqSealRootVerdict(peerPubkey) != true) return;
+      _ref.read(appStateProvider.notifier).markMessagePqRoot(nymMessageId);
+    }));
+  }
+
   /// Whose post-quantum announcements we watch: our conversation partners,
   /// group members and ourselves. Unlike the vouch list — a broadcast web of
   /// trust — post-quantum keys are only needed for peers we actually message,
@@ -4524,8 +4554,14 @@ class NostrController {
             pqRepublishInterval.inMilliseconds) {
       return;
     }
-    // A KEM key only when we can actually use one.
-    final keys = pqEnabled ? _pqSelfKeys() : null;
+    // A KEM key only once §6 has decided where it comes from.
+    //
+    // On a fresh account the settings load that generates the root has not
+    // finished when this first fires. Announcing anyway published an
+    // nsec-derived key that peers cached for the whole TTL, so two accounts
+    // created minutes apart genuinely exchanged legacy-sealed messages.
+    // `nym: 1` still goes out, so peers still skip the Bitchat wrap.
+    final keys = (pqEnabled && _pqRootSettled) ? _pqSelfKeys() : null;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final selfDeviceId = await _pqDeviceId();
     final devices = PqPolicy.mergeDeviceRoster(
@@ -4596,6 +4632,11 @@ class NostrController {
   /// Whether this device must be linked before it can take part.
   bool get pqRootLinkNeeded => _pqRootLocked;
 
+  /// Whether §6 has run. Until it has, this device does not know whether the
+  /// account has a root, so any key it could announce is nsec-derived by
+  /// default rather than by decision.
+  bool _pqRootSettled = false;
+
   /// The root as its `nympq1…` code, shown beside the nsec.
   String? get pqRootCode {
     final root = _pqRoot;
@@ -4663,9 +4704,15 @@ class NostrController {
       holdRoot: _pqRoot != null,
     );
 
+    if (action != PqRootAction.wait) _pqRootSettled = true;
+
     switch (action) {
       case PqRootAction.wait:
+        return;
       case PqRootAction.ready:
+        // The boot announcement went out without a key, because until now we
+        // did not know whether one existed. Publish the real one.
+        await publishPqAnnouncement(force: true);
         return;
 
       case PqRootAction.publishRecord:
