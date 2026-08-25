@@ -223,6 +223,30 @@ Uint8List pqRootDeriveSeed(Uint8List root, int epoch) {
 MlKemKeyPair pqKeypairFromRoot(Uint8List root, int epoch) =>
     mlKem768.keygen(pqRootDeriveSeed(root, epoch));
 
+/// Domain separator for the root fingerprint.
+const String pqRootFpSalt = 'nym-pq-root-fp-v1';
+
+/// Fingerprint length, in bytes.
+const int pqRootFpLength = 8;
+
+/// A short public fingerprint of [root], as lowercase hex.
+///
+/// Goes in the settings record so a device can tell "this is the root I hold"
+/// from "this is a different one" without either side revealing the secret.
+/// Must stay byte-identical to the PWA's `pqRootFingerprint` — a record
+/// without a matching one reads as no record at all, and a device that
+/// believes there is no record generates a second root.
+String pqRootFingerprint(Uint8List root) {
+  if (root.length != pqRootLength) {
+    throw ArgumentError('pq root must be $pqRootLength bytes');
+  }
+  final prk = nip44.hkdfExtract(
+      Uint8List.fromList(utf8.encode(pqRootFpSalt)), root);
+  final out = nip44.hkdfExpand(
+      prk, Uint8List.fromList(utf8.encode('fp')), pqRootFpLength);
+  return [for (final b in out) b.toRadixString(16).padLeft(2, '0')].join();
+}
+
 // ---- pq2: layered, so a signer login can take part -------------------------
 //
 // pq1 mixes the ECDH secret and the KEM secret into one key, and a NIP-07 or

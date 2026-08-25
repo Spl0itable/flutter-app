@@ -83,6 +83,10 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
 
   bool _revealOpen = false;
   bool _nsecVisible = false;
+  bool _pqRootVisible = false;
+  final TextEditingController _pqRootLink = TextEditingController();
+  String? _pqRootLinkStatus;
+  bool _pqRootLinking = false;
   bool _pubkeyOpen = false; // full-hex pubkey slideout
   bool _saving = false;
 
@@ -145,6 +149,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     _nick.dispose();
     _bio.dispose();
     _lightning.dispose();
+    _pqRootLink.dispose();
     super.dispose();
   }
 
@@ -649,7 +654,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 color: c.textDim,
               ),
               Text(
-                tr("Reveal this nym's private key"),
+                tr("Reveal this nym's private key and recovery code"),
                 style: TextStyle(color: c.textDim, fontSize: 13),
               ),
             ],
@@ -688,12 +693,146 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 // The PWA reveals the nsec on a plain click toggle — no hold
                 // gate (toggleRevealPrivkey, app.js:2959). Populate immediately.
                 _nsecRow(c),
+                const SizedBox(height: 16),
+                _pqRootRow(c),
               ],
             ),
           ),
         ],
       ],
     );
+  }
+
+  /// The recovery code, beside the nsec. It is the OTHER half of what a device
+  /// needs: without it a second device reads new messages but not the
+  /// quantum-resistant ones, and losing every device holding it loses that
+  /// history for good.
+  Widget _pqRootRow(NymColors c) {
+    final ctrl = ref.read(nostrControllerProvider);
+    final code = ctrl.pqRootCode;
+    return code == null ? _pqRootLinkRow(c) : _pqRootCodeRow(c, code);
+  }
+
+  Widget _pqRootCodeRow(NymColors c, String code) {
+    final display = _pqRootVisible ? code : '•' * code.length.clamp(8, 24);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(tr('Post-quantum recovery code'),
+            style: TextStyle(color: c.text, fontSize: 12)),
+        const SizedBox(height: 4),
+        Text(
+          tr('This code, not your nsec, is what makes your messages '
+              'quantum-resistant. Copy it to any other device you use this '
+              'account on. Store it with your nsec and never share it.'),
+          style: TextStyle(color: c.textDim, fontSize: 11),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.05),
+                  borderRadius: NymRadius.rxs,
+                  border: Border.all(color: c.glassBorder),
+                ),
+                child: Text(
+                  display,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: c.text, fontFamily: 'monospace', fontSize: 12),
+                ),
+              ),
+            ),
+            IconButton(
+              icon: NymSvgIcon(NymIcons.nsecEye, size: 18, color: c.textDim),
+              onPressed: () =>
+                  setState(() => _pqRootVisible = !_pqRootVisible),
+            ),
+            IconButton(
+              tooltip: tr('Copy'),
+              icon: NymSvgIcon(NymIcons.ctxCopy, size: 16, color: c.textDim),
+              onPressed: () => _copyToClipboard(
+                  code, tr('Post-quantum recovery code copied')),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _pqRootLinkRow(NymColors c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(tr('Post-quantum recovery code'),
+            style: TextStyle(color: c.text, fontSize: 12)),
+        const SizedBox(height: 4),
+        Text(
+          tr('This device has no recovery code yet. Paste the one from a '
+              'device that already has it — you will find it in this same '
+              'panel there — so both can read the same quantum-resistant '
+              'messages.'),
+          style: TextStyle(color: c.textDim, fontSize: 11),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _pqRootLink,
+                autocorrect: false,
+                enableSuggestions: false,
+                style: TextStyle(
+                    color: c.text, fontFamily: 'monospace', fontSize: 12),
+                decoration: InputDecoration(
+                  hintText: 'nympq1…',
+                  hintStyle: TextStyle(color: c.textDim, fontSize: 12),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  enabledBorder: _inputBorder(c, c.glassBorder),
+                  focusedBorder: _inputBorder(c, c.primaryA(0.3)),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: _pqRootLinking ? null : _linkPqRoot,
+              child: Text(tr('Link'),
+                  style: TextStyle(color: c.primary, fontSize: 12)),
+            ),
+          ],
+        ),
+        if (_pqRootLinkStatus != null) ...[
+          const SizedBox(height: 4),
+          Text(_pqRootLinkStatus!,
+              style: TextStyle(color: c.textDim, fontSize: 11)),
+        ],
+      ],
+    );
+  }
+
+  Future<void> _linkPqRoot() async {
+    final code = _pqRootLink.text.trim();
+    if (code.isEmpty) return;
+    setState(() => _pqRootLinking = true);
+    final ok =
+        await ref.read(nostrControllerProvider).linkPqRootFromCode(code);
+    if (!mounted) return;
+    setState(() {
+      _pqRootLinking = false;
+      _pqRootLinkStatus = ok
+          ? tr('Linked. This device can now read your quantum-resistant '
+              'messages.')
+          : tr('That code does not match this account. Check it and try '
+              'again.');
+      if (ok) _pqRootLink.clear();
+    });
   }
 
   Widget _nsecRow(NymColors c) {

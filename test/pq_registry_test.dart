@@ -15,6 +15,7 @@ import 'package:nym_bar/core/crypto/keys.dart';
 import 'package:nym_bar/core/crypto/ml_kem.dart';
 import 'package:nym_bar/core/crypto/pq.dart' as pq;
 import 'package:nym_bar/features/identity/pq_registry.dart';
+import 'package:nym_bar/features/identity/pq_root.dart';
 
 Uint8List unhex(String h) {
   final out = Uint8List(h.length ~/ 2);
@@ -731,6 +732,66 @@ void main() {
       final ann = PqAnnouncement.parse(PqAnnouncement.encodeRetraction(1))!;
       expect(ann.retracted, isTrue);
       expect(ann.rootSeeded, isFalse);
+    });
+  });
+
+  // A record whose fingerprint the other app cannot reproduce reads there as
+  // NO record — and a device that believes there is no record generates a
+  // second root, splitting the account.
+  group('root fingerprint parity with the PWA', () {
+    final vectors = (jsonDecode(File('test/pq-vectors.json').readAsStringSync())
+        as Map<String, dynamic>)['v2']['rootFingerprint'] as List<dynamic>;
+
+    test('every vector reproduces byte for byte', () {
+      expect(vectors, isNotEmpty);
+      for (final v in vectors) {
+        final m = v as Map<String, dynamic>;
+        expect(pq.pqRootFingerprint(unhex(m['root'] as String)), m['fp'],
+            reason: m['root'] as String);
+      }
+    });
+
+    test('different roots do not collide', () {
+      final seen = <String>{};
+      for (final v in vectors) {
+        seen.add(pq.pqRootFingerprint(unhex((v as Map)['root'] as String)));
+      }
+      expect(seen.length, vectors.length);
+    });
+
+    test('a wrong-length root is refused rather than fingerprinted', () {
+      expect(() => pq.pqRootFingerprint(Uint8List(31)), throwsArgumentError);
+    });
+
+    test('a published record carries the fingerprint', () {
+      final root = unhex((vectors.first as Map)['root'] as String);
+      final json = PqRootRecord.forRoot(root).toJson();
+      expect(json['fp'], (vectors.first as Map)['fp']);
+      expect(json['v'], 2);
+      expect(json['ts'], isA<int>());
+    });
+
+    test('and the round trip keeps it', () {
+      final root = unhex((vectors.first as Map)['root'] as String);
+      final back = PqRootRecord.fromJson(PqRootRecord.forRoot(root).toJson())!;
+      expect(back.isValid, isTrue);
+      expect(back.matches(root), isTrue);
+      expect(back.matches(unhex((vectors[1] as Map)['root'] as String)),
+          isFalse);
+    });
+
+    test('adding a wrap does not drop the fingerprint', () {
+      final root = unhex((vectors.first as Map)['root'] as String);
+      final rec = PqRootRecord.forRoot(root)
+          .withWrap(const PqRootWrap(type: pqRootWrapPasskey, blob: 'enc:v1:aa:bb'));
+      expect(rec.fp, (vectors.first as Map)['fp']);
+      expect(rec.isValid, isTrue);
+    });
+
+    // This is the shape the PWA rejects outright.
+    test('a record with no fingerprint is not valid', () {
+      expect(const PqRootRecord().isValid, isFalse);
+      expect(PqRootRecord.fromJson({'v': 2, 'wraps': []})!.isValid, isFalse);
     });
   });
 

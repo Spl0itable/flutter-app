@@ -299,6 +299,20 @@
         "v2AsString": "{\"v\":\"2\",\"alg\":\"mlkem768\",\"nym\":1,\"epoch\":0,\"src\":\"root\",\"pk\":\"Q0keCmVLiwqrhyxhqgGoKuyU9bgEUfdqYYMr8tWNHXM-CtFj2lEv4Ikt2NHDBGG04mBD-oMA9OKkLjysunO0scBQ3yR99Jgla0OL-Xa2joMy7wfAZAmI5tAaB1Un2jdBPQQjKrpOKPIda7ZzfoyGIgKC-kEbmyTPDYfA2hN5Nwoa7SK3DgxZnSyw71nAhEi2a5U-Y7lSmWlB99CfQfWgW4Q4cEACXUB51wCa_pu1K2NNyedc7pqq8caKqeF43VvOMGtY2JYnDgXH3EyBLNBrvEiQfsZz4AOS_js5odyrxAc70smPt3dzQIY9ZPBklHjBn9dckqsu2euqB1tdd5GHMfsu5eKUAIeSaqW-v1W-Vbi7UKFUpuggTiEg33V3dyIRArFewPO8V9dlZHQXPtA45QaZIMqtrxOLtgi4jWg2X5bBPQy-IFoQBAnQ27kWxkkUwSGpCUbAegtLbHS6CZFu31pEJAdqfnRh0TVDp0qqAOR1GkoBhXGnxSW9PoaCNVubohFNl9uJWPpiAlMaU7U0VFgHLwx0BxgSe5Qd6Ch_4LoycSKTB8O5iSK71Wm-1QYHZzwjw8PMWkW19-Vs3LBOVOGBcZh2YgCndtvKDOsKZzZ-qHAPBhJxw5BP0KiftBpcHhxqmgpLrpRbVExDJTVDBkmDkrG18qiBybRHbUeKStSPieQA2cmnFgpqNKckB-W4IHJYfnBUOjAYAjXBTeR7oltCkQodxmZ3KpCnyky2ZSe-ZZwxDXUjsoGCJDgOwbGZ15InHagIdSxYVwnMBFZEpDfNaNMLWPGTgNab4LNKiRExC3pLg2NqsTgtScbBwiMc0gjAmzucmNM-TPSAnflLxbNd9JAgm9wJ4TxoHDaX9JMgzRknKEnEDQNdJeoFN-wwfbSgsGgKKNwBkvZEnfQYBVl0B3JpveafiFXPQNHOo7uQWWwnL5leZiW1SRDHUCVcFWhk7hYK3ZnK6FAGp7NZXqZhFMVCYTSTNBtsQtSxfCNhz1qWYpgWBMqD1HdmBWxu8WFzqSUxEaZSorig6iyxP-c_WGzP3ytnAFvBeoNUujGp_hilSFwTrOqZ96SC-sihIDUePXKfEgQlYqiV9jWWk2qFfCqv17JdhQgU1oaaW-YGhzw0NKJ8VztKpYJwSmdowgJc_oijZWMEAcsZ64uiL2MWrvq4MXAgMYVU3BVRBPK63HQWn8u5FZFErbYKVPu3lWMKWEGCDQtCMVYP-9JYe2EY1nDAMYFMvDNtAQgMzHqUPgRrY8GxjqyiP-S19_pskSx-fpBsx6lHfWGet-qcp2YIU8cpQ3N8X4CUUhKIO3oAZLVX9rCefQuQgBF_YgUpFGadJlMecnUtctZxuQuRcaWIbNqWXgOu9yiiGlUR7XcvS6m_nwI5QxlUFZcVZ3WI6ZMDPBIGT4lWNHG3W4upU_uCn_Yy5Gun6_xyD0NgNeaWqfa9OtNrmkFTNtWMAJqCbilSE4dwB6dlebAkzkyjdbi-Zvo6-2KHmbWhxSa7Xaug5kFWpEtT9nDOsRFqe4G38OJjcqhMkcrqn_ad4jT-sj5AyrakqwZTdhG1aQIrjR4\",\"exp\":1736294400}"
       }
     },
+    "rootFingerprint": [
+      {
+        "root": "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
+        "fp": "6c4d126a2a53b690"
+      },
+      {
+        "root": "01080f161d242b323a41484f565d646b737a81888f969da4acb3bac1c8cfd6dd",
+        "fp": "2adb739e92031530"
+      },
+      {
+        "root": "0000000000000000000000000000000000000000000000000000000000000000",
+        "fp": "54a6e79b5f6bdb82"
+      }
+    ],
     "pq2LayerKeys": {
       "sharedSecret": "3333333333333333333333333333333333333333333333333333333333333333",
       "kemCiphertextFill": "0x44 x1088",

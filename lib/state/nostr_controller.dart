@@ -4671,7 +4671,9 @@ class NostrController {
       case PqRootAction.publishRecord:
         // A previous launch generated the root but could not publish the
         // record; without it another device generates a rival root.
-        await sync.pqRootRecordSet(const PqRootRecord());
+        final held = _pqRoot;
+        if (held == null) return;
+        await sync.pqRootRecordSet(PqRootRecord.forRoot(held));
         return;
 
       case PqRootAction.awaitLink:
@@ -4683,7 +4685,7 @@ class NostrController {
         // §6.4. The record is published BEFORE the root is persisted: a root
         // we kept but failed to publish is worse than no root at all.
         final root = pq.pqGenerateRoot();
-        if (!await sync.pqRootRecordSet(const PqRootRecord())) return;
+        if (!await sync.pqRootRecordSet(PqRootRecord.forRoot(root))) return;
         if (!await _persistPqRoot(root)) return;
         try {
           await _ref

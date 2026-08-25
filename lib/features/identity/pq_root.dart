@@ -124,10 +124,28 @@ class PqRootWrap {
 /// The `nymchat-pq-root` payload. Its EXISTENCE is what stops a second device
 /// generating a rival root (spec §6), so an empty [wraps] is still valid.
 class PqRootRecord {
-  const PqRootRecord({this.wraps = const [], this.version = 2});
+  const PqRootRecord({this.wraps = const [], this.version = 2, this.fp});
+
+  /// Builds the record for [root], stamping its fingerprint.
+  factory PqRootRecord.forRoot(Uint8List root,
+          {List<PqRootWrap> wraps = const []}) =>
+      PqRootRecord(wraps: wraps, fp: pq.pqRootFingerprint(root));
 
   final List<PqRootWrap> wraps;
   final int version;
+
+  /// Fingerprint of the root this record belongs to. The PWA REQUIRES it: a
+  /// record without one reads there as no record, and a device that believes
+  /// there is no record generates a second root and splits the account.
+  final String? fp;
+
+  /// Whether this record identifies a root at all. Matches the PWA's
+  /// `_pqRootValidRecord`, so both apps accept and reject the same payloads.
+  bool get isValid => version == 2 && fp != null && fp!.isNotEmpty;
+
+  /// Whether [root] is the one this record belongs to.
+  bool matches(Uint8List root) =>
+      fp != null && pq.pqRootFingerprint(root) == fp;
 
   bool get isEmpty => wraps.isEmpty;
 
@@ -141,6 +159,7 @@ class PqRootRecord {
   /// Replaces any wrap of the same type, keeping every other path.
   PqRootRecord withWrap(PqRootWrap wrap) => PqRootRecord(
         version: version,
+        fp: fp,
         wraps: [
           for (final w in wraps)
             if (w.type != wrap.type) w,
@@ -150,7 +169,9 @@ class PqRootRecord {
 
   Map<String, dynamic> toJson() => {
         'v': version,
+        if (fp != null) 'fp': fp,
         'wraps': [for (final w in wraps) w.toJson()],
+        'ts': DateTime.now().millisecondsSinceEpoch ~/ 1000,
       };
 
   /// Null only when the payload is not a record at all — a record with no
@@ -170,6 +191,9 @@ class PqRootRecord {
     return PqRootRecord(
       wraps: wraps,
       version: raw['v'] is int ? raw['v'] as int : 2,
+      fp: raw['fp'] is String && (raw['fp'] as String).isNotEmpty
+          ? raw['fp'] as String
+          : null,
     );
   }
 
