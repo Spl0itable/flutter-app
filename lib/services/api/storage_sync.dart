@@ -675,21 +675,44 @@ class StorageSync {
     return ((raw + 2) ~/ 3) * 4;
   }
 
+  /// pq2 framing: `pq2.` plus a fixed 1088-byte ML-KEM ciphertext and the
+  /// AEAD output, both base64url. Exact — the ciphertext is a constant size
+  /// and base64url is a pure function of length.
+  static const int _pq2PrefixLen = 4;
+  static const int _mlKemCipherTextBytes = 1088;
+
+  static int _b64uLen(int n) => (n * 4 + 2) ~/ 3;
+
+  static int pq2PayloadLen(int innerLen) =>
+      _pq2PrefixLen +
+      _b64uLen(_mlKemCipherTextBytes) +
+      1 +
+      _b64uLen(innerLen + 16);
+
   /// Size of the final `["EVENT", wrapped]` frame for a rumor of this size.
-  static int wrappedSizeForRumor(int rumorBytes) {
+  ///
+  /// [pq2] is not a rounding error: the layer adds ~1.5 KB of KEM ciphertext
+  /// AND inflates what it wraps by a third, on BOTH layers, so a rumor the
+  /// classical model says fits in 65 KB can produce an event of nearly 120 KB.
+  /// Budgeting classically and then publishing post-quantum is what made every
+  /// packed history shard overflow and fall back to NIP-44.
+  static int wrappedSizeForRumor(int rumorBytes, {bool pq2 = false}) {
     const sealOverhead = 200; // kind/created_at/tags/pubkey/id/sig
     const wrapOverhead = 320; // same, plus the p/d/k tags
-    final sealJson = nip44PayloadLen(rumorBytes) + sealOverhead;
-    return nip44PayloadLen(sealJson) + wrapOverhead + 10;
+    int layer(int n) =>
+        pq2 ? pq2PayloadLen(nip44PayloadLen(n)) : nip44PayloadLen(n);
+    final sealJson = layer(rumorBytes) + sealOverhead;
+    return layer(sealJson) + wrapOverhead + 10;
   }
 
   /// Largest rumor whose wrapped event still clears the relay gate. Derived
   /// rather than hardcoded so it stays correct if the gate moves.
-  static int maxRumorBytesForWrap([int limit = _relayEventLimit]) {
+  static int maxRumorBytesForWrap(
+      [int limit = _relayEventLimit, bool pq2 = false]) {
     var lo = 32, hi = 64 * 1024, best = 32;
     while (lo <= hi) {
       final mid = (lo + hi) >> 1;
-      if (wrappedSizeForRumor(mid) <= limit) {
+      if (wrappedSizeForRumor(mid, pq2: pq2) <= limit) {
         best = mid;
         lo = mid + 1;
       } else {
@@ -699,7 +722,13 @@ class StorageSync {
     return best;
   }
 
-  static final int _maxRumorBytes = maxRumorBytesForWrap();
+  static final int _maxRumorBytesClassical = maxRumorBytesForWrap();
+  static final int _maxRumorBytesPq2 =
+      maxRumorBytesForWrap(_relayEventLimit, true);
+
+  /// The ceiling for the encryption a self-addressed wrap will actually use.
+  int get _maxRumorBytes =>
+      _pqSealToSelf ? _maxRumorBytesPq2 : _maxRumorBytesClassical;
 
   /// Approximate rumor byte size: UTF-8 length of the double-JSON-stringified
   /// payload plus the fixed rumor overhead (settings.js:359-363).
@@ -1198,12 +1227,13 @@ class StorageSync {
 
     // Group message history → nymchat-history-<gid>-<YYYYMM>-<shard>.
     // Message JSON per shard. The rumor carries this as an ESCAPED string,
-    // which inflates it, and the escaped total has to stay under
-    // maxRumorBytesForWrap() (28,672). Budgeting 18 KB of raw message JSON
-    // leaves room for that escaping plus the rumor scaffolding; the previous
-    // 30,000 exceeded the wrap cliff on its own, so every shard it produced was
-    // silently dropped at publish time (settings.js:497).
-    const shardBudget = 18000;
+    // which inflates it, and the escaped total has to stay under the rumor
+    // ceiling for the encryption actually in play. Derived, not hardcoded:
+    // post-quantum lowers that ceiling from 28,672 to 16,384, and a fixed
+    // 18 KB budget overflowed EVERY packed shard — which is what sent the
+    // whole history back to NIP-44. 0.628 is the share of the ceiling the raw
+    // JSON may occupy, leaving the rest for escaping and scaffolding.
+    final shardBudget = (_maxRumorBytes * 0.628).floor();
     for (final e in historyByConvKey.entries) {
       final convKey = e.key;
       final msgs = e.value;
