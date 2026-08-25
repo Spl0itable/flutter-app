@@ -2325,7 +2325,7 @@ class NostrService {
     // what relays take.
     Future<NostrEvent?> build(
       Future<String> Function(String plaintext) seal,
-      String Function(String plaintext, Uint8List ephSk) wrap,
+      Future<String> Function(String plaintext, Uint8List ephSk) wrap,
     ) async {
       final sealed = await sig.sign(
         UnsignedEvent(
@@ -2349,7 +2349,7 @@ class NostrService {
             ['d', outerD],
             ['k', 'nym-sync'],
           ],
-          content: wrap(sealJson, ephSk),
+          content: await wrap(sealJson, ephSk),
         ),
         ephSk,
       );
@@ -2363,15 +2363,21 @@ class NostrService {
     // weakest thing on the relay: readable by anyone who breaks secp256k1,
     // regardless of how carefully the messages themselves were sealed.
     //
-    // Only with a local nsec. An extension or NIP-46 signer returns a finished
-    // NIP-44 payload rather than a conversation key, so there is no hybrid one
-    // to derive (PqPolicy.capable).
-    final ownSk = identity.privkey;
+    // The LAYERED format, so a signer login is not excluded: the outer layer
+    // is keyed from the KEM secret alone and the inner NIP-44 is produced by
+    // whatever holds the identity key. This used to call pqEncrypt, the
+    // combined format, which needs the raw ECDH output and therefore a local
+    // nsec — so extension and NIP-46 accounts silently kept their settings,
+    // conversation list and group keys on classical encryption.
     final selfKem = _pqSelfKeys.isEmpty ? null : _pqSelfKeys.first;
-    if (ownSk != null && selfKem != null) {
+    if (selfKem != null) {
       final wrapped = await build(
-        (pt) async => pq.pqEncrypt(pt, ownSk, self, selfKem.kemPk),
-        (pt, ephSk) => pq.pqEncrypt(pt, ephSk, self, selfKem.kemPk),
+        // Outer seal: the signer (or the local key) produces the inner NIP-44.
+        (pt) async => pq.pq2Seal(
+            await sig.nip44Encrypt(self, pt), self, self, selfKem.kemPk),
+        // The wrap layer is ours by construction — a throwaway key we just
+        // generated — so the inner half never needs the signer here.
+        (pt, ephSk) => pq.pq2Encrypt(pt, ephSk, self, selfKem.kemPk),
       );
       if (wrapped != null) {
         await pool.publishDm(wrapped);
@@ -2385,7 +2391,8 @@ class NostrService {
 
     final wrapped = await build(
       (pt) => sig.nip44Encrypt(self, pt),
-      (pt, ephSk) => nip44.encrypt(pt, nip44.getConversationKey(ephSk, self)),
+      (pt, ephSk) async =>
+          nip44.encrypt(pt, nip44.getConversationKey(ephSk, self)),
     );
     if (wrapped == null) return null;
     await pool.publishDm(wrapped);

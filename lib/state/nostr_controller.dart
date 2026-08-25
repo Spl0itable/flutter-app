@@ -4352,7 +4352,8 @@ class NostrController {
 
   /// Whether copies addressed to ourselves can be post-quantum.
   bool get pqSelfEnabled =>
-      PqPolicy.selfEnabled(privkey: _identity?.privkey, mode: _pqMode);
+      PqPolicy.selfEnabled(
+          privkey: _identity?.privkey, root: _pqRoot, mode: _pqMode);
 
   /// Our own ML-KEM key, for copies addressed to OURSELVES.
   ///
@@ -4743,7 +4744,9 @@ class NostrController {
         : record.matches(held);
 
     final action = pqRootDecide(
-      durableIdentity: sync.durableIdentity,
+      throwawayKeypair: _ref
+          .read(keyValueStoreProvider)
+          .getBool(StorageKeys.randomKeypairPerSession, defaultValue: false),
       recordLoadSucceeded: sync.pqRootLoadSucceeded,
       recordPresent: sync.pqRootRowPresent,
       holdRoot: held != null,
