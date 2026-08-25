@@ -202,6 +202,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: [
+                                _pubkeySlideout(c),
+                                const SizedBox(height: 18),
                                 _nicknameGroup(c),
                                 const SizedBox(height: 18),
                                 _avatarGroup(c),
@@ -305,7 +307,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               ),
             ),
             const SizedBox(width: 8),
-            // The start of the pubkey, shown in full in the panel below —
+            // The tail of the pubkey, shown in full in the panel above —
             // nothing to tap for, so nothing that looks tappable.
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -327,26 +329,19 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             style: TextStyle(color: c.textDim, fontSize: 11),
           ),
         ),
-        _pubkeySlideout(c),
-        _hint(
-          c,
-          tr('Your ephemeral pseudonym nickname for this session. The '
-              'characters after the # are the start of your public key, shown '
-              'in full below.'),
-        ),
       ],
     );
   }
 
-  /// The full-hex pubkey panel (`#pubkeySlideout`, index.html:1159-1169): a
-  /// title, an explanatory paragraph, the full pubkey, and a Copy button.
+  /// The full pubkey panel (`#pubkeySlideout` in the PWA): a title, an
+  /// explanatory paragraph, the full pubkey, and a Copy button. It sits above
+  /// the nickname field, which is where the `#suffix` it explains comes from.
   Widget _pubkeySlideout(NymColors c) {
     // npub by default, one tap from hex — the same app-wide preference the
     // user context menu writes (`nym_pubkey_format`, key_format.dart).
     final isNpub = _pubkeyFormat == PubkeyFormat.npub;
     final pk = formatPubkeyForDisplay(_pubkey, _pubkeyFormat);
     return Container(
-      margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.04),
@@ -369,7 +364,9 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 'your private key proves you are really you, like a password. '
                 'Others use this pubkey to find you on Nymchat, and you use '
                 'theirs to find them. The same key has two spellings — npub '
-                'and hex — and they are interchangeable.'),
+                'and hex — and they are interchangeable. The four characters '
+                'after the # in a nickname are the last four of the hex '
+                'spelling.'),
             style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
           ),
           const SizedBox(height: 8),
