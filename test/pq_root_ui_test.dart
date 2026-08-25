@@ -161,6 +161,36 @@ void main() {
       expect(modal.contains('writePubkeyFormat(prefs, next)'), isTrue,
           reason: 'one preference, so the context menu agrees');
     });
+
+    // The panel explains where the nickname's #suffix comes from, so it has to
+    // come first: the nickname field below it is the thing being explained.
+    test('the pubkey panel is built above the nickname group', () {
+      final pk = modal.indexOf('_pubkeySlideout(c),');
+      final nick = modal.indexOf('_nicknameGroup(c),');
+      expect(pk, greaterThan(-1));
+      expect(nick, greaterThan(-1));
+      expect(pk, lessThan(nick));
+    });
+
+    test('the nickname field carries no hint of its own', () {
+      expect(modal.contains('ephemeral pseudonym'), isFalse,
+          reason: 'the panel above explains the suffix now');
+      expect(
+          kAppStringsCatalog.any(
+              (s) => s.contains('the start of your public key')),
+          isFalse,
+          reason: 'and the sentence that said so is gone from the catalog');
+    });
+
+    test('the panel explains the suffix, and gets it the right way round', () {
+      final para = kAppStringsCatalog.firstWhere(
+          (s) => s.startsWith('A "pubkey" aka "public key"'));
+      expect(
+          para,
+          endsWith('The four characters after the # in a nickname are the '
+              'last four of the hex spelling.'));
+      expect(modal.contains('last four of the hex '), isTrue);
+    });
   });
 
   group('every new string is translatable', () {
