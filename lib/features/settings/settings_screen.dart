@@ -55,9 +55,8 @@ import 'settings_widgets.dart';
 const String kPqStatusFull = 'Active for messages with other Nymchat users.';
 const String kPqStatusSendOnly =
     'Active for messages you send to other Nymchat users. Messages you receive, '
-    'and your own synced settings and history, stay on standard encryption: '
-    'your signer holds the key they would have to be derived from, and won\'t '
-    'do the post-quantum half. Logging in with your nsec covers both directions.';
+    'and your own synced settings and history, stay on standard encryption '
+    'until this device has your nympq1\u2026 recovery code.';
 const String kPqStatusUnavailable =
     'Not available. Post-quantum encryption needs the ML-KEM implementation, '
     'which did not load.';
@@ -1503,10 +1502,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         '⚠ Audio/video calls and P2P file sharing connect peers directly over '
         'WebRTC, which can reveal your true IP address to the other party. '
         'Use a VPN or Tor to help conceal it.');
-    // Post-quantum: what is possible is decided by the login type, not a
-    // preference — and sending and receiving are different questions. A signer
-    // login can hybridize the WRAP it builds itself, but cannot decapsulate,
-    // so it sends post-quantum and receives classical. See PqPolicy.
+    // Post-quantum: sending and receiving are different questions. Sending
+    // needs only the peer's announced key, so any login can do it; receiving
+    // needs this device's own root, which is what the nympq1 code carries. A
+    // device without one therefore sends post-quantum and receives classical,
+    // whatever the login type. See PqPolicy.
     final nostrCtrl = ref.read(nostrControllerProvider);
     final pqCapable = nostrCtrl.pqCapable;
     final pqSendOnly = !pqCapable && nostrCtrl.pqEnabled;

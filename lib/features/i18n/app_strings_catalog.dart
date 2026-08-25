@@ -1348,6 +1348,6 @@ const List<String> kAppStringsCatalog = <String>[
   'Installed APK',
   'Signing certificate',
   // Post-quantum status line (settings_screen.dart).
-  'Active for messages you send to other Nymchat users. Messages you receive, and your own synced settings and history, stay on standard encryption: your signer holds the key they would have to be derived from, and won\'t do the post-quantum half. Logging in with your nsec covers both directions.',
+  'Active for messages you send to other Nymchat users. Messages you receive, and your own synced settings and history, stay on standard encryption until this device has your nympq1\u2026 recovery code.',
   'Not available. Post-quantum encryption needs the ML-KEM implementation, which did not load.',
 ];
