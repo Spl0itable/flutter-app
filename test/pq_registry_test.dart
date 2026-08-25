@@ -367,11 +367,15 @@ void main() {
       expect(p.nym, isTrue);
     });
 
-    test('known bitchat peer: bitchat only, never post-quantum', () {
+    // This asserted `p.nym` was FALSE and pinned the bug: a peer classified as
+    // Bitchat received the Bitchat wrap ALONE, so the Nymchat copy of the
+    // message never existed.
+    test('known bitchat peer, no announcement: BOTH formats, never post-quantum',
+        () {
       final p = plan(bitchat: true);
       expect(p.pq, isFalse);
       expect(p.bitchat, isTrue);
-      expect(p.nym, isFalse);
+      expect(p.nym, isTrue);
     });
 
     // Classification is inference, not proof — a Bitchat client echoing our
@@ -477,6 +481,74 @@ void main() {
       final r = PqRegistry()..ingest(author, kemLess, nowSec: before);
       expect(r.isKnownNymchatClient(author, nowSec: before), isTrue);
       expect(r.keyFor(author, nowSec: before, enabled: false), isNull);
+    });
+  });
+
+  group('routing table (1:1 PM)', () {
+    // Read straight off the rule, not off the code: what a recipient gets
+    // depends on their kind-30078 `nym-pq` announcement and NOTHING else.
+    // Classification from traffic is not an input in either direction.
+    final key = unhex(a['kemPublicKey'] as String);
+
+    void expectRoute(
+      String label, {
+      Uint8List? kem,
+      bool layered = true,
+      bool proven = false,
+      required bool pq,
+      required bool nym,
+      required bool bitchat,
+    }) {
+      for (final flags in const [
+        (b: false, n: false, name: 'unclassified'),
+        (b: true, n: false, name: 'bitchat-flagged'),
+        (b: false, n: true, name: 'nym-flagged'),
+        (b: true, n: true, name: 'flagged both ways'),
+      ]) {
+        test('$label (${flags.name})', () {
+          final p = PqPmPlan.decide(
+            recipientKemKey: kem,
+            recipientAcceptsLayered: layered,
+            provenNymchat: proven,
+            knownBitchat: flags.b,
+            knownNym: flags.n,
+          );
+          expect(p.pq, pq, reason: 'post-quantum wrap');
+          expect(p.nym, nym, reason: 'Nymchat wrap');
+          expect(p.bitchat, bitchat, reason: 'Bitchat wrap');
+        });
+      }
+    }
+
+    expectRoute('no announcement at all -> NIP-44 + Bitchat',
+        pq: false, nym: true, bitchat: true);
+    expectRoute('live announcement with pk2 -> pq2 alone',
+        kem: key, pq: true, nym: true, bitchat: false);
+    expectRoute('live announcement carrying no key -> NIP-44 alone',
+        proven: true, pq: false, nym: true, bitchat: false);
+    expectRoute('live announcement, pq1 key only -> NIP-44 alone',
+        kem: key, layered: false, pq: false, nym: true, bitchat: false);
+
+    test('the Nymchat wrap is sent to every recipient, in every state', () {
+      for (final kem in [null, key]) {
+        for (final layered in [false, true]) {
+          for (final proven in [false, true]) {
+            for (final b in [false, true]) {
+              for (final n in [false, true]) {
+                expect(
+                    PqPmPlan.decide(
+                      recipientKemKey: kem,
+                      recipientAcceptsLayered: layered,
+                      provenNymchat: proven,
+                      knownBitchat: b,
+                      knownNym: n,
+                    ).nym,
+                    isTrue);
+              }
+            }
+          }
+        }
+      }
     });
   });
 

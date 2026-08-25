@@ -633,6 +633,12 @@ class PqPmPlan {
   /// A post-quantum wrap never carries a Bitchat copy of the same plaintext:
   /// that would hand a quantum attacker the easier target and buys no reach.
   /// It falls out of the rule rather than being a special case.
+  ///
+  /// [knownBitchat] and [knownNym] — how the peer was classified from their
+  /// traffic — decide nothing here any more, in either direction: they cannot
+  /// add a Nymchat wrap (every recipient gets one) and they cannot take a
+  /// Bitchat wrap away (only the signed announcement does). They stay on the
+  /// signature so a test can prove exactly that.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
@@ -640,7 +646,6 @@ class PqPmPlan {
     bool provenNymchat = false,
     bool recipientAcceptsLayered = false,
   }) {
-    final unknown = !knownBitchat && !knownNym;
     // Holding a KEM key means we hold their announcement, so it always implies
     // a proven Nymchat client. Deriving it here rather than trusting the caller
     // keeps the two arguments from ever disagreeing.
@@ -661,11 +666,19 @@ class PqPmPlan {
     return PqPmPlan(
       kemPublicKey: usableKem,
       bitchat: bitchat,
-      // Invariant: a message must always leave in SOME format. The other terms
-      // happen to cover every case today, but a silent no-send is such a bad
-      // failure — no error, no retry, the message simply never exists — that
-      // the guard stays.
-      nym: !bitchat || knownNym || unknown || proven,
+      // ALWAYS. Every recipient gets a Nymchat wrap: the layered one when they
+      // announced a key they can open it with, an ordinary NIP-44 one when they
+      // did not.
+      //
+      // This used to be conditional, and the condition was false for the single
+      // commonest case there is — a peer already classified as Bitchat and
+      // nothing else. `knownBitchat` alone makes `unknown`, `knownNym` and
+      // `proven` all false and `bitchat` true, so every term collapsed and the
+      // peer received the Bitchat wrap ALONE. If they were in fact running
+      // Nymchat, or running both, the Nymchat copy of the message simply never
+      // existed. Withholding it buys nothing: a Bitchat client ignores a wrap
+      // it cannot open.
+      nym: true,
       provenNym: proven,
       layered: usableKem != null,
     );
