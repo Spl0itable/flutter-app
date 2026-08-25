@@ -119,6 +119,8 @@ class PqAnnouncement {
     required this.epoch,
     this.devices = const [],
     this.retracted = false,
+    this.version = 1,
+    this.src,
   });
 
   /// Null when [retracted], and also null for a Nymchat client that cannot or
@@ -133,6 +135,18 @@ class PqAnnouncement {
   /// A replaceable event cannot be unpublished, so turning post-quantum off
   /// supersedes the announcement with a retracted, already-expired one.
   final bool retracted;
+
+  /// Payload version: 1 is nsec-derived, 2 carries [src].
+  final int version;
+
+  /// Where the announced key was seeded from; only `"root"` means the identity
+  /// root secret. Null for v1 and for anything unrecognised.
+  final String? src;
+
+  /// Whether the announced key is root-seeded, i.e. real HNDL protection.
+  /// Needs BOTH `v:2` and `src == "root"` — spec §3 requires an unknown `src`
+  /// to read as legacy.
+  bool get rootSeeded => version >= 2 && src == 'root';
 
   /// Parses an announcement's `content`. Returns null for anything malformed,
   /// wrong-algorithm, or carrying a wrong-length key — a bad announcement must
@@ -186,11 +200,14 @@ class PqAnnouncement {
       }
     }
 
+    final rawSrc = decoded['src'];
     return PqAnnouncement(
       publicKey: pk,
       expiresAt: exp,
       epoch: decoded['epoch'] is int ? decoded['epoch'] as int : 0,
       devices: devices,
+      version: decoded['v'] is int ? decoded['v'] as int : 1,
+      src: rawSrc is String ? rawSrc : null,
     );
   }
 
@@ -198,14 +215,18 @@ class PqAnnouncement {
   /// Builds the `content` payload for our own announcement. [publicKey] is
   /// null when we cannot or will not do post-quantum — the announcement still
   /// goes out, because its presence is what tells peers we run Nymchat.
+  ///
+  /// [rootSeeded] promotes the payload to `v:2` + `src:"root"`; without it the
+  /// v1 payload stays byte-identical to what earlier builds emitted.
   static String encode({
     required Uint8List? publicKey,
     required int expiresAt,
     required int epoch,
     required List<PqDevice> devices,
+    bool rootSeeded = false,
   }) =>
       jsonEncode({
-        'v': 1,
+        'v': rootSeeded ? 2 : 1,
         'alg': pqAlgorithm,
         // Marks this as a Nymchat client regardless of whether a KEM key is
         // present, so "Nymchat without post-quantum" stays distinguishable
@@ -214,6 +235,7 @@ class PqAnnouncement {
         'epoch': epoch,
         if (publicKey != null) 'pk': pq.b64uEncode(publicKey),
         'exp': expiresAt,
+        if (rootSeeded) 'src': 'root',
         'devices': [for (final d in devices) d.toJson()],
       });
 
@@ -236,7 +258,8 @@ class PqRegistry {
   PqRegistry({this.maxEntries = 5000});
 
   final int maxEntries;
-  final Map<String, ({Uint8List? pk, int exp, int epoch})> _keys = {};
+  final Map<String, ({Uint8List? pk, int exp, int epoch, bool root})> _keys =
+      {};
 
   /// Ingests a peer's announcement. [content] is the event content; [pubkey]
   /// its (already signature-verified) author.
@@ -251,7 +274,8 @@ class PqRegistry {
       _keys.remove(pubkey);
       return;
     }
-    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch);
+    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch,
+        rootSeeded: ann.rootSeeded);
   }
 
   /// Records a key. Also the path our own key takes, so self-addressed wraps
@@ -260,8 +284,9 @@ class PqRegistry {
   /// The cap is enforced here rather than in [ingest] so every write goes
   /// through one bound (Dart's Map preserves insertion order, so the evicted
   /// entry is the earliest-recorded one).
-  void record(String pubkey, Uint8List? pk, int exp, int epoch) {
-    _keys[pubkey] = (pk: pk, exp: exp, epoch: epoch);
+  void record(String pubkey, Uint8List? pk, int exp, int epoch,
+      {bool rootSeeded = false}) {
+    _keys[pubkey] = (pk: pk, exp: exp, epoch: epoch, root: rootSeeded);
     while (_keys.length > maxEntries) {
       _keys.remove(_keys.keys.first);
     }
@@ -273,7 +298,8 @@ class PqRegistry {
 
   /// The live entry for a peer, or null. Shared by both lookups so expiry is
   /// enforced in exactly one place.
-  ({Uint8List? pk, int exp, int epoch})? _entry(String pubkey, int nowSec) {
+  ({Uint8List? pk, int exp, int epoch, bool root})? _entry(
+      String pubkey, int nowSec) {
     final rec = _keys[pubkey];
     if (rec == null) return null;
     if (rec.exp <= nowSec) {
@@ -288,6 +314,15 @@ class PqRegistry {
   Uint8List? keyFor(String pubkey, {required int nowSec, required bool enabled}) {
     if (!enabled) return null;
     return _entry(pubkey, nowSec)?.pk;
+  }
+
+  /// Whether a peer's live announcement is root-seeded (spec §3), for the
+  /// badge. A KEM-less entry is never root-seeded: there is no key to protect.
+  bool isRootSeeded(String pubkey,
+      {required int nowSec, required bool enabled}) {
+    if (!enabled) return false;
+    final e = _entry(pubkey, nowSec);
+    return e != null && e.pk != null && e.root;
   }
 
   /// Whether a peer has published a live capability announcement, i.e. whether
@@ -318,6 +353,7 @@ class PqRegistry {
               e.value.pk == null ? null : pq.b64uEncode(e.value.pk!),
               e.value.exp,
               e.value.epoch,
+              e.value.root ? 1 : 0,
             ],
       };
 
@@ -359,7 +395,9 @@ class PqRegistry {
         }
         if (pk.length != mlKemPublicKeyLength) continue;
       }
-      record(entry.key, pk, exp, epoch);
+      // Absent on rows written before the root existed — those peers were
+      // legacy, so the default is the truth rather than a guess.
+      record(entry.key, pk, exp, epoch, rootSeeded: v.length > 3 && v[3] == 1);
     }
   }
 }
@@ -434,18 +472,11 @@ class PqPolicy {
   }
 
   /// Whether EVERY device on this account can open a hybrid copy addressed to
-  /// the account.
+  /// the account. One that cannot runs on defaults forever, silently.
   ///
-  /// A self-addressed blob is encapsulated to an ML-KEM key derived from the
-  /// nsec. A device signed in with an extension or a NIP-46 remote signer holds
-  /// no secret to derive from — it can only ask the signer for NIP-44 — so it
-  /// can open neither the settings blob nor the sync ping, and it silently runs
-  /// on defaults forever.
-  ///
-  /// An empty roster means no evidence of a second device, not a missing
-  /// answer: a single-device account is the common case and must not be
-  /// downgraded by it. Stale entries stop counting, so a device that is gone
-  /// does not hold the account back for good.
+  /// An empty roster means no second device, not a missing answer. Stale
+  /// entries stop counting, so a device that is gone does not hold the
+  /// account back for good.
   static bool allDevicesCapable(
     List<PqDevice> devices,
     String selfDeviceId, {
@@ -490,20 +521,14 @@ class PqPmPlan {
 
   /// Decides the transports for a recipient.
   ///
-  /// There is no setting. Nymchat-to-Nymchat is post-quantum; anyone we cannot
-  /// prove is on Nymchat gets exactly what they got before post-quantum
-  /// existed. The whole rule is one question — has this peer published a
-  /// capability announcement ([provenNymchat])? — because that announcement is
-  /// signed and cannot be faked, whereas inferring the client from public
-  /// activity would occasionally be wrong, and being wrong here means sending
-  /// someone a message their app cannot open, with no error and no retry.
+  /// No setting. The whole rule is one question — has this peer published a
+  /// signed capability announcement ([provenNymchat])? — because inferring the
+  /// client from public activity would sometimes be wrong, and wrong here
+  /// means a message their app cannot open, silently.
   ///
-  /// A post-quantum wrap is never accompanied by a Bitchat copy of the same
-  /// plaintext: it would hand a future quantum attacker the easier target and
-  /// make the shield badge a lie, and it buys no reach, because a peer with an
-  /// ML-KEM key is demonstrably not on Bitchat. That falls out of the rule
-  /// rather than being a special case — holding a key implies holding the
-  /// announcement.
+  /// A post-quantum wrap never carries a Bitchat copy of the same plaintext:
+  /// that would hand a quantum attacker the easier target and buys no reach.
+  /// It falls out of the rule rather than being a special case.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
@@ -535,9 +560,22 @@ class PqPmPlan {
 /// Our own ML-KEM keys for the current epoch plus a bounded window of previous
 /// ones, so a wrap sent just before a rotation still opens. Ordered
 /// newest-first, matching the PWA's `pqSelfCandidates`.
+///
+/// With a [root], root-derived epochs come first (new writes use those), then
+/// the nsec-derived ones. The nsec-derived tail is PERMANENT, not a migration
+/// window — spec §4; dropping it is data loss.
 List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidates(
-    Uint8List privkey, int epoch) {
+  Uint8List privkey,
+  int epoch, {
+  Uint8List? root,
+}) {
   final out = <({Uint8List kemSk, Uint8List kemPk})>[];
+  if (root != null) {
+    for (var e = epoch; e >= 0 && e > epoch - 1 - pqPreviousEpochs; e--) {
+      final kp = pq.pqKeypairFromRoot(root, e);
+      out.add((kemSk: kp.secretKey, kemPk: kp.publicKey));
+    }
+  }
   for (var e = epoch; e >= 0 && e > epoch - 1 - pqPreviousEpochs; e--) {
     final kp = pq.pqKeypairFromPrivkey(privkey, e);
     out.add((kemSk: kp.secretKey, kemPk: kp.publicKey));
