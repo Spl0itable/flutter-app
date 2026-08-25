@@ -114,7 +114,41 @@ void main() {
         () {
       expect(gate.contains('final linkNeeded = ctrl.pqRootLinkNeeded;'), isTrue);
       expect(gate.contains('Add your post-quantum recovery code'), isTrue);
-      expect(gate.contains('this device does not have it yet'), isTrue);
+      // Asserted against the catalog, not the source: the literal is wrapped
+      // across lines there, so a source grep tests the formatter.
+      expect(
+          kAppStringsCatalog.any((s) => s.contains('does not have it yet')),
+          isTrue);
+    });
+
+    // It already has the user's attention; sending them off to find the panel
+    // loses most of them.
+    test('and can link from the notice itself', () {
+      expect(gate.contains('showAppPrompt('), isTrue);
+      expect(gate.contains('ctrl.linkPqRootFromCode(code)'), isTrue);
+      expect(gate.contains("placeholder: 'nympq1"), isTrue);
+      expect(kAppStringsCatalog, contains('Link this device'));
+    });
+
+    test('and is told plainly whether the code matched', () {
+      expect(
+          kAppStringsCatalog,
+          contains('Linked. This device can now read your quantum-resistant '
+              'messages.'));
+      expect(kAppStringsCatalog.any((s) => s.startsWith('That code does not '
+          'match this account.')), isTrue);
+    });
+
+    // The other half: a device that HAS the code is handed it, not sent
+    // looking for it.
+    test('a device that holds the code gets it in the notice', () {
+      expect(gate.contains('copyValue: ctrl.pqRootCode'), isTrue);
+      expect(gate.contains('copiedMessage:'), isTrue);
+      final dlg =
+          File('lib/widgets/common/app_dialog.dart').readAsStringSync();
+      expect(dlg.contains('Widget _copyRow(NymColors c)'), isTrue);
+      expect(dlg.contains('Clipboard.setData(ClipboardData(text: value))'),
+          isTrue);
     });
 
     test('and the timer is cancelled on dispose', () {
@@ -190,6 +224,40 @@ void main() {
           endsWith('The four characters after the # in a nickname are the '
               'last four of the hex spelling.'));
       expect(modal.contains('last four of the hex '), isTrue);
+    });
+  });
+
+  // The bug this guards: _ensurePqRoot ran once, from the boot settings
+  // restore. A launch that could not reach /api/storage spent the whole
+  // session with no root, silently announcing an nsec-derived key.
+  group('the root question is re-asked until it is answered', () {
+    final ctrl = File('lib/state/nostr_controller.dart').readAsStringSync();
+
+    test('every completed settings read runs the decision again', () {
+      final merge = ctrl.substring(
+          ctrl.indexOf('Future<void> _mergeRemoteSettings(StorageSync sync)'));
+      final body = merge.substring(0, merge.indexOf('\n  Future<'));
+      expect(body.contains('_settingsGetFailed = false;'), isTrue);
+      expect(body.contains('_ensurePqRoot()'), isTrue,
+          reason: 'a reconnect that succeeds must be able to generate');
+    });
+
+    test('and a settled answer costs nothing to re-ask', () {
+      expect(
+          ctrl.contains(
+              'if (_pqRootSettled && (_pqRoot != null || _pqRootLocked)) return;'),
+          isTrue);
+    });
+
+    test('the decision no longer asks for a local nsec', () {
+      final root =
+          File('lib/features/identity/pq_root.dart').readAsStringSync();
+      expect(root.contains('hasLocalKey'), isFalse,
+          reason: 'a signer login needs the root to become capable at all');
+    });
+
+    test('a root that does not match the record is dropped, not announced', () {
+      expect(ctrl.contains('if (!matches) _pqRoot = null;'), isTrue);
     });
   });
 

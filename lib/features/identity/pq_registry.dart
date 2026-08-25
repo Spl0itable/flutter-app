@@ -476,12 +476,10 @@ class PqPolicy {
   /// Whether we can RECEIVE post-quantum messages, and therefore whether we
   /// announce an ML-KEM key for peers to encapsulate to.
   ///
-  /// Needs the nsec: the ML-KEM keypair derives from it, and opening a message
-  /// means decapsulating with its secret half. An extension or NIP-46 signer
-  /// holds the nsec and will not do ML-KEM, so those logins cannot receive.
-  /// Whether we can RECEIVE at all. The root alone suffices: the layered
-  /// format derives the decapsulation key from it and leaves the inner NIP-44
-  /// to whatever holds the identity key, a signer included.
+  /// The root alone suffices: the layered format derives the decapsulation key
+  /// from it and leaves the inner NIP-44 to whatever holds the identity key, a
+  /// signer included. An nsec alone also suffices, for the keys derived from
+  /// it. Either way this is the RECEIVE question, not the login question.
   static bool capable({required Uint8List? privkey, Uint8List? root}) =>
       privkey != null || root != null;
 

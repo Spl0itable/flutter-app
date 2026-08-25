@@ -370,19 +370,19 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
           ),
           const SizedBox(height: 8),
+          // The key gets the full width; the controls sit under it. Beside it
+          // they squeezed a 64-character string into a third of the row.
+          SelectableText(
+            pk,
+            style: TextStyle(
+              color: c.text,
+              fontFamily: 'monospace',
+              fontSize: 11,
+            ),
+          ),
+          const SizedBox(height: 10),
           Row(
             children: [
-              Expanded(
-                child: SelectableText(
-                  pk,
-                  style: TextStyle(
-                    color: c.text,
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
               _smallButton(
                 c,
                 isNpub ? tr('Copy npub') : tr('Copy hex pubkey'),
@@ -639,16 +639,21 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               // `#revealPrivkeyArrow` (app.js:2959) — a filled triangle that
               // swaps down/right with the slideout (the PWA rewrites the SVG,
               // no CSS rotation).
+              // Secondary, not dim: this is the one row in the modal that
+              // leads to key material, and it should not read as a caption.
               NymSvgIcon(
                 _revealOpen
                     ? NymIcons.revealArrowDown
                     : NymIcons.revealArrowRight,
                 size: 18,
-                color: c.textDim,
+                color: c.secondary,
               ),
               Text(
                 tr("Reveal this nym's private key and recovery code"),
-                style: TextStyle(color: c.textDim, fontSize: 13),
+                style: TextStyle(
+                    color: c.secondary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600),
               ),
             ],
           ),

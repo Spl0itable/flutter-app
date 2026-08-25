@@ -209,17 +209,17 @@ void main() {
   group('§6 generation and adoption ordering', () {
     PqRootAction decide({
       bool durable = true,
-      bool localKey = true,
       bool loaded = true,
       bool present = false,
       bool hold = false,
+      bool matches = true,
     }) =>
         pqRootDecide(
           durableIdentity: durable,
-          hasLocalKey: localKey,
           recordLoadSucceeded: loaded,
           recordPresent: present,
           holdRoot: hold,
+          recordMatchesHeldRoot: matches,
         );
 
     test('§6.4 no record → generate', () {
@@ -247,10 +247,25 @@ void main() {
           reason: 'without the record another device generates a rival root');
     });
 
-    test('an ephemeral identity and a signer-only login never generate', () {
+    test('an ephemeral identity never generates', () {
       expect(decide(durable: false), PqRootAction.wait);
-      expect(decide(localKey: false), PqRootAction.wait);
       expect(decide(durable: false, present: true), PqRootAction.wait);
+    });
+
+    // For a signer login the root is what makes the account post-quantum at
+    // all, so requiring one first would be a deadlock. The PWA gates on
+    // support, not capability, for exactly this reason.
+    test('a signer login generates too — no nsec is required', () {
+      expect(decide(), PqRootAction.generate,
+          reason: 'the decision must not ask whether an nsec is held');
+    });
+
+    // Holding *a* root is not holding *this account's* root.
+    test('a stale root that does not open the record → await link', () {
+      expect(decide(present: true, hold: true, matches: false),
+          PqRootAction.awaitLink);
+      expect(decide(present: true, hold: true, matches: true),
+          PqRootAction.ready);
     });
   });
 

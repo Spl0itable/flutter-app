@@ -4344,9 +4344,10 @@ class NostrController {
   bool get pqEnabled =>
       PqPolicy.enabled(privkey: _identity?.privkey, mode: _pqMode);
 
-  /// Whether we can RECEIVE post-quantum — needs the nsec, since the ML-KEM
-  /// keypair derives from it. Extension and NIP-46 logins can send but not
-  /// receive; see PqPolicy.
+  /// Whether we can RECEIVE post-quantum. True once this device holds the
+  /// root — including on an extension or NIP-46 login, where the root is what
+  /// opens the outer layer and the signer finishes the inner one. See
+  /// PqPolicy.
   bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey, root: _pqRoot);
 
   /// Whether copies addressed to ourselves can be post-quantum.
@@ -4706,18 +4707,32 @@ class NostrController {
   /// Generation and adoption (spec §6), once the boot settings read settled.
   Future<void> _ensurePqRoot() async {
     final sync = _storageSync;
-    final identity = _identity;
-    if (sync == null || identity == null) return;
+    if (sync == null || _identity == null) return;
     if (PanicWipe.inProgress) return;
+    // Settled means the question is answered for this session: we hold a root,
+    // or we know we must be linked. Anything else — an offline launch, a flaky
+    // /api/storage — left it unanswered, and it has to be asked again on the
+    // next read that succeeds. Running once at boot meant a device that could
+    // not reach D1 at launch spent the whole session with no root, announcing
+    // an nsec-derived key.
+    if (_pqRootSettled && (_pqRoot != null || _pqRootLocked)) return;
 
     // The order of these questions is the safety property; it lives in one
     // pure, tested function rather than in this method's control flow.
+    // A record we can parse tells us WHICH root it belongs to; one we could
+    // only see the row of does not, and a row is still proof a root exists.
+    final record = sync.pqRootRecord;
+    final held = _pqRoot;
+    final matches = record == null || held == null || !record.isValid
+        ? held != null
+        : record.matches(held);
+
     final action = pqRootDecide(
       durableIdentity: sync.durableIdentity,
-      hasLocalKey: identity.privkey != null,
       recordLoadSucceeded: sync.pqRootLoadSucceeded,
       recordPresent: sync.pqRootRowPresent,
-      holdRoot: _pqRoot != null,
+      holdRoot: held != null,
+      recordMatchesHeldRoot: matches,
     );
 
     if (action != PqRootAction.wait) _pqRootSettled = true;
@@ -4741,6 +4756,10 @@ class NostrController {
 
       case PqRootAction.awaitLink:
         // §6.3 — do NOT generate, do NOT announce; prompt the user to link.
+        // A root that does not open this account's record is not this
+        // account's root: keeping it in play would announce a key no peer
+        // could reach us on.
+        if (!matches) _pqRoot = null;
         _pqRootLocked = true;
         return;
 
@@ -9535,6 +9554,9 @@ class NostrController {
         return;
       }
       _settingsGetFailed = false;
+      // Every completed read re-asks the §6 question, exactly as the PWA runs
+      // `pqRootEnsure` inside each settings restore. Cheap once settled.
+      unawaited(_ensurePqRoot());
       // N26 inbound: merge the cross-device notification read-state additively
       // (idempotent) BEFORE the settings ts gate — a notification read on another
       // device clears its badge here even if no settings section changed
