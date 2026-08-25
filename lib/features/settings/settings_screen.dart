@@ -57,6 +57,13 @@ const String kPqStatusSendOnly =
     'Active for messages you send to other Nymchat users. Messages you receive, '
     'and your own synced settings and history, stay on standard encryption '
     'until this device has your nympq1\u2026 recovery code.';
+/// Capable, but on the nsec-derived key because this device has no recovery
+/// code yet. Saying plain "Active" here contradicts the panel that says there
+/// is no code, and overstates what is actually protecting the messages.
+const String kPqStatusNoRoot =
+    'Active, but on the older key: this device has no nympq1… recovery code '
+    'yet. It is set up automatically the first time this account reaches the '
+    'network — until then, messages use a key derived from your nsec.';
 const String kPqStatusUnavailable =
     'Not available. Post-quantum encryption needs the ML-KEM implementation, '
     'which did not load.';
@@ -76,6 +83,7 @@ const String kPqReachOne = 'Currently in use with 1 contact.';
 /// Every literal the post-quantum status line can show.
 const List<String> kPqStatusStrings = [
   kPqStatusFull,
+  kPqStatusNoRoot,
   kPqStatusSendOnly,
   kPqStatusUnavailable,
   kPqReachNone,
@@ -1516,11 +1524,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         : pqPeers == 1
             ? tr(kPqReachOne)
             : tr(kPqReachSome, {'count': '$pqPeers'});
-    final pqStatus = pqCapable
+    // Root-seeded is the only state that gets the unqualified "Active".
+    final pqRootHeld = nostrCtrl.pqRootHeld;
+    final pqStatus = pqCapable && pqRootHeld
         ? '${tr(kPqStatusFull)} $pqReach'
-        : pqSendOnly
-            ? '${tr(kPqStatusSendOnly)} $pqReach'
-            : tr(kPqStatusUnavailable);
+        : pqCapable
+            ? '${tr(kPqStatusNoRoot)} $pqReach'
+            : pqSendOnly
+                ? '${tr(kPqStatusSendOnly)} $pqReach'
+                : tr(kPqStatusUnavailable);
     final dmTtlItems = <({int value, String label})>[
       (value: 3600, label: tr('1 hour')),
       (value: 21600, label: tr('6 hours')),
@@ -1681,7 +1693,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: Text(
             pqStatus,
             style: TextStyle(
-              color: pqCapable
+              color: pqCapable && pqRootHeld
                   ? context.nym.primary
                   : context.nym.text.withValues(alpha: 0.85),
               fontSize: 13,

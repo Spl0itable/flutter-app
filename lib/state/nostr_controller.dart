@@ -4716,6 +4716,21 @@ class NostrController {
     // not reach D1 at launch spent the whole session with no root, announcing
     // an nsec-derived key.
     if (_pqRootSettled && (_pqRoot != null || _pqRootLocked)) return;
+    // One at a time. The settings restore starts this without awaiting it, so
+    // two overlapping runs could each reach §6.4 and mint a rival root for the
+    // same account — the single failure the ordering exists to prevent.
+    if (_pqRootInFlight) return;
+    _pqRootInFlight = true;
+    try {
+      await _ensurePqRootLocked(sync);
+    } finally {
+      _pqRootInFlight = false;
+    }
+  }
+
+  bool _pqRootInFlight = false;
+
+  Future<void> _ensurePqRootLocked(StorageSync sync) async {
 
     // The order of these questions is the safety property; it lives in one
     // pure, tested function rather than in this method's control flow.
@@ -4764,11 +4779,21 @@ class NostrController {
         return;
 
       case PqRootAction.generate:
-        // §6.4. The record is published BEFORE the root is persisted: a root
-        // we kept but failed to publish is worse than no root at all.
+        // §6.4. Persist FIRST, publish second — the order the PWA uses.
+        //
+        // This used to publish the record first and throw the root away if
+        // that write failed, on the reasoning that an unpublished root is
+        // worse than none. It is not: a settings-set that fails on a
+        // minutes-old account (offline, a NIP-98 round trip, a rate limit)
+        // left the account with no root at all and nothing to retry, so it
+        // kept announcing an nsec-derived key. A root we kept but could not
+        // publish is exactly the publishRecord case above, and the next boot
+        // finishes the job.
         final root = pq.pqGenerateRoot();
-        if (!await sync.pqRootRecordSet(PqRootRecord.forRoot(root))) return;
         if (!await _persistPqRoot(root)) return;
+        // Best-effort: a failure here is recovered by publishRecord, so it
+        // must not cost us the root we just persisted.
+        await sync.pqRootRecordSet(PqRootRecord.forRoot(root));
         try {
           await _ref
               .read(keyValueStoreProvider)
