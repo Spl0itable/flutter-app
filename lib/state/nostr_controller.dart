@@ -4778,6 +4778,11 @@ class NostrController {
     );
 
     if (action != PqRootAction.wait) _pqRootSettled = true;
+    // Anything but awaitLink means this device holds, or is about to hold, the
+    // account's root, so nothing is unreadable-pending-a-link.
+    if (action != PqRootAction.awaitLink && action != PqRootAction.wait) {
+      sync.pqRootLocked = false;
+    }
 
     switch (action) {
       case PqRootAction.wait:
@@ -4797,6 +4802,10 @@ class NostrController {
         return;
 
       case PqRootAction.awaitLink:
+        // The decode path needs this to tell "cannot read these rows" from
+        // "cannot read them YET" — without it a locked device treats the
+        // account's settings as unreadable-forever and republishes defaults.
+        sync.pqRootLocked = true;
         // §6.3 — do NOT generate, do NOT announce; prompt the user to link.
         // A root that does not open this account's record is not this
         // account's root: keeping it in play would announce a key no peer
@@ -4881,6 +4890,7 @@ class NostrController {
     final sync = _storageSync;
     if (sync == null) return;
     try {
+      sync.pqRootLocked = false;
       sync.clearSettingsHashes();
       await _mergeRemoteSettings(sync);
     } catch (_) {

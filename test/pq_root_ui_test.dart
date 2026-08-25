@@ -389,6 +389,63 @@ void main() {
     });
   });
 
+  // A second device logging in must not publish its defaults over the
+  // account's settings before it can read them.
+  group('a locked device never overwrites settings it cannot read', () {
+    final sync = File('lib/services/api/storage_sync.dart').readAsStringSync();
+    final ctrl = File('lib/state/nostr_controller.dart').readAsStringSync();
+
+    test('rows that did not open are counted, not silently skipped', () {
+      expect(sync.contains('var pending = 0;'), isTrue);
+      expect(
+          sync.contains(
+              '_settingsRestoreUnreadable = pending > 0 && _pqRootLockedOut;'),
+          isTrue);
+    });
+
+    test('and saving is refused while any row is unread', () {
+      expect(sync.contains('if (_settingsRestoreUnreadable) return false;'),
+          isTrue);
+    });
+
+    // The v1 reasoning: with a local nsec, an all-fail decode is final. Under
+    // v2 the rows are sealed to the ROOT, which a fresh device does not have
+    // yet — so that verdict wiped accounts.
+    test('an all-fail decode is not final while locked out', () {
+      expect(sync.contains('if (_pqRootLockedOut) return null;'), isTrue);
+      expect(sync.contains('if (storedBlobs == 0 || _signer is LocalSigner)'),
+          isFalse,
+          reason: 'the old branch treated a locked device as unreadable-forever');
+    });
+
+    test('the controller tells the storage layer the verdict', () {
+      expect(ctrl.contains('sync.pqRootLocked = true;'), isTrue);
+      expect(ctrl.contains('sync.pqRootLocked = false;'), isTrue);
+    });
+  });
+
+  group('the recovery-code panel confirms what it holds', () {
+    final modal =
+        File('lib/features/identity/nick_edit_modal.dart').readAsStringSync();
+
+    test('it shows the fingerprint, as the PWA does', () {
+      expect(modal.contains('pq.pqRootFingerprint(bytes)'), isTrue);
+      expect(kAppStringsCatalog, contains('Fingerprint: {fp}'));
+    });
+  });
+
+  group('the encrypt-at-rest offer survives an unreadable first load', () {
+    final gate = File('lib/features/onboarding/boot_gate.dart').readAsStringSync();
+
+    // The flag it needs lives in the settings a locked device cannot read, so
+    // at the 2.5s mark it is simply not there yet.
+    test('it is re-checked after the settings have had time to land', () {
+      final retry = gate.substring(gate.indexOf('_pqNoticeRetry = Timer('));
+      expect(retry.substring(0, 700).contains('_maybePromptEncryptAtRest()'),
+          isTrue);
+    });
+  });
+
   group('every new string is translatable', () {
     // A string missing from the catalog stays English in every other language,
     // silently, and only in this one panel.
