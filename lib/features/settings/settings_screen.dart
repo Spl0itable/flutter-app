@@ -1675,10 +1675,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'by a future quantum computer. This is automatic and has no '
               'setting. Bitchat users and other Nostr clients keep receiving '
               'standard NIP‑17 exactly as before.'),
+          // Green only when it is genuinely on end to end. The send-only and
+          // unavailable states keep the ordinary colour, so the green means
+          // one thing — the same rule the PWA's status line follows.
           child: Text(
             pqStatus,
             style: TextStyle(
-              color: context.nym.text.withValues(alpha: 0.85),
+              color: pqCapable
+                  ? context.nym.primary
+                  : context.nym.text.withValues(alpha: 0.85),
               fontSize: 13,
             ),
           ),

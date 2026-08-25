@@ -232,21 +232,31 @@ enum PqRootAction {
 
 /// The §6 decision. Pure and separate because the ORDER of these questions is
 /// the whole safety property.
+///
+/// Deliberately not gated on holding a local nsec: for a signer login the root
+/// is the thing that makes the account post-quantum at all, so requiring one
+/// first is a deadlock — no key, so no root, so no key. The PWA's
+/// `pqRootEnsure` gates on support rather than capability for the same reason,
+/// and the two must reach the same verdict from the same inputs.
 PqRootAction pqRootDecide({
   required bool durableIdentity,
-  required bool hasLocalKey,
   required bool recordLoadSucceeded,
   required bool recordPresent,
   required bool holdRoot,
+  bool recordMatchesHeldRoot = true,
 }) {
-  // No local nsec means no hybrid at all; ephemeral has nothing to protect.
-  if (!durableIdentity || !hasLocalKey) return PqRootAction.wait;
+  // An ephemeral identity has nothing to protect past the session.
+  if (!durableIdentity) return PqRootAction.wait;
   // A read that did not complete proves nothing either way.
   if (!recordLoadSucceeded) return PqRootAction.wait;
-  if (holdRoot) {
-    return recordPresent ? PqRootAction.ready : PqRootAction.publishRecord;
+  if (recordPresent) {
+    // Holding *a* root is not holding *this account's* root. A stale one from
+    // a reset identity opens nothing the record points at, so it is the §6.3
+    // case exactly as an empty device is.
+    if (holdRoot && recordMatchesHeldRoot) return PqRootAction.ready;
+    return PqRootAction.awaitLink;
   }
-  // §6.3: a record we cannot open is still a record.
-  if (recordPresent) return PqRootAction.awaitLink;
+  // No record. Ours has not landed yet, or there is none to land.
+  if (holdRoot) return PqRootAction.publishRecord;
   return PqRootAction.generate;
 }
