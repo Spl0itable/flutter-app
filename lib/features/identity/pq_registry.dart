@@ -634,11 +634,11 @@ class PqPmPlan {
   /// that would hand a quantum attacker the easier target and buys no reach.
   /// It falls out of the rule rather than being a special case.
   ///
-  /// [knownBitchat] and [knownNym] — how the peer was classified from their
-  /// traffic — decide nothing here any more, in either direction: they cannot
-  /// add a Nymchat wrap (every recipient gets one) and they cannot take a
-  /// Bitchat wrap away (only the signed announcement does). They stay on the
-  /// signature so a test can prove exactly that.
+  /// [knownNym] decides nothing: it is inference, set by a Bitchat client that
+  /// echoes our `x` tag back as readily as by a real Nymchat peer.
+  /// [knownBitchat] is not inference — it is set when a `v2:` payload from that
+  /// pubkey DECRYPTS, which only their client could have produced — and it is
+  /// the one signal allowed to overrule the announcement.
   static PqPmPlan decide({
     required Uint8List? recipientKemKey,
     required bool knownBitchat,
@@ -653,16 +653,28 @@ class PqPmPlan {
     // Never the combined format. A peer that announced only `pk` is handed no
     // key at all and receives ordinary NIP-44, which every client can read —
     // protection is what an old peer costs us, never delivery.
-    final usableKem = recipientAcceptsLayered ? recipientKemKey : null;
-    // The Bitchat wrap exists to reach someone who MIGHT be running Bitchat,
-    // and only a signed announcement proves they are not.
+    final announced = recipientAcceptsLayered ? recipientKemKey : null;
+
+    // Two kinds of evidence, and they answer different questions.
     //
-    // This used to also drop the wrap for a peer merely CLASSIFIED as Nymchat
-    // — inference from traffic, not proof. A Bitchat client that echoes our
-    // `x` tag back flips that bit and the peer silently stops receiving
-    // anything we send. The announcement is signed and cannot be faked, so it
-    // is the only thing allowed to suppress the wrap.
-    final bitchat = !proven;
+    // An announcement proves the pubkey RAN Nymchat at some point in the last
+    // week. Bitchat-format traffic from them proves they are running Bitchat
+    // NOW. When both are true the second one decides, because the costs are
+    // not symmetric: an unnecessary Bitchat copy is a few hundred wasted bytes,
+    // while a missing one is a message that never arrives and never errors.
+    //
+    // Suppressing on the announcement ALONE is what stopped a peer who had used
+    // Nymchat and moved to Bitchat — or who runs both — receiving anything at
+    // all. Before the announcement existed, a peer we had heard bitchat format
+    // from always got a bitchat copy; this restores that.
+    final bitchat = knownBitchat || !proven;
+
+    // A post-quantum wrap never accompanies a Bitchat copy of the same
+    // plaintext: the copy is the easier target, so pairing them buys a quantum
+    // attacker the message and buys us nothing. When the peer is getting a
+    // Bitchat copy the honest answer is classical NIP-44, and the shield says
+    // so rather than claiming a protection the plaintext does not have.
+    final usableKem = bitchat ? null : announced;
     return PqPmPlan(
       kemPublicKey: usableKem,
       bitchat: bitchat,

@@ -1941,9 +1941,13 @@ class NostrService {
     // passed to [onWrap], so never deposited to D1 — the PWA deposits only the
     // nym wrap). Skipped for a self-copy and for remote signers (bitchat sealing
     // needs a local key).
+    //
+    // NO expiration on this one. Bitchat 1.7.1 checks the gift wrap's tags are
+    // EXACTLY [["p", recipient]] and rejects the DM outright otherwise, so a
+    // NIP-40 tag here made every message undeliverable to Bitchat for anyone
+    // with disappearing messages switched on. The PWA has never sent one.
     if (bitchatRumor != null && recipientPubkey != identity.pubkey) {
-      final bwrap = await _buildBitchatWrap(bitchatRumor, recipientPubkey,
-          expiration: expiration);
+      final bwrap = await _buildBitchatWrap(bitchatRumor, recipientPubkey);
       if (bwrap != null) await pool.publishDm(bwrap);
     }
 
