@@ -49,7 +49,12 @@ void main() {
       final ann = PqAnnouncement.parse(a['content'] as String)!;
       expect(ann.devices.length, 2);
       expect(ann.devices.first.id, 'a1b2c3d4');
-      expect(ann.devices.first.version, 'v3.73.533');
+      // From the fixture, not pinned here: the emitter stamps the current
+      // app version, so a hardcoded copy goes stale on every release.
+      final roster = (jsonDecode(a['content'] as String)
+          as Map<String, dynamic>)['devices'] as List<dynamic>;
+      expect(ann.devices.first.version,
+          (roster.first as Map<String, dynamic>)['ver']);
     });
 
     test('a retraction parses as retracted with no key', () {
