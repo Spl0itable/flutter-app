@@ -4202,6 +4202,12 @@ class NostrController {
   /// mid-conversation.
   static const int _pqMissTtlMs = 10 * 60 * 1000;
 
+  /// How long a SEND may wait on a peer's announcement before going with what
+  /// it already knows. Deliberately short: a first message that goes classical
+  /// is a missed upgrade and the next one picks the key up, while a message
+  /// that never leaves is gone.
+  static const int _pqSendLookupBudgetMs = 1500;
+
   /// Cap on a single prefetch sweep, so opening a large group does not fire one
   /// subscription per member.
   static const int _pqPrefetchMax = 60;
@@ -4263,8 +4269,23 @@ class NostrController {
         _pqLookupMisses.remove(pubkey);
       }
     });
-    _pqLookups[pubkey] = f;
-    return f;
+    // BOUNDED, because the send path awaits this and a lookup is an
+    // optimization while delivery is not.
+    //
+    // Neither leg is bounded on the send path's terms, and the whole cost falls
+    // on peers with no announcement — a peer WITH a key returns above and never
+    // gets here — which is to say on Bitchat users, every single message. The
+    // bounded future is what later callers attach to as well, so one stuck read
+    // cannot go on holding up every subsequent message to that peer.
+    //
+    // Errors are swallowed for the same reason: not finding an announcement is
+    // the normal outcome here, and it must never be able to abort a send.
+    final bounded = f.timeout(
+      const Duration(milliseconds: _pqSendLookupBudgetMs),
+      onTimeout: () {},
+    ).catchError((_) {});
+    _pqLookups[pubkey] = bounded;
+    return bounded;
   }
 
   /// How many contacts we hold a live post-quantum key for. Surfaced in
@@ -4944,7 +4965,12 @@ class NostrController {
     // send without opening anything, and for the first message of a brand new
     // thread — whose conversation entry does not exist yet, so the critical
     // subscription has not been rebuilt around them.
-    await ensurePqAnnouncement(recipientPubkey);
+    // Never lets a key lookup abort the send: a peer with no announcement is
+    // the normal case here, not an error, and the plan below already treats a
+    // missing key as "send classical".
+    try {
+      await ensurePqAnnouncement(recipientPubkey);
+    } catch (_) {}
 
     // Which transports this recipient gets. See PqPmPlan.decide for why
     // post-quantum replaces rather than accompanies the others.

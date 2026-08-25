@@ -7,6 +7,7 @@
 // recording transport and looks at the events, then opens the Bitchat copy the
 // way a Bitchat client would.
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -247,6 +248,45 @@ void main() {
       expect(ids[0], isNotEmpty);
       expect(ids[0], ids[1],
           reason: 'a reaction on either copy must match the other');
+    });
+  });
+
+  _lookupCannotBlockASend();
+}
+
+/// The send path awaits a peer's announcement before deciding. A peer WITH a
+/// key answers off the registry and never reaches the network; a peer WITHOUT
+/// one pays for the lookup on EVERY message, which is to say a Bitchat user
+/// does, always. Neither leg of that lookup is bounded on the send path's
+/// terms, and the pending future is handed to every later caller — so one stuck
+/// read stopped every subsequent message to that peer, silently, with nothing
+/// published.
+///
+/// Driving a stalled D1 read needs the controller's private members, so this
+/// pins the two guards at the source instead. The PWA has the executable
+/// version of this in scripts/test-pm-send.mjs.
+void _lookupCannotBlockASend() {
+  group('a stalled key lookup cannot stop a message', () {
+    final src = File('lib/state/nostr_controller.dart').readAsStringSync();
+
+    test('the announcement lookup is bounded before the send awaits it', () {
+      expect(
+          src.contains('const Duration(milliseconds: _pqSendLookupBudgetMs)'),
+          isTrue,
+          reason: 'ensurePqAnnouncement must time out rather than hang a send');
+    });
+
+    test('later callers attach to the BOUNDED future, not the raw one', () {
+      expect(src.contains('_pqLookups[pubkey] = bounded;'), isTrue,
+          reason: 'or one stuck read holds up every later message to that peer');
+    });
+
+    test('and a failed lookup can never abort the send', () {
+      expect(
+          RegExp(r'try \{\s*await ensurePqAnnouncement\(recipientPubkey\);\s*\}\s*catch')
+              .hasMatch(src),
+          isTrue,
+          reason: 'a peer with no announcement is the normal case, not an error');
     });
   });
 }
