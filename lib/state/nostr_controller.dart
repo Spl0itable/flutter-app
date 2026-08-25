@@ -4347,7 +4347,7 @@ class NostrController {
   /// Whether we can RECEIVE post-quantum — needs the nsec, since the ML-KEM
   /// keypair derives from it. Extension and NIP-46 logins can send but not
   /// receive; see PqPolicy.
-  bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey);
+  bool get pqCapable => PqPolicy.capable(privkey: _identity?.privkey, root: _pqRoot);
 
   /// Whether copies addressed to ourselves can be post-quantum.
   bool get pqSelfEnabled =>
@@ -4381,6 +4381,14 @@ class NostrController {
         memberPubkey,
         nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
         enabled: pqEnabled,
+      );
+
+  /// Whether copies addressed to OURSELVES may use the layered format. False
+  /// as soon as one live device on the account can open only the combined one.
+  bool pqSelfUsesLayered() => PqPolicy.allDevicesLayered(
+        _pqDevices,
+        _pqDeviceIdCached ?? '',
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       );
 
   /// Whether a peer's announced key is root-seeded (spec §3), for the badge.
@@ -4482,10 +4490,13 @@ class NostrController {
   /// Our ML-KEM keypair for the current epoch, root-seeded when we hold a root
   /// and nsec-seeded otherwise (an unlinked device, and all v1 data).
   MlKemKeyPair? _pqSelfKeys() {
-    final privkey = _identity?.privkey;
-    if (privkey == null) return null;
+    // The root derives the key on its own, which is what lets a signer login
+    // hold one at all. Falling back to the nsec keeps the legacy keys a v1
+    // peer may still be sealing to.
     final root = _pqRoot;
     if (root != null) return pq.pqKeypairFromRoot(root, _pqEpoch);
+    final privkey = _identity?.privkey;
+    if (privkey == null) return null;
     return pq.pqKeypairFromPrivkey(privkey, _pqEpoch);
   }
 
@@ -4566,9 +4577,14 @@ class NostrController {
     final selfDeviceId = await _pqDeviceId();
     final devices = PqPolicy.mergeDeviceRoster(
         _pqDevices, selfDeviceId, ApiConfig.appVersion,
-        nowSec: nowSec, capable: _identity?.privkey != null);
+        nowSec: nowSec,
+        capable: PqPolicy.capable(privkey: _identity?.privkey, root: _pqRoot),
+        layered: PqPolicy.capable(privkey: _identity?.privkey, root: _pqRoot));
     final signed = await service.publishPqAnnouncement(
       kemPublicKey: keys?.publicKey,
+      // `pk` is the claim an older peer acts on, and only a login holding the
+      // nsec can honour it.
+      legacyCapable: PqPolicy.legacyCapable(privkey: identity.privkey),
       epoch: _pqEpoch,
       devices: devices,
       // Only a genuinely root-seeded key may claim `src:"root"`.
@@ -4810,6 +4826,8 @@ class NostrController {
       knownNym: _nymUsers.contains(recipientPubkey),
       provenNymchat:
           _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
+      recipientAcceptsLayered: _pqRegistry.acceptsLayered(recipientPubkey,
+          nowSec: nowSec, enabled: pqOn),
     );
 
     UnsignedEvent? bitchatRumor;
@@ -4861,6 +4879,10 @@ class NostrController {
       sendNymWrap: plan.nym,
       recipientKemPublicKey: plan.kemPublicKey,
       selfKemPublicKey: pqSelfKey(),
+      recipientLayered: plan.layered,
+      // Our own copy: layered unless a live device on this account can only
+      // open the combined format.
+      selfLayered: pqSelfUsesLayered(),
     );
   }
 
@@ -9726,6 +9748,17 @@ class NostrController {
       return key;
     };
     groups.rootSeededFor = pqPeerIsRootSeeded;
+    // A signer login strips the layered format's outer layer itself, using the
+    // key the root derives — that is what lets it receive at all.
+    _service?.selfKemForUnwrap = () {
+      final k = _pqSelfKeys();
+      return k == null ? null : (kemSk: k.secretKey, kemPk: k.publicKey);
+    };
+    groups.layeredFor = (memberPubkey) => _pqRegistry.acceptsLayered(
+          memberPubkey,
+          nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          enabled: pqEnabled,
+        );
   }
 
   void _refreshEphemeralSubscriptions() {

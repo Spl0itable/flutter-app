@@ -26,6 +26,11 @@ class GroupManager {
   /// default for a badge.
   bool Function(String memberPubkey)? rootSeededFor;
 
+  /// Whether a member accepts the layered format. Same injection; null leaves
+  /// the fan-out on the combined one, which is what every peer understood
+  /// before the split.
+  bool Function(String memberPubkey)? layeredFor;
+
   /// Post-quantum coverage of the last message sent per group message id, so
   /// the UI can say "quantum-resistant to 8 of 10 members" rather than implying
   /// all-or-nothing. A group message counts as protected only when EVERY member
@@ -180,6 +185,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
     return group;
   }
@@ -224,6 +230,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
       onCoverage: (pq, total, root) =>
           _recordCoverage(nymMessageId, pq, total, root),
     );
@@ -257,6 +264,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 
@@ -289,6 +297,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 
@@ -322,6 +331,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 
@@ -358,6 +368,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 
@@ -392,6 +403,7 @@ class GroupManager {
       settings: settings,
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 
@@ -423,6 +435,7 @@ class GroupManager {
       encryptTo: (pk) => ek.encryptionPubkeyFor(pk, selfPubkey),
       kemKeyFor: kemKeyFor,
       rootSeededFor: rootSeededFor,
+      layeredFor: layeredFor,
     );
   }
 }

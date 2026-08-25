@@ -233,6 +233,11 @@ class NostrService {
   /// so one instance is safe.
   static final CryptoWorker _cryptoWorker = CryptoWorker.instance;
 
+  /// Our own ML-KEM keypair, supplied by the controller which owns the root.
+  /// Lets a signer login strip the layered format's outer layer before handing
+  /// the inside to the signer; null when this device holds no root.
+  ({Uint8List kemSk, Uint8List kemPk})? Function()? selfKemForUnwrap;
+
   /// Wrap ids (kind-1059 event ids) we've ALREADY unwrapped this process.
   ///
   /// Unwrapping a gift wrap is a per-candidate secp256k1 ECDH + ChaCha20 +
@@ -1279,15 +1284,15 @@ class NostrService {
       // Cap concurrent remote decrypts so a backfill burst can't flood the one
       // signer socket (see [_remoteUnwrapGate]); gate only the RPC round-trips.
       await _remoteUnwrapGate.acquire();
-      ({NostrEvent seal, Map<String, dynamic> rumor})? res;
+      ({NostrEvent seal, Map<String, dynamic> rumor, bool isPq})? res;
       try {
-        res = await _unwrapRemote(wrap, sig);
+        res = await _unwrapRemote(wrap, sig, selfKem: selfKemForUnwrap?.call());
       } finally {
         _remoteUnwrapGate.release();
       }
       if (res != null) {
         await _emitUnwrapped(handlers!, wrap, res.seal, res.rumor,
-            isBitchat: false, fromArchive: fromArchive);
+            isBitchat: false, isPq: res.isPq, fromArchive: fromArchive);
         return;
       }
     }
@@ -1316,21 +1321,46 @@ class NostrService {
     return false;
   }
 
-  /// Unwraps a self-addressed gift [wrap] via the remote signer's
-  /// `nip44_decrypt` RPC (NIP-46): decrypt the wrap content (sealed by the
-  /// ephemeral wrap key to our identity key), then the seal content (between the
-  /// sender and us). Returns null on any failure (try the local candidates).
-  Future<({NostrEvent seal, Map<String, dynamic> rumor})?> _unwrapRemote(
+  /// Unwraps a self-addressed gift [wrap] via the signer's `nip44_decrypt`
+  /// (NIP-07 or NIP-46): decrypt the wrap content (sealed by the ephemeral wrap
+  /// key to our identity key), then the seal content. Returns null on any
+  /// failure, so the caller falls back to the local candidates.
+  ///
+  /// The layered format is what lets a signer take part at all. Its outer layer
+  /// needs only our own ML-KEM key — derived from the root, which this device
+  /// holds directly — and what is left inside is an ordinary NIP-44 payload the
+  /// signer decrypts as it always has. The combined format cannot be done here:
+  /// it mixes the raw ECDH output into the key, which no signer returns.
+  ///
+  /// [selfKem] is our decapsulation keypair, or null when this device holds no
+  /// root — in which case a layered wrap simply does not open here.
+  Future<({NostrEvent seal, Map<String, dynamic> rumor, bool isPq})?>
+      _unwrapRemote(
     NostrEvent wrap,
-    EventSigner sig,
-  ) async {
+    EventSigner sig, {
+    ({Uint8List kemSk, Uint8List kemPk})? selfKem,
+  }) async {
     try {
-      final sealJson = await sig.nip44Decrypt(wrap.pubkey, wrap.content);
+      // Both layers were sealed to the p-tag target: our identity key here,
+      // since this path only runs for self-addressed wraps.
+      final recipPk = identity.pubkey;
+      var usedPq = false;
+      Future<String> strip(String content, String senderPk) async {
+        if (!pq.isPq2Payload(content)) return content;
+        if (selfKem == null) throw StateError('no post-quantum key on this device');
+        usedPq = true;
+        return pq.pq2Open(
+            content, senderPk, recipPk, selfKem.kemSk, selfKem.kemPk);
+      }
+
+      final sealJson = await sig.nip44Decrypt(
+          wrap.pubkey, await strip(wrap.content, wrap.pubkey));
       final seal =
           NostrEvent.fromJson(jsonDecode(sealJson) as Map<String, dynamic>);
-      final rumorJson = await sig.nip44Decrypt(seal.pubkey, seal.content);
+      final rumorJson = await sig.nip44Decrypt(
+          seal.pubkey, await strip(seal.content, seal.pubkey));
       final rumor = jsonDecode(rumorJson) as Map<String, dynamic>;
-      return (seal: seal, rumor: rumor);
+      return (seal: seal, rumor: rumor, isPq: usedPq);
     } catch (_) {
       return null;
     }
@@ -1613,6 +1643,7 @@ class NostrService {
     required int epoch,
     required List<PqDevice> devices,
     bool rootSeeded = false,
+    bool legacyCapable = true,
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -1647,6 +1678,7 @@ class NostrService {
           epoch: epoch,
           devices: devices,
           rootSeeded: rootSeeded,
+          legacyCapable: legacyCapable,
         ),
       ),
     );
@@ -1807,6 +1839,7 @@ class NostrService {
     String recipientPubkey, {
     int? expiration,
     Uint8List? recipientKemPublicKey,
+    bool layered = false,
   }) async {
     final sig = signer;
     if (sig == null) return null;
@@ -1817,6 +1850,7 @@ class NostrService {
         recipientPubkey: recipientPubkey,
         expiration: expiration,
         recipientKemPk: recipientKemPublicKey,
+        layered: layered,
       );
     }
     // Remote (NIP-46) signer: seal via the remote RPCs; the wrap layer uses a
@@ -1859,9 +1893,12 @@ class NostrService {
     String recipientPubkey, {
     int? expiration,
     Uint8List? recipientKemPublicKey,
+    bool layered = false,
   }) async {
     final wrap = await _buildWrap(rumor, recipientPubkey,
-        expiration: expiration, recipientKemPublicKey: recipientKemPublicKey);
+        expiration: expiration,
+        recipientKemPublicKey: recipientKemPublicKey,
+        layered: layered);
     if (wrap == null) return null;
     // Gift wraps (kind 1059) publish via DM_EVENT so the proxy gives them
     // priority to the default relays (relays.js `sendDMToRelays`). In direct
@@ -1890,6 +1927,8 @@ class NostrService {
     bool sendNymWrap = true,
     Uint8List? recipientKemPublicKey,
     Uint8List? selfKemPublicKey,
+    bool recipientLayered = false,
+    bool selfLayered = false,
   }) async {
     if (signer == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -1913,17 +1952,17 @@ class NostrService {
     if (sendNymWrap) {
       final recipientWrap = await _wrapAndPublish(rumor, recipientPubkey,
           expiration: expiration,
-          recipientKemPublicKey: recipientKemPublicKey);
+          recipientKemPublicKey: recipientKemPublicKey,
+          layered: recipientLayered);
       if (recipientWrap != null) onWrap?.call(recipientWrap);
     }
     if (recipientPubkey != identity.pubkey) {
-      // The self-addressed copy is post-quantum whenever we are, otherwise it
-      // would be the weakest link: an attacker who breaks secp256k1 could read
-      // the whole archive regardless of how the outbound copy was sealed. Our
-      // own ML-KEM key is nsec-derived, so every device sharing the nsec opens
-      // it.
+      // Post-quantum whenever we are, or the archive becomes the weakest
+      // link. Opened by any device holding the root.
       final selfWrap = await _wrapAndPublish(rumor, identity.pubkey,
-          expiration: expiration, recipientKemPublicKey: selfKemPublicKey);
+          expiration: expiration,
+          recipientKemPublicKey: selfKemPublicKey,
+          layered: selfLayered);
       if (selfWrap != null) onWrap?.call(selfWrap);
     }
     return true;
@@ -1957,6 +1996,7 @@ class NostrService {
     void Function(NostrEvent wrap)? onWrap,
     Uint8List? Function(String memberPubkey)? kemKeyFor,
     bool Function(String memberPubkey)? rootSeededFor,
+    bool Function(String memberPubkey)? layeredFor,
     void Function(int pqCount, int total, int rootCount)? onCoverage,
   }) async {
     final sig = signer;
@@ -1976,6 +2016,9 @@ class NostrService {
       // what wrapMany looks jobs up by — while the key itself comes from the
       // member's real pubkey, which is what published the announcement.
       final kemByTarget = <String, Uint8List>{};
+      // Keyed by the same encryption target as kemByTarget, since that is what
+      // wrapMany looks jobs up by.
+      final layeredTargets = <String>{};
       var pqCount = 0;
       var rootCount = 0;
       if (kemKeyFor != null) {
@@ -1985,6 +2028,9 @@ class NostrService {
             kemByTarget[targets[i]] = k;
             pqCount++;
             if (rootSeededFor?.call(recipients[i]) ?? false) rootCount++;
+            if (layeredFor?.call(recipients[i]) ?? false) {
+              layeredTargets.add(targets[i]);
+            }
           }
         }
       }
@@ -1994,6 +2040,7 @@ class NostrService {
         recipientPubkeys: targets,
         expiration: expiration,
         recipientKemPks: kemByTarget.isEmpty ? null : kemByTarget,
+        layeredPubkeys: layeredTargets.isEmpty ? null : layeredTargets,
       );
       for (final wrap in wraps) {
         if (wrap != null) {
