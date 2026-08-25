@@ -208,14 +208,14 @@ void main() {
   // Two devices generating independent roots is the failure this prevents.
   group('§6 generation and adoption ordering', () {
     PqRootAction decide({
-      bool durable = true,
+      bool throwaway = false,
       bool loaded = true,
       bool present = false,
       bool hold = false,
       bool matches = true,
     }) =>
         pqRootDecide(
-          durableIdentity: durable,
+          throwawayKeypair: throwaway,
           recordLoadSucceeded: loaded,
           recordPresent: present,
           holdRoot: hold,
@@ -247,9 +247,22 @@ void main() {
           reason: 'without the record another device generates a rival root');
     });
 
-    test('an ephemeral identity never generates', () {
-      expect(decide(durable: false), PqRootAction.wait);
-      expect(decide(durable: false, present: true), PqRootAction.wait);
+    // THE bug this signature change exists for. The standard onboarding does
+    // not log anyone in — it persists a nick and boots the auto-ephemeral
+    // identity — so loginMethod is null for almost every account, even though
+    // the keypair is kept across launches. Gating on a "durable login" meant
+    // those accounts never generated a root and silently stayed on the
+    // nsec-derived key, while the PWA (which has no such gate) generated one.
+    test('an account created through onboarding generates a root', () {
+      expect(decide(), PqRootAction.generate,
+          reason: 'no durable-login gate: the decision must not ask how the '
+              'identity was created');
+    });
+
+    // The one identity that genuinely has nothing to carry forward.
+    test('a per-session throwaway keypair never generates', () {
+      expect(decide(throwaway: true), PqRootAction.wait);
+      expect(decide(throwaway: true, present: true), PqRootAction.wait);
     });
 
     // For a signer login the root is what makes the account post-quantum at

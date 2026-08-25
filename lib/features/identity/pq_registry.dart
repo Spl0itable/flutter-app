@@ -508,8 +508,11 @@ class PqPolicy {
   /// settings — can be post-quantum. They are addressed to us, so this is the
   /// receive-side question: encapsulating to a key we cannot decapsulate with
   /// would lock this device out of its own history.
-  static bool selfEnabled({required Uint8List? privkey, required PqMode mode}) =>
-      capable(privkey: privkey) && mode == PqMode.on;
+  static bool selfEnabled(
+          {required Uint8List? privkey,
+          Uint8List? root,
+          required PqMode mode}) =>
+      capable(privkey: privkey, root: root) && mode == PqMode.on;
 
   /// Post-quantum is on for anyone who can do it. Kept as a function so the
   /// escape hatch has somewhere to live.

@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
 import 'package:nym_bar/core/crypto/keys.dart';
+import 'package:nym_bar/core/crypto/nip44.dart' as nip44;
 import 'package:nym_bar/core/crypto/pq.dart' as pq;
 import 'package:nym_bar/features/identity/pq_root.dart';
 import 'package:nym_bar/services/api/api_client.dart';
@@ -102,7 +103,10 @@ void main() {
       final rootBlob = d1[sync.d1Category(pqRootCategory)]!;
       final otherBlob = d1[sync.d1Category('nymchat-readstate')]!;
       expect(pq.isPqPayload(rootBlob), isFalse);
-      expect(pq.isPqPayload(otherBlob), isTrue,
+      expect(pq.isPq2Payload(rootBlob), isFalse);
+      // Layered, so a signer login on this account can open its own settings.
+      // The combined form needed the raw ECDH output and therefore an nsec.
+      expect(pq.isPq2Payload(otherBlob), isTrue,
           reason: 'the exception is exactly one category wide');
     });
 
@@ -162,30 +166,22 @@ void main() {
       final d1 = <String, String>{};
       await _syncOver(d1, root: _root).readStateSet({'#nymchat': 1700000000});
       final blob = d1[_syncOver({}).d1Category('nymchat-readstate')]!;
-      expect(pq.isPqPayload(blob), isTrue);
+      expect(pq.isPq2Payload(blob), isTrue);
 
-      // Opens with the root-derived key.
+      // The outer layer opens with the root-derived KEM secret alone — no secp
+      // key involved, which is what lets a signer login read it.
       final rootKem = pq.pqKeypairFromRoot(_root, 0);
+      final inner = await pq.pq2Open(
+          blob, _pub, _pub, rootKem.secretKey, rootKem.publicKey);
       expect(
-        pq.pqDecrypt(
-            blob,
-            _pub,
-            pq.PqIdentity(
-                privkey: _priv,
-                kemSecretKey: rootKem.secretKey,
-                kemPublicKey: rootKem.publicKey)),
+        nip44.decrypt(inner, nip44.getConversationKey(_priv, _pub)),
         contains('#nymchat'),
       );
       // And NOT the nsec-derived one, which falls out of the npub.
       final nsecKem = pq.pqKeypairFromPrivkey(_priv, 0);
       expect(
-        () => pq.pqDecrypt(
-            blob,
-            _pub,
-            pq.PqIdentity(
-                privkey: _priv,
-                kemSecretKey: nsecKem.secretKey,
-                kemPublicKey: nsecKem.publicKey)),
+        () => pq.pq2Open(
+            blob, _pub, _pub, nsecKem.secretKey, nsecKem.publicKey),
         throwsA(anything),
       );
     });

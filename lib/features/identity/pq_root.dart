@@ -238,15 +238,26 @@ enum PqRootAction {
 /// first is a deadlock — no key, so no root, so no key. The PWA's
 /// `pqRootEnsure` gates on support rather than capability for the same reason,
 /// and the two must reach the same verdict from the same inputs.
+///
+/// Nor on the identity being a "durable login". The standard onboarding does
+/// not log anyone in: it persists a nick and boots the auto-ephemeral
+/// identity, so `loginMethod` is null for the overwhelming majority of
+/// accounts even though the keypair is kept across launches and the account is
+/// durable in every sense the user cares about. Requiring a durable login here
+/// meant those accounts NEVER generated a root and silently stayed on the
+/// nsec-derived key. The PWA has no such gate — `settingsLoadFromD1` falls
+/// back to `this.pubkey` and runs `pqRootEnsure` regardless — which is why
+/// this worked there and not here. [throwawayKeypair] is the one identity that
+/// genuinely has nothing to protect: a new keypair every launch.
 PqRootAction pqRootDecide({
-  required bool durableIdentity,
   required bool recordLoadSucceeded,
   required bool recordPresent,
   required bool holdRoot,
+  bool throwawayKeypair = false,
   bool recordMatchesHeldRoot = true,
 }) {
-  // An ephemeral identity has nothing to protect past the session.
-  if (!durableIdentity) return PqRootAction.wait;
+  // A keypair that is regenerated every launch has nothing to carry forward.
+  if (throwawayKeypair) return PqRootAction.wait;
   // A read that did not complete proves nothing either way.
   if (!recordLoadSucceeded) return PqRootAction.wait;
   if (recordPresent) {

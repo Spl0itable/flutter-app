@@ -2514,9 +2514,10 @@ class StorageSync {
   /// other protects neither. With a local nsec this is the hybrid; there is no
   /// size cap to work around, since D1 takes the blob whatever it weighs.
   ///
-  /// An extension or NIP-46 signer returns a finished NIP-44 payload rather
-  /// than a conversation key, so there is no hybrid one to derive — those
-  /// logins stay classical by construction (PqPolicy.capable).
+  /// A signer login is not excluded: the layered format seals the outer layer
+  /// from the root and leaves the inner NIP-44 to whatever holds the identity
+  /// key, so it participates once this device has a recovery code
+  /// (PqPolicy.selfEnabled, which reads the root as well as the nsec).
   ///
   /// It also stays classical when ANOTHER device on the account is one of those
   /// logins ([setPqSealToSelf]): that device holds no secret to derive from, so
@@ -2531,10 +2532,15 @@ class StorageSync {
           ? await _pqSelfKeyCandidates()
           : const <({Uint8List kemSk, Uint8List kemPk})>[];
       final selfKem = candidates.isEmpty ? null : candidates.first;
-      if (allowPq && _pqSealToSelf && signer is LocalSigner && selfKem != null) {
+      if (allowPq && _pqSealToSelf && selfKem != null) {
         try {
-          return pq.pqEncrypt(
-              plaintext, signer.privkey, _pubkey, selfKem.kemPk);
+          // Layered, not combined: the outer layer is keyed from the KEM
+          // secret alone, so the inner NIP-44 can come from a signer. The
+          // combined format needed the raw ECDH output and therefore a local
+          // nsec, which left every extension and NIP-46 account's settings
+          // classical — and wrote a blob the PWA does not produce.
+          final inner = await signer.nip44Encrypt(_pubkey, plaintext);
+          return await pq.pq2Seal(inner, _pubkey, _pubkey, selfKem.kemPk);
         } catch (_) {
           // Fall through to NIP-44 rather than losing the write.
         }
@@ -2553,6 +2559,21 @@ class StorageSync {
   Future<String?> _decryptFromSelf(String ciphertext) async {
     try {
       final signer = _signer;
+      // Layered first: it is what both apps write now, and it opens with the
+      // KEM secret plus whatever holds the identity key — a signer included.
+      if (pq.isPq2Payload(ciphertext)) {
+        for (final k in await _pqSelfKeyCandidates()) {
+          try {
+            final inner = await pq.pq2Open(
+                ciphertext, _pubkey, _pubkey, k.kemSk, k.kemPk);
+            return await signer.nip44Decrypt(_pubkey, inner);
+          } catch (_) {
+            // Wrong epoch — try the next.
+          }
+        }
+        return null;
+      }
+      // The combined form: only a local nsec can open it, by construction.
       if (pq.isPqPayload(ciphertext)) {
         if (signer is! LocalSigner) return null;
         for (final k in await _pqSelfKeyCandidates()) {

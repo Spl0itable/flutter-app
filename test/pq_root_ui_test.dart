@@ -256,6 +256,22 @@ void main() {
           reason: 'a signer login needs the root to become capable at all');
     });
 
+    // Onboarding does not log anyone in; it boots the auto-ephemeral identity.
+    // Gating generation on a durable login therefore excluded almost every
+    // real account, which is why the apps kept announcing an nsec-derived key
+    // while the PWA — which has no such gate — did not.
+    test('nor whether the identity is a durable login', () {
+      final root =
+          File('lib/features/identity/pq_root.dart').readAsStringSync();
+      expect(root.contains('durableIdentity'), isFalse);
+      expect(ctrl.contains('durableIdentity: sync.durableIdentity'), isFalse);
+    });
+
+    test('only a per-session throwaway keypair opts out', () {
+      expect(ctrl.contains('throwawayKeypair:'), isTrue);
+      expect(ctrl.contains('StorageKeys.randomKeypairPerSession'), isTrue);
+    });
+
     test('a root that does not match the record is dropped, not announced', () {
       expect(ctrl.contains('if (!matches) _pqRoot = null;'), isTrue);
     });
