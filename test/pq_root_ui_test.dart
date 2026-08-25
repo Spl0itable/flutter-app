@@ -422,6 +422,18 @@ void main() {
       expect(ctrl.contains('sync.pqRootLocked = true;'), isTrue);
       expect(ctrl.contains('sync.pqRootLocked = false;'), isTrue);
     });
+
+    // The lock is decided AFTER the load that read the rows — section 6 needs
+    // a completed read to tell "no record" from "could not look" — so the
+    // first load computes the verdict with the lock still unknown. Without
+    // recomputing, the very boot that does the wiping is the unprotected one.
+    test('the verdict is recomputed when the lock is decided', () {
+      expect(sync.contains('_lastLoadPending = pending;'), isTrue);
+      expect(
+          sync.contains(
+              '_settingsRestoreUnreadable = v && _lastLoadPending > 0;'),
+          isTrue);
+    });
   });
 
   group('the recovery-code panel confirms what it holds', () {

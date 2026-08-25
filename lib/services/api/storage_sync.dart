@@ -1002,9 +1002,17 @@ class StorageSync {
   /// these rows" from "cannot read them YET".
   bool _pqRootLockedOut = false;
 
+  /// Rows the last completed load could not open, remembered so the verdict
+  /// can be recomputed when the lock is decided.
+  int _lastLoadPending = 0;
+
   set pqRootLocked(bool v) {
     _pqRootLockedOut = v;
-    if (!v) _settingsRestoreUnreadable = false;
+    // The lock is decided AFTER the load that read these rows — §6 needs a
+    // completed read to tell "no record" from "could not look". So the first
+    // load always computes this with the lock still unknown, and recomputing
+    // here is what protects the very boot that used to do the wiping.
+    _settingsRestoreUnreadable = v && _lastLoadPending > 0;
   }
 
   bool get pqRootLoadSucceeded => _pqRootLoadSucceeded;
@@ -1519,6 +1527,7 @@ class StorageSync {
     // is final, decryption is pure computation over keys derived from it" —
     // stopped being true when the rows moved to a key derived from the
     // recovery code instead of from the nsec.
+    _lastLoadPending = pending;
     _settingsRestoreUnreadable = pending > 0 && _pqRootLockedOut;
     if (decoded.isEmpty) {
       // Null means "the load FAILED", and the caller keeps the outbound-save
