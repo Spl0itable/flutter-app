@@ -990,6 +990,31 @@ class StorageSync {
   /// a row we cannot decrypt is still proof a root exists.
   bool _pqRootRowPresent = false;
 
+  /// Rows exist that this device could not open, and the reason is
+  /// recoverable — they are sealed to a root it does not hold yet. Saving must
+  /// stay off while this is true or the session's defaults replace them.
+  bool _settingsRestoreUnreadable = false;
+
+  bool get settingsRestoreUnreadable => _settingsRestoreUnreadable;
+
+  /// Whether this device is locked out of the account's root. Set by the
+  /// controller once §6 settles; the decode path needs it to tell "cannot read
+  /// these rows" from "cannot read them YET".
+  bool _pqRootLockedOut = false;
+
+  /// Rows the last completed load could not open, remembered so the verdict
+  /// can be recomputed when the lock is decided.
+  int _lastLoadPending = 0;
+
+  set pqRootLocked(bool v) {
+    _pqRootLockedOut = v;
+    // The lock is decided AFTER the load that read these rows — §6 needs a
+    // completed read to tell "no record" from "could not look". So the first
+    // load always computes this with the lock still unknown, and recomputing
+    // here is what protects the very boot that used to do the wiping.
+    _settingsRestoreUnreadable = v && _lastLoadPending > 0;
+  }
+
   bool get pqRootLoadSucceeded => _pqRootLoadSucceeded;
 
   /// True when the account is known to have a root record already.
@@ -1394,6 +1419,9 @@ class StorageSync {
       // hash and is never rewritten in the form that device can read. That is
       // why settings stayed stuck after linking: the plaintext had not
       // changed, so nothing was republished under the new key.
+      // Never write over rows we could not read (the PWA's
+      // `_settingsRestoreUnreadable` guard in _saveSettingsBlobToD1).
+      if (_settingsRestoreUnreadable) return false;
       final selfKem = allowPq ? await _pqSelfKeyCandidates() : const [];
       final mode = (allowPq && _pqSealToSelf && selfKem.isNotEmpty) ? 'pq' : 'c';
       final hash = _sha256Hex('$_pubkey|$mode|$plaintext');
@@ -1449,6 +1477,7 @@ class StorageSync {
 
     final decoded = <_DecodedCategory>[];
     var storedBlobs = 0;
+    var pending = 0; // rows that did not open
     for (final e in cats.entries) {
       final entry = e.value;
       if (entry is! Map) continue;
@@ -1458,7 +1487,10 @@ class StorageSync {
       final updatedAt = (entry['updatedAt'] as num?)?.toInt() ?? 0;
       try {
         final plain = await _decryptFromSelf(blob);
-        if (plain == null) continue;
+        if (plain == null) {
+          pending++;
+          continue;
+        }
         final payload = jsonDecode(plain);
         if (payload is! Map<String, dynamic>) continue;
         final realCat = payload['__cat'] is String
@@ -1479,8 +1511,24 @@ class StorageSync {
         ));
       } catch (_) {
         // Skip an undecryptable/corrupt category.
+        pending++;
       }
     }
+
+    // Something opened, so whatever blocked an earlier attempt is over —
+    // unless what did NOT open is sealed to a root this device cannot
+    // reach.
+    //
+    // That case is recoverable by linking, and treating it as final is how
+    // a second device wiped the account: the root row is classical so it
+    // always opens, the real settings rows do not, and the caller saw a
+    // successful load carrying almost nothing and published this session's
+    // defaults over them. The v1 reasoning — "with a local nsec the verdict
+    // is final, decryption is pure computation over keys derived from it" —
+    // stopped being true when the rows moved to a key derived from the
+    // recovery code instead of from the nsec.
+    _lastLoadPending = pending;
+    _settingsRestoreUnreadable = pending > 0 && _pqRootLockedOut;
     if (decoded.isEmpty) {
       // Null means "the load FAILED", and the caller keeps the outbound-save
       // gate shut on it so this device cannot publish its defaults over rows it
@@ -1499,7 +1547,12 @@ class StorageSync {
       // Only an undecryptable row under a signer we do not control is genuinely
       // transient — a locked or briefly unavailable signer looks exactly like
       // this — so that one still reports failure and is retried on reconnect.
-      if (storedBlobs == 0 || _signer is LocalSigner) {
+      if (storedBlobs == 0) {
+        return const SettingsLoadResult(payload: {}, newestTs: 0);
+      }
+      // Locked out of the root: recoverable by linking, so never final.
+      if (_pqRootLockedOut) return null;
+      if (_signer is LocalSigner) {
         return const SettingsLoadResult(payload: {}, newestTs: 0);
       }
       return null;

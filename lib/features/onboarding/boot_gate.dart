@@ -202,7 +202,13 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
       _pqNoticeDelay = Timer(const Duration(milliseconds: 3500), () {
         if (mounted) unawaited(_maybeShowPqNotice());
         _pqNoticeRetry = Timer(const Duration(seconds: 12), () {
-          if (mounted) unawaited(_maybeShowPqNotice());
+          if (!mounted) return;
+          unawaited(_maybeShowPqNotice());
+          // And the encrypt-at-rest offer, which needs the synced
+          // `encryptAtRestPreferred` flag — that flag lives in the settings a
+          // locked device cannot read, so on a second device it is not there
+          // at the 2.5s mark and the prompt never fired at all.
+          unawaited(_maybePromptEncryptAtRest());
         });
       });
     }
