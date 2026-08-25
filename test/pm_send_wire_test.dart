@@ -65,19 +65,21 @@ void main() {
       knownBitchat: knownBitchat,
       knownNym: knownNym,
     );
-    UnsignedEvent? bitchatRumor;
+    final bitchatRumors = <UnsignedEvent>[];
     if (plan.bitchat) {
-      final encoded = bitchat.encodeBitchatMessage(rumor.content, me,
-          recipientPubkey: peer);
-      // No tags — mirrors `_publishDualPm`. Bitchat 1.7.1 rejects any inner
-      // rumor whose tags are neither empty nor exactly [["p", recipient]].
-      bitchatRumor = UnsignedEvent(
-        pubkey: me,
-        createdAt: rumor.createdAt,
-        kind: 14,
-        tags: const [],
-        content: encoded.content,
-      );
+      for (final chunk in bitchat.chunkBitchatContent(rumor.content)) {
+        final encoded =
+            bitchat.encodeBitchatMessage(chunk, me, recipientPubkey: peer);
+        // No tags — mirrors `_publishDualPm`. Bitchat 1.7.1 rejects any inner
+        // rumor whose tags are neither empty nor exactly [["p", recipient]].
+        bitchatRumors.add(UnsignedEvent(
+          pubkey: me,
+          createdAt: rumor.createdAt,
+          kind: 14,
+          tags: const [],
+          content: encoded.content,
+        ));
+      }
     }
     await svc.publishPM(
       rumor: rumor,
@@ -86,7 +88,7 @@ void main() {
         dmTtlSeconds: expiration != null ? 3600 : 0,
       ),
       recipientPubkey: peer,
-      bitchatRumor: bitchatRumor,
+      bitchatRumors: bitchatRumors,
       sendNymWrap: plan.nym,
       recipientKemPublicKey: plan.kemPublicKey,
       recipientLayered: plan.layered,
@@ -284,6 +286,70 @@ void main() {
       final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
       expect(jsonEncode(wrap.tags), jsonEncode([['p', peer]]));
       expect(await bitchatAccepts(wrap), isNull);
+    });
+  });
+
+  group('a long message reaches Bitchat in pieces', () {
+    // Bitchat writes a 1-byte TLV length and refuses to encode a field over 255
+    // bytes; its decoder meets an unknown type and discards the WHOLE packet.
+    // We used to set the high bit of the type byte with a 2-byte length — a
+    // convention bitchat has never had — so every long message to a Bitchat
+    // user was dropped on arrival, and had been for as long as this existed.
+    final long = 'The quick brown fox jumps over the lazy dog. ' * 20;
+
+    test('it goes out as several wraps, each decodable by bitchat', () async {
+      final rec = await send(content: long);
+      final wraps =
+          rec.dmCalls.where((e) => e.content.startsWith('v2:')).toList();
+      expect(wraps.length, greaterThan(1));
+
+      final parts = <String>[];
+      for (final w in wraps) {
+        final opened = await giftwrap.unwrapGiftWrap(w, [
+          giftwrap.classicalCandidate(skPeer, bitchat: true),
+        ]);
+        final inner = opened!.rumor['content'] as String;
+        final b = base64Url
+            .decode(base64Url.normalize(inner.substring('bitchat1:'.length)));
+        final payload = b.sublist(30, 30 + ((b[12] << 8) | b[13]));
+        // Decoded exactly as bitchat does: 1-byte lengths, unknown type => drop.
+        var i = 1;
+        String? id, text;
+        while (i + 2 <= payload.length) {
+          final type = payload[i], len = payload[i + 1];
+          final st = i + 2;
+          expect(st + len, lessThanOrEqualTo(payload.length));
+          final v = utf8.decode(payload.sublist(st, st + len));
+          if (type == 0x00) {
+            id = v;
+          } else if (type == 0x01) {
+            text = v;
+          } else {
+            fail('bitchat would discard this packet: unknown TLV type $type');
+          }
+          i = st + len;
+        }
+        expect(id, isNotNull);
+        expect(utf8.encode(text!).length, lessThanOrEqualTo(255));
+        parts.add(text);
+      }
+      expect(parts.join(), long, reason: 'the pieces reassemble exactly');
+    });
+  });
+
+  group('chunking', () {
+    test('never splits a multi-byte character', () {
+      final emoji = '🙂' * 200; // 4 bytes each; no 255 boundary is clean
+      final parts = bitchat.chunkBitchatContent(emoji);
+      expect(parts.join(), emoji);
+      expect(parts.join(), isNot(contains('\uFFFD')));
+      for (final p in parts) {
+        expect(utf8.encode(p).length, lessThanOrEqualTo(255));
+      }
+    });
+
+    test('leaves short text as one chunk', () {
+      expect(bitchat.chunkBitchatContent('hello'), hasLength(1));
     });
   });
 

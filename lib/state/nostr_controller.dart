@@ -4999,36 +4999,41 @@ class NostrController {
       plan = const PqPmPlan(kemPublicKey: null, bitchat: true, nym: true);
     }
 
-    UnsignedEvent? bitchatRumor;
+    // One rumor per chunk. Bitchat caps a TLV value at 255 bytes and sends
+    // longer text as several messages; anything bigger in one packet is
+    // discarded whole on arrival. Short text is a single chunk.
+    final bitchatRumors = <UnsignedEvent>[];
     if (plan.bitchat) {
       // The bitchat rumor's content is a `bitchat1:` packet, and the rumor
       // itself carries no tags at all — see below.
-      final encoded = bitchat.encodeBitchatMessage(
-        rumor.content,
-        identity.pubkey,
-        recipientPubkey: recipientPubkey,
-      );
-      // NO TAGS. Bitchat 1.7.1 (upstream e9275cb, 2026-07-26) hardened its
-      // envelope checks: `validInnerMessageTags` accepts an inner rumor only
-      // when its tags are EMPTY or exactly [["p", recipient]]. Anything else
-      // and the whole DM is dropped as malformed, silently, on their side.
-      //
-      // We had been putting ['x', nymMessageId] here so a reaction on either
-      // copy could be matched to the other. That one tag is why Bitchat users
-      // stopped receiving anything from us the week they updated — while our
-      // read receipts kept arriving, because those rumors have always been
-      // built with no tags.
-      //
-      // Losing it costs nothing on this copy: only a Bitchat client reads it,
-      // and Bitchat matches receipts by the UUID inside the bitchat1: packet,
-      // never by our tag.
-      bitchatRumor = UnsignedEvent(
-        pubkey: identity.pubkey,
-        createdAt: rumor.createdAt,
-        kind: EventKind.dmRumor,
-        tags: const [],
-        content: encoded.content,
-      );
+      for (final chunk in bitchat.chunkBitchatContent(rumor.content)) {
+        final encoded = bitchat.encodeBitchatMessage(
+          chunk,
+          identity.pubkey,
+          recipientPubkey: recipientPubkey,
+        );
+        // NO TAGS. Bitchat 1.7.1 (upstream e9275cb, 2026-07-26) hardened its
+        // envelope checks: `validInnerMessageTags` accepts an inner rumor only
+        // when its tags are EMPTY or exactly [["p", recipient]]. Anything else
+        // and the whole DM is dropped as malformed, silently, on their side.
+        //
+        // We had been putting ['x', nymMessageId] here so a reaction on either
+        // copy could be matched to the other. That one tag is why Bitchat users
+        // stopped receiving anything from us the week they updated — while our
+        // read receipts kept arriving, because those rumors have always been
+        // built with no tags.
+        //
+        // Losing it costs nothing on this copy: only a Bitchat client reads it,
+        // and Bitchat matches receipts by the UUID inside the bitchat1: packet,
+        // never by our tag.
+        bitchatRumors.add(UnsignedEvent(
+          pubkey: identity.pubkey,
+          createdAt: rumor.createdAt,
+          kind: EventKind.dmRumor,
+          tags: const [],
+          content: encoded.content,
+        ));
+      }
     }
 
     // The echo went on screen before the recipient's key was looked up, so it
@@ -5048,7 +5053,7 @@ class NostrController {
       recipientPubkey: recipientPubkey,
       settings: _msgSettings,
       onWrap: onWrap,
-      bitchatRumor: bitchatRumor,
+      bitchatRumors: bitchatRumors,
       sendNymWrap: plan.nym,
       recipientKemPublicKey: plan.kemPublicKey,
       selfKemPublicKey: pqSelfKey(),
