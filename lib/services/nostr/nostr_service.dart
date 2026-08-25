@@ -1947,7 +1947,8 @@ class NostrService {
   /// Returns the post-quantum coverage of the fan-out via [onCoverage]: a group
   /// message counts as protected only when EVERY member got a post-quantum
   /// wrap, since one classical copy of the same plaintext is enough for an
-  /// attacker.
+  /// attacker. `rootCount` is how many of those wraps went to a root-seeded
+  /// key — full coverage under legacy keys is not the same guarantee.
   Future<bool> publishGroupMessage({
     required UnsignedEvent rumor,
     required List<String> recipients,
@@ -1955,7 +1956,8 @@ class NostrService {
     MessagingSettings settings = const MessagingSettings(),
     void Function(NostrEvent wrap)? onWrap,
     Uint8List? Function(String memberPubkey)? kemKeyFor,
-    void Function(int pqCount, int total)? onCoverage,
+    bool Function(String memberPubkey)? rootSeededFor,
+    void Function(int pqCount, int total, int rootCount)? onCoverage,
   }) async {
     final sig = signer;
     if (sig == null) return false;
@@ -1975,12 +1977,14 @@ class NostrService {
       // member's real pubkey, which is what published the announcement.
       final kemByTarget = <String, Uint8List>{};
       var pqCount = 0;
+      var rootCount = 0;
       if (kemKeyFor != null) {
         for (var i = 0; i < recipients.length; i++) {
           final k = kemKeyFor(recipients[i]);
           if (k != null) {
             kemByTarget[targets[i]] = k;
             pqCount++;
+            if (rootSeededFor?.call(recipients[i]) ?? false) rootCount++;
           }
         }
       }
@@ -1997,7 +2001,7 @@ class NostrService {
           onWrap?.call(wrap);
         }
       }
-      onCoverage?.call(pqCount, recipients.length);
+      onCoverage?.call(pqCount, recipients.length, rootCount);
       return true;
     }
 
@@ -2006,14 +2010,18 @@ class NostrService {
     // the wrap is the layer a recorder stores. Coverage is counted the same
     // way, since the protection against that threat is the same.
     var remotePq = 0;
+    var remoteRoot = 0;
     for (final pk in recipients) {
       final kem = kemKeyFor?.call(pk);
-      if (kem != null) remotePq++;
+      if (kem != null) {
+        remotePq++;
+        if (rootSeededFor?.call(pk) ?? false) remoteRoot++;
+      }
       final wrap = await _wrapAndPublish(rumor, encryptTo(pk),
           expiration: expiration, recipientKemPublicKey: kem);
       if (wrap != null) onWrap?.call(wrap);
     }
-    onCoverage?.call(remotePq, recipients.length);
+    onCoverage?.call(remotePq, recipients.length, remoteRoot);
     return true;
   }
 

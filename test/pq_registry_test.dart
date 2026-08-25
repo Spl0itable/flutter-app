@@ -733,6 +733,84 @@ void main() {
       expect(ann.rootSeeded, isFalse);
     });
   });
+
+  // The badge is only as honest as what the registry remembers. Losing the
+  // flag anywhere along here turns a legacy key into a full shield, or a
+  // root-seeded one into a needless downgrade.
+  group('the registry carries root-seeded through', () {
+    final pk = pq.pqKeypairFromRoot(unhex('5a' * 32), 0).publicKey;
+    final peer = 'ab' * 32;
+    const now = 1700000000;
+    const exp = 2000000000;
+
+    String content({required bool rootSeeded}) => PqAnnouncement.encode(
+          publicKey: pk,
+          expiresAt: exp,
+          epoch: 0,
+          devices: const [],
+          rootSeeded: rootSeeded,
+        );
+
+    test('ingest keeps the flag rather than dropping it at the door', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: true), nowSec: now);
+      expect(r.isRootSeeded(peer, nowSec: now, enabled: true), isTrue);
+    });
+
+    test('a legacy announcement stays legacy', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: false), nowSec: now);
+      expect(r.isRootSeeded(peer, nowSec: now, enabled: true), isFalse);
+    });
+
+    test('an unknown peer is not root-seeded', () {
+      expect(PqRegistry().isRootSeeded(peer, nowSec: now, enabled: true),
+          isFalse);
+    });
+
+    test('an expired entry is not root-seeded', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: true), nowSec: now);
+      expect(r.isRootSeeded(peer, nowSec: exp + 1, enabled: true), isFalse);
+    });
+
+    test('post-quantum off answers no, like keyFor', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: true), nowSec: now);
+      expect(r.isRootSeeded(peer, nowSec: now, enabled: false), isFalse);
+    });
+
+    test('a KEM-less entry is never root-seeded', () {
+      final r = PqRegistry()..record(peer, null, exp, 0, rootSeeded: true);
+      expect(r.isRootSeeded(peer, nowSec: now, enabled: true), isFalse,
+          reason: 'there is no key to protect');
+    });
+
+    // Without this a restart reads every peer as legacy and downgrades their
+    // shields until a fresh announcement lands.
+    test('the flag survives the cache round trip', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: true), nowSec: now);
+      final back = PqRegistry()..hydrate(r.toJson(nowSec: now), nowSec: now);
+      expect(back.isRootSeeded(peer, nowSec: now, enabled: true), isTrue);
+    });
+
+    test('and a legacy peer is not resurrected as root-seeded', () {
+      final r = PqRegistry()
+        ..ingest(peer, content(rootSeeded: false), nowSec: now);
+      final back = PqRegistry()..hydrate(r.toJson(nowSec: now), nowSec: now);
+      expect(back.isRootSeeded(peer, nowSec: now, enabled: true), isFalse);
+    });
+
+    test('a row written before the flag existed reads as legacy', () {
+      final legacyRow = {
+        peer: [pq.b64uEncode(pk), exp, 0]
+      };
+      final back = PqRegistry()..hydrate(legacyRow, nowSec: now);
+      expect(back.keyFor(peer, nowSec: now, enabled: true), isNotNull);
+      expect(back.isRootSeeded(peer, nowSec: now, enabled: true), isFalse);
+    });
+  });
 }
 
 // Group coverage: a group message is post-quantum only when EVERY member got a

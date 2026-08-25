@@ -12,8 +12,15 @@ import 'crypto_verified_badge.dart' show showAnchoredInfoPopup;
 /// encrypted — so collapsing them into one glyph would say something false
 /// about one axis or the other.
 enum PqBadgeState {
-  /// Every copy of this message used the hybrid ECDH + ML-KEM-768 exchange.
+  /// Every copy of this message used the hybrid ECDH + ML-KEM-768 exchange,
+  /// under ML-KEM keys seeded from identity roots on both sides.
   full,
+
+  /// Hybrid on the wire, but an ML-KEM key on one side or the other was
+  /// derived from its Nostr identity key. Recovering that identity key
+  /// reproduces the ML-KEM key with it, so the message does not survive the
+  /// attack the shield would otherwise claim.
+  legacy,
 
   /// A group message where only some members could receive a post-quantum
   /// copy. Rendered distinctly rather than as protected: if even one member got
@@ -45,13 +52,15 @@ enum PqBadgeState {
 /// flag must never outrank what actually went on the wire.
 PqBadgeState pqBadgeStateFor({
   required bool pqEncrypted,
+  bool pqRoot = false,
   ({int pq, int total})? pqCoverage,
   bool isGroup = false,
 }) {
   final cov = pqCoverage;
   if (cov != null && cov.total > 0) {
     if (cov.pq == 0) return PqBadgeState.classical;
-    return cov.pq == cov.total ? PqBadgeState.full : PqBadgeState.partial;
+    if (cov.pq != cov.total) return PqBadgeState.partial;
+    return pqRoot ? PqBadgeState.full : PqBadgeState.legacy;
   }
   // `pqEncrypted` is OUR copy's transport, and in a group that is one wrap out
   // of many. The same plaintext went to every member, so one classical copy is
@@ -61,7 +70,10 @@ PqBadgeState pqBadgeStateFor({
   // count that reaches every member can support it. Received group messages
   // carry no count at all (only the sender counts the fan-out), and a sent one
   // can be rendered before its count lands.
-  if (pqEncrypted) return isGroup ? PqBadgeState.partial : PqBadgeState.full;
+  if (pqEncrypted) {
+    if (isGroup) return PqBadgeState.partial;
+    return pqRoot ? PqBadgeState.full : PqBadgeState.legacy;
+  }
   return PqBadgeState.classical;
 }
 
@@ -94,6 +106,7 @@ class CryptoPqBadge extends StatelessWidget {
   Color get _color => switch (state) {
         PqBadgeState.full => const Color(0xFF8B7CF6),
         PqBadgeState.partial => const Color(0xFF9AA0A6),
+        PqBadgeState.legacy => const Color(0xFF9AA0A6),
         PqBadgeState.classical => const Color(0xFF9AA0A6).withValues(alpha: 0.65),
       };
 
@@ -163,7 +176,7 @@ class _ShieldPainter extends CustomPainter {
             Matrix4.translationValues(-rotateAbout, -rotateAbout, 0.0))
         .storage);
 
-    if (state == PqBadgeState.partial) {
+    if (state == PqBadgeState.partial || state == PqBadgeState.legacy) {
       // `stroke-dasharray: 3 2` — reads as "not fully closed" at a glance.
       _strokeDashed(canvas, shield, paint);
       _strokeDashed(canvas, rotated, paint);
@@ -225,6 +238,16 @@ const String kPqPartialTitle = 'Partly quantum-resistant';
 const String kPqPartialLead = 'This message was quantum-resistant to ';
 const String kPqPartialCount = '%d of %d members';
 const String kPqPartialSome = 'some members';
+const String kPqLegacyTitle = 'Quantum-resistant, legacy key';
+const String kPqLegacyBody =
+    "This message's key exchange combined NIP-44 secp256k1 ECDH with "
+    "ML-KEM-768, but at least one side's ML-KEM key was derived from its "
+    "Nostr identity key rather than from independent entropy. A quantum "
+    "computer that recovers that identity key reproduces the ML-KEM key with "
+    "it, so this message does not survive the attack it was meant to survive. "
+    "Messages already sent stay this way — the ciphertext exists and cannot "
+    "be re-sealed. New messages become fully quantum-resistant once both "
+    "sides hold a post-quantum recovery code.";
 const String kPqClassicalTitle = 'Not quantum-resistant';
 const String kPqClassicalBody =
     'This message is end-to-end encrypted with the standard NIP-44 secp256k1 '
@@ -249,6 +272,8 @@ const List<String> kPqPopupStrings = [
   kPqPartialCount,
   kPqPartialSome,
   kPqPartialTail,
+  kPqLegacyTitle,
+  kPqLegacyBody,
   kPqClassicalTitle,
   kPqClassicalBody,
 ];
@@ -274,6 +299,11 @@ void showPqPopup(
                     .replaceFirst('%d', '${coverage.total}')
                 : tr(kPqPartialSome)) +
             tr(kPqPartialTail),
+      ),
+    PqBadgeState.legacy => (
+        tr(kPqLegacyTitle),
+        const Color(0xFF9AA0A6),
+        tr(kPqLegacyBody),
       ),
     PqBadgeState.classical => (
         tr(kPqClassicalTitle),

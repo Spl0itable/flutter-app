@@ -396,6 +396,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (!message.isPM && !message.isGroup) return null;
     return pqBadgeStateFor(
       pqEncrypted: message.pqEncrypted,
+      pqRoot: message.pqRoot,
       pqCoverage: message.pqCoverage,
       isGroup: message.isGroup,
     );

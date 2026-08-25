@@ -1302,6 +1302,8 @@ const List<String> kAppStringsCatalog = <String>[
   'Quantum-resistant encryption',
   'Partly quantum-resistant',
   'Not quantum-resistant',
+  'Quantum-resistant, legacy key',
+  'This message\'s key exchange combined NIP-44 secp256k1 ECDH with ML-KEM-768, but at least one side\'s ML-KEM key was derived from its Nostr identity key rather than from independent entropy. A quantum computer that recovers that identity key reproduces the ML-KEM key with it, so this message does not survive the attack it was meant to survive. Messages already sent stay this way — the ciphertext exists and cannot be re-sealed. New messages become fully quantum-resistant once both sides hold a post-quantum recovery code.',
   'This message is end-to-end encrypted with the standard NIP-44 secp256k1 key exchange, and nobody but the participants can read it today. It has no post-quantum layer, so an adversary recording it now could decrypt it with a future quantum computer. Messages sent before either side upgraded stay this way permanently — the ciphertext already exists and cannot be re-sealed. New messages go quantum-resistant automatically once both sides have published a post-quantum key.',
   'This message was quantum-resistant to ',
   '. The rest haven\'t published a post-quantum key, so their copies used standard NIP-44 encryption only — and because those copies carry the same message, treat this one as classically encrypted overall.',

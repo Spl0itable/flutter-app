@@ -258,7 +258,8 @@ class PqRegistry {
   PqRegistry({this.maxEntries = 5000});
 
   final int maxEntries;
-  final Map<String, ({Uint8List? pk, int exp, int epoch})> _keys = {};
+  final Map<String, ({Uint8List? pk, int exp, int epoch, bool root})> _keys =
+      {};
 
   /// Ingests a peer's announcement. [content] is the event content; [pubkey]
   /// its (already signature-verified) author.
@@ -273,7 +274,8 @@ class PqRegistry {
       _keys.remove(pubkey);
       return;
     }
-    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch);
+    record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch,
+        rootSeeded: ann.rootSeeded);
   }
 
   /// Records a key. Also the path our own key takes, so self-addressed wraps
@@ -282,8 +284,9 @@ class PqRegistry {
   /// The cap is enforced here rather than in [ingest] so every write goes
   /// through one bound (Dart's Map preserves insertion order, so the evicted
   /// entry is the earliest-recorded one).
-  void record(String pubkey, Uint8List? pk, int exp, int epoch) {
-    _keys[pubkey] = (pk: pk, exp: exp, epoch: epoch);
+  void record(String pubkey, Uint8List? pk, int exp, int epoch,
+      {bool rootSeeded = false}) {
+    _keys[pubkey] = (pk: pk, exp: exp, epoch: epoch, root: rootSeeded);
     while (_keys.length > maxEntries) {
       _keys.remove(_keys.keys.first);
     }
@@ -295,7 +298,8 @@ class PqRegistry {
 
   /// The live entry for a peer, or null. Shared by both lookups so expiry is
   /// enforced in exactly one place.
-  ({Uint8List? pk, int exp, int epoch})? _entry(String pubkey, int nowSec) {
+  ({Uint8List? pk, int exp, int epoch, bool root})? _entry(
+      String pubkey, int nowSec) {
     final rec = _keys[pubkey];
     if (rec == null) return null;
     if (rec.exp <= nowSec) {
@@ -310,6 +314,15 @@ class PqRegistry {
   Uint8List? keyFor(String pubkey, {required int nowSec, required bool enabled}) {
     if (!enabled) return null;
     return _entry(pubkey, nowSec)?.pk;
+  }
+
+  /// Whether a peer's live announcement is root-seeded (spec §3), for the
+  /// badge. A KEM-less entry is never root-seeded: there is no key to protect.
+  bool isRootSeeded(String pubkey,
+      {required int nowSec, required bool enabled}) {
+    if (!enabled) return false;
+    final e = _entry(pubkey, nowSec);
+    return e != null && e.pk != null && e.root;
   }
 
   /// Whether a peer has published a live capability announcement, i.e. whether
@@ -340,6 +353,7 @@ class PqRegistry {
               e.value.pk == null ? null : pq.b64uEncode(e.value.pk!),
               e.value.exp,
               e.value.epoch,
+              e.value.root ? 1 : 0,
             ],
       };
 
@@ -381,7 +395,9 @@ class PqRegistry {
         }
         if (pk.length != mlKemPublicKeyLength) continue;
       }
-      record(entry.key, pk, exp, epoch);
+      // Absent on rows written before the root existed — those peers were
+      // legacy, so the default is the truth rather than a guess.
+      record(entry.key, pk, exp, epoch, rootSeeded: v.length > 3 && v[3] == 1);
     }
   }
 }

@@ -3117,6 +3117,7 @@ class NostrController {
       selfPubkey: self,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
+      pqRootFor: pqSealIsRootSeeded,
     );
     if (m == null) return;
     // Resolve the display author against the users map — the PWA's
@@ -3212,6 +3213,7 @@ class NostrController {
       nymMessageId: nymMessageId,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
+      pqRoot: u.isPq && pqSealIsRootSeeded(senderPubkey),
       deliveryStatus: isOwn ? DeliveryStatus.sent : DeliveryStatus.delivered,
     );
   }
@@ -4376,6 +4378,19 @@ class NostrController {
         enabled: pqEnabled,
       );
 
+  /// Whether a peer's announced key is root-seeded (spec §3), for the badge.
+  bool pqPeerIsRootSeeded(String pubkey) => _pqRegistry.isRootSeeded(
+        pubkey,
+        nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        enabled: pqEnabled,
+      );
+
+  /// A seal is fully post-quantum only when BOTH ends' ML-KEM keys are
+  /// root-seeded. The same plaintext exists in a copy under each, so one
+  /// nsec-derived key is enough for an adversary who breaks secp256k1.
+  bool pqSealIsRootSeeded(String peerPubkey) =>
+      _pqRoot != null && pqPeerIsRootSeeded(peerPubkey);
+
   /// Whose post-quantum announcements we watch: our conversation partners,
   /// group members and ourselves. Unlike the vouch list — a broadcast web of
   /// trust — post-quantum keys are only needed for peers we actually message,
@@ -4781,7 +4796,9 @@ class NostrController {
     for (final t in rumor.tags) {
       if (t.length > 1 && t[0] == 'x') {
         _ref.read(appStateProvider.notifier)
-            .markOwnMessagePq(t[1], pqEncrypted: plan.pq);
+            .markOwnMessagePq(t[1],
+                pqEncrypted: plan.pq,
+                pqRoot: plan.pq && pqSealIsRootSeeded(recipientPubkey));
         break;
       }
     }
@@ -5091,8 +5108,12 @@ class NostrController {
         // must not read as protected -- one classical copy of the same
         // plaintext is all an attacker needs -- so the badge carries the count
         // rather than a yes/no.
-        onCoverage: (pq, total) => appState.markOwnMessagePq(
-            nymMessageId, coverage: (pq: pq, total: total)),
+        rootSeededFor: pqPeerIsRootSeeded,
+        onCoverage: (pq, total, root) => appState.markOwnMessagePq(
+            nymMessageId,
+            coverage: (pq: pq, total: total),
+            // Our own root matters too: the self-archive copy is sealed to it.
+            pqRoot: total > 0 && pq == total && root == total && _pqRoot != null),
       );
     }
   }
@@ -9655,6 +9676,7 @@ class NostrController {
       if (key == null) unawaited(ensurePqAnnouncement(memberPubkey));
       return key;
     };
+    groups.rootSeededFor = pqPeerIsRootSeeded;
   }
 
   void _refreshEphemeralSubscriptions() {
