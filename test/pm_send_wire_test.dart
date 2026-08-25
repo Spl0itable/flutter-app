@@ -40,6 +40,7 @@ void main() {
     bool knownBitchat = false,
     bool knownNym = false,
     String content = 'hello from nymchat',
+    int? expiration,
   }) async {
     final rec = _RecordingTransport();
     final svc = NostrService(
@@ -68,18 +69,22 @@ void main() {
     if (plan.bitchat) {
       final encoded = bitchat.encodeBitchatMessage(rumor.content, me,
           recipientPubkey: peer);
+      // No tags — mirrors `_publishDualPm`. Bitchat 1.7.1 rejects any inner
+      // rumor whose tags are neither empty nor exactly [["p", recipient]].
       bitchatRumor = UnsignedEvent(
         pubkey: me,
         createdAt: rumor.createdAt,
         kind: 14,
-        tags: const [
-          ['x', nymMessageId],
-        ],
+        tags: const [],
         content: encoded.content,
       );
     }
     await svc.publishPM(
       rumor: rumor,
+      settings: MessagingSettings(
+        dmForwardSecrecyEnabled: expiration != null,
+        dmTtlSeconds: expiration != null ? 3600 : 0,
+      ),
       recipientPubkey: peer,
       bitchatRumor: bitchatRumor,
       sendNymWrap: plan.nym,
@@ -230,24 +235,55 @@ void main() {
           && e.tags.firstWhere((t) => t[0] == 'p')[1] == peer), isEmpty);
     });
 
-    test('both copies of one message share an x tag', () async {
+    // --- Bitchat's own envelope guards -------------------------------------
+    // Transliterated from bitchat's `NostrProtocol.swift decryptPrivateMessage`
+    // as of upstream e9275cb (v1.7.1, 2026-07-26), which hardened validation. A
+    // wrap failing ANY of these is dropped as malformed on their side, silently
+    // — which is what a user sees as "they never got it". Our own decoder
+    // cannot catch it: it accepts whatever we produce.
+    Future<String?> bitchatAccepts(NostrEvent wrap) async {
+      String t(List<List<String>> x) => jsonEncode(x);
+      // step 0: the gift wrap's tags must be EXACTLY [["p", recipient]].
+      if (t(wrap.tags) != t([['p', peer]])) return 'wrap tags: ${t(wrap.tags)}';
+      final opened = await giftwrap.unwrapGiftWrap(wrap, [
+        giftwrap.classicalCandidate(skPeer, bitchat: true),
+      ]);
+      if (opened == null) return 'does not decrypt';
+      // step 2: the seal carries no tags.
+      if (t(opened.seal.tags) != '[]') return 'seal tags: ${t(opened.seal.tags)}';
+      // step 4: validInnerMessageTags — empty, or exactly [["p", recipient]].
+      final rt = (opened.rumor['tags'] as List)
+          .map((e) => (e as List).map((x) => x as String).toList())
+          .toList();
+      if (t(rt) != '[]' && t(rt) != t([['p', peer]])) return 'rumor tags: ${t(rt)}';
+      return null;
+    }
+
+    test('a MESSAGE passes every one of Bitchat 1.7.1 envelope checks',
+        () async {
       final rec = await send();
-      final ids = <String?>[];
-      for (final ev in rec.dmCalls) {
-        if (ev.tags.firstWhere((t) => t[0] == 'p')[1] != peer) continue;
-        final opened = await giftwrap.unwrapGiftWrap(ev, [
-          giftwrap.classicalCandidate(skPeer,
-              bitchat: ev.content.startsWith('v2:')),
-        ]);
-        final tags = (opened!.rumor['tags'] as List)
-            .map((t) => (t as List).map((e) => e as String).toList())
-            .toList();
-        ids.add(tags.firstWhere((t) => t[0] == 'x', orElse: () => ['x', ''])[1]);
-      }
-      expect(ids, hasLength(2));
-      expect(ids[0], isNotEmpty);
-      expect(ids[0], ids[1],
-          reason: 'a reaction on either copy must match the other');
+      final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
+      expect(await bitchatAccepts(wrap), isNull);
+    });
+
+    // Named so a well-meaning re-add of the x tag fails right here.
+    test('the bitchat rumor carries NO tags at all', () async {
+      final rec = await send();
+      final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
+      final opened = await giftwrap.unwrapGiftWrap(wrap, [
+        giftwrap.classicalCandidate(skPeer, bitchat: true),
+      ]);
+      expect(opened!.rumor['tags'], isEmpty,
+          reason: 'an x tag here is what stopped Bitchat 1.7.1 accepting us');
+    });
+
+    test('and the bitchat wrap carries nothing but its p tag', () async {
+      // With disappearing messages ON, an expiration tag on the wrap fails
+      // Bitchat's exact-shape check — this asserts we never add one.
+      final rec = await send(expiration: 1787660000);
+      final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
+      expect(jsonEncode(wrap.tags), jsonEncode([['p', peer]]));
+      expect(await bitchatAccepts(wrap), isNull);
     });
   });
 
