@@ -87,7 +87,6 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   final TextEditingController _pqRootLink = TextEditingController();
   String? _pqRootLinkStatus;
   bool _pqRootLinking = false;
-  bool _pubkeyOpen = false; // full-hex pubkey slideout
   bool _saving = false;
 
   /// Per-surface upload caps, mirroring the PWA nick-edit avatar/banner guards
@@ -241,7 +240,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
           border: Border(bottom: BorderSide(color: c.glassBorder)),
         ),
         child: Text(
-          tr("Change Nym's Details").toUpperCase(),
+          tr("View or Edit Nym's Details").toUpperCase(),
           style: TextStyle(
             color: c.primary,
             fontSize: 22,
@@ -306,24 +305,16 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               ),
             ),
             const SizedBox(width: 8),
-            // `.nym-suffix-clickable` (index.html:1159) — tap to view the full
-            // hex pubkey.
-            Tooltip(
-              message: tr('Click to view full pubkey'),
-              child: InkWell(
-                onTap: () => setState(() => _pubkeyOpen = !_pubkeyOpen),
-                borderRadius: NymRadius.rxs,
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                  child: Text(
-                    _suffix,
-                    style: TextStyle(
-                      color: c.primary,
-                      fontFamily: 'monospace',
-                      fontSize: 13,
-                    ),
-                  ),
+            // The start of the pubkey, shown in full in the panel below —
+            // nothing to tap for, so nothing that looks tappable.
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              child: Text(
+                _suffix,
+                style: TextStyle(
+                  color: c.primary,
+                  fontFamily: 'monospace',
+                  fontSize: 13,
                 ),
               ),
             ),
@@ -336,11 +327,12 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             style: TextStyle(color: c.textDim, fontSize: 11),
           ),
         ),
-        if (_pubkeyOpen) _pubkeySlideout(c),
+        _pubkeySlideout(c),
         _hint(
           c,
-          tr('Your ephemeral pseudonym nickname for this session. The # and four '
-              'characters identify this Nym\'s pubkey.'),
+          tr('Your ephemeral pseudonym nickname for this session. The '
+              'characters after the # are the start of your public key, shown '
+              'in full below.'),
         ),
       ],
     );
@@ -372,9 +364,12 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                   color: c.text, fontSize: 12, fontWeight: FontWeight.w600)),
           const SizedBox(height: 6),
           Text(
-            tr('This is your public key — a unique identifier derived from your '
-                'keypair. Share it so others can find and verify this Nym. It is '
-                'safe to share (unlike your private key).'),
+            tr('A "pubkey" aka "public key" is one half of a keypair: your '
+                'public key identifies you to everyone, like a username, while '
+                'your private key proves you are really you, like a password. '
+                'Others use this pubkey to find you on Nymchat, and you use '
+                'theirs to find them. The same key has two spellings — npub '
+                'and hex — and they are interchangeable.'),
             style: TextStyle(color: c.textDim, fontSize: 11, height: 1.4),
           ),
           const SizedBox(height: 8),
@@ -393,7 +388,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               const SizedBox(width: 8),
               _smallButton(
                 c,
-                tr('Copy'),
+                isNpub ? tr('Copy npub') : tr('Copy hex pubkey'),
                 () => _copyToClipboard(
                     pk, isNpub ? tr('npub copied') : tr('Pubkey copied')),
               ),
@@ -402,6 +397,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 c,
                 isNpub ? tr('Show hex') : tr('Show npub'),
                 _togglePubkeyFormat,
+                icon: NymIcons.ctxSwapFormat,
               ),
             ],
           ),
@@ -932,7 +928,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   }
 
   Widget _smallButton(NymColors c, String label, VoidCallback onTap,
-      {bool danger = false}) {
+      {bool danger = false, String? icon}) {
+    final fg = danger ? c.danger : c.text;
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -944,12 +941,15 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             color: danger ? c.danger.withValues(alpha: 0.4) : c.glassBorder,
           ),
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: danger ? c.danger : c.text,
-            fontSize: 12,
-          ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              NymSvgIcon(icon, size: 12, color: fg),
+              const SizedBox(width: 5),
+            ],
+            Text(label, style: TextStyle(color: fg, fontSize: 12)),
+          ],
         ),
       ),
     );
