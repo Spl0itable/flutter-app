@@ -1,0 +1,294 @@
+// What actually goes on the wire when a PM is sent.
+//
+// Every other test around this checks the send PLAN — an object describing
+// what should happen. That is how "Bitchat users receive nothing" survived
+// three rounds of fixes: a plan test asserted the broken behaviour, and the
+// plan is not what users notice. This drives the REAL `publishPM` against a
+// recording transport and looks at the events, then opens the Bitchat copy the
+// way a Bitchat client would.
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:nym_bar/core/crypto/bitchat.dart' as bitchat;
+import 'package:nym_bar/core/crypto/gift_wrap.dart' as giftwrap;
+import 'package:nym_bar/core/crypto/keys.dart' as keys;
+import 'package:nym_bar/core/crypto/pq.dart' as pq;
+import 'package:nym_bar/features/identity/pq_registry.dart';
+import 'package:nym_bar/models/nostr_event.dart';
+import 'package:nym_bar/services/nostr/event_signer.dart';
+import 'package:nym_bar/services/nostr/identity_service.dart';
+import 'package:nym_bar/services/nostr/nostr_service.dart';
+import 'package:nym_bar/services/relay/relay_message.dart';
+import 'package:nym_bar/services/relay/relay_pool.dart';
+import 'package:nym_bar/services/relay/relay_stats.dart';
+
+void main() {
+  final skMe = keys.generatePrivateKey();
+  final skPeer = keys.generatePrivateKey();
+  final me = keys.getPublicKeyHex(skMe);
+  final peer = keys.getPublicKeyHex(skPeer);
+  final peerKem = pq.pqKeypairFromPrivkey(skPeer, 0);
+
+  /// Everything `_publishDualPm` does between deciding and publishing, so the
+  /// test exercises the same construction the app does.
+  Future<_RecordingTransport> send({
+    Uint8List? recipientKemKey,
+    bool layered = true,
+    bool proven = false,
+    bool knownBitchat = false,
+    bool knownNym = false,
+    String content = 'hello from nymchat',
+  }) async {
+    final rec = _RecordingTransport();
+    final svc = NostrService(
+      identity: Identity(pubkey: me, privkey: skMe, nym: 'me#0001'),
+      signer: LocalSigner(skMe),
+      pool: rec,
+    );
+    const nymMessageId = 'shared-message-id';
+    final rumor = UnsignedEvent(
+      pubkey: me,
+      createdAt: 1700000000,
+      kind: 14,
+      tags: const [
+        ['x', nymMessageId],
+      ],
+      content: content,
+    );
+    final plan = PqPmPlan.decide(
+      recipientKemKey: recipientKemKey,
+      recipientAcceptsLayered: layered,
+      provenNymchat: proven,
+      knownBitchat: knownBitchat,
+      knownNym: knownNym,
+    );
+    UnsignedEvent? bitchatRumor;
+    if (plan.bitchat) {
+      final encoded = bitchat.encodeBitchatMessage(rumor.content, me,
+          recipientPubkey: peer);
+      bitchatRumor = UnsignedEvent(
+        pubkey: me,
+        createdAt: rumor.createdAt,
+        kind: 14,
+        tags: const [
+          ['x', nymMessageId],
+        ],
+        content: encoded.content,
+      );
+    }
+    await svc.publishPM(
+      rumor: rumor,
+      recipientPubkey: peer,
+      bitchatRumor: bitchatRumor,
+      sendNymWrap: plan.nym,
+      recipientKemPublicKey: plan.kemPublicKey,
+      recipientLayered: plan.layered,
+    );
+    return rec;
+  }
+
+  /// The transport each published wrap used, and who it was addressed to.
+  List<String> transports(_RecordingTransport rec) => rec.dmCalls.map((ev) {
+        final c = ev.content;
+        final kind = c.startsWith('pq2.')
+            ? 'pq2'
+            : c.startsWith('pq1.')
+                ? 'pq1'
+                : c.startsWith('v2:')
+                    ? 'bitchat'
+                    : 'nip44';
+        final to = ev.tags.firstWhere((t) => t.isNotEmpty && t[0] == 'p',
+            orElse: () => const ['p', '?'])[1];
+        return '$kind->${to == me ? 'self' : to == peer ? 'peer' : '?'}';
+      }).toList();
+
+  List<String> toPeer(_RecordingTransport rec) =>
+      transports(rec).where((t) => t.endsWith('->peer')).toList();
+
+  group('what a 1:1 PM actually puts on the wire', () {
+    test('no announcement -> Bitchat + NIP-44', () async {
+      expect(toPeer(await send()), ['bitchat->peer', 'nip44->peer']);
+    });
+
+    // Classification from traffic must not move the verdict in either
+    // direction — it is inference, and the announcement is signed.
+    test('...whatever the peer is classified as', () async {
+      for (final flags in const [
+        (b: true, n: false),
+        (b: false, n: true),
+        (b: true, n: true),
+      ]) {
+        expect(toPeer(await send(knownBitchat: flags.b, knownNym: flags.n)),
+            ['bitchat->peer', 'nip44->peer'],
+            reason: 'knownBitchat=${flags.b} knownNym=${flags.n}');
+      }
+    });
+
+    test('live announcement with pk2 -> pq2 alone', () async {
+      expect(toPeer(await send(recipientKemKey: peerKem.publicKey)),
+          ['pq2->peer']);
+    });
+
+    test('live announcement, pq1 key only -> NIP-44 alone', () async {
+      expect(
+          toPeer(await send(recipientKemKey: peerKem.publicKey, layered: false)),
+          ['nip44->peer']);
+    });
+
+    test('live announcement carrying no key -> NIP-44 alone', () async {
+      expect(toPeer(await send(proven: true)), ['nip44->peer']);
+    });
+
+    // A peer who moved from Nymchat to Bitchat, or who runs both. Their
+    // announcement is live and would otherwise silence us for its whole
+    // seven-day TTL.
+    test('heard bitchat + live pk2 announcement -> Bitchat + NIP-44', () async {
+      expect(
+          toPeer(await send(
+              recipientKemKey: peerKem.publicKey, knownBitchat: true)),
+          ['bitchat->peer', 'nip44->peer']);
+    });
+
+    test('heard bitchat + keyless announcement -> Bitchat + NIP-44', () async {
+      expect(toPeer(await send(proven: true, knownBitchat: true)),
+          ['bitchat->peer', 'nip44->peer']);
+    });
+
+    test('a self-copy is archived for our other devices either way', () async {
+      expect(transports(await send()).where((t) => t.endsWith('->self')),
+          isNotEmpty);
+      expect(
+          transports(await send(recipientKemKey: peerKem.publicKey))
+              .where((t) => t.endsWith('->self')),
+          isNotEmpty);
+    });
+  });
+
+  group('the Bitchat copy, opened as a Bitchat client would', () {
+    test('a Bitchat peer gets a wrap it can actually read', () async {
+      final rec = await send();
+      final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
+
+      expect(wrap.kind, 1059);
+      expect(wrap.tags.firstWhere((t) => t[0] == 'p')[1], peer);
+      expect(wrap.pubkey, isNot(me),
+          reason: 'the wrap is signed by a throwaway key, not by us');
+
+      final opened = await giftwrap.unwrapGiftWrap(wrap, [
+        giftwrap.classicalCandidate(skPeer, bitchat: true),
+      ]);
+      expect(opened, isNotNull);
+      expect(opened!.isBitchat, isTrue);
+
+      final inner = opened.rumor['content'] as String;
+      expect(inner, startsWith('bitchat1:'));
+
+      // Decode the packet the way the Bitchat app does, so a change to the
+      // header or TLV layout fails here rather than in someone's chat.
+      final b = base64Url.decode(base64Url
+          .normalize(inner.substring('bitchat1:'.length)));
+      expect(b[0], 0x01, reason: 'version 1');
+      expect(b[1], 0x11, reason: 'type NOISE_ENCRYPTED');
+      expect(b[11] & 0x01, 1, reason: 'HAS_RECIPIENT flag');
+      final payloadLen = (b[12] << 8) | b[13];
+      expect(_hex(b.sublist(14, 22)), me.substring(0, 16),
+          reason: 'sender id');
+      expect(_hex(b.sublist(22, 30)), peer.substring(0, 16),
+          reason: 'recipient id');
+
+      final payload = b.sublist(30, 30 + payloadLen);
+      expect(payload[0], 0x01, reason: 'PRIVATE_MESSAGE');
+      final tlv = <int, String>{};
+      var i = 1;
+      while (i < payload.length) {
+        final type = payload[i];
+        final long = (type & 0x80) != 0;
+        final len = long ? ((payload[i + 1] << 8) | payload[i + 2]) : payload[i + 1];
+        final start = i + (long ? 3 : 2);
+        tlv[type & 0x7f] = utf8.decode(payload.sublist(start, start + len));
+        i = start + len;
+      }
+      expect(tlv[1], 'hello from nymchat',
+          reason: 'the plaintext comes back out intact');
+      expect(tlv[0], hasLength(36), reason: 'a bitchat message id');
+    });
+
+    test('an announced peer we have heard bitchat from still gets a readable wrap',
+        () async {
+      final rec = await send(
+          recipientKemKey: peerKem.publicKey, knownBitchat: true);
+      final wrap = rec.dmCalls.firstWhere((e) => e.content.startsWith('v2:'));
+      final opened = await giftwrap.unwrapGiftWrap(wrap, [
+        giftwrap.classicalCandidate(skPeer, bitchat: true),
+      ]);
+      expect(opened, isNotNull);
+      expect((opened!.rumor['content'] as String), startsWith('bitchat1:'));
+      // And not ALSO post-quantum: a readable copy beside it protects nothing.
+      expect(rec.dmCalls.where((e) => e.content.startsWith('pq2.')
+          && e.tags.firstWhere((t) => t[0] == 'p')[1] == peer), isEmpty);
+    });
+
+    test('both copies of one message share an x tag', () async {
+      final rec = await send();
+      final ids = <String?>[];
+      for (final ev in rec.dmCalls) {
+        if (ev.tags.firstWhere((t) => t[0] == 'p')[1] != peer) continue;
+        final opened = await giftwrap.unwrapGiftWrap(ev, [
+          giftwrap.classicalCandidate(skPeer,
+              bitchat: ev.content.startsWith('v2:')),
+        ]);
+        final tags = (opened!.rumor['tags'] as List)
+            .map((t) => (t as List).map((e) => e as String).toList())
+            .toList();
+        ids.add(tags.firstWhere((t) => t[0] == 'x', orElse: () => ['x', ''])[1]);
+      }
+      expect(ids, hasLength(2));
+      expect(ids[0], isNotEmpty);
+      expect(ids[0], ids[1],
+          reason: 'a reaction on either copy must match the other');
+    });
+  });
+}
+
+String _hex(List<int> b) =>
+    b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+/// A PoolTransport that records instead of publishing.
+class _RecordingTransport implements PoolTransport {
+  final List<NostrEvent> plainCalls = [];
+  final List<NostrEvent> dmCalls = [];
+
+  @override
+  void connectAll() {}
+  @override
+  void updateGeoRelays(List<String> geoRelayUrls) {}
+  @override
+  Future<void> disconnectAll() async {}
+  @override
+  int get connectedCount => 0;
+  @override
+  Set<String> get connectedRelayUrls => const {};
+  @override
+  RelayStats get stats => RelayStats();
+  @override
+  Future<int> publish(NostrEvent event) async {
+    plainCalls.add(event);
+    return 1;
+  }
+
+  @override
+  Future<int> publishDm(NostrEvent event) async {
+    dmCalls.add(event);
+    return 1;
+  }
+
+  @override
+  Future<int> publishGeo(NostrEvent event, List<String> closestRelayUrls) async
+      => 1;
+  @override
+  Subscription subscribe(List<NostrFilter> filters, {String? subId}) =>
+      throw UnimplementedError();
+  @override
+  void closeSubscription(Subscription sub) {}
+}
