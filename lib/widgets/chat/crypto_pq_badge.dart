@@ -222,14 +222,10 @@ const String kPqPartialCount = '%d of %d members';
 const String kPqPartialSome = 'some members';
 const String kPqLegacyTitle = 'Quantum-resistant, legacy key';
 const String kPqLegacyBody =
-    "This message's key exchange combined NIP-44 secp256k1 ECDH with "
-    "ML-KEM-768, but at least one side's ML-KEM key was derived from its "
-    "Nostr identity key rather than from independent entropy. A quantum "
-    "computer that recovers that identity key reproduces the ML-KEM key with "
-    "it, so this message does not survive the attack it was meant to survive. "
-    "Messages already sent stay this way — the ciphertext exists and cannot "
-    "be re-sealed. New messages become fully quantum-resistant once both "
-    "sides hold a post-quantum recovery code.";
+    "The hybrid exchange ran, but one side's ML-KEM key came from its Nostr "
+    "identity key rather than from a recovery code. A quantum computer that "
+    "recovers the identity key recovers this one with it. New messages "
+    "upgrade automatically once both sides hold a code.";
 const String kPqClassicalTitle = 'Not quantum-resistant';
 const String kPqClassicalBody =
     'This message is end-to-end encrypted with the standard NIP-44 secp256k1 '

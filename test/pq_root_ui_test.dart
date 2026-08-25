@@ -80,6 +80,89 @@ void main() {
     });
   });
 
+  group('the post-quantum notice', () {
+    final gate =
+        File('lib/features/onboarding/boot_gate.dart').readAsStringSync();
+    final tutorial = File('lib/features/onboarding/tutorial_overlay.dart')
+        .readAsStringSync();
+
+    // Two explanations of the same thing back to back is worse than one.
+    test('it is suppressed while the tutorial is still ahead', () {
+      expect(gate.contains('if (!seen) {'), isTrue);
+      expect(
+          gate.contains(
+              'unawaited(ref.read(nostrControllerProvider).dismissPqUpgradeNotice())'),
+          isTrue,
+          reason: 'dismissed, not deferred, so the tour never shows it twice');
+    });
+
+    test('the tutorial is what covers it instead', () {
+      expect(tutorial.contains('post-quantum recovery code'), isTrue);
+      expect(tutorial.contains('nympq1'), isTrue);
+      // The whole point of the code is that losing it is unrecoverable.
+      expect(tutorial.contains('cannot be recovered'), isTrue);
+    });
+
+    test('it fires only once', () {
+      expect(gate.contains('if (_pqNoticeShown) return;'), isTrue);
+      expect(gate.contains('await ctrl.dismissPqUpgradeNotice();'), isTrue);
+    });
+
+    // A returning user on a new device is not covered, and telling them they
+    // are would be false.
+    test('a device needing the code is told to link, not that it is covered',
+        () {
+      expect(gate.contains('final linkNeeded = ctrl.pqRootLinkNeeded;'), isTrue);
+      expect(gate.contains('Add your post-quantum recovery code'), isTrue);
+      expect(gate.contains('this device does not have it yet'), isTrue);
+    });
+
+    test('and the timer is cancelled on dispose', () {
+      expect(gate.contains('_pqNoticeDelay?.cancel();'), isTrue);
+    });
+  });
+
+  // The modal is the "view" half as much as the "edit" half, so the pubkey is
+  // read on open rather than discovered by tapping four characters.
+  group('the Nym details modal', () {
+    test('it is titled for viewing as well as editing', () {
+      expect(modal.contains("View or Edit Nym's Details"), isTrue);
+      expect(modal.contains("Change Nym's Details"), isFalse);
+    });
+
+    test('the pubkey panel is open, not behind a tap', () {
+      expect(modal.contains('_pubkeySlideout(c),'), isTrue);
+      expect(modal.contains('if (_pubkeyOpen)'), isFalse);
+      expect(modal.contains('_pubkeyOpen'), isFalse,
+          reason: 'the toggle state is gone entirely, not just unused');
+    });
+
+    test('the suffix no longer advertises a reveal that does not exist', () {
+      expect(modal.contains('Click to view full pubkey'), isFalse);
+      expect(modal.contains('Click the #'), isFalse);
+    });
+
+    test('copy and swap read the same as the context menu', () {
+      expect(modal.contains("tr('Copy npub')"), isTrue);
+      expect(modal.contains("tr('Copy hex pubkey')"), isTrue);
+      expect(modal.contains("tr('Show hex')"), isTrue);
+      expect(modal.contains("tr('Show npub')"), isTrue);
+    });
+
+    test('the swap button carries the same glyph as the context-menu row', () {
+      expect(modal.contains('icon: NymIcons.ctxSwapFormat'), isTrue);
+      final icons = File('lib/widgets/nym_icons.dart').readAsStringSync();
+      expect(icons.contains('ctxSwapFormat'), isTrue);
+      // Same path data as the PWA's #ctxTogglePubkeyFormat.
+      expect(icons.contains('M 2 6 L 12 6'), isTrue);
+    });
+
+    test('the format switch still writes the shared preference', () {
+      expect(modal.contains('writePubkeyFormat(prefs, next)'), isTrue,
+          reason: 'one preference, so the context menu agrees');
+    });
+  });
+
   group('every new string is translatable', () {
     // A string missing from the catalog stays English in every other language,
     // silently, and only in this one panel.

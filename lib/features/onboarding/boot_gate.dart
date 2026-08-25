@@ -133,11 +133,14 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
   /// Delay timers (PWA's `setTimeout`s), cancelled on dispose so a torn-down
   /// shell never leaves them pending.
   Timer? _tutorialDelay;
+  Timer? _pqNoticeDelay;
+  bool _pqNoticeShown = false;
   Timer? _encryptPromptDelay;
 
   @override
   void dispose() {
     _tutorialDelay?.cancel();
+    _pqNoticeDelay?.cancel();
     _encryptPromptDelay?.cancel();
     super.dispose();
   }
@@ -183,6 +186,56 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     _encryptPromptDelay = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) unawaited(_maybePromptEncryptAtRest());
     });
+
+    // The post-quantum notice. Suppressed when the tutorial is still ahead —
+    // the tour covers the same ground beside the nsec, and two explanations of
+    // the same thing back to back is worse than one. Dismissed rather than
+    // deferred, so taking the tour never means seeing it twice.
+    if (!seen) {
+      unawaited(ref.read(nostrControllerProvider).dismissPqUpgradeNotice());
+    } else {
+      _pqNoticeDelay = Timer(const Duration(milliseconds: 3500), () {
+        if (mounted) unawaited(_maybeShowPqNotice());
+      });
+    }
+  }
+
+  /// The one-time post-quantum notice.
+  ///
+  /// The copy branches on what this device actually needs: one that holds the
+  /// root is told to save the code, one that does not is told to link, because
+  /// for that device nothing is protected until it does and saying "you're
+  /// covered" would be false.
+  Future<void> _maybeShowPqNotice() async {
+    if (_pqNoticeShown) return;
+    final ctrl = ref.read(nostrControllerProvider);
+    if (!ctrl.pqUpgradeNoticePending) return;
+    _pqNoticeShown = true;
+    await ctrl.dismissPqUpgradeNotice();
+    if (!mounted) return;
+    final linkNeeded = ctrl.pqRootLinkNeeded;
+    await showAppAlert(
+      context,
+      linkNeeded
+          ? tr('This account already has a post-quantum recovery code, and '
+              'this device does not have it yet.\n\nUntil you add it, this '
+              'device keeps working normally but cannot read the '
+              'quantum-resistant messages your other devices can. Open your '
+              'Nym\u2019s details and paste the nympq1… code from a device '
+              'that has it.')
+          : tr('Your private messages and group chats with other Nymchat '
+              'users are now encrypted with an added post-quantum key '
+              'exchange (ML-KEM-768), so traffic recorded today can\u2019t be '
+              'decrypted later by a quantum computer.\n\nThis uses a recovery '
+              'code, not your nsec. Save your nympq1… code alongside your '
+              'nsec — you will need it to read these messages on another '
+              'device, and if every device holding it is lost, they cannot be '
+              'recovered. You will find it in your Nym\u2019s details.'),
+      title: linkNeeded
+          ? tr('Add your post-quantum recovery code')
+          : tr('Quantum-resistant encryption is on'),
+      okLabel: tr('Got it'),
+    );
   }
 
   /// Shows the "Protect your identity here too?" prompt when

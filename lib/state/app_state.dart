@@ -4807,6 +4807,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// wraps. Without this the badge waits for our own self-copy to round-trip
   /// and be unwrapped, so a sent message reads as classical until the app is
   /// restarted and the conversation reopened.
+  /// Upgrades a message's root verdict once the peer's announcement lands.
+  /// Only ever upgrades: a definite legacy verdict is never revisited.
+  void markMessagePqRoot(String nymMessageId) {
+    for (final list in state.messages.values) {
+      final idx = list.indexWhere((m) => m.nymMessageId == nymMessageId);
+      if (idx < 0) continue;
+      if (list[idx].pqRoot) return;
+      list[idx].pqRoot = true;
+      _scheduleEmit();
+      return;
+    }
+  }
+
   void markOwnMessagePq(String nymMessageId,
       {bool? pqEncrypted, bool? pqRoot, ({int pq, int total})? coverage}) {
     for (final list in state.messages.values) {
