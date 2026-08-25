@@ -4976,16 +4976,28 @@ class NostrController {
     // post-quantum replaces rather than accompanies the others.
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final pqOn = PqPolicy.enabled(privkey: identity.privkey, mode: _pqMode);
-    final plan = PqPmPlan.decide(
-      recipientKemKey:
-          _pqRegistry.keyFor(recipientPubkey, nowSec: nowSec, enabled: pqOn),
-      knownBitchat: _bitchatUsers.contains(recipientPubkey),
-      knownNym: _nymUsers.contains(recipientPubkey),
-      provenNymchat:
-          _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
-      recipientAcceptsLayered: _pqRegistry.acceptsLayered(recipientPubkey,
-          nowSec: nowSec, enabled: pqOn),
-    );
+    // Deciding the format is an optimization. Delivering the message is not, so
+    // nothing that goes wrong in here may take the send with it. The fallback
+    // is the safe end of every axis — both formats, no post-quantum — which is
+    // what an unknown peer gets anyway. (The PWA hit exactly this: a throw in
+    // its plan aborted the send before any wrap was built, for every
+    // recipient, with nothing visible to the user.)
+    PqPmPlan plan;
+    try {
+      plan = PqPmPlan.decide(
+        recipientKemKey:
+            _pqRegistry.keyFor(recipientPubkey, nowSec: nowSec, enabled: pqOn),
+        knownBitchat: _bitchatUsers.contains(recipientPubkey),
+        knownNym: _nymUsers.contains(recipientPubkey),
+        provenNymchat:
+            _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
+        recipientAcceptsLayered: _pqRegistry.acceptsLayered(recipientPubkey,
+            nowSec: nowSec, enabled: pqOn),
+      );
+    } catch (e) {
+      debugPrint('[PQ] send plan failed, falling back to dual-send: $e');
+      plan = const PqPmPlan(kemPublicKey: null, bitchat: true, nym: true);
+    }
 
     UnsignedEvent? bitchatRumor;
     if (plan.bitchat) {
