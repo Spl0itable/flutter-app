@@ -1387,7 +1387,16 @@ class StorageSync {
   Future<bool> _setSettingsCategory(String category, String plaintext,
       {bool allowPq = true}) async {
     try {
-      final hash = _sha256Hex('$_pubkey|$plaintext');
+      // The mode rides in the hash basis, exactly as the PWA does it, so a
+      // policy flip is a content change. Without it a row stranded under the
+      // old policy — sealed classically before this device linked, or sealed
+      // hybrid while another device cannot open it — keeps matching the stored
+      // hash and is never rewritten in the form that device can read. That is
+      // why settings stayed stuck after linking: the plaintext had not
+      // changed, so nothing was republished under the new key.
+      final selfKem = allowPq ? await _pqSelfKeyCandidates() : const [];
+      final mode = (allowPq && _pqSealToSelf && selfKem.isNotEmpty) ? 'pq' : 'c';
+      final hash = _sha256Hex('$_pubkey|$mode|$plaintext');
       final hashKey = '${_pubkey}_$category';
       if (_lastSettingsHash[hashKey] == hash) return false; // unchanged
 
@@ -2580,6 +2589,13 @@ class StorageSync {
       return null;
     }
   }
+
+  /// Forgets the per-category content hashes, so the next write is not
+  /// short-circuited as "unchanged". Needed after a link: rows this device
+  /// could not open must be re-read and re-applied, and anything it writes
+  /// afterwards has to actually go out even if the plaintext is identical to
+  /// what it last published under the wrong key.
+  void clearSettingsHashes() => _lastSettingsHash.clear();
 
   /// Reads either form. A blob written before this device had a post-quantum
   /// key, or by a device signing with an extension, is still plain NIP-44 — the

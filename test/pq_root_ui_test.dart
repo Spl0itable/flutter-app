@@ -334,6 +334,61 @@ void main() {
     });
   });
 
+  // The device that most needs the prompt is a FRESH install joining an
+  // account that already has a root: no upgrade, so the upgrade notice is
+  // never armed, and the screen telling it to link never appeared.
+  group('a locked device is prompted even without an upgrade', () {
+    final ctrl = File('lib/state/nostr_controller.dart').readAsStringSync();
+    final gate = File('lib/features/onboarding/boot_gate.dart').readAsStringSync();
+
+    test('the link prompt is its own signal, not the upgrade one', () {
+      expect(ctrl.contains('bool get pqRootLinkPromptPending'), isTrue);
+      expect(ctrl.contains('if (!pqRootLinkNeeded) return false;'), isTrue);
+      expect(ctrl.contains('nym_pq_link_prompt_\$self'), isTrue,
+          reason: 'keyed per account, so switching identities asks again');
+    });
+
+    test('and either signal opens the notice', () {
+      expect(
+          gate.contains(
+              'if (!ctrl.pqUpgradeNoticePending && !linkPending) return;'),
+          isTrue);
+      expect(gate.contains('await ctrl.dismissPqRootLinkPrompt();'), isTrue);
+    });
+
+    test('it re-checks after the settings read could have settled', () {
+      expect(gate.contains('_pqNoticeRetry'), isTrue,
+          reason: 'the lock is only known once section 6 settles');
+      expect(gate.contains('_pqNoticeRetry?.cancel();'), isTrue);
+    });
+  });
+
+  group('linking verifies against the record, not our epoch', () {
+    final ctrl = File('lib/state/nostr_controller.dart').readAsStringSync();
+    final link = ctrl.substring(
+        ctrl.indexOf('Future<bool> linkPqRootFromCode'),
+        ctrl.indexOf('Future<void> _reloadSettingsAfterLink'));
+
+    // The record is the account's own statement of which root it uses: exact,
+    // epoch-free, and always present on a device that needs linking.
+    test('the fingerprint is the primary check', () {
+      expect(link.contains('record.matches(root)'), isTrue);
+      expect(link.contains('_storageSync?.pqRootRecord'), isTrue);
+    });
+
+    test('and the announced-key fallback uses the announcement own epoch', () {
+      expect(link.contains('_pqRegistry.epochFor(self!)'), isTrue,
+          reason: 'our counter is not the publishing device\'s counter');
+    });
+
+    test('a successful link clears the lock and re-reads settings', () {
+      expect(link.contains('_pqRootLocked = false;'), isTrue);
+      expect(link.contains('_reloadSettingsAfterLink()'), isTrue);
+      expect(ctrl.contains('sync.clearSettingsHashes();'), isTrue,
+          reason: 'an identical blob must still be republished');
+    });
+  });
+
   group('every new string is translatable', () {
     // A string missing from the catalog stays English in every other language,
     // silently, and only in this one panel.
