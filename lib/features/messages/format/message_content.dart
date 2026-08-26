@@ -24,7 +24,7 @@ import '../../../state/app_state.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
 import '../../../widgets/chat/messages_list.dart'
-    show messageListScrollerProvider;
+    show MessageListScroller, messageListScrollerProvider;
 import '../../../widgets/common/app_dialog.dart';
 import '../../../widgets/common/nym_avatar.dart';
 import '../../../widgets/context_menu/context_menu_actions.dart';
@@ -2452,9 +2452,40 @@ class _QuoteBox extends ConsumerWidget {
     );
     if (target == null) return; // not in the loaded set → bail (PWA parity)
     final scroller = ref.read(messageListScrollerProvider(key));
-    if (scroller.scrollToMessage(target.id)) {
-      ref.read(flashedMessageProvider.notifier).flash(target.id);
+    final flash = ref.read(flashedMessageProvider.notifier);
+    // A quote tapped inside an OPEN thread means "show me the original in the
+    // conversation" — the thread list only holds the root and its replies, so
+    // leave the thread first and jump once the conversation list is back. Both
+    // handles are read up front: this widget is disposed by that close.
+    final open = ref.read(activeThreadProvider);
+    if (open != null && open.view.storageKey == key) {
+      ref.read(activeThreadProvider.notifier).state = null;
+      _jumpWhenBound(scroller, flash, target.id);
+      return;
     }
+    if (scroller.scrollToMessage(target.id)) flash.flash(target.id);
+  }
+
+  /// Retries the jump across a few frames: closing the thread view remounts the
+  /// conversation list, and [MessageListScroller] only rebinds its controller +
+  /// id→index map on that list's next build, so the first frame can still miss.
+  static void _jumpWhenBound(
+    MessageListScroller scroller,
+    FlashedMessageNotifier flash,
+    String id, [
+    int attempts = 8,
+  ]) {
+    WidgetsBinding.instance
+      ..addPostFrameCallback((_) {
+        if (scroller.scrollToMessage(id)) {
+          flash.flash(id);
+        } else if (attempts > 1) {
+          _jumpWhenBound(scroller, flash, id, attempts - 1);
+        }
+      })
+      // A post-frame callback only runs when a frame is actually scheduled;
+      // the retries would otherwise stall once the app goes idle.
+      ..scheduleFrame();
   }
 
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
