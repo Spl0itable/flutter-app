@@ -502,6 +502,13 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     return counts[threadKeyForMessage(m)] ?? 0;
   }
 
+  /// Whether tapping this message's body may open its thread view (threads
+  /// on, affordances allowed, and the row is a thread root or reply).
+  bool get _threadTapEligible =>
+      appThreadsEnabled &&
+      widget.showThreadAffordances &&
+      (message.threadRoot != null || threadEligibleRoot(message));
+
   /// The clickable "N replies" row shown under the reactions/zaps row on a
   /// thread root (the PWA's `.thread-indicator`). Opens the thread view.
   Widget _threadIndicator(BuildContext context, int count) {
@@ -900,10 +907,12 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     }
     // Threads: tapping the message body opens its thread view (links, media,
     // badges, author taps and long-presses all win the gesture arena first;
-    // ineligible rows stay silent).
-    if (appThreadsEnabled &&
-        widget.showThreadAffordances &&
-        (message.threadRoot != null || threadEligibleRoot(message))) {
+    // ineligible rows stay silent). IRC rows take the whole-row tap; in
+    // bubble mode the tap target is the bubble itself (wrapped inside
+    // [_buildBubble]) — the row spans the full width with the bubble aligned
+    // to one side, and the blank flex area beside it must not read as a
+    // message click.
+    if (!settings.useBubbles && _threadTapEligible) {
       final tappableRow = row;
       row = GestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -2020,7 +2029,21 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           alignment: sideAlign,
           // Key the rounded bubble (NOT the trailing reactions/translation/
           // receipt rows) so the group avatar can bottom-align to it.
-          child: KeyedSubtree(key: widget.bubbleAnchorKey, child: bubble),
+          // Threads: in bubble mode the tap-to-open-thread target is the
+          // bubble ITSELF — never the full-width row, whose blank flex space
+          // on either side of the bubble must stay inert (links, media,
+          // badges and long-presses inside still win the gesture arena).
+          child: KeyedSubtree(
+            key: widget.bubbleAnchorKey,
+            child: _threadTapEligible
+                ? GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => openMessageThread(ref, message,
+                        storageKey: widget.scrollKey, silent: true),
+                    child: bubble,
+                  )
+                : bubble,
+          ),
         ),
         // PM sent/delivered/read receipt (`.delivery-status`). The PWA emits it as
         // a TOP-LEVEL sibling AFTER `.message-content` (`messages.js:940`), and the
