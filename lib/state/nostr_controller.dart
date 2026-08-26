@@ -443,6 +443,9 @@ class NostrController {
       final settings = _ref.read(settingsProvider.notifier);
       appSpamFilterEnabled = settings.spamFilterEnabled;
       appSpamFilterAggressive = settings.spamFilterAggressive;
+      // Message threads (Slack-style). The settings toggle updates the flag
+      // live via SettingsController.setThreadsEnabled; this seeds boot.
+      appThreadsEnabled = _ref.read(settingsProvider).threadsEnabled;
       // The inbound PoW exclusion threshold. Unlike the spam flags this one DOES
       // have settings-modal UI, so it is refreshed on save too (_flushSettingsSync).
       appPowFilterBits = pow.normalizePowDifficulty(settings.powDifficulty);
@@ -3214,6 +3217,8 @@ class NostrController {
     final tags = _tags(rumor);
     final nymMessageId = _tagValue(tags, 'x');
     final ms = int.tryParse(_tagValue(tags, 'ms') ?? '') ?? 0;
+    // Thread reply marker: the root's shared nymMessageId (threads).
+    final threadRoot = _tagValue(tags, 'nymthread');
     final createdAtRaw = (rumor['created_at'] as num?)?.toInt() ?? 0;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final createdAt = createdAtRaw > nowSec + 60 ? nowSec : createdAtRaw;
@@ -3233,6 +3238,7 @@ class NostrController {
       conversationKey: GroupLogic.groupStorageKey(groupId),
       eventKind: EventKind.giftWrap,
       nymMessageId: nymMessageId,
+      threadRoot: threadRoot,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
       pqRoot: u.isPq && pqSealRootVerdict(senderPubkey) == true,
@@ -5170,7 +5176,7 @@ class NostrController {
   /// composer (after the `/` check) and by formatting/action commands whose
   /// output (e.g. `/me …`) must be sent verbatim even though it starts with a
   /// slash.
-  Future<void> _sendMessageContent(String content) async {
+  Future<void> _sendMessageContent(String content, {String? threadRoot}) async {
     final trimmed = content.trim();
     if (trimmed.isEmpty) return;
     // Every outgoing send marks us active + throttle-broadcasts presence
@@ -5183,6 +5189,16 @@ class NostrController {
     final view = state.view;
     _markDirty(view.storageKey);
 
+    // In a thread view the same composer replies into the thread: attach the
+    // open thread's root when it belongs to the conversation being sent to
+    // (never mis-thread a send after a view switch).
+    if (threadRoot == null) {
+      final at = _ref.read(activeThreadProvider);
+      if (at != null && at.view == view && appThreadsEnabled) {
+        threadRoot = at.rootId;
+      }
+    }
+
     // Transport routing: with no internet, an outgoing message goes over the
     // Bluetooth mesh instead of Nostr relays (and a DM to a mesh-only peer
     // always does). When online, everything — including #mesh — goes to Nostr.
@@ -5194,7 +5210,7 @@ class NostrController {
 
     if (view.kind == ViewKind.channel) {
       // Optimistic local echo with a temp `_optim_*` id (messages.js sendMessage).
-      final echo = appState.sendLocal(trimmed);
+      final echo = appState.sendLocal(trimmed, threadRoot: threadRoot);
       if (service == null || identity == null) return;
       final isGeo = state.channels
           .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
@@ -5210,6 +5226,7 @@ class NostrController {
           // Honor the user's Proof-of-Work Difficulty setting (clamped up to
           // the Nymchat floor by the service).
           powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
+          threadRoot: threadRoot,
         );
         // Swap the temp id for the real signed-event id IN PLACE and register
         // it so the relay echo is deduped — never shown twice (the PWA's
@@ -5260,17 +5277,24 @@ class NostrController {
         return;
       }
       final nymMessageId = PmLogic.generateSharedEventId();
-      final echo = appState.sendLocal(trimmed, nymMessageId: nymMessageId);
+      final echo = appState.sendLocal(trimmed,
+          nymMessageId: nymMessageId, threadRoot: threadRoot);
       if (service == null || identity == null) return;
       final base = PmLogic.buildPmRumor(
         selfPubkey: identity.pubkey,
         recipientPubkey: view.id,
         content: trimmed,
         nymMessageId: nymMessageId,
+        // Thread reply marker rides inside the encrypted rumor (threads).
+        extraTags: [
+          if (threadRoot != null && threadRoot.isNotEmpty)
+            ['nymthread', threadRoot],
+        ],
       );
-      // buildPmRumor has no extra-tag seam, so append the NIP-30 declarations
-      // for any known custom `:shortcode:` in the body to the rumor we just
-      // built (pms.js:313 spreads `...customEmojiTagsForContent(content)`).
+      // buildPmRumor's extra-tag seam carries the thread marker; append the
+      // NIP-30 declarations for any known custom `:shortcode:` in the body to
+      // the rumor we just built (pms.js:313 spreads
+      // `...customEmojiTagsForContent(content)`).
       final emojiTags = _ref
           .read(liveCustomEmojiProvider.notifier)
           .emojiTagsForContent(trimmed);
@@ -5327,7 +5351,8 @@ class NostrController {
       // group send, groups.js:1754-1758 / :1298).
       _afterSelfKeyRotation();
       final nymMessageId = GroupLogic.generateGroupId();
-      appState.sendLocal(trimmed, nymMessageId: nymMessageId);
+      appState.sendLocal(trimmed,
+          nymMessageId: nymMessageId, threadRoot: threadRoot);
       final rumor = GroupLogic.buildGroupMessageRumor(
         group: group,
         selfPubkey: identity.pubkey,
@@ -5337,8 +5362,11 @@ class NostrController {
         // NIP-30 declarations for any known custom `:shortcode:` in the body
         // (groups.js:1699 `tags.push(...customEmojiTagsForContent(content))`),
         // plus the owner's group-metadata piggyback (`_attachGroupMetaTags`) so
-        // members converge on the custom avatar/banner even from a D1 backfill.
+        // members converge on the custom avatar/banner even from a D1 backfill,
+        // and the thread-reply marker when replying in a thread.
         extraTags: [
+          if (threadRoot != null && threadRoot.isNotEmpty)
+            ['nymthread', threadRoot],
           ..._ref
               .read(liveCustomEmojiProvider.notifier)
               .emojiTagsForContent(trimmed),
@@ -10257,6 +10285,7 @@ class NostrController {
     str('chatLayout', c.setChatLayout);
     str('chatViewMode', c.setChatViewMode);
     boolean('columnsWallpaper', c.setColumnsWallpaper);
+    boolean('threadsEnabled', c.setThreadsEnabled);
     str('nickStyle', c.setNickStyle);
     str('wallpaperType', c.setWallpaperType);
     // Text size only applies within the PWA's accepted range (app.js:6310:
