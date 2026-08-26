@@ -838,6 +838,28 @@ class BotChatController extends StateNotifier<BotChatState> {
     try {
       final sk = _privkey;
       if (sk != null) {
+        // Hybrid post-quantum whenever the recipient announced a layered
+        // ML-KEM key — which the Nymbot worker now does (its keypair derives
+        // from the bot's own nympq1 root). Falls back to classical exactly
+        // like the canonical PM path; a lookup failure never blocks the send.
+        Uint8List? kemPk;
+        try {
+          kemPk = await _ref
+              .read(nostrControllerProvider)
+              .pqLayeredWrapKeyFor(recipientPubkey);
+        } catch (_) {
+          kemPk = null;
+        }
+        if (kemPk != null) {
+          // Awaited inside the try so a seal failure is caught here.
+          return await giftwrap.pq2Nip59Wrap(
+            rumor: rumor,
+            senderPrivkey: sk,
+            recipientPubkey: recipientPubkey,
+            recipientKemPublicKey: kemPk,
+            expiration: expiration,
+          );
+        }
         return giftwrap.nip59Wrap(
           rumor: rumor,
           senderPrivkey: sk,
@@ -871,8 +893,19 @@ class BotChatController extends StateNotifier<BotChatState> {
     if (sk == null) return;
     try {
       final wrap = NostrEvent.fromJson(wrapJson);
-      final unwrapped =
-          await giftwrap.unwrapGiftWrap(wrap, [giftwrap.classicalCandidate(sk)]);
+      // The full self candidate set (ML-KEM keypairs first, classical last):
+      // once the user announced a key, the worker seals its replies
+      // post-quantum, and a classical-only candidate would push every reply
+      // onto the slower relay-echo fallback.
+      var candidates = const <giftwrap.UnwrapCandidate>[];
+      try {
+        candidates =
+            _ref.read(nostrControllerProvider).selfUnwrapCandidates();
+      } catch (_) {}
+      if (candidates.isEmpty) {
+        candidates = [giftwrap.classicalCandidate(sk)];
+      }
+      final unwrapped = await giftwrap.unwrapGiftWrap(wrap, candidates);
       if (unwrapped == null || !mounted) return;
       final rumor = unwrapped.rumor;
       final msg = PmLogic.mapPmRumor(

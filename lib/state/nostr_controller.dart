@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/crypto/bech32_codec.dart' as bech32;
 import '../core/crypto/key_format.dart' show normalizePubkeyInput;
 import '../core/crypto/bitchat.dart' as bitchat;
+import '../core/crypto/gift_wrap.dart' as giftwrap;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/ml_kem.dart';
 import '../core/crypto/pow.dart' as pow;
@@ -4430,6 +4431,43 @@ class NostrController {
   /// this npub; encapsulating to it from an extension or NIP-46 login — which
   /// cannot derive its secret half — would lock THIS device out of its own
   /// history. Outbound messages have no such hazard: the recipient decapsulates.
+  /// The layered ML-KEM key to seal an outgoing DM to [pubkey] with — after
+  /// making sure the announcement lookup ran at least once — or null for
+  /// classical. Only ever the layered (`pq2`) format: the peer must have
+  /// announced `pk2`, so a signer login on either end can open it. Used by the
+  /// Nymbot engine, whose wraps are built outside [_publishDualPm].
+  Future<Uint8List?> pqLayeredWrapKeyFor(String pubkey) async {
+    try {
+      await ensurePqAnnouncement(pubkey);
+    } catch (_) {}
+    try {
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final pqOn = PqPolicy.enabled(privkey: _identity?.privkey, mode: _pqMode);
+      if (!pqOn) return null;
+      final key = _pqRegistry.keyFor(pubkey, nowSec: nowSec, enabled: pqOn);
+      if (key == null) return null;
+      return _pqRegistry.acceptsLayered(pubkey, nowSec: nowSec, enabled: pqOn)
+          ? key
+          : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Decrypt candidates for a wrap addressed to our identity key: every
+  /// ML-KEM keypair the account can decapsulate with, then the classical
+  /// fallback. The same ordering the live gift-wrap ingest uses.
+  List<giftwrap.UnwrapCandidate> selfUnwrapCandidates() {
+    final sk = _identity?.privkey;
+    if (sk == null) return const [];
+    return [
+      if (pqCapable)
+        for (final k in pqSelfCandidateKeys())
+          (sk: sk, bitchat: false, kemSk: k.kemSk, kemPk: k.kemPk),
+      giftwrap.classicalCandidate(sk),
+    ];
+  }
+
   Uint8List? pqSelfKey() {
     if (!pqSelfEnabled) return null;
     // DERIVED, not read from the registry. The registry entry is whatever
