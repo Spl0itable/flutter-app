@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Each released version corresponds to a tag on
 [github.com/Spl0itable/NYM](https://github.com/Spl0itable/NYM/releases).
 
-## [Unreleased]
+## [3.75.543] - 2026-08-26
 
 ### Added
 - Slack-style message threads across channels, PMs, and group chats. Tapping a
