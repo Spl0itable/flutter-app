@@ -752,6 +752,18 @@ class BotChatController extends StateNotifier<BotChatState> {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nymMessageId = PmLogic.generateSharedEventId();
 
+    // A send while the bot conversation's thread view is open replies into
+    // that thread: the root's shared id rides inside the encrypted rumor
+    // (`nymthread`), the worker scopes its context to the thread and files
+    // its reply there — same wiring as `_sendMessageContent`.
+    String? threadRoot;
+    if (appThreadsEnabled) {
+      final at = _ref.read(activeThreadProvider);
+      if (at != null && at.view == const ChatView.pm(kNymbotPubkey)) {
+        threadRoot = at.rootId;
+      }
+    }
+
     // Build the kind-14 rumor (with the NIP-30 custom-emoji declarations the
     // PWA spreads in, pms.js:313), wrap it to the bot AND to self, and publish
     // both — the worker fetches the bot-addressed wrap by its id from relays.
@@ -763,9 +775,12 @@ class BotChatController extends StateNotifier<BotChatState> {
         recipientPubkey: kNymbotPubkey,
         content: content,
         nymMessageId: nymMessageId,
-        extraTags: _ref
-            .read(liveCustomEmojiProvider.notifier)
-            .emojiTagsForContent(content),
+        extraTags: [
+          if (threadRoot != null) ['nymthread', threadRoot],
+          ..._ref
+              .read(liveCustomEmojiProvider.notifier)
+              .emojiTagsForContent(content),
+        ],
         nowMs: nowMs,
       );
       botWrap = await _wrapRumor(rumor, kNymbotPubkey);
@@ -799,6 +814,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       eventKind: 1059,
       senderVerified: true,
       nymMessageId: nymMessageId,
+      threadRoot: threadRoot,
       deliveryStatus:
           botWrap != null ? DeliveryStatus.sent : DeliveryStatus.failed,
     );
@@ -960,6 +976,12 @@ class BotChatController extends StateNotifier<BotChatState> {
         recipientPubkey: kNymbotPubkey,
         content: m.content,
         nymMessageId: m.nymMessageId ?? PmLogic.generateSharedEventId(),
+        // A message sent from a thread view keeps its thread on the rebuilt
+        // wrap too, so the worker sees the same `nymthread` the original
+        // rumor carried.
+        extraTags: [
+          if ((m.threadRoot ?? '').isNotEmpty) ['nymthread', m.threadRoot!],
+        ],
       );
       final wrap = await _wrapRumor(rumor, kNymbotPubkey);
       if (wrap != null && _publishDmEvent(wrap.toJson())) {

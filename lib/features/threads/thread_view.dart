@@ -209,7 +209,9 @@ class _ThreadViewState extends ConsumerState<ThreadView> {
                             ? tr('No replies yet')
                             : replies.length == 1
                                 ? tr('1 reply')
-                                : tr('{n} replies', {'n': '${replies.length}'}),
+                                // Abbreviated like reaction badges.
+                                : tr('{n} replies',
+                                    {'n': abbreviateNumber(replies.length)}),
                         style: TextStyle(
                           color: c.textDim,
                           fontSize: 11,

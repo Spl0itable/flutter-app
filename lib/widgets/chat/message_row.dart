@@ -527,7 +527,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
               Text(
                 count == 1
                     ? tr('1 reply')
-                    : tr('{n} replies', {'n': '$count'}),
+                    // Count abbreviated like reaction badges (`abbreviateNumber`).
+                    : tr('{n} replies', {'n': abbreviateNumber(count)}),
                 style: TextStyle(
                   color: c.primary,
                   fontSize: 12,
