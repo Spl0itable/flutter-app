@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Each released version corresponds to a tag on
 [github.com/Spl0itable/NYM](https://github.com/Spl0itable/NYM/releases).
 
-## [3.75.544] - 2026-08-26
+## [3.75.543] - 2026-08-26
 
 ### Added
 - Nymbot works inside channel message threads. Opening a thread on one of its
@@ -19,15 +19,6 @@ Each released version corresponds to a tag on
   state. In a thread rooted on someone else's message, `?commands` and
   `@Nymbot` mentions still reach it and are answered in that thread; it only
   replies unprompted once it is already the thread's last speaker.
-
-### Fixed
-- Tapping a quoted block inside an open thread now leaves the thread and jumps
-  to the original message in the conversation, instead of silently doing
-  nothing because the thread list never held it.
-
-## [3.75.543] - 2026-08-26
-
-### Added
 - Slack-style message threads across channels, PMs, and group chats. Tapping a
   message (or its "N replies" row under the reactions/zaps row) swaps the
   current view to the thread — the root message plus its replies — using the
@@ -41,6 +32,9 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Tapping a quoted block inside an open thread now leaves the thread and jumps
+  to the original message in the conversation, instead of silently doing
+  nothing because the thread list never held it.
 - The app dialog (including the post-quantum `nympq1…` recovery-code paste
   prompt) now lifts above the soft keyboard instead of hiding its input
   behind it, matching the other keyboard-aware modals.
