@@ -2247,7 +2247,12 @@ class _ComposerState extends ConsumerState<Composer> {
     }
 
     if (_formatToolbarOpen) {
-      panels.add(FormatToolbar(onTool: _applyFormatTool));
+      // An open command palette / autocomplete sits flush on the toolbar's
+      // top edge — square the touching corners while it shows (PWA parity).
+      panels.add(FormatToolbar(
+        onTool: _applyFormatTool,
+        squareTop: _overlayActive,
+      ));
     }
 
     if (panels.isEmpty) return null;
