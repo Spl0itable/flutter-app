@@ -1355,14 +1355,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // `onThreadsEnabledChange`).
       _GroupSpec(
         text: tr('Message Threads {options} Group replies under their '
-            'original message, Slack-style. Replies open in a thread view and '
-            'the original shows a reply count. Disabling shows every message '
+            'original message. Replies open in a thread view and the '
+            'original shows a reply count. Disabling shows every message '
             'inline like before.', {'options': _optText(threadsItems)}),
         child: FormGroup(
           label: tr('Message Threads'),
-          hint: tr('Group replies under their original message, Slack-style. '
-              'Replies open in a thread view and the original shows a reply '
-              'count. Disabling shows every message inline like before.'),
+          hint: tr('Group replies under their original message. Replies '
+              'open in a thread view and the original shows a reply count. '
+              'Disabling shows every message inline like before.'),
           child: FormSelect<bool>(
             value: s.threadsEnabled,
             items: threadsItems,
