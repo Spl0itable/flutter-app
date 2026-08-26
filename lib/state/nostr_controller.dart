@@ -43,6 +43,7 @@ import '../services/notification_service.dart' show NotificationService;
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
 import '../features/nymbot/nymbot_providers.dart';
+import '../features/nymbot/nymbot_threads.dart';
 import '../features/p2p/p2p_models.dart';
 import '../features/p2p/p2p_service.dart';
 import '../features/pms/pm_logic.dart';
@@ -11762,7 +11763,33 @@ class NostrController {
     if (body != text.trim() && (isBotCommand(body) || isNymbotMention(body))) {
       return true;
     }
-    return _quotedNymbotAuthor(text) != null && body.isNotEmpty;
+    if (_quotedNymbotAuthor(text) != null && body.isNotEmpty) return true;
+    // A plain reply inside a thread Nymbot rooted or last spoke in continues
+    // that conversation the same way a quote-reply does (threads.js) — without
+    // this a guess typed into a game's thread never reaches the bot.
+    return body.isNotEmpty && _threadBotTarget() != null;
+  }
+
+  /// The open thread's root when the composer replies into one in the CURRENT
+  /// channel view, else null — the same gate [_sendMessageContent] applies, so
+  /// a send is never mis-threaded after a view switch.
+  String? _composerThreadRoot() {
+    if (!appThreadsEnabled) return null;
+    final view = _ref.read(appStateProvider).view;
+    if (view.kind != ViewKind.channel) return null;
+    final at = _ref.read(activeThreadProvider);
+    return (at != null && at.view == view) ? at.rootId : null;
+  }
+
+  /// The Nymbot message the OPEN thread's next plain reply would answer, or
+  /// null when the composer isn't in a channel thread the bot is part of.
+  /// Read before the outgoing message is published, so the bot is still the
+  /// thread's last speaker.
+  Message? _threadBotTarget() {
+    final rootId = _composerThreadRoot();
+    if (rootId == null) return null;
+    final state = _ref.read(appStateProvider);
+    return threadBotReplyTarget(state, state.view.storageKey, rootId);
   }
 
   /// The non-quoted remainder of a composed message (the PWA's
@@ -11852,11 +11879,25 @@ class NostrController {
       }
     }
 
+    // The thread the composer is replying into, if any — what the worker tags
+    // the reply with so the answer lands back in the thread. Set for ANY thread
+    // (a `?command` typed under someone else's message is answered in place
+    // too), unlike [threadTarget] below which gates the implicit routing.
+    final threadRoot = _composerThreadRoot();
+    // The open thread's Nymbot message, resolved BEFORE the outgoing message is
+    // published so the bot is still the thread's last speaker.
+    final threadTarget = _threadBotTarget();
+
     // Reply to a Nymbot message without an explicit command → ?ask, or ?guess
     // when the quoted message carries a wordplay game token (commands.js:28-35).
+    // A plain reply in the bot's thread routes the same way, reading the token
+    // off the thread's newest game message instead of a quote (threads.js).
+    final gameTokenRe = RegExp(r'\[gc:[A-Za-z0-9+/=]+\]');
     if (_quotedNymbotAuthor(rawText) != null && !content.startsWith('?')) {
-      final hasGameToken = RegExp(r'\[gc:[A-Za-z0-9+/=]+\]').hasMatch(rawText);
-      content = (hasGameToken ? '?guess ' : '?ask ') + content;
+      content = (gameTokenRe.hasMatch(rawText) ? '?guess ' : '?ask ') + content;
+    } else if (threadTarget != null && !content.startsWith('?')) {
+      content = (gameTokenRe.hasMatch(threadTarget.content) ? '?guess ' : '?ask ') +
+          content;
     }
 
     final parsed = parseBotCommand(content);
@@ -11872,10 +11913,17 @@ class NostrController {
     final storageKey = view.storageKey;
     final cmd = parsed.name;
 
-    // Reply-chain conversation context for ?ask / ?guess (commands.js:42-45).
+    // Conversation context for ?ask / ?guess (commands.js:42-45): the whole
+    // thread when the message came from one (a thread IS the conversation, and
+    // a game's [gc:] token lives further up it), otherwise the reply chain.
     var conversation = const <Map<String, String>>[];
     if (cmd == 'ask' || cmd == 'guess') {
-      conversation = _extractQuoteChain(rawText);
+      if (threadRoot != null) {
+        conversation = threadBotConversation(
+            _ref.read(appStateProvider), storageKey, threadRoot,
+            exclude: rawText);
+      }
+      if (conversation.isEmpty) conversation = _extractQuoteChain(rawText);
     }
 
     // Channel context for the AI-aware commands (commands.js:46-191). A `?ask`
@@ -11928,6 +11976,10 @@ class NostrController {
         'publishedContent': rawText,
         'channelMessages': channelMessages,
         'activeUsers': activeUsers,
+        // The thread the command came from: the worker echoes it as a NIP-10
+        // marked root on the signed reply so it lands in the thread instead of
+        // the flat channel (bot.js). Omitted outside a thread.
+        if (threadRoot != null) 'threadRoot': threadRoot,
         'lang': LocalizationService.instance.language,
       });
       final event = data['event'];
