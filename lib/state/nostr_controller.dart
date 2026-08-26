@@ -4370,6 +4370,16 @@ class NostrController {
   /// Wall-clock of our last announcement publish, for the daily republish.
   int _pqLastPublishMs = 0;
 
+  /// The signed announcement event from the last publish. The Nymbot PM
+  /// request hands it to the worker (which signature-verifies it) so bot
+  /// replies seal post-quantum without an archive/relay lookup.
+  NostrEvent? _pqSelfSignedAnnouncement;
+
+  /// Wire form of the last published announcement, or null before the first
+  /// publish of this session.
+  Map<String, dynamic>? get pqSelfAnnouncementJson =>
+      _pqSelfSignedAnnouncement?.toJson();
+
   /// Devices carried by our own announcement, so a republish merges onto the
   /// existing roster rather than clobbering it.
   List<PqDevice> _pqDevices = const [];
@@ -4699,6 +4709,10 @@ class NostrController {
       rootSeeded: keys != null && _pqRoot != null,
     );
     if (signed == null) return;
+    // Kept for the Nymbot worker: the bot PM request carries this signed
+    // event so the worker can seal its reply to our KEM key without
+    // depending on an archive/relay lookup finding it.
+    _pqSelfSignedAnnouncement = signed;
     _pqDevices = devices;
     _refreshPqSealPolicy();
     _pqLastPublishMs = DateTime.now().millisecondsSinceEpoch;

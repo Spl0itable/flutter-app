@@ -1003,6 +1003,13 @@ class BotChatController extends StateNotifier<BotChatState> {
       final fresh = RegExp(r'^\s*!\s*\S').hasMatch(m.content);
       final pro = state.proModel;
       final git = state.git;
+      Map<String, dynamic>? pqAnnouncement;
+      try {
+        pqAnnouncement =
+            _ref.read(nostrControllerProvider).pqSelfAnnouncementJson;
+      } catch (_) {
+        pqAnnouncement = null;
+      }
       final data = await _service.sendBotMessage(
         pubkey: _pubkey!,
         eventId: wrapId,
@@ -1015,6 +1022,7 @@ class BotChatController extends StateNotifier<BotChatState> {
         // (pms.js:2455-2466).
         git: (pro != null && git != null && git.hasRepo) ? git : null,
         cmdAlias: commandAliasHint(m.content),
+        pqAnnouncement: pqAnnouncement,
       );
       if (!mounted) return;
       _setBotTyping(false);
