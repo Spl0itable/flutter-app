@@ -2286,6 +2286,50 @@ class NostrController {
     }
   }
 
+  /// Gateway mode: a signed Nostr event that reached us over the RADIO.
+  ///
+  /// Two directions, one rule. When [publish] is set, a mesh-only peer has
+  /// asked us to put their event on the relays because they have no internet
+  /// and we do — one phone with a signal is enough for the whole room.
+  /// Otherwise a gateway is rebroadcasting what it heard from the relays, so a
+  /// mesh-only device can READ a geohash channel and not only write to it.
+  ///
+  /// Either way the event is VERIFIED first. It is signed by its originator, so
+  /// a gateway that altered or invented one produces something the relays would
+  /// reject and we refuse to act on. Publishing an unverified event on
+  /// somebody's behalf would make this device the author of whatever a peer
+  /// felt like handing it.
+  Future<void> handleMeshCarriedEvent({
+    required Map<String, dynamic> event,
+    required String geohash,
+    required bool publish,
+  }) async {
+    final service = _service;
+    if (service == null) return;
+    NostrEvent parsed;
+    try {
+      parsed = NostrEvent.fromJson(event);
+    } catch (_) {
+      return;
+    }
+    if (!await service.verifyEvent(parsed)) {
+      debugPrint('[mesh] carried event failed verification — dropped');
+      return;
+    }
+    if (publish) {
+      // Someone else's message, signed by them, going out over our connection.
+      await service.pool.publish(parsed);
+      return;
+    }
+    // Inbound from a gateway: run it through the ordinary channel ingest so it
+    // renders, notifies and dedups exactly like an event off our own socket.
+    if (parsed.kind == EventKind.geoChannel ||
+        parsed.kind == EventKind.namedChannel) {
+      _ref.read(appStateProvider.notifier).ingestEvent(parsed);
+      _maybeNotifyChannel(parsed);
+    }
+  }
+
   /// Public entry for the Bluetooth-mesh bridge to surface a mesh PM or channel
   /// @-mention through the SAME notification pipeline (bell history + loud
   /// alert) as internet-delivered events — so mesh notifications appear in the

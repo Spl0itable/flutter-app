@@ -43,6 +43,11 @@ class SyncTypeFlags {
     5: MeshMessageType.fragment,
     6: MeshMessageType.requestSync,
     7: MeshMessageType.fileTransfer,
+    // Bit 9 is bitchat's for prekey bundles. Extended bits are compat-safe by
+    // construction: the field encodes little-endian with trailing zeros
+    // trimmed, so bit 9 simply widens it from one byte to two, and a client
+    // that does not know the bit ignores it and answers with what it does.
+    9: MeshMessageType.prekeyBundle,
   };
 
   static final int _knownMask = () {
@@ -61,9 +66,11 @@ class SyncTypeFlags {
   }
 
   /// The set covering ordinary public history: announces (which carry the
-  /// signing keys everything else is verified against) plus public messages.
+  /// signing keys everything else is verified against) plus public messages,
+  /// plus prekey bundles — which have to travel while their owner is AWAY,
+  /// since that is precisely when their mail is being couriered.
   static SyncTypeFlags get publicMessages => SyncTypeFlags.masked(
-        (1 << 0) | (1 << 1),
+        (1 << 0) | (1 << 1) | (1 << 9),
       );
 
   bool contains(int meshType) {

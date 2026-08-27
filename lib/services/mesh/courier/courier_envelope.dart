@@ -42,9 +42,23 @@ import '../noise/noise_handshake.dart';
 /// confused with an XX one.
 const String kCourierNoiseProtocolName = 'Noise_X_25519_ChaChaPoly_SHA256';
 
-/// Domain separation for the seal — bitchat's `courierPrologue`.
+/// Domain separation for the static-sealed (v1) seal — bitchat's
+/// `courierPrologue`.
 final Uint8List kCourierPrologue =
     Uint8List.fromList(utf8.encode('bitchat-courier-v1'));
+
+/// Domain separation for a PREKEY-sealed (v2) envelope. Distinct from both the
+/// interactive XX transcripts and the static-sealed courier prologue, and bound
+/// to the specific prekey id — so a ciphertext cannot be replayed against a
+/// different prekey than the one it was sealed to.
+Uint8List courierPrekeyPrologue(int prekeyId) {
+  final id = Uint8List(4);
+  ByteData.view(id.buffer).setUint32(0, prekeyId, Endian.big);
+  return Uint8List.fromList([
+    ...utf8.encode('bitchat-prekey-v1'),
+    ...id,
+  ]);
+}
 
 /// Domain separation for the rotating recipient tag.
 final Uint8List _kTagContext =
@@ -57,6 +71,7 @@ class CourierEnvelope {
     required this.expiryMs,
     required this.ciphertext,
     int copies = 1,
+    this.prekeyId,
   }) : copies = copies < 1 ? 1 : (copies > maxCopies ? maxCopies : copies);
 
   /// 16-byte rotating hint: `HMAC-SHA256(recipient static key, context || day)`
@@ -75,6 +90,18 @@ class CourierEnvelope {
   /// a bounded number of carriers rather than the whole mesh. 1 means
   /// carry-only — deliver to the recipient, never re-spray.
   final int copies;
+
+  /// Seal-format discriminator. Null means v1: the ciphertext is one-way Noise
+  /// X to the recipient's long-lived STATIC key, and is therefore not forward
+  /// secret. A value means v2: sealed to the recipient's one-time prekey with
+  /// this id, which they delete after use — so a later compromise of their
+  /// identity key cannot open an envelope captured in transit.
+  ///
+  /// Carried as an optional TLV so a v1 decoder skips it as unknown: an older
+  /// client still carries and hands over v2 envelopes opaquely, and when one is
+  /// addressed to it the static-key open simply fails and it is dropped
+  /// quietly.
+  final int? prekeyId;
 
   static const int tagLength = 16;
 
@@ -97,6 +124,7 @@ class CourierEnvelope {
         expiryMs: expiryMs,
         ciphertext: ciphertext,
         copies: next,
+        prekeyId: prekeyId,
       );
 
   /// TLV (type, length16 BE, value): `0x01` tag, `0x02` expiry, `0x03`
@@ -121,6 +149,14 @@ class CourierEnvelope {
     tlv(0x02, exp);
     tlv(0x03, ciphertext);
     if (copies > 1) tlv(0x04, [copies]);
+    // Omitted for a v1 static-sealed envelope so it stays byte-identical to
+    // the pre-prekey wire form.
+    final pk = prekeyId;
+    if (pk != null) {
+      final id = Uint8List(4);
+      ByteData.view(id.buffer).setUint32(0, pk, Endian.big);
+      tlv(0x05, id);
+    }
     return out.toBytes();
   }
 
@@ -132,6 +168,7 @@ class CourierEnvelope {
     int? expiry;
     Uint8List? ciphertext;
     var copies = 1;
+    int? prekeyId;
     while (off < data.length) {
       final t = data[off];
       off += 1;
@@ -159,6 +196,13 @@ class CourierEnvelope {
         case 0x04:
           if (len != 1) return null;
           copies = v[0];
+        case 0x05:
+          if (len != 4) return null;
+          var id = 0;
+          for (final b in v) {
+            id = (id << 8) | b;
+          }
+          prekeyId = id;
         default:
         // Forward compatible.
       }
@@ -169,6 +213,7 @@ class CourierEnvelope {
       expiryMs: expiry,
       ciphertext: ciphertext,
       copies: copies,
+      prekeyId: prekeyId,
     );
   }
 
@@ -223,17 +268,24 @@ class CourierSeal {
   const CourierSeal._();
 
   /// Seals [payload] to [recipientStaticKey].
+  ///
+  /// [prologue] selects the seal format: [kCourierPrologue] for a v1 envelope
+  /// sealed to the recipient's long-lived static key, or
+  /// [courierPrekeyPrologue] for a v2 envelope sealed to a one-time prekey —
+  /// in which case [recipientStaticKey] is that PREKEY's public half, not the
+  /// identity key.
   static Future<Uint8List> seal({
     required Uint8List payload,
     required Uint8List recipientStaticKey,
     required Uint8List senderStaticPrivate,
     required Uint8List senderStaticPublic,
+    Uint8List? prologue,
   }) async {
     if (recipientStaticKey.length != NoiseCrypto.dhLen) {
       throw ArgumentError('recipient static key must be 32 bytes');
     }
     final sym = NoiseSymmetricState.initialize(kCourierNoiseProtocolName);
-    sym.mixHash(kCourierPrologue);
+    sym.mixHash(prologue ?? kCourierPrologue);
     // Pre-message: the initiator knows the responder's static key.
     sym.mixHash(recipientStaticKey);
 
@@ -259,17 +311,22 @@ class CourierSeal {
   /// Throws when the ciphertext is not ours (or is malformed) — which is the
   /// normal case for a courier testing an envelope it merely carries, so
   /// callers treat a throw as "not for me", never as an error.
+  ///
+  /// [prologue] must match what the sender used, and for a v2 envelope
+  /// [localStaticPrivate]/[localStaticPublic] are the PREKEY's halves rather
+  /// than the identity key's.
   static Future<(Uint8List payload, Uint8List senderStaticKey)> open({
     required Uint8List ciphertext,
     required Uint8List localStaticPrivate,
     required Uint8List localStaticPublic,
+    Uint8List? prologue,
   }) async {
     // e (32) + encrypted static (32 + 16 tag) + encrypted payload (>= 16 tag).
     if (ciphertext.length < 32 + 48 + 16) {
       throw ArgumentError('courier ciphertext too short');
     }
     final sym = NoiseSymmetricState.initialize(kCourierNoiseProtocolName);
-    sym.mixHash(kCourierPrologue);
+    sym.mixHash(prologue ?? kCourierPrologue);
     // Pre-message: the responder mixes its OWN static key.
     sym.mixHash(localStaticPublic);
 

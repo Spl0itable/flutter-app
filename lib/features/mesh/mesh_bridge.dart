@@ -35,6 +35,7 @@ import '../../state/nostr_controller.dart';
 import 'mesh_controller.dart';
 import 'mesh_diagnostics.dart';
 import 'mesh_outbox.dart';
+import '../../services/mesh/protocol/nostr_carrier_packet.dart';
 
 /// The bare storage key of the mesh "Nearby" public channel (renders as
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
@@ -185,6 +186,43 @@ class MeshBridge {
     };
   }
 
+  /// Restores this device's one-time prekeys and keeps them written.
+  ///
+  /// The private halves MUST survive a restart: a sender who picked up our
+  /// published bundle before we closed will have sealed mail to one of those
+  /// keys, and a courier may hand it over hours later. Losing them turns
+  /// forward secrecy into lost mail.
+  void _restorePrekeys() {
+    final kv = _ref.read(keyValueStoreProvider);
+    try {
+      _service.prekeys.decode(kv.getString(StorageKeys.meshPrekeys));
+    } catch (_) {}
+    _service.onPrekeysChanged = (encoded) {
+      try {
+        kv.setString(StorageKeys.meshPrekeys, encoded);
+      } catch (_) {}
+    };
+  }
+
+  /// A gateway asked us to publish an event, or rebroadcast one it heard.
+  ///
+  /// Both directions verify before acting: a carried event is signed by its
+  /// ORIGINATOR, so a gateway that altered it — or invented it — produces
+  /// something the relays would reject and we refuse to show. A gateway is a
+  /// postbox, not an author.
+  void _onNostrCarrier(NostrCarrierPacket carrier, String fromPeerID) {
+    final event = carrier.event();
+    if (event == null) return;
+    unawaited(_ref
+        .read(nostrControllerProvider)
+        .handleMeshCarriedEvent(
+          event: event,
+          geohash: carrier.geohash,
+          publish: carrier.direction == NostrCarrierDirection.toGateway ||
+              carrier.direction == NostrCarrierDirection.toBridge,
+        ));
+  }
+
   void _loadGhostPins() {
     _ghostPinnedPms.addAll(
       _ref
@@ -222,6 +260,8 @@ class MeshBridge {
       final pubkey = _pubkeyForNoiseKey(staticKeyHex);
       return pubkey != null && _ghostPinnedPms.contains(pubkey.toLowerCase());
     };
+    _restorePrekeys();
+    _service.onNostrCarrier = _onNostrCarrier;
     MeshService.debugLog = MeshDiagnostics.instance.log;
     _subs.add(_service.peersStream.listen(_onPeers));
     _subs.add(_service.onPublicMessage.listen(_onPublic));

@@ -186,6 +186,10 @@ class StorageKeys {
   /// serve to a peer who missed it survives a restart.
   static const meshGossipArchive = 'nym_mesh_gossip_archive';
 
+  /// This device's one-time mesh prekeys (private halves). Persisted so mail
+  /// sealed to a key we published before a restart can still be opened.
+  static const meshPrekeys = 'nym_mesh_prekeys';
+
   // Notifications / sync
   static const notificationsEnabled = 'nym_notifications_enabled';
   static const groupNotifyMentionsOnly = 'nym_group_notify_mentions_only';

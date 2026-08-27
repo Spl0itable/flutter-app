@@ -35,6 +35,22 @@ class MeshMessageType {
   /// File transfer packet (BLE media / voice notes).
   static const int fileTransfer = 0x22;
 
+  /// A signed batch of one-time prekeys, gossiped mesh-wide so a courier
+  /// envelope can be sealed to a one-time key instead of the owner's long-lived
+  /// static key — forward secrecy for mail sent while they are away.
+  static const int prekeyBundle = 0x24;
+
+  /// Directed echo request (nonce + origin TTL) — mesh diagnostics.
+  static const int ping = 0x26;
+
+  /// Directed echo reply (echoed nonce + origin TTL).
+  static const int pong = 0x27;
+
+  /// Gateway mode: a complete signed Nostr event ferried between a mesh-only
+  /// peer and a peer that has internet, so a message reaches the relays through
+  /// SOMEBODY's connection rather than waiting for your own.
+  static const int nostrCarrier = 0x28;
+
   /// Ephemeral live push-to-talk audio frame (never gossip-synced).
   static const int voiceFrame = 0x29;
 
@@ -71,6 +87,10 @@ class MeshMessageType {
         courierEnvelope,
         requestSync,
         fileTransfer,
+        prekeyBundle,
+        ping,
+        pong,
+        nostrCarrier,
         voiceFrame,
       }.contains(type);
 
@@ -90,6 +110,14 @@ class MeshMessageType {
         return 'FRAGMENT';
       case courierEnvelope:
         return 'COURIER_ENVELOPE';
+      case prekeyBundle:
+        return 'PREKEY_BUNDLE';
+      case ping:
+        return 'PING';
+      case pong:
+        return 'PONG';
+      case nostrCarrier:
+        return 'NOSTR_CARRIER';
       case requestSync:
         return 'REQUEST_SYNC';
       case fileTransfer:
