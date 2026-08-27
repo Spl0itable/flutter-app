@@ -11,6 +11,7 @@ import 'mesh_constants.dart';
 import 'mesh_events.dart';
 import 'mesh_peer.dart';
 import 'noise/channel_encryption.dart';
+import 'noise/noise_crypto.dart';
 import 'noise/noise_identity.dart';
 import 'noise/noise_session_manager.dart';
 import 'noise/nostr_link.dart';
@@ -781,11 +782,11 @@ class MeshService {
       }
       final response = await _noise.handleHandshake(senderPeerID, payload);
       if (response != null) {
-        await _sendPacket(await _buildPacket(
+        await _sendDirected(
+          peerID: senderPeerID,
           type: MeshMessageType.noiseHandshake,
           payload: response,
-          recipientID: _peerIdBytes(senderPeerID),
-        ));
+        );
       }
       if (_noise.isEstablished(senderPeerID)) {
         // Announce our capabilities inside the session BEFORE flushing queued
@@ -969,12 +970,12 @@ class MeshService {
       {bool avatar = true, bool banner = false}) async {
     if (!_running || _profileRequested.contains(peerID)) return;
     _profileRequested.add(peerID);
-    await _sendPacket(await _buildPacket(
+    await _sendDirected(
+      peerID: peerID,
       type: MeshMessageType.nymProfileRequest,
       payload:
           MeshProfileRequest(wantAvatar: avatar, wantBanner: banner).encode(),
-      recipientID: _peerIdBytes(peerID),
-    ));
+    );
   }
 
   Future<void> _handleProfileRequest(
@@ -984,11 +985,11 @@ class MeshService {
     final request = MeshProfileRequest.decode(payload);
     final profile = await provider(request);
     if (profile == null) return;
-    await _sendPacket(await _buildPacket(
+    await _sendDirected(
+      peerID: senderPeerID,
       type: MeshMessageType.nymProfileResponse,
       payload: profile.encode(),
-      recipientID: _peerIdBytes(senderPeerID),
-    ));
+    );
   }
 
   void _handleProfileResponse(String senderPeerID, Uint8List payload) {
@@ -1020,11 +1021,11 @@ class MeshService {
   Future<void> _sendOrQueueEncrypted(String peerID, Uint8List plaintext) async {
     if (_noise.isEstablished(peerID)) {
       final ciphertext = await _noise.encrypt(peerID, plaintext);
-      await _sendPacket(await _buildPacket(
+      await _sendDirected(
+        peerID: peerID,
         type: MeshMessageType.noiseEncrypted,
         payload: ciphertext,
-        recipientID: _peerIdBytes(peerID),
-      ));
+      );
       return;
     }
     _pendingPlaintext.putIfAbsent(peerID, () => []).add(plaintext);
@@ -1032,11 +1033,11 @@ class MeshService {
       // New session ⇒ the peer-state proof must be re-sent once it establishes.
       _peerStateSentTo.remove(peerID);
       final msg1 = await _noise.initiateHandshake(peerID);
-      await _sendPacket(await _buildPacket(
+      await _sendDirected(
+        peerID: peerID,
         type: MeshMessageType.noiseHandshake,
         payload: msg1,
-        recipientID: _peerIdBytes(peerID),
-      ));
+      );
     }
   }
 
@@ -1055,11 +1056,11 @@ class MeshService {
     for (final plaintext in queued) {
       try {
         final ciphertext = await _noise.encrypt(peerID, plaintext);
-        await _sendPacket(await _buildPacket(
+        await _sendDirected(
+          peerID: peerID,
           type: MeshMessageType.noiseEncrypted,
           payload: ciphertext,
-          recipientID: _peerIdBytes(peerID),
-        ));
+        );
       } catch (_) {}
     }
   }
@@ -1341,8 +1342,7 @@ class MeshService {
     final ownerHex = _hex(bundle.noiseStaticPublicKey);
     // The signing key comes from the owner's own verified announce, NOT from
     // the packet — a relayed bundle's carrier is not its author.
-    final ownerPeerID =
-        _hex(NoiseCrypto.sha256(bundle.noiseStaticPublicKey)).substring(0, 16);
+    final ownerPeerID = _peerIdForNoiseKey(bundle.noiseStaticPublicKey);
     final owner = _peers[ownerPeerID];
     final signingKey = owner?.signingPublicKey;
     if (owner == null || signingKey == null || !owner.isVerified) {
@@ -1418,8 +1418,7 @@ class MeshService {
       debugLog?.call('courier deposit refused (ghost/no key)');
       return 0;
     }
-    final recipientPeerID =
-        _hex(NoiseCrypto.sha256(key!)).substring(0, 16);
+    final recipientPeerID = _peerIdForNoiseKey(key!);
     final now = DateTime.now().millisecondsSinceEpoch;
     // Prefer a one-time PREKEY over the long-lived static key when the
     // recipient has published one. Both seal the same way; the difference is
@@ -1523,8 +1522,7 @@ class MeshService {
       // The sender's static key is AUTHENTICATED by the seal's `ss` DH, so the
       // peerID derived from it is who really wrote this — not whoever handed
       // it over.
-      final originPeerID =
-          _hex(NoiseCrypto.sha256(senderStatic)).substring(0, 16);
+      final originPeerID = _peerIdForNoiseKey(senderStatic);
       debugLog?.call('courier envelope OPENED from $originPeerID '
           '(carried by $senderPeerID)');
       await _dispatchNoisePayload(originPeerID, plaintext);
@@ -1603,6 +1601,12 @@ class MeshService {
       } catch (_) {}
     }
   }
+
+  /// The peerID a Noise static key derives to — the first 16 hex chars of its
+  /// SHA-256 fingerprint, the same rule [NoiseIdentity] uses. Lets a key that
+  /// arrived inside a payload be matched against the peer table.
+  static String _peerIdForNoiseKey(Uint8List staticPublicKey) =>
+      _hex(NoiseCrypto.sha256(staticPublicKey)).substring(0, 16);
 
   /// A stable key for an envelope, so the same mail arriving from two couriers
   /// is carried once.
@@ -1715,6 +1719,32 @@ class MeshService {
       }
       await Future<void>.delayed(MeshConstants.interFragmentDelay);
     }
+  }
+
+  /// Sends a packet addressed to [peerID], or sends nothing at all when that
+  /// is not a real peerID.
+  ///
+  /// Deliberately never falls back to an unaddressed packet. Everything routed
+  /// through here is meant for ONE peer — a handshake, Noise ciphertext, a
+  /// profile — and [BitchatPacket] treats a null recipient as "not directed",
+  /// so a malformed id would quietly hand that traffic to the whole mesh.
+  Future<void> _sendDirected({
+    required String peerID,
+    required int type,
+    required Uint8List payload,
+    int? ttl,
+  }) async {
+    final recipient = _peerIdBytes(peerID);
+    if (recipient == null) {
+      debugLog?.call('refusing to send type $type to malformed peerID');
+      return;
+    }
+    await _sendPacket(await _buildPacket(
+      type: type,
+      payload: payload,
+      recipientID: recipient,
+      ttl: ttl,
+    ));
   }
 
   /// The 8 raw bytes of a 16-hex peerID, or null when it is not one.
@@ -1856,15 +1886,9 @@ class MeshService {
     return chunks;
   }
 
-  Uint8List _peerIdBytes(String peerID) {
-    final out = Uint8List(8);
-    for (var i = 0; i < 8 && i * 2 + 1 < peerID.length; i++) {
-      out[i] = int.parse(peerID.substring(i * 2, i * 2 + 2), radix: 16);
-    }
-    return out;
-  }
-
-  String _hex(Uint8List bytes) =>
+  // Static so the static derivations above ([_peerIdForNoiseKey]) can use it;
+  // unqualified calls from instance methods resolve to it unchanged.
+  static String _hex(Uint8List bytes) =>
       bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
