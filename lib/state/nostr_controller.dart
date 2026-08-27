@@ -11838,8 +11838,20 @@ class NostrController {
     if (author != null) {
       conversation.add({'author': author, 'text': buf.join('\n').trim()});
     }
-    return conversation;
+    // Take the wire envelope off Nymbot's own turns; shown it as history the
+    // model writes it itself.
+    final out = <Map<String, String>>[];
+    for (final e in conversation) {
+      final isBot = _rxNymbotAuthor.hasMatch((e['author'] ?? '').trim());
+      final text = isBot ? threadEntryText(e['text'] ?? '', isBot: true) : (e['text'] ?? '');
+      if (text.trim().isEmpty) continue;
+      out.add({'author': e['author']!, 'text': text});
+    }
+    return out;
   }
+
+  static final RegExp _rxNymbotAuthor =
+      RegExp(r'^nymbot(?:#[0-9a-f]{4})?$', caseSensitive: false);
 
   /// Routes a channel message to Nymbot: resolves `@Nymbot …` / a reply-quote
   /// of a Nymbot message to `?ask`/`?guess` (commands.js:14-35), gathers the
