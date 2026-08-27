@@ -2218,8 +2218,21 @@ String _stripQuoteLines(String raw) => raw
     .replaceAll(_rxWs, ' ')
     .trim();
 
-/// `scoreHaystack` (messages.js:2695-2701): exact 1000 / contains 500 / long-
-/// prefix(80) 250 / else 0.
+/// Letters and digits only, lowercased — the normalized form both a rendered
+/// quote and a raw message reduce to identically. Unicode-aware, so non-Latin
+/// scripts normalize rather than vanishing.
+final RegExp _rxLooseStrip = RegExp(r'[^\p{L}\p{N}]+', unicode: true);
+String _loose(String s) => s.toLowerCase().replaceAll(_rxLooseStrip, '');
+
+/// `scoreHaystack` (messages.js): exact 1000 / contains 500 / long-prefix(80)
+/// 250, then the same three tiers on the normalized form (900/400/200).
+///
+/// The needle is the quote as RENDERED — markdown markers consumed by the
+/// parser (`**bold**` → `bold`), line breaks joined with nothing — while the
+/// haystack is the stored SOURCE text. Comparing only those two literal forms
+/// matched plain single-line prose and nothing else, so a quote of a formatted
+/// or multi-line message reported its original as missing. The normalized
+/// tiers sit below the literal ones so an exact match still wins.
 int _scoreHaystack(String haystack, String needle) {
   if (haystack.isEmpty) return 0;
   if (haystack == needle) return 1000;
@@ -2227,6 +2240,15 @@ int _scoreHaystack(String haystack, String needle) {
   if (needle.length > 20 &&
       haystack.contains(needle.substring(0, 80.clamp(0, needle.length)))) {
     return 250;
+  }
+  final looseNeedle = _loose(needle);
+  final looseHay = _loose(haystack);
+  if (looseNeedle.isEmpty || looseHay.isEmpty) return 0;
+  if (looseHay == looseNeedle) return 900;
+  if (looseNeedle.length >= 8 && looseHay.contains(looseNeedle)) return 400;
+  if (looseNeedle.length >= 20 &&
+      looseHay.contains(looseNeedle.substring(0, 60.clamp(0, looseNeedle.length)))) {
+    return 200;
   }
   return 0;
 }
@@ -2255,7 +2277,10 @@ Message? resolveQuotedMessage(
     final suffix = m.pubkey.length >= 4
         ? m.pubkey.substring(m.pubkey.length - 4).toLowerCase()
         : m.pubkey.toLowerCase();
-    if (quotedSuffix != null && suffix != quotedSuffix) return false;
+    // When the quote recorded a #suffix, that IS the identity — the nym beside
+    // it is only how it was spelled at quote time, so don't also demand the
+    // name agree.
+    if (quotedSuffix != null) return suffix == quotedSuffix;
     final trimmed = m.author.trim();
     final baseAuthor = stripPubkeySuffix(trimmed);
     if (quotedName.isNotEmpty &&
@@ -2450,7 +2475,20 @@ class _QuoteBox extends ConsumerWidget {
       messages,
       hostMessageId: hostMessageId,
     );
-    if (target == null) return; // not in the loaded set → bail (PWA parity)
+    // Nothing to jump to — say so instead of swallowing the tap, the way the
+    // PWA's `_scrollToQuotedMessage` does. Bound to the conversation the quote
+    // lives in, so under columns the notice lands in the right one. The
+    // notifier is captured rather than `ref`, so it survives the thread close
+    // below disposing this widget.
+    final app = ref.read(appStateProvider.notifier);
+    void reportUnavailable() => app.addSystemMessage(
+          tr('Original message is not available'),
+          storageKey: key,
+        );
+    if (target == null) {
+      reportUnavailable();
+      return;
+    }
     final scroller = ref.read(messageListScrollerProvider(key));
     final flash = ref.read(flashedMessageProvider.notifier);
     // A quote tapped inside an OPEN thread means "show me the original in the
@@ -2460,27 +2498,38 @@ class _QuoteBox extends ConsumerWidget {
     final open = ref.read(activeThreadProvider);
     if (open != null && open.view.storageKey == key) {
       ref.read(activeThreadProvider.notifier).state = null;
-      _jumpWhenBound(scroller, flash, target.id);
+      _jumpWhenBound(scroller, flash, target.id, onGiveUp: reportUnavailable);
       return;
     }
-    if (scroller.scrollToMessage(target.id)) flash.flash(target.id);
+    if (scroller.scrollToMessage(target.id)) {
+      flash.flash(target.id);
+    } else {
+      // Resolved, but outside the rendered window — same dead end for the
+      // reader as not finding it at all.
+      reportUnavailable();
+    }
   }
 
   /// Retries the jump across a few frames: closing the thread view remounts the
   /// conversation list, and [MessageListScroller] only rebinds its controller +
   /// id→index map on that list's next build, so the first frame can still miss.
+  /// [onGiveUp] fires once the retries are spent.
   static void _jumpWhenBound(
     MessageListScroller scroller,
     FlashedMessageNotifier flash,
-    String id, [
+    String id, {
+    required VoidCallback onGiveUp,
     int attempts = 8,
-  ]) {
+  }) {
     WidgetsBinding.instance
       ..addPostFrameCallback((_) {
         if (scroller.scrollToMessage(id)) {
           flash.flash(id);
         } else if (attempts > 1) {
-          _jumpWhenBound(scroller, flash, id, attempts - 1);
+          _jumpWhenBound(scroller, flash, id,
+              onGiveUp: onGiveUp, attempts: attempts - 1);
+        } else {
+          onGiveUp();
         }
       })
       // A post-frame callback only runs when a frame is actually scheduled;
