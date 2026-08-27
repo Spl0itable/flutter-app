@@ -1,0 +1,1596 @@
+1787815041475 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041475,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 212 ms ago, but just fired now. This means that timers were blocked from firing for nearly 212 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 212 ms ago, but just fired now. This means that timers were blocked from firing for nearly 212 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041476 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041476,
+  "details": "A timer should have fired 211 ms ago, but just fired now. This means that timers were blocked from firing for nearly 211 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041477 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041477,
+  "details": "A timer should have fired 197 ms ago, but just fired now. This means that timers were blocked from firing for nearly 197 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041477 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041477,
+  "details": "A timer should have fired 162 ms ago, but just fired now. This means that timers were blocked from firing for nearly 162 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041477 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041477,
+  "details": "A timer should have fired 159 ms ago, but just fired now. This means that timers were blocked from firing for nearly 159 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041477 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041477,
+  "details": "A timer should have fired 159 ms ago, but just fired now. This means that timers were blocked from firing for nearly 159 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041477 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041477,
+  "details": "A timer should have fired 127 ms ago, but just fired now. This means that timers were blocked from firing for nearly 127 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041807 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041807,
+  "details": "A timer should have fired 233 ms ago, but just fired now. This means that timers were blocked from firing for nearly 233 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815041807 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815041807,
+  "details": "A timer should have fired 214 ms ago, but just fired now. This means that timers were blocked from firing for nearly 214 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042148 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042148,
+  "details": "A timer should have fired 223 ms ago, but just fired now. This means that timers were blocked from firing for nearly 223 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042149 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042149,
+  "details": "A timer should have fired 224 ms ago, but just fired now. This means that timers were blocked from firing for nearly 224 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042149 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042149,
+  "details": "A timer should have fired 224 ms ago, but just fired now. This means that timers were blocked from firing for nearly 224 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042150 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042150,
+  "details": "A timer should have fired 174 ms ago, but just fired now. This means that timers were blocked from firing for nearly 174 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042150 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042150,
+  "details": "A timer should have fired 157 ms ago, but just fired now. This means that timers were blocked from firing for nearly 157 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042150 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042150,
+  "details": "A timer should have fired 140 ms ago, but just fired now. This means that timers were blocked from firing for nearly 140 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042150 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042150,
+  "details": "A timer should have fired 140 ms ago, but just fired now. This means that timers were blocked from firing for nearly 140 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 163 ms ago, but just fired now. This means that timers were blocked from firing for nearly 163 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 163 ms ago, but just fired now. This means that timers were blocked from firing for nearly 163 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 163 ms ago, but just fired now. This means that timers were blocked from firing for nearly 163 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 163 ms ago, but just fired now. This means that timers were blocked from firing for nearly 163 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 163 ms ago, but just fired now. This means that timers were blocked from firing for nearly 163 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 117 ms ago, but just fired now. This means that timers were blocked from firing for nearly 117 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042349 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042349,
+  "details": "A timer should have fired 109 ms ago, but just fired now. This means that timers were blocked from firing for nearly 109 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042546 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042546,
+  "details": "A timer should have fired 185 ms ago, but just fired now. This means that timers were blocked from firing for nearly 185 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042546 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042546,
+  "details": "A timer should have fired 179 ms ago, but just fired now. This means that timers were blocked from firing for nearly 179 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042547 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042547,
+  "details": "A timer should have fired 180 ms ago, but just fired now. This means that timers were blocked from firing for nearly 180 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042547 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042547,
+  "details": "A timer should have fired 180 ms ago, but just fired now. This means that timers were blocked from firing for nearly 180 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042547 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042547,
+  "details": "A timer should have fired 180 ms ago, but just fired now. This means that timers were blocked from firing for nearly 180 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042558 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042558,
+  "details": "A timer should have fired 191 ms ago, but just fired now. This means that timers were blocked from firing for nearly 191 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815042559 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815042559,
+  "details": "A timer should have fired 192 ms ago, but just fired now. This means that timers were blocked from firing for nearly 192 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815043221 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815043221,
+  "details": "A timer should have fired 398 ms ago, but just fired now. This means that timers were blocked from firing for nearly 398 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815043221 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815043221,
+  "details": "A timer should have fired 398 ms ago, but just fired now. This means that timers were blocked from firing for nearly 398 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815043221 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815043221,
+  "details": "A timer should have fired 397 ms ago, but just fired now. This means that timers were blocked from firing for nearly 397 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815043222 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815043222,
+  "details": "A timer should have fired 398 ms ago, but just fired now. This means that timers were blocked from firing for nearly 398 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815043222 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815043222,
+  "details": "A timer should have fired 396 ms ago, but just fired now. This means that timers were blocked from firing for nearly 396 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 1132 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1132 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 1132 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1132 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 1108 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1108 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 865 ms ago, but just fired now. This means that timers were blocked from firing for nearly 865 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 832 ms ago, but just fired now. This means that timers were blocked from firing for nearly 832 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044043 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044043,
+  "details": "A timer should have fired 832 ms ago, but just fired now. This means that timers were blocked from firing for nearly 832 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044044 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044044,
+  "details": "A timer should have fired 823 ms ago, but just fired now. This means that timers were blocked from firing for nearly 823 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044044 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044044,
+  "details": "A timer should have fired 822 ms ago, but just fired now. This means that timers were blocked from firing for nearly 822 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044044 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044044,
+  "details": "A timer should have fired 823 ms ago, but just fired now. This means that timers were blocked from firing for nearly 823 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044044 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044044,
+  "details": "A timer should have fired 823 ms ago, but just fired now. This means that timers were blocked from firing for nearly 823 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044044 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044044,
+  "details": "A timer should have fired 823 ms ago, but just fired now. This means that timers were blocked from firing for nearly 823 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044046 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044046,
+  "details": "A timer should have fired 824 ms ago, but just fired now. This means that timers were blocked from firing for nearly 824 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044047 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044047,
+  "details": "A timer should have fired 584 ms ago, but just fired now. This means that timers were blocked from firing for nearly 584 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815044775 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815044775,
+  "details": "A timer should have fired 182 ms ago, but just fired now. This means that timers were blocked from firing for nearly 182 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815045030 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815045030,
+  "details": "A timer should have fired 437 ms ago, but just fired now. This means that timers were blocked from firing for nearly 437 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815045030 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815045030,
+  "details": "A timer should have fired 435 ms ago, but just fired now. This means that timers were blocked from firing for nearly 435 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815045030 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815045030,
+  "details": "A timer should have fired 435 ms ago, but just fired now. This means that timers were blocked from firing for nearly 435 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815045030 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815045030,
+  "details": "A timer should have fired 435 ms ago, but just fired now. This means that timers were blocked from firing for nearly 435 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815045030 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815045030,
+  "details": "A timer should have fired 433 ms ago, but just fired now. This means that timers were blocked from firing for nearly 433 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815046206 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815046206,
+  "details": "A timer should have fired 1604 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1604 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815046206 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815046206,
+  "details": "A timer should have fired 1604 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1604 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815046206 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815046206,
+  "details": "A timer should have fired 1461 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1461 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815046206 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815046206,
+  "details": "A timer should have fired 1431 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1431 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815046206 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815046206,
+  "details": "A timer should have fired 1431 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1431 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047070 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047070,
+  "details": "A timer should have fired 2168 ms ago, but just fired now. This means that timers were blocked from firing for nearly 2168 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047070 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047070,
+  "details": "A timer should have fired 2168 ms ago, but just fired now. This means that timers were blocked from firing for nearly 2168 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047070 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047070,
+  "details": "A timer should have fired 2042 ms ago, but just fired now. This means that timers were blocked from firing for nearly 2042 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047070 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047070,
+  "details": "A timer should have fired 2040 ms ago, but just fired now. This means that timers were blocked from firing for nearly 2040 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047070 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047070,
+  "details": "A timer should have fired 2040 ms ago, but just fired now. This means that timers were blocked from firing for nearly 2040 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047071 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047071,
+  "details": "A timer should have fired 1993 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1993 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047071 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047071,
+  "details": "A timer should have fired 1608 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1608 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815047071 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815047071,
+  "details": "A timer should have fired 315 ms ago, but just fired now. This means that timers were blocked from firing for nearly 315 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815048361 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815048361,
+  "details": "A timer should have fired 1083 ms ago, but just fired now. This means that timers were blocked from firing for nearly 1083 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815048361 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815048361,
+  "details": "A timer should have fired 905 ms ago, but just fired now. This means that timers were blocked from firing for nearly 905 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
+1787815048363 [TimerSignificantlyOverdue] {
+  "type": "Event",
+  "kind": "TimerSignificantlyOverdue",
+  "isolateGroup": {
+    "type": "@IsolateGroup",
+    "id": "isolateGroups/6873689997910940",
+    "name": "main.dart",
+    "number": "6873689997910940",
+    "isSystemIsolateGroup": false
+  },
+  "isolate": {
+    "type": "@Isolate",
+    "id": "isolates/7892265326810203",
+    "name": "main",
+    "number": "7892265326810203",
+    "isSystemIsolate": false,
+    "isolateGroupId": "isolateGroups/6873689997910940"
+  },
+  "timestamp": 1787815048363,
+  "details": "A timer should have fired 900 ms ago, but just fired now. This means that timers were blocked from firing for nearly 900 ms. Some possible causes of this are: asynchronous operations were blocked by uninterruptible synchronous ones, or your program was frozen by the OS to conserve resources."
+}
