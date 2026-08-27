@@ -1919,9 +1919,23 @@ class NostrController {
   /// feeds `shouldRecordNotification`, no bell entry either), which is precisely
   /// the case a notification exists for. And it gates the read receipts below:
   /// a backgrounded app must not tell the sender their message was read.
-  bool _isActiveView(String storageKey) =>
-      _appInForeground &&
-      _ref.read(appStateProvider).view.storageKey == storageKey;
+  ///
+  /// [threadRoot] is the message's thread marker, when it has one. A reply
+  /// collapsed inside a thread is OFF SCREEN even while its conversation is on
+  /// screen (only the root's reply-count row renders), so it must not count as
+  /// seen — see [threadReplyHidden]. Omit it and the check is the plain
+  /// conversation-is-open test, which is what the read-receipt callers want.
+  bool _isActiveView(String storageKey, {String? threadRoot}) {
+    if (!_appInForeground) return false;
+    final app = _ref.read(appStateProvider);
+    if (app.view.storageKey != storageKey) return false;
+    return !threadReplyHidden(
+      state: app,
+      openThread: _ref.read(activeThreadProvider),
+      storageKey: storageKey,
+      threadRoot: threadRoot,
+    );
+  }
 
   void _maybeNotifyChannel(NostrEvent e) {
     final self = _service?.selfPubkey ?? _identity?.pubkey ?? '';
@@ -1930,7 +1944,10 @@ class NostrController {
     final isBlocked = appState.blockedUsers.contains(e.pubkey);
     final key = EventMapper.channelKeyOf(e);
     final mention = _refersToSelf(e.content);
-    final isActive = key != null && _isActiveView(key);
+    // A mention that lands as a thread reply is invisible behind the root's
+    // reply-count row, so the active-view gate must not swallow it.
+    final isActive = key != null &&
+        _isActiveView(key, threadRoot: EventMapper.threadRootFromTags(e.tags));
     // Record gate (history) vs alert gate (sound/popup). A historical channel
     // mention is still added to history silently (nostr-core.js:546-555:
     // `_addNotificationToHistory` in the `isHistorical` branch) — only the loud
@@ -2015,7 +2032,7 @@ class NostrController {
       // A verified-bot sender (fresh Nymbot PM reply) is fully silent — the
       // PWA returns before sound/popup/history (notifications.js:14/126).
       isBot: m.isBot || isVerifiedBot(m.pubkey),
-      isActiveView: _isActiveView(key),
+      isActiveView: _isActiveView(key, threadRoot: m.threadRoot),
       friendsOnly: _notifyFriendsOnly,
       groupMentionsOnly: _groupNotifyMentionsOnly,
     );
