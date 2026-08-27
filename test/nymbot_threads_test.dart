@@ -106,6 +106,49 @@ void main() {
     });
   });
 
+  group('threadBotConversation strips the wire envelope', () {
+    const zap = '\n\n\u26a1 Liked this response? Zap this message with a '
+        'Bitcoin Lightning tip! If you don\'t know what or how to zap, just ask!';
+
+    test('a quote-reply exchange reaches the worker as what was said', () {
+      final reply = _human('e' * 64, now + 3,
+          "> @Nymbot#4bb2: @Luxas#a8df Nice, what's new?\n> \n> \u26a1 Liked this...\n\nwhat? that is what I asked you",
+          threadRoot: _rootId);
+      final n = _store([
+        _bot(_rootId, now, "@Luxas#a8df Here's something interesting.$zap"),
+        _human('c' * 64, now + 1,
+            "> @Nymbot#4bb2: @Luxas#a8df Here's something interesting.\n\nnice, what's new",
+            threadRoot: _rootId),
+        _bot('d' * 64, now + 2, "@Luxas#a8df Nice, what's new?$zap",
+            threadRoot: _rootId),
+        reply,
+      ]);
+      final convo = threadBotConversation(n.state, '#room', _rootId,
+          exclude: reply.content);
+      expect(convo.any((e) => e['text']!.contains('that is what I asked you')),
+          isFalse,
+          reason: 'the message just sent must not come back as history');
+      expect(convo.any((e) => e['text']!.contains('>')), isFalse);
+      expect(convo.any((e) => e['text']!.startsWith('@')), isFalse);
+      expect(convo.any((e) => e['text']!.contains('\u26a1')), isFalse);
+      expect(convo.map((e) => e['text']), [
+        "Here's something interesting.",
+        "nice, what's new",
+        "Nice, what's new?",
+      ]);
+    });
+
+    test('an unfinished game token survives the stripping', () {
+      final n = _store([
+        _bot(_rootId, now, '@Luxas#a8df Trivia?\n[gc:dHJpdmlhOnBhcmlz]$zap'),
+        _human('c' * 64, now + 1, 'london', threadRoot: _rootId),
+      ]);
+      final convo = threadBotConversation(n.state, '#room', _rootId);
+      expect(convo.first['text'], contains('[gc:dHJpdmlhOnBhcmlz]'));
+      expect(convo.first['text'], isNot(contains('\u26a1')));
+    });
+  });
+
   group('threadBotConversation', () {
     test('sends the thread root first, then replies, with nym#suffix authors',
         () {

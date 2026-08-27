@@ -31,6 +31,7 @@ import '../../../widgets/context_menu/context_menu_actions.dart';
 import '../../../widgets/context_menu/context_menu_panel.dart';
 import '../../commands/command_handler.dart' show resolveTarget;
 import '../../i18n/i18n.dart';
+import '../../nymbot/nymbot_threads.dart' show threadChainFor;
 import '../../shop/cosmetics.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
@@ -2491,12 +2492,19 @@ class _QuoteBox extends ConsumerWidget {
     }
     final scroller = ref.read(messageListScrollerProvider(key));
     final flash = ref.read(flashedMessageProvider.notifier);
-    // A quote tapped inside an OPEN thread means "show me the original in the
-    // conversation" — the thread list only holds the root and its replies, so
-    // leave the thread first and jump once the conversation list is back. Both
-    // handles are read up front: this widget is disposed by that close.
+    // A quote inside a thread usually points into that same thread, so try
+    // there first; only leave the thread when the message really is elsewhere.
     final open = ref.read(activeThreadProvider);
-    if (open != null && open.view.storageKey == key) {
+    final inThread = open != null && open.view.storageKey == key;
+    if (inThread &&
+        threadChainFor(ref.read(appStateProvider), key, open.rootId)
+            .any((m) => m.id == target.id)) {
+      if (scroller.scrollToMessage(target.id)) {
+        flash.flash(target.id);
+        return;
+      }
+    }
+    if (inThread) {
       ref.read(activeThreadProvider.notifier).state = null;
       _jumpWhenBound(scroller, flash, target.id, onGiveUp: reportUnavailable);
       return;
@@ -2504,8 +2512,6 @@ class _QuoteBox extends ConsumerWidget {
     if (scroller.scrollToMessage(target.id)) {
       flash.flash(target.id);
     } else {
-      // Resolved, but outside the rendered window — same dead end for the
-      // reader as not finding it at all.
       reportUnavailable();
     }
   }

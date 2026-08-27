@@ -73,6 +73,27 @@ Message? threadBotReplyTarget(
   return bots.last;
 }
 
+/// The @mention a bot reply opens with and the zap prompt it can close with.
+/// The `[gc:]` token stays — ?guess reads the live game out of it.
+final RegExp _rxBotMention = RegExp(r'^@\S+[ \t]+');
+final RegExp _rxZapLine = RegExp(r'^[ \t]*\u26a1.*$', multiLine: true);
+final RegExp _rxBlankRun = RegExp(r'\n{3,}');
+
+/// One entry's text, with the wire envelope off: quote block, and for the bot
+/// its @mention and zap prompt. Left in, the model mimics the format instead
+/// of answering. The quote is redundant here anyway — in a thread the message
+/// it quotes is its own entry.
+String threadEntryText(String content, {bool isBot = false}) {
+  var text = content
+      .split('\n')
+      .where((l) => !l.startsWith('>'))
+      .join('\n');
+  if (isBot) {
+    text = text.replaceFirst(_rxBotMention, '').replaceAll(_rxZapLine, '');
+  }
+  return text.replaceAll(_rxBlankRun, '\n\n').trim();
+}
+
 /// `nym#abcd` — the shape quote-replies use, so the worker can tell the bot's
 /// own turns apart from the humans' in a transcript.
 String threadEntryAuthor(Message m) {
@@ -92,22 +113,19 @@ List<Map<String, String>> threadBotConversation(
   String rootId, {
   String? exclude,
   int limit = _maxEntries,
+  String botPubkey = kNymbotPubkey,
 }) {
   final entries = <Map<String, String>>[];
   for (final m in threadChainFor(s, storageKey, rootId)) {
-    final text = m.content.trim().isEmpty
-        ? ''
-        : (m.content.length > _maxEntryChars
-            ? m.content.substring(0, _maxEntryChars)
-            : m.content);
-    if (text.trim().isEmpty) continue;
+    var text = threadEntryText(m.content, isBot: _isBotMessage(m, botPubkey));
+    if (text.isEmpty) continue;
+    if (text.length > _maxEntryChars) text = text.substring(0, _maxEntryChars);
     entries.add({'author': threadEntryAuthor(m), 'text': text});
   }
-  if (exclude != null && exclude.trim().isNotEmpty && entries.isNotEmpty) {
-    final tail = exclude.length > _maxEntryChars
-        ? exclude.substring(0, _maxEntryChars)
-        : exclude;
-    if (entries.last['text']!.trim() == tail.trim()) entries.removeLast();
+  // Normalised like the entries: the caller hands it over as published.
+  final tail = exclude == null ? '' : threadEntryText(exclude);
+  if (tail.isNotEmpty && entries.isNotEmpty && entries.last['text'] == tail) {
+    entries.removeLast();
   }
   if (entries.length > limit) {
     return entries.sublist(entries.length - limit);
