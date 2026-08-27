@@ -1503,6 +1503,11 @@ class NostrService {
     // Extra tags merged in verbatim — the outbox's `['nymmesh', <id>]`, which
     // lets a peer who already received this over the radio drop the Nostr copy.
     List<List<String>> extraTags = const [],
+    // Return the SIGNED event without publishing it. Gateway mode hands that
+    // event to a peer who still has internet, so it must be byte-identical to
+    // what we would have published ourselves — same tags, same kind, same
+    // proof of work, same signature. The caller owns delivery from there.
+    bool buildOnly = false,
   }) async {
     // [signerOverride] is the pseudonymous-send path: a fresh per-message
     // ephemeral key (publishMessagePseudonymous) so the message is unlinkable to
@@ -1547,6 +1552,7 @@ class NostrService {
       difficulty,
     );
     final signed = await sig.sign(mined);
+    if (buildOnly) return signed;
 
     // Geohash channel messages (kind 20000 with a `g` tag) route through
     // GEO_EVENT so the proxy prioritizes the closest geo relays; the proxy

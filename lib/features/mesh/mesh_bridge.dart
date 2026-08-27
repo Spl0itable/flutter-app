@@ -22,6 +22,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../features/pms/pm_logic.dart' show ReceiptInfo;
 import '../../models/message.dart';
+import '../../models/nostr_event.dart';
 import '../../services/mesh/mesh_events.dart';
 import '../../services/mesh/mesh_peer.dart';
 import '../../services/mesh/mesh_service.dart';
@@ -796,9 +797,8 @@ class MeshBridge {
   ///    placeholder, not an identity anyone can receive at, so a gift wrap to
   ///    it would encrypt to nothing and leak the conversation's existence for
   ///    no delivery.
-  ///  * a send made while ONLINE. `#mesh` rides the radio even with the
-  ///    internet up; that is the channel's nature, not a fallback, and the
-  ///    composer already publishes everything else to Nostr directly.
+  ///  * a send made while ONLINE. The composer already published it to Nostr
+  ///    directly, so queueing it would publish the same message twice.
   void _queueForNostr({
     required MeshOutboxKind kind,
     required String target,
@@ -833,6 +833,106 @@ class MeshBridge {
     } catch (_) {
       // Best-effort: a queue failure must never cost the radio send that
       // already went out.
+    }
+    // Now sign the event this send would have published, and let BOTH delivery
+    // paths carry that same one: a gateway may publish it in a moment, and our
+    // own outbox may publish it hours later. Identical bytes mean an identical
+    // event id, so the relays treat the second as a duplicate rather than a
+    // second message.
+    //
+    // Deliberately after the enqueue rather than before it: signing mines proof
+    // of work, and the message must be durably queued the instant the radio
+    // carried it — not once the mining finishes.
+    unawaited(_signAndOfferToGateways(
+      kind: kind,
+      target: target,
+      content: content,
+      echo: echo,
+      threadRoot: threadRoot,
+      meshMessageId: meshMessageId,
+    ));
+  }
+
+  Future<void> _signAndOfferToGateways({
+    required MeshOutboxKind kind,
+    required String target,
+    required String content,
+    required Message echo,
+    String? threadRoot,
+    String? meshMessageId,
+  }) async {
+    final signed = await _buildOutboxEvent(
+      kind: kind,
+      target: target,
+      content: content,
+      echo: echo,
+      threadRoot: threadRoot,
+      meshMessageId: meshMessageId,
+    );
+    if (signed == null) return;
+    try {
+      _ref
+          .read(nostrControllerProvider)
+          .attachMeshOutboxSignedEvent(echo.id, signed.toJson());
+    } catch (_) {
+      // The entry replays the ordinary way without it.
+    }
+    // Ask anyone nearby who still has a signal to publish it now. The outbox
+    // waits for OUR internet; this does not have to. It stays a shortcut and
+    // never the only copy — the entry is queued either way, because nothing
+    // on the wire tells us whether a gateway succeeded.
+    await _askGateways(target, signed);
+  }
+
+  /// Builds and signs the event this send would have published, without
+  /// publishing it.
+  ///
+  /// Channels only. A PM replays as a gift wrap addressed to one pubkey, and
+  /// handing that to a stranger to post tells them we are talking to that
+  /// person — the same disclosure the courier gate exists to refuse. It also
+  /// returns null while ghosted: the event signs with the REAL key, so
+  /// publishing it would tie the epoch straight back to the npub.
+  Future<NostrEvent?> _buildOutboxEvent({
+    required MeshOutboxKind kind,
+    required String target,
+    required String content,
+    required Message echo,
+    String? threadRoot,
+    String? meshMessageId,
+  }) async {
+    if (kind != MeshOutboxKind.channel) return null;
+    if (_ref.read(ghostModeProvider).enabled) return null;
+    // No signed copy is not a failure: the outbox still replays this the
+    // ordinary way once our own internet returns.
+    return _ref.read(nostrControllerProvider).buildMeshOutboxEvent(
+          channelKey: target,
+          content: content,
+          createdAtSec: echo.createdAt,
+          threadRoot: threadRoot,
+          meshMessageId: meshMessageId,
+        );
+  }
+
+  /// Asks nearby peers to publish [event] for us.
+  ///
+  /// Verified peers only: an unverified one is a radio claiming a name, and
+  /// handing it our traffic tells a stranger we are here. The ask goes to all
+  /// of them rather than picking one, because nothing on the wire says which
+  /// peer has internet — a peer that has none simply declines.
+  Future<void> _askGateways(String geohash, NostrEvent event) async {
+    if (!_service.isRunning) return;
+    var asked = 0;
+    for (final peer in _service.peers) {
+      if (!peer.isVerified) continue;
+      final ok = await _service.carryToGateway(
+        gatewayPeerID: peer.peerID,
+        geohash: geohash,
+        event: event.toJson(),
+      );
+      if (ok) asked++;
+    }
+    if (asked > 0) {
+      MeshDiagnostics.instance.log('asked $asked peer(s) to publish for us');
     }
   }
 

@@ -32,6 +32,7 @@ class MeshOutboxEntry {
     this.threadRoot,
     this.meshMessageId,
     this.nymMessageId,
+    this.signedEvent,
     this.attempts = 0,
   });
 
@@ -70,6 +71,16 @@ class MeshOutboxEntry {
   /// it here dedups the two copies through the ordinary PM path.
   final String? nymMessageId;
 
+  /// The event signed at send time, as raw JSON, when one could be built.
+  ///
+  /// Gateway mode may already be carrying this exact event to the relays.
+  /// Republishing the SAME bytes means the same event id, so the relays treat
+  /// the second copy as a duplicate; rebuilding it here would differ by the
+  /// proof-of-work nonce alone and put the message on the relays twice. It is
+  /// also what the user actually wrote — a rebuild hours later would re-read
+  /// the current nym and settings.
+  final Map<String, dynamic>? signedEvent;
+
   /// Publish attempts spent. Bounded so a message to a dead relay set cannot
   /// retry forever.
   int attempts;
@@ -83,6 +94,7 @@ class MeshOutboxEntry {
         if (threadRoot != null) 'threadRoot': threadRoot,
         if (meshMessageId != null) 'meshMessageId': meshMessageId,
         if (nymMessageId != null) 'nymMessageId': nymMessageId,
+        if (signedEvent != null) 'signedEvent': signedEvent,
         if (attempts > 0) 'attempts': attempts,
       };
 
@@ -119,6 +131,9 @@ class MeshOutboxEntry {
       threadRoot: str('threadRoot'),
       meshMessageId: str('meshMessageId'),
       nymMessageId: str('nymMessageId'),
+      signedEvent: raw['signedEvent'] is Map
+          ? Map<String, dynamic>.from(raw['signedEvent'] as Map)
+          : null,
       attempts: raw['attempts'] is num ? (raw['attempts'] as num).toInt() : 0,
     );
   }
@@ -198,6 +213,33 @@ class MeshOutbox {
   /// The entries a flush should publish at [nowMs]: everything still inside the
   /// TTL, oldest first, so a conversation replays in the order it was written.
   /// Prunes as a side effect — an expired entry is never handed out.
+  /// Attaches the event signed at send time to an entry already queued.
+  ///
+  /// Separate from [add] because the enqueue must not wait on it: signing mines
+  /// proof of work, and a message must be durably queued the moment the radio
+  /// carried it, not a second later. Returns whether an entry was updated.
+  bool attachSignedEvent(String localId, Map<String, dynamic> event) {
+    for (var i = 0; i < _entries.length; i++) {
+      final e = _entries[i];
+      if (e.localId != localId) continue;
+      if (e.signedEvent != null) return false;
+      _entries[i] = MeshOutboxEntry(
+        kind: e.kind,
+        target: e.target,
+        content: e.content,
+        createdAtSec: e.createdAtSec,
+        localId: e.localId,
+        threadRoot: e.threadRoot,
+        meshMessageId: e.meshMessageId,
+        nymMessageId: e.nymMessageId,
+        signedEvent: event,
+        attempts: e.attempts,
+      );
+      return true;
+    }
+    return false;
+  }
+
   List<MeshOutboxEntry> due(int nowMs) {
     prune(nowMs);
     return List.unmodifiable(_entries);

@@ -184,6 +184,79 @@ void main() {
       expect(box.isEmpty, isTrue);
     });
   });
+
+  // Gateway mode may already be carrying this exact event to the relays.
+  // Republishing the SAME bytes yields the same event id, so the relays treat
+  // the second copy as a duplicate; rebuilding it would differ by the
+  // proof-of-work nonce alone and put the message on the relays twice.
+  group('the event signed at send time', () {
+    Map<String, dynamic> event([String id = 'abc']) => <String, dynamic>{
+          'id': id,
+          'kind': 20000,
+          'content': 'hello',
+        };
+
+    test('attaches to an entry already queued', () {
+      final box = MeshOutbox()..add(_entry('_optim_1'));
+      expect(box.entries.single.signedEvent, isNull);
+      expect(box.attachSignedEvent('_optim_1', event()), isTrue);
+      expect(box.entries.single.signedEvent!['id'], 'abc');
+    });
+
+    test('leaves everything else about the entry alone', () {
+      final box = MeshOutbox()
+        ..add(_entry('_optim_1',
+            target: 'u4pruyd',
+            threadRoot: 'r' * 64,
+            meshMessageId: 'mesh-1',
+            nymMessageId: 'nym-1'));
+      box.noteAttempt('_optim_1');
+      box.attachSignedEvent('_optim_1', event());
+      final e = box.entries.single;
+      expect(e.target, 'u4pruyd');
+      expect(e.threadRoot, 'r' * 64);
+      expect(e.meshMessageId, 'mesh-1');
+      expect(e.nymMessageId, 'nym-1');
+      expect(e.createdAtSec, 1700000000);
+      expect(e.attempts, 1);
+    });
+
+    test('never overwrites the event already recorded', () {
+      final box = MeshOutbox()..add(_entry('_optim_1'));
+      expect(box.attachSignedEvent('_optim_1', event('first')), isTrue);
+      expect(box.attachSignedEvent('_optim_1', event('second')), isFalse);
+      expect(box.entries.single.signedEvent!['id'], 'first');
+    });
+
+    test('an entry already gone is ignored rather than resurrected', () {
+      final box = MeshOutbox();
+      expect(box.attachSignedEvent('_optim_gone', event()), isFalse);
+      expect(box.isEmpty, isTrue);
+    });
+
+    test('survives the reload, or the whole point is lost', () {
+      final box = MeshOutbox()..add(_entry('_optim_1'));
+      box.attachSignedEvent('_optim_1', event('deadbeef'));
+      final restored = MeshOutbox()..decode(box.encode());
+      expect(restored.entries.single.signedEvent!['id'], 'deadbeef');
+      expect(restored.entries.single.signedEvent!['kind'], 20000);
+    });
+
+    test('an entry written before this existed still decodes', () {
+      final box = MeshOutbox()
+        ..decode('[{"kind":"channel","target":"nymchat","content":"hi",'
+            '"createdAt":1700000000,"localId":"_optim_1"}]');
+      expect(box.entries.single.signedEvent, isNull);
+    });
+
+    test('a non-map signedEvent is dropped, not carried as junk', () {
+      final box = MeshOutbox()
+        ..decode('[{"kind":"channel","target":"nymchat","content":"hi",'
+            '"createdAt":1700000000,"localId":"_optim_1",'
+            '"signedEvent":"not an event"}]');
+      expect(box.entries.single.signedEvent, isNull);
+    });
+  });
 }
 
 /// Minimal JSON encoder for the one map the corrupt-row test embeds.

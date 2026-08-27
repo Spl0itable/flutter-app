@@ -4415,6 +4415,16 @@ class NostrController {
     _persistMeshOutbox();
   }
 
+  /// Records the event signed at send time against an entry already queued.
+  ///
+  /// The enqueue happens the instant the radio carried the message; signing
+  /// mines proof of work and lands a moment later. Ignored when the entry has
+  /// gone (already published, or dropped).
+  void attachMeshOutboxSignedEvent(String localId, Map<String, dynamic> event) {
+    _loadMeshOutbox();
+    if (_meshOutbox.attachSignedEvent(localId, event)) _persistMeshOutbox();
+  }
+
   /// Publishes everything the outbox still holds, oldest first.
   ///
   /// Called on the relay reconnect edge ([_onConnectionChanged]) and once after
@@ -4451,6 +4461,110 @@ class NostrController {
     }
   }
 
+  /// The one place a mesh-carried channel send becomes a Nostr event.
+  ///
+  /// Shared by the replay (which publishes) and by gateway mode (which only
+  /// needs the signed bytes), so the two cannot drift into building different
+  /// events for the same message.
+  Future<NostrEvent?> _channelEventForOutbox({
+    required NostrService service,
+    required Identity identity,
+    required String channelKey,
+    required String content,
+    required int createdAtSec,
+    required bool buildOnly,
+    String? threadRoot,
+    String? meshMessageId,
+  }) {
+    final isGeo = _ref
+        .read(appStateProvider)
+        .channels
+        .any((c) => c.key == channelKey.toLowerCase() && c.isGeohash);
+    return service.publishChannelMessage(
+      buildOnly: buildOnly,
+      channelKey: channelKey,
+      content: content,
+      nym: identity.nym,
+      geohash: isGeo ? channelKey : null,
+      emojiTags: _ref
+          .read(liveCustomEmojiProvider.notifier)
+          .emojiTagsForContent(content),
+      powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
+      threadRoot: threadRoot,
+      createdAtSec: createdAtSec,
+      extraTags: [
+        if ((meshMessageId ?? '').isNotEmpty) ['nymmesh', meshMessageId!],
+      ],
+    );
+  }
+
+  /// Builds and signs the event a mesh-carried channel send would publish,
+  /// without publishing it.
+  ///
+  /// Gateway mode ([MeshBridge]) hands the result to a peer who still has
+  /// internet. Signed by us, so that peer is a postbox: it cannot alter or
+  /// forge what it publishes, and the relays would reject it if it tried.
+  /// Null when there is nothing to sign with, in which case the outbox still
+  /// replays the message the ordinary way once our own internet returns.
+  Future<NostrEvent?> buildMeshOutboxEvent({
+    required String channelKey,
+    required String content,
+    required int createdAtSec,
+    String? threadRoot,
+    String? meshMessageId,
+  }) async {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return null;
+    try {
+      return await _channelEventForOutbox(
+        service: service,
+        identity: identity,
+        channelKey: channelKey,
+        content: content,
+        createdAtSec: createdAtSec,
+        threadRoot: threadRoot,
+        meshMessageId: meshMessageId,
+        buildOnly: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Publishes an event exactly as it was signed, without rebuilding it.
+  ///
+  /// Returns the event on success, or null when it will not parse — in which
+  /// case the caller rebuilds rather than losing the message. Verification is
+  /// not needed here: we signed this ourselves and it never left the device.
+  Future<NostrEvent?> _republishSignedEvent(
+    Map<String, dynamic> raw,
+    NostrService service,
+  ) async {
+    try {
+      final event = NostrEvent.fromJson(raw);
+      var geo = '';
+      for (final t in event.tags) {
+        if (t.length >= 2 && t[0] == 'g') {
+          geo = t[1];
+          break;
+        }
+      }
+      if (event.kind == EventKind.geoChannel && geo.isNotEmpty) {
+        final closest = service
+            .closestGeoRelays(geo)
+            .map((r) => r.url)
+            .toList(growable: false);
+        await service.pool.publishGeo(event, closest);
+      } else {
+        await service.pool.publish(event);
+      }
+      return event;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Publishes one retained send. Returns whether it went out.
   Future<bool> _publishMeshOutboxEntry(
     MeshOutboxEntry entry,
@@ -4460,25 +4574,32 @@ class NostrController {
     try {
       switch (entry.kind) {
         case MeshOutboxKind.channel:
-          final isGeo = _ref
-              .read(appStateProvider)
-              .channels
-              .any((c) => c.key == entry.target.toLowerCase() && c.isGeohash);
-          final signed = await service.publishChannelMessage(
+          // Prefer the event signed at send time. Gateway mode may already have
+          // carried this exact event to the relays, and republishing the same
+          // bytes yields the same id, so the relays treat the second copy as a
+          // duplicate rather than a second message.
+          final stashed = entry.signedEvent;
+          if (stashed != null) {
+            final replayed = await _republishSignedEvent(stashed, service);
+            if (replayed != null) {
+              _ref.read(appStateProvider.notifier).replaceOptimistic(
+                    entry.localId,
+                    replayed.id,
+                    realCreatedAt: replayed.createdAt,
+                  );
+              return true;
+            }
+            // Fall through and rebuild rather than lose the message.
+          }
+          final signed = await _channelEventForOutbox(
+            service: service,
+            identity: identity,
             channelKey: entry.target,
             content: entry.content,
-            nym: identity.nym,
-            geohash: isGeo ? entry.target : null,
-            emojiTags: _ref
-                .read(liveCustomEmojiProvider.notifier)
-                .emojiTagsForContent(entry.content),
-            powDifficulty: _ref.read(settingsProvider.notifier).powDifficulty,
-            threadRoot: entry.threadRoot,
             createdAtSec: entry.createdAtSec,
-            extraTags: [
-              if ((entry.meshMessageId ?? '').isNotEmpty)
-                ['nymmesh', entry.meshMessageId!],
-            ],
+            threadRoot: entry.threadRoot,
+            meshMessageId: entry.meshMessageId,
+            buildOnly: false,
           );
           if (signed == null) return false;
           // The mesh echo is still an `_optim_*` placeholder; give it the real
