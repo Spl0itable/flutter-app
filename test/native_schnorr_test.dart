@@ -91,6 +91,36 @@ void main() {
     );
   });
 
+  test('native SIGNING produces signatures pure-Dart bip340 accepts',
+      () async {
+    if (!native) {
+      markTestSkipped('libsecp256k1 not available');
+      return;
+    }
+    final sk = keys.generatePrivateKey();
+    final pk = keys.getPublicKeyHex(sk);
+    for (var i = 0; i < 5; i++) {
+      final e = NostrEvent(
+        pubkey: pk,
+        createdAt: 1700000000 + i,
+        kind: EventKind.namedChannel,
+        tags: const [
+          ['d', 'room'],
+        ],
+        content: 'native-signed $i',
+      );
+      e.id = e.computeId();
+      final sig = NativeSchnorr.sign(privkey: sk, idHex: e.id);
+      expect(sig, isNotNull);
+      e.sig = sig!;
+      // Both verifiers accept it — and the routed signId (native when loaded)
+      // round-trips through the routed verifyEvent.
+      expect(schnorr.verifyEvent(e), isTrue);
+      e.sig = schnorr.signId(e.id, sk);
+      expect(schnorr.verifyEvent(e), isTrue);
+    }
+  });
+
   test('native vs pure-Dart throughput (informational)', () async {
     if (!native) {
       markTestSkipped('libsecp256k1 not available');

@@ -32,6 +32,12 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Outgoing event signing (every send, read receipt, presence ping) now uses
+  native libsecp256k1 when available — the CPU profile showed the pure-Dart
+  path costing 10-20 ms of BigInt math ON THE UI THREAD per signature, which
+  is scroll-time jank whenever receipts fire. The gift-wrap worker isolates
+  load the native library too, so seal signing and seal verification inside
+  PM processing take the fast path as well.
 - The iOS scroll jank measured in the DevTools captures (a quarter to a third
   of ALL frames blowing the raster budget, spikes to 60–127 ms) traced to
   ~23 offscreen render passes (`Canvas::saveLayer`) per frame. The dominant
