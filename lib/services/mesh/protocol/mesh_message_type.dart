@@ -16,6 +16,10 @@ class MeshMessageType {
   /// Peer is leaving the mesh (payload = sender peerID string).
   static const int leave = 0x03;
 
+  /// Store-and-forward envelope carried by another peer on the sender's behalf
+  /// ([CourierEnvelope] TLV payload). Opaque to whoever carries it.
+  static const int courierEnvelope = 0x04;
+
   /// Noise XX handshake message (payloads are the 32/96/48-byte XX messages).
   static const int noiseHandshake = 0x10;
 
@@ -64,6 +68,7 @@ class MeshMessageType {
         noiseHandshake,
         noiseEncrypted,
         fragment,
+        courierEnvelope,
         requestSync,
         fileTransfer,
         voiceFrame,
@@ -83,6 +88,8 @@ class MeshMessageType {
         return 'NOISE_ENCRYPTED';
       case fragment:
         return 'FRAGMENT';
+      case courierEnvelope:
+        return 'COURIER_ENVELOPE';
       case requestSync:
         return 'REQUEST_SYNC';
       case fileTransfer:

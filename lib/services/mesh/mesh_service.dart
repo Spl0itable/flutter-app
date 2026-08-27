@@ -22,6 +22,8 @@ import 'protocol/fragment_payload.dart';
 import 'protocol/identity_announcement.dart';
 import 'protocol/mesh_message_identity.dart';
 import 'protocol/mesh_message_type.dart';
+import 'courier/courier_envelope.dart';
+import 'courier/courier_store.dart';
 import 'sync/gossip_sync.dart';
 import 'sync/request_sync_packet.dart';
 import 'protocol/mesh_profile.dart';
@@ -101,6 +103,22 @@ class MeshService {
   /// of range — or in another mesh partition — still receives it. See
   /// [GossipSync]; the radio work lives here, the policy lives there.
   final GossipSync gossip = GossipSync();
+
+  /// Mail this device is carrying for other people — sealed messages bound for
+  /// peers who were not in range when they were sent. See [CourierStore]; the
+  /// radio work lives here, the policy (who may deposit, who may carry, how far
+  /// a copy spreads) lives there.
+  final CourierStore couriers = CourierStore();
+
+  /// Whether Ghost Mode is on. Wired by the bridge. A ghosted device never
+  /// deposits mail with a courier: the deposit would outlive the epoch and
+  /// associate a throwaway identity with a message someone else still holds.
+  bool Function()? isGhostMode;
+
+  /// Whether a conversation with this peer is pinned to the mesh because it
+  /// began under a ghost identity. Wired by the bridge; such a conversation
+  /// never leaves the radio, courier included.
+  bool Function(String recipientStaticKeyHex)? isGhostPinned;
 
   /// Called whenever the gossip store changes enough to be worth persisting, so
   /// the carried history survives a restart. Wired by the bridge; null in
@@ -571,6 +589,11 @@ class MeshService {
       case MeshMessageType.nymReaction:
         _handleReactionBroadcast(packet, senderPeerID);
         break;
+      case MeshMessageType.courierEnvelope:
+        // Directed mail. Try to open it: if it is ours, deliver it; if not,
+        // carry it for whoever it belongs to.
+        if (forUs) await _handleCourierEnvelope(packet, senderPeerID);
+        break;
       case MeshMessageType.requestSync:
         // Local-only by design: a sync request is answered by the peer that
         // heard it and never relayed, which is why it carries TTL 0 below.
@@ -636,6 +659,10 @@ class MeshService {
 
     peer.touch();
     _emitPeers();
+    // Meeting a peer is the moment mail can move: hand them anything we carry
+    // for them, and a share of anything still spreading. Best-effort and
+    // unawaited so a slow radio never stalls the announce path.
+    unawaited(_courierEncounter(peer));
   }
 
   /// bitchat public mesh message ([MeshMessageType.message]): the payload is the
@@ -757,6 +784,17 @@ class MeshService {
     } catch (_) {
       return;
     }
+    await _dispatchNoisePayload(senderPeerID, plaintext);
+  }
+
+  /// Handles a decrypted transport payload from [senderPeerID].
+  ///
+  /// Shared by the live Noise session path and the courier path: an envelope
+  /// opened out of a courier's hands yields the SAME plaintext a session would
+  /// have, so a message that arrived by mail behaves exactly like one that
+  /// arrived over the air.
+  Future<void> _dispatchNoisePayload(
+      String senderPeerID, Uint8List plaintext) async {
     final noisePayload = NoisePayload.decode(plaintext);
     if (noisePayload == null) return;
 
@@ -1052,6 +1090,224 @@ class MeshService {
   }
 
   /// Builds a packet from us with the standard TTL, optionally Ed25519-signed.
+  // ---- Couriers -------------------------------------------------------------
+
+  /// The Noise transport payload a private message rides in, built without a
+  /// session — so a courier envelope can carry exactly what a live session
+  /// would have, and the receiver's dispatch cannot tell the difference.
+  ///
+  /// Null when the content does not fit one packet (the TLV length is a single
+  /// byte). Couriered mail is not chunked: a stranger carries one envelope, not
+  /// a reassembly job.
+  static Uint8List? privateMessagePayload({
+    required String messageId,
+    required String content,
+  }) {
+    final body =
+        PrivateMessagePacket(messageID: messageId, content: content).encode();
+    if (body == null) return null;
+    return NoisePayload(NoisePayloadType.privateMessage, body).encode();
+  }
+
+  /// Seals [payload] to [recipientStaticKeyHex] and hands sealed copies to
+  /// nearby peers, who carry it and deliver it if they meet the recipient.
+  ///
+  /// The last-resort delivery path: the recipient is not in range and, with no
+  /// internet, the sender outbox cannot help either. Returns how many couriers
+  /// took a copy — zero when the deposit was refused, which the caller should
+  /// treat as "no worse off", never as an error.
+  ///
+  /// Refusal is the important half. [CourierStore.mayDeposit] blocks a
+  /// ghost-pinned conversation and a ghosted sender outright: handing an
+  /// envelope to a courier tells that courier a message exists and that we sent
+  /// it, and a ghost identity exists precisely so that no such link is made.
+  Future<int> depositWithCouriers({
+    required String recipientStaticKeyHex,
+    required Uint8List payload,
+    int copies = 4,
+  }) async {
+    final ghosted = isGhostMode?.call() ?? false;
+    final pinned = isGhostPinned?.call(recipientStaticKeyHex) ?? false;
+    final key = _fromHex(recipientStaticKeyHex);
+    if (!CourierStore.mayDeposit(
+      isGhostPinned: pinned,
+      isGhostMode: ghosted,
+      hasRecipientStaticKey: key != null && key.length == 32,
+    )) {
+      debugLog?.call('courier deposit refused (ghost/no key)');
+      return 0;
+    }
+    final recipientPeerID =
+        _hex(NoiseCrypto.sha256(key!)).substring(0, 16);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    Uint8List sealed;
+    try {
+      sealed = await CourierSeal.seal(
+        payload: payload,
+        recipientStaticKey: key,
+        senderStaticPrivate: identity.staticPrivate,
+        senderStaticPublic: identity.staticPublic,
+      );
+    } catch (e) {
+      debugLog?.call('courier seal failed: $e');
+      return 0;
+    }
+    final envelope = CourierEnvelope(
+      recipientTag: await CourierEnvelope.recipientTagFor(
+        noiseStaticKey: key,
+        epochDay: CourierEnvelope.epochDayFor(now),
+      ),
+      expiryMs: now + CourierEnvelope.maxLifetimeMs,
+      ciphertext: sealed,
+      copies: copies,
+    );
+    final bytes = envelope.encode();
+    if (bytes == null) return 0;
+
+    var handed = 0;
+    for (final peer in _peers.values) {
+      if (handed >= couriers.maxCouriersPerDeposit) break;
+      if (!CourierStore.mayCourier(
+        isVerified: peer.isVerified,
+        isSelf: peer.peerID == identity.peerID,
+        isRecipient: peer.peerID == recipientPeerID,
+      )) {
+        continue;
+      }
+      final recipient = _peerIdBytes(peer.peerID);
+      if (recipient == null) continue;
+      try {
+        await _sendPacket(await _buildPacket(
+          type: MeshMessageType.courierEnvelope,
+          payload: bytes,
+          recipientID: recipient,
+          ttl: 0,
+        ));
+        handed++;
+      } catch (_) {
+        // A courier that will not take it is not a failure; try the next.
+      }
+    }
+    debugLog?.call('courier deposit: $handed carrier(s)');
+    return handed;
+  }
+
+  /// An envelope arrived. Either it is ours — open and deliver it — or it is
+  /// somebody else's mail we have been asked to carry.
+  Future<void> _handleCourierEnvelope(
+      BitchatPacket packet, String senderPeerID) async {
+    final envelope = CourierEnvelope.decode(packet.payload);
+    if (envelope == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (envelope.isExpiredAt(now)) return;
+
+    // Is it for us? Only the recipient can open it, so this is also the test.
+    try {
+      final (plaintext, senderStatic) = await CourierSeal.open(
+        ciphertext: envelope.ciphertext,
+        localStaticPrivate: identity.staticPrivate,
+        localStaticPublic: identity.staticPublic,
+      );
+      // The sender's static key is AUTHENTICATED by the seal's `ss` DH, so the
+      // peerID derived from it is who really wrote this — not whoever handed
+      // it over.
+      final originPeerID =
+          _hex(NoiseCrypto.sha256(senderStatic)).substring(0, 16);
+      debugLog?.call('courier envelope OPENED from $originPeerID '
+          '(carried by $senderPeerID)');
+      await _dispatchNoisePayload(originPeerID, plaintext);
+      return;
+    } catch (_) {
+      // Not ours. That is the ordinary case — carry it.
+    }
+
+    final key = _courierKey(envelope.ciphertext);
+    if (couriers.accept(envelope, key)) {
+      debugLog?.call('carrying courier envelope for someone (copies='
+          '${envelope.copies})');
+      couriers.markHandedTo(key, senderPeerID);
+    }
+  }
+
+  /// A peer just became known: hand them any mail we carry for them, and give
+  /// them a share of anything that still has budget to spread.
+  Future<void> _courierEncounter(MeshPeer peer) async {
+    if (couriers.length == 0) return;
+    final staticKey = peer.noisePublicKey;
+    final recipient = _peerIdBytes(peer.peerID);
+    if (recipient == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    // Delivery: mail addressed to this peer, matched on the rotating tag.
+    if (staticKey != null && staticKey.length == 32) {
+      final tags = await CourierEnvelope.candidateTagsFor(
+        noiseStaticKey: staticKey,
+        nowMs: now,
+      );
+      for (final entry in couriers.forTags(tags)) {
+        final bytes = entry.value.envelope.encode();
+        if (bytes == null) continue;
+        try {
+          await _sendPacket(await _buildPacket(
+            type: MeshMessageType.courierEnvelope,
+            payload: bytes,
+            recipientID: recipient,
+            ttl: 0,
+          ));
+          // Delivered: stop carrying it. If the peer could not open it after
+          // all, the sender's own retries still cover the message.
+          couriers.drop(entry.key);
+          debugLog?.call('courier delivered to ${peer.peerID}');
+        } catch (_) {}
+      }
+    }
+
+    // Spray: hand a share of the remaining budget on, so the message keeps
+    // spreading toward a recipient neither of us has met. Only to a verified
+    // peer — an unverified one is a radio claiming a name, and telling it we
+    // carry mail is telling a stranger.
+    if (!CourierStore.mayCourier(
+      isVerified: peer.isVerified,
+      isSelf: peer.peerID == identity.peerID,
+      isRecipient: false,
+    )) {
+      return;
+    }
+    for (final entry in couriers.sprayableTo(peer.peerID)) {
+      final copies = entry.value.envelope.copies;
+      final share = CourierStore.sprayShare(copies);
+      if (share <= 0) continue;
+      final bytes = entry.value.envelope.withCopies(share).encode();
+      if (bytes == null) continue;
+      try {
+        await _sendPacket(await _buildPacket(
+          type: MeshMessageType.courierEnvelope,
+          payload: bytes,
+          recipientID: recipient,
+          ttl: 0,
+        ));
+        couriers.setCopies(entry.key, CourierStore.keepShare(copies));
+        couriers.markHandedTo(entry.key, peer.peerID);
+      } catch (_) {}
+    }
+  }
+
+  /// A stable key for an envelope, so the same mail arriving from two couriers
+  /// is carried once.
+  String _courierKey(Uint8List ciphertext) =>
+      _hex(NoiseCrypto.sha256(ciphertext)).substring(0, 32);
+
+  static Uint8List? _fromHex(String hex) {
+    if (hex.length.isOdd || hex.isEmpty) return null;
+    final out = Uint8List(hex.length ~/ 2);
+    for (var i = 0; i < out.length; i++) {
+      final b = int.tryParse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+      if (b == null) return null;
+      out[i] = b;
+    }
+    return out;
+  }
+
   // ---- Gossip sync ----------------------------------------------------------
 
   /// Files one of OUR public sends into the gossip store.
@@ -1075,6 +1331,9 @@ class MeshService {
   Future<void> _gossipTick() async {
     if (!_running) return;
     if (gossip.prune()) _gossipDirty = true;
+    // Mail we are carrying expires too — someone else's message is not worth
+    // holding forever.
+    couriers.prune();
     if (_gossipDirty) {
       _gossipDirty = false;
       _persistGossipArchive();
