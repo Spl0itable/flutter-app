@@ -20,9 +20,50 @@ import 'package:nym_bar/services/mesh/noise/noise_crypto.dart';
 import 'package:nym_bar/services/mesh/protocol/mesh_diagnostics_packets.dart';
 import 'package:nym_bar/services/mesh/protocol/nostr_carrier_packet.dart';
 
+import 'package:nym_bar/features/mesh/mesh_controller.dart';
+
 Uint8List _b(List<int> v) => Uint8List.fromList(v);
 
 void main() {
+  // What a peer row shows while a probe is out, when it answers, and when it
+  // never does. A peer is in the list because we heard an announce, which may
+  // have been minutes and several moves ago — so silence has to read as an
+  // answer rather than a row that waits forever.
+  group('the probe as the UI sees it', () {
+    test('a probe in flight is waiting, and nothing else', () {
+      const p = MeshPingState.waiting();
+      expect(p.isWaiting, isTrue);
+      expect(p.lost, isFalse);
+      expect(p.roundTripMs, isNull);
+    });
+
+    test('an answer stops waiting and carries the numbers', () {
+      const p = MeshPingState.result(roundTripMs: 42, hops: 3);
+      expect(p.isWaiting, isFalse);
+      expect(p.lost, isFalse);
+      expect(p.roundTripMs, 42);
+      expect(p.hops, 3);
+    });
+
+    test('silence is an answer, not a hang', () {
+      const p = MeshPingState.lost();
+      expect(p.lost, isTrue);
+      expect(p.isWaiting, isFalse);
+    });
+
+    test('a reply with no derivable hop count still reports the round trip',
+        () {
+      // hopCount returns null for an impossible TTL pair — the packet was
+      // rewritten rather than relayed. Better no hop count than a wrong one,
+      // and the round trip is still a real measurement.
+      const p = MeshPingState.result(roundTripMs: 88, hops: null);
+      expect(p.roundTripMs, 88);
+      expect(p.hops, isNull);
+      expect(p.isWaiting, isFalse);
+      expect(p.lost, isFalse);
+    });
+  });
+
   group('PING / PONG', () {
     test('round-trips the nonce and origin TTL', () {
       final nonce = _b([1, 2, 3, 4, 5, 6, 7, 8]);
