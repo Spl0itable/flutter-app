@@ -6,6 +6,7 @@ import 'dart:async' show Timer;
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -3210,10 +3211,17 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
                         ],
                       ),
                       clipBehavior: Clip.antiAlias,
-                      child: Image.network(
-                        proxiedMedia(widget.urls[_index]),
+                      // CachedNetworkImage, NOT Image.network: the inline tile
+                      // already fetched this URL into the shared disk cache, so
+                      // the modal opens from disk instead of re-downloading the
+                      // media it is literally zoomed in on. Full-resolution
+                      // decode (no memCacheWidth) — this is the one surface
+                      // that wants native pixels.
+                      child: CachedNetworkImage(
+                        imageUrl: proxiedMedia(widget.urls[_index]),
+                        httpHeaders: InlineNetworkImage.imageFetchHeaders,
                         fit: BoxFit.contain,
-                        errorBuilder: (_, __, ___) => const Icon(
+                        errorWidget: (_, __, ___) => const Icon(
                             Icons.broken_image,
                             color: Colors.white54,
                             size: 48),

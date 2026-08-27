@@ -3399,7 +3399,14 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    final color = _hover && widget.enabled ? c.primary : c.textDim;
+    // The rest/disabled dim (`.translate-input-btn { opacity: 0.6 }`,
+    // disabled 0.4) is FOLDED into the glyph color rather than an [Opacity]
+    // wrapper: Opacity costs a saveLayer per frame, and only the glyph is
+    // visible at rest (the hover fill only paints at full opacity anyway).
+    final restAlpha =
+        widget.translating ? 1.0 : (widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4);
+    final base = _hover && widget.enabled ? c.primary : c.textDim;
+    final color = base.withValues(alpha: base.a * restAlpha);
     Widget glyph = NymSvgIcon(NymIcons.translate, size: 16, color: color);
     if (widget.translating) {
       // `.translating` pulse: opacity 0.4 ↔ 0.8.
@@ -3411,11 +3418,8 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
     // `.translating`'s keyframes animate the SAME opacity property, so the
     // 0.4↔0.8 pulse REPLACES the base opacity (styles-chat.css:1784-1800) —
     // don't also apply the disabled 0.4 or the pulse dims to 0.16–0.32.
-    return Opacity(
-      opacity: widget.translating
-          ? 1.0
-          : (widget.enabled ? (_hover ? 1.0 : 0.6) : 0.4),
-      child: Tooltip(
+    // (The base dim itself is folded into the glyph color above.)
+    return Tooltip(
         message: tr('Translate text'),
         child: MouseRegion(
           cursor: widget.enabled
@@ -3450,7 +3454,6 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
             ),
           ),
         ),
-      ),
     );
   }
 }
