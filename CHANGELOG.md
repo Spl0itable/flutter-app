@@ -32,6 +32,31 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Outgoing event signing (every send, read receipt, presence ping) now uses
+  native libsecp256k1 when available — the CPU profile showed the pure-Dart
+  path costing 10-20 ms of BigInt math ON THE UI THREAD per signature, which
+  is scroll-time jank whenever receipts fire. The gift-wrap worker isolates
+  load the native library too, so seal signing and seal verification inside
+  PM processing take the fast path as well.
+- The iOS scroll jank measured in the DevTools captures (a quarter to a third
+  of ALL frames blowing the raster budget, spikes to 60–127 ms) traced to
+  ~23 offscreen render passes (`Canvas::saveLayer`) per frame. The dominant
+  source was SVG icon tinting: a srcIn colorFilter forces vector_graphics to
+  saveLayer every icon, every frame, and 15–25 tinted icons are always on
+  screen (header, composer toolbar, the per-row add-reaction pills, badges).
+  Icons now tint via the SVG theme's `currentColor` — resolved at parse time,
+  rendered identically, no offscreen pass. The add-reaction pill's and the
+  composer translate button's resting `Opacity` dims are likewise folded
+  directly into their colors.
+- The fullscreen image viewer now opens media from the shared disk cache the
+  inline tile already populated, instead of re-downloading it with a separate
+  uncached fetch.
+- The "Stay Connected in Background" descriptions (settings and the network
+  stats modal) now say the mode uses more data as well as more battery.
+- Opening a thread from another conversation no longer throws a
+  "Cannot use ref after the widget was disposed" error storm: the post-frame
+  callback captured the tapping row's ref, which the view switch itself could
+  dispose before the frame ended. It now captures the provider notifier.
 - The whole-app freezes during the first minutes after opening (scroll not
   responding, the sidebar stalling) are fixed at their two sources. The
   periodic cache flush serialized every dirty conversation, every known

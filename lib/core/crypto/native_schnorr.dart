@@ -46,6 +46,29 @@ class NativeSchnorr {
         .catchError((Object _) => _available = false);
   }
 
+  /// Signs the 32-byte [idHex] with [privkey] natively (BIP340, deterministic
+  /// — libsecp256k1 self-verifies the result before returning). Returns the
+  /// 128-char hex signature, or null when the native library isn't loaded in
+  /// this isolate or signing failed — the caller falls back to pure-Dart
+  /// bip340. Pure-Dart signing is ~10–20 ms of BigInt math; the CPU profile
+  /// showed it landing on the MAIN isolate for every outgoing event (sends,
+  /// receipts, presence), which is scroll-time jank. Native is ~50 µs.
+  static String? sign({
+    required Uint8List privkey,
+    required String idHex,
+  }) {
+    if (!isAvailable) return null;
+    try {
+      final sig = coinlib.SchnorrSignature.sign(
+        coinlib.ECPrivateKey(privkey),
+        Uint8List.fromList(hexToBytes(idHex)),
+      );
+      return bytesToHex(sig.data);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Verifies a BIP340 signature natively. Call only when [isAvailable];
   /// returns false on any malformed input or verify failure.
   static bool verify({

@@ -11,8 +11,13 @@ import 'native_schnorr.dart';
 String _privHex(Uint8List privkey) => bytesToHex(privkey).padLeft(64, '0');
 
 /// Signs the 32-byte event id [idHex] with [privkey], returning a 64-byte
-/// (128-char hex) Schnorr signature. Uses fresh aux randomness per signature.
+/// (128-char hex) Schnorr signature. Native libsecp256k1 when loaded in this
+/// isolate (deterministic BIP340, self-verified, ~50 µs); otherwise the
+/// pure-Dart bip340 path with fresh aux randomness (~10–20 ms of BigInt
+/// math — which the CPU profile showed as main-thread jank per send).
 String signId(String idHex, Uint8List privkey) {
+  final native = NativeSchnorr.sign(privkey: privkey, idHex: idHex);
+  if (native != null) return native;
   final aux = bytesToHex(randomBytes(32));
   return bip340.sign(_privHex(privkey), idHex, aux);
 }
