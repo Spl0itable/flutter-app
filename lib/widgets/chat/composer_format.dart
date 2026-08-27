@@ -747,6 +747,10 @@ class _MediaThumb extends StatelessWidget {
         height: 56,
         fit: BoxFit.cover,
         gaplessPlayback: true,
+        // A camera-roll pick is a full-resolution photo; decode at the 56px
+        // chip size (×1.5 cover margin) instead.
+        cacheWidth:
+            (56 * MediaQuery.devicePixelRatioOf(context) * 1.5).ceil(),
         errorBuilder: (_, __, ___) => _broken(c),
       );
     } else {
@@ -755,6 +759,8 @@ class _MediaThumb extends StatelessWidget {
         width: 56,
         height: 56,
         fit: BoxFit.cover,
+        cacheWidth:
+            (56 * MediaQuery.devicePixelRatioOf(context) * 1.5).ceil(),
         errorBuilder: (_, __, ___) => _broken(c),
       );
     }

@@ -383,9 +383,19 @@ class HomeShellState extends ConsumerState<HomeShell>
           // `body::before` — always-on ambient corner glows + center vignette,
           // painted beneath the wallpaper (styles-core.css:130-144, with
           // ghost/light overrides). pointer-events:none.
-          Positioned.fill(child: _AmbientGlow(c: c, isGhost: isGhost)),
+          //
+          // Both background layers are RepaintBoundary-isolated: they are
+          // static full-screen vector paints (the tiled wallpaper patterns run
+          // hundreds of clip+shader cells), and without their own layers ANY
+          // repaint that climbs to this Stack — typing dots, load shimmer,
+          // composer pulses, snap-in entrances — re-rasterized both at the
+          // animation's frame rate. As cached layers they re-paint only when
+          // the theme/wallpaper actually changes.
+          Positioned.fill(
+            child: RepaintBoundary(child: _AmbientGlow(c: c, isGhost: isGhost)),
+          ),
           // `#wallpaperLayer` — fixed, behind all content, pointer-events:none.
-          const Positioned.fill(child: WallpaperLayer()),
+          const Positioned.fill(child: RepaintBoundary(child: WallpaperLayer())),
           Positioned.fill(
             child: isWide
                 ? _wide(context, useColumns)

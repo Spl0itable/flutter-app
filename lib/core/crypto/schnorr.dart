@@ -4,6 +4,7 @@ import 'package:bip340/bip340.dart' as bip340;
 
 import '../../models/nostr_event.dart';
 import 'keys.dart';
+import 'native_schnorr.dart';
 
 /// BIP340 Schnorr signing/verification for Nostr events.
 
@@ -24,10 +25,21 @@ String signEvent(UnsignedEvent event, Uint8List privkey) {
 /// Verifies a fully-populated [event]: recomputes the id from its content and
 /// checks the Schnorr signature against the event pubkey. Returns false on any
 /// mismatch or malformed input.
+///
+/// Uses native libsecp256k1 when it is loaded in this isolate (~100× faster
+/// than the pure-Dart path — see [NativeSchnorr]); otherwise the pure-Dart
+/// bip340 implementation. Both are BIP340 and agree on every verdict.
 bool verifyEvent(NostrEvent event) {
   if (event.sig.length != 128 || event.pubkey.length != 64) return false;
   final computedId = event.computeId();
   if (event.id.isNotEmpty && event.id != computedId) return false;
+  if (NativeSchnorr.isAvailable) {
+    return NativeSchnorr.verify(
+      pubkeyHex: event.pubkey,
+      idHex: computedId,
+      sigHex: event.sig,
+    );
+  }
   try {
     return bip340.verify(event.pubkey, computedId, event.sig);
   } catch (_) {

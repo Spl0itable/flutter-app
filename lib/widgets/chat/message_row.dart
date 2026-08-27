@@ -5540,7 +5540,15 @@ class _LocalMediaBody extends StatelessWidget {
                 constraints: const BoxConstraints(
                     maxWidth: 260, maxHeight: 320, minWidth: 80),
                 child: Image.memory(bytes,
-                    fit: BoxFit.cover, gaplessPlayback: true),
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    // Decode at the tile size (×1.5 cover margin), not the
+                    // photo's intrinsic megapixels — the full bytes are kept
+                    // for the fullscreen tap above.
+                    cacheWidth: (260 *
+                            MediaQuery.devicePixelRatioOf(context) *
+                            1.5)
+                        .ceil()),
               ),
             ),
           );

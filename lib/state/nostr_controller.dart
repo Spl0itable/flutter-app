@@ -11,6 +11,7 @@ import '../core/crypto/bitchat.dart' as bitchat;
 import '../core/crypto/gift_wrap.dart' as giftwrap;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/ml_kem.dart';
+import '../core/crypto/native_schnorr.dart';
 import '../core/crypto/pow.dart' as pow;
 import '../core/crypto/pq.dart' as pq;
 import '../core/crypto/schnorr.dart' as schnorr;
@@ -353,6 +354,12 @@ class NostrController {
     if (_settingsHydratedC.isCompleted) {
       _settingsHydratedC = Completer<void>();
     }
+    // Load native libsecp256k1 into the MAIN isolate (fire-and-forget; falls
+    // back to pure-Dart bip340 until/unless it resolves) so the few inline
+    // `schnorr.verifyEvent` call sites — build-integrity rows, the canary,
+    // emoji-pack checks — take the ~100× faster path. The batch verifier's
+    // worker isolates load it themselves (see `verifyEventsBatch`).
+    unawaited(NativeSchnorr.ensureLoaded());
     try {
       final kv = _ref.read(keyValueStoreProvider);
       // `secretWrite` routes identity-secret persistence through the vault
@@ -1185,6 +1192,9 @@ class NostrController {
     _deletedIdsPersistTimer = null;
     _pqKeysPersistTimer?.cancel();
     _pqKeysPersistTimer = null;
+    _verifiedIdsPersistTimer?.cancel();
+    _verifiedIdsPersistTimer = null;
+    NostrService.onVerifiedIdsChanged = null;
     _pqAnnounceTimer?.cancel();
     _pqAnnounceTimer = null;
     // Flush any pending debounced group-store / read-watermark writes before we
@@ -4590,6 +4600,28 @@ class NostrController {
   /// loudly — it makes the next message to every peer classical while their
   /// announcements are looked up again, which is invisible apart from a
   /// downgraded badge. See [PqRegistry.hydrate] for why restoring is safe.
+  /// Debounced (30s) persist of the verified-signature id cache
+  /// ([NostrService.snapshotVerifiedIds]) so the NEXT launch's relay/D1 replay
+  /// skips re-verifying everything this session already verified. The long
+  /// debounce keeps the boot flood from re-writing the (up to ~1.4 MB) row
+  /// every few seconds; the trailing write after the last verification covers
+  /// the tail. Rides the [_schedulePersistPqKeys] pattern.
+  Timer? _verifiedIdsPersistTimer;
+  void _schedulePersistVerifiedIds() {
+    if (_verifiedIdsPersistTimer != null) return;
+    if (PanicWipe.inProgress) return;
+    _verifiedIdsPersistTimer = Timer(const Duration(seconds: 30), () {
+      _verifiedIdsPersistTimer = null;
+      final cache = _cache;
+      if (cache == null || !cache.isOpen) return;
+      if (PanicWipe.inProgress) return;
+      unawaited(cache
+          .saveMetaSet(CacheStore.metaVerifiedEventIds,
+              NostrService.snapshotVerifiedIds().toSet())
+          .catchError((_) {}));
+    });
+  }
+
   Timer? _pqKeysPersistTimer;
   void _schedulePersistPqKeys() {
     if (_pqKeysPersistTimer != null) return;
@@ -8671,6 +8703,17 @@ class NostrController {
               if (m.id.isNotEmpty) m.id,
         ]);
       }
+      // Restore the persisted verified-signature ids from PAST sessions and
+      // keep persisting new ones (debounced). The message-cache seeding above
+      // only covers what the message stores hold; a heavy returning account
+      // also replays thousands of reactions, kind-0 profiles, presence and
+      // vouch events on every boot/resume, each costing ~12 ms of pure-Dart
+      // BIP340 math without this cache — several seconds of pegged CPU that
+      // read as the whole app lagging while history streamed in.
+      final verifiedIds =
+          await cache.loadMetaSet(CacheStore.metaVerifiedEventIds);
+      if (verifiedIds.isNotEmpty) NostrService.seedVerifiedIds(verifiedIds);
+      NostrService.onVerifiedIdsChanged = _schedulePersistVerifiedIds;
       if (!cachePms) unawaited(cache.clearPms());
       // Reactions hydrate AFTER messages so their tallies attach to rows that
       // now exist (same effective order as the PWA's single hydration pass).

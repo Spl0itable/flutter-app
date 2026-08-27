@@ -64,6 +64,15 @@ class CacheStore {
   static const String metaPoolShardLastSeen = 'poolShardLastSeen';
   static const String metaPqKeys = 'pqKeys';
 
+  /// Event ids whose BIP340 signatures verified in past sessions (bounded,
+  /// newest-biased — see `IsolateVerifier.snapshotVerifiedIds`). Restored at
+  /// boot so the relay/D1 replay of already-seen reactions, profiles, presence
+  /// and out-of-cache history skips the ~12 ms/event signature math that made
+  /// heavy accounts crawl on open/resume. Ids are public, content-bound
+  /// hashes; caching them weakens nothing (tampered content re-hashes to a
+  /// different id and misses the cache).
+  static const String metaVerifiedEventIds = 'verifiedEventIds';
+
   static const String _dbName = 'nym_cache.db';
   static const int _dbVersion = 2;
 
