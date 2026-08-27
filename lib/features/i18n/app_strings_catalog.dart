@@ -650,6 +650,7 @@ const List<String> kAppStringsCatalog = <String>[
   'Options',
   'Or paste a signer URI',
   'Original ({lang}): ',
+  'Original message is not available',
   'Original message unavailable',
   'Original: ',
   'Owner of {name}',

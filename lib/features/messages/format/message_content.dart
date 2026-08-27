@@ -2472,7 +2472,20 @@ class _QuoteBox extends ConsumerWidget {
       messages,
       hostMessageId: hostMessageId,
     );
-    if (target == null) return; // not in the loaded set → bail (PWA parity)
+    // Nothing to jump to — say so instead of swallowing the tap, the way the
+    // PWA's `_scrollToQuotedMessage` does. Bound to the conversation the quote
+    // lives in, so under columns the notice lands in the right one. The
+    // notifier is captured rather than `ref`, so it survives the thread close
+    // below disposing this widget.
+    final app = ref.read(appStateProvider.notifier);
+    void reportUnavailable() => app.addSystemMessage(
+          tr('Original message is not available'),
+          storageKey: key,
+        );
+    if (target == null) {
+      reportUnavailable();
+      return;
+    }
     final scroller = ref.read(messageListScrollerProvider(key));
     final flash = ref.read(flashedMessageProvider.notifier);
     // A quote tapped inside an OPEN thread means "show me the original in the
@@ -2482,27 +2495,38 @@ class _QuoteBox extends ConsumerWidget {
     final open = ref.read(activeThreadProvider);
     if (open != null && open.view.storageKey == key) {
       ref.read(activeThreadProvider.notifier).state = null;
-      _jumpWhenBound(scroller, flash, target.id);
+      _jumpWhenBound(scroller, flash, target.id, onGiveUp: reportUnavailable);
       return;
     }
-    if (scroller.scrollToMessage(target.id)) flash.flash(target.id);
+    if (scroller.scrollToMessage(target.id)) {
+      flash.flash(target.id);
+    } else {
+      // Resolved, but outside the rendered window — same dead end for the
+      // reader as not finding it at all.
+      reportUnavailable();
+    }
   }
 
   /// Retries the jump across a few frames: closing the thread view remounts the
   /// conversation list, and [MessageListScroller] only rebinds its controller +
   /// id→index map on that list's next build, so the first frame can still miss.
+  /// [onGiveUp] fires once the retries are spent.
   static void _jumpWhenBound(
     MessageListScroller scroller,
     FlashedMessageNotifier flash,
-    String id, [
+    String id, {
+    required VoidCallback onGiveUp,
     int attempts = 8,
-  ]) {
+  }) {
     WidgetsBinding.instance
       ..addPostFrameCallback((_) {
         if (scroller.scrollToMessage(id)) {
           flash.flash(id);
         } else if (attempts > 1) {
-          _jumpWhenBound(scroller, flash, id, attempts - 1);
+          _jumpWhenBound(scroller, flash, id,
+              onGiveUp: onGiveUp, attempts: attempts - 1);
+        } else {
+          onGiveUp();
         }
       })
       // A post-frame callback only runs when a frame is actually scheduled;

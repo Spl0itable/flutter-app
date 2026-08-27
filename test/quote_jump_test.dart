@@ -6,6 +6,7 @@
 // These run real quotes through the real parser and lock in the match.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nym_bar/features/i18n/app_strings_catalog.dart';
 import 'package:nym_bar/features/messages/format/message_content.dart';
 import 'package:nym_bar/features/messages/format/nym_format.dart';
 import 'package:nym_bar/models/message.dart';
@@ -83,6 +84,12 @@ void main() {
         [_msg('bobs', _bobPk, 'bob', 'hey what is up')],
       );
       expect(found, isNull);
+    });
+
+    test('the notice shown when it resolves to nothing is translatable', () {
+      // The tap now reports the dead end instead of swallowing it (PWA
+      // parity); a notice only English speakers can read is not a notice.
+      expect(kAppStringsCatalog, contains('Original message is not available'));
     });
 
     test('the quoting message itself is excluded', () {
