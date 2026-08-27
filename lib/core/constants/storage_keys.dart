@@ -181,6 +181,7 @@ class StorageKeys {
   // Notifications / sync
   static const notificationsEnabled = 'nym_notifications_enabled';
   static const groupNotifyMentionsOnly = 'nym_group_notify_mentions_only';
+  static const threadNotifyMentionsOnly = 'nym_thread_notify_mentions_only';
   static const notifyFriendsOnly = 'nym_notify_friends_only';
   static const notificationLastRead = 'nym_notification_last_read';
   static const lastSettingsSyncTs = 'nym_last_settings_sync_ts';

@@ -1906,6 +1906,16 @@ class NostrController {
           .getString(StorageKeys.groupNotifyMentionsOnly) ==
       'true';
 
+  /// "Only notify for mentions in threads" — the thread-scoped twin of
+  /// [_groupNotifyMentionsOnly]. On, a reply in ANY thread (channel, PM or
+  /// group) only notifies when it @-mentions or quote-replies the user; off, a
+  /// reply in a thread the user started notifies too.
+  bool get _threadNotifyMentionsOnly =>
+      _ref
+          .read(keyValueStoreProvider)
+          .getString(StorageKeys.threadNotifyMentionsOnly) ==
+      'true';
+
   /// Whether the app is on screen. Backgrounded, nothing is "being viewed" —
   /// see [_isActiveView].
   bool _appInForeground = true;
@@ -1944,10 +1954,14 @@ class NostrController {
     final isBlocked = appState.blockedUsers.contains(e.pubkey);
     final key = EventMapper.channelKeyOf(e);
     final mention = _refersToSelf(e.content);
+    final threadRoot = EventMapper.threadRootFromTags(e.tags);
     // A mention that lands as a thread reply is invisible behind the root's
     // reply-count row, so the active-view gate must not swallow it.
-    final isActive = key != null &&
-        _isActiveView(key, threadRoot: EventMapper.threadRootFromTags(e.tags));
+    final isActive = key != null && _isActiveView(key, threadRoot: threadRoot);
+    final inThread = isThreadReplyMarker(threadRoot);
+    final ownThread = key != null &&
+        threadRootIsOwn(
+            state: appState, storageKey: key, threadRoot: threadRoot);
     // Record gate (history) vs alert gate (sound/popup). A historical channel
     // mention is still added to history silently (nostr-core.js:546-555:
     // `_addNotificationToHistory` in the `isHistorical` branch) — only the loud
@@ -1965,6 +1979,12 @@ class NostrController {
       isBot: isVerifiedBot(e.pubkey),
       isActiveView: isActive,
       friendsOnly: _notifyFriendsOnly,
+      // A channel's flat rule is mention-only, so a thread reply that merely
+      // answers the user's own message would fall through it — the thread rules
+      // are what let "someone replied to you" reach the bell at all.
+      isThreadReply: inThread,
+      isOwnThreadRoot: ownThread,
+      threadMentionsOnly: _threadNotifyMentionsOnly,
     );
     if (!record) return;
     // PWA footer context label for a channel source is `in #<geohash>`
@@ -1990,7 +2010,15 @@ class NostrController {
       route: channelRoute.isNotEmpty ? channelRoute : e.pubkey,
       eventId: e.id,
       tsMs: e.createdAt * 1000,
-      contextLabel: key != null ? tr('in {key}', {'key': key}) : null,
+      // A thread reply names the thread as well as the channel — a bare
+      // `in #abc` sends the user hunting for a message that is collapsed behind
+      // one of that channel's "N replies" rows.
+      contextLabel: key == null
+          ? null
+          : (inThread
+              ? tr('in a thread in {key}', {'key': key})
+              : tr('in {key}', {'key': key})),
+      threadRoot: inThread ? threadRoot : null,
       // `_silentForAlert` IS the live-arrival rule (10s here, as the PWA's
       // channel path has it) — and the catch-up watermark when one is running.
       // Keeping the old `!_isHistorical(...)` term alongside it re-imposed the
@@ -2019,6 +2047,9 @@ class NostrController {
             : (m.conversationPubkey != null
                 ? PmLogic.pmStorageKey(m.conversationPubkey!)
                 : ''));
+    final inThread = isThreadReplyMarker(m.threadRoot);
+    final ownThread = threadRootIsOwn(
+        state: appState, storageKey: key, threadRoot: m.threadRoot);
     // Record gate (history) — NOT gated on age, so backlog/gift-wrapped PMs and
     // group messages (which always arrive with an old `created_at`) still land
     // in the bell. This is the fix for PMs/group messages never appearing.
@@ -2035,6 +2066,13 @@ class NostrController {
       isActiveView: _isActiveView(key, threadRoot: m.threadRoot),
       friendsOnly: _notifyFriendsOnly,
       groupMentionsOnly: _groupNotifyMentionsOnly,
+      // A group thread is a side conversation: judging its replies by the flat
+      // "every group message notifies" rule turns each one into a buzz, so the
+      // thread rules take over. A PM's thread stays exempt — every message in a
+      // 1:1 is addressed to the user.
+      isThreadReply: inThread,
+      isOwnThreadRoot: ownThread,
+      threadMentionsOnly: _threadNotifyMentionsOnly,
     );
     if (!record) return;
     // PWA `treatAsHistorical = msg.isHistorical || ageMs > 30000` — drives the
@@ -2064,12 +2102,30 @@ class NostrController {
       route: isGroup ? (m.groupId ?? '') : m.pubkey,
       eventId: m.nymMessageId ?? m.id,
       tsMs: m.timestamp,
-      // Group footer label `in <GroupName>` (PWA `channelInfo`); PMs leave it
-      // null so the panel labels them 'PM' from the type.
-      contextLabel:
-          isGroup ? tr('in {name}', {'name': _groupNameFor(m.groupId)}) : null,
+      contextLabel: _messageContextLabel(
+          isGroup: isGroup, inThread: inThread, groupId: m.groupId),
+      threadRoot: inThread ? m.threadRoot : null,
       silent: treatAsHistorical,
     );
+  }
+
+  /// The bell footer label for a PM/group notification. A group names itself
+  /// (`in <GroupName>`); a PM leaves it null so the panel labels it 'PM' from
+  /// the type. A thread reply says so in both cases, so the user opens the
+  /// thread rather than scanning the flat conversation for a message that is
+  /// collapsed inside one.
+  String? _messageContextLabel({
+    required bool isGroup,
+    required bool inThread,
+    required String? groupId,
+  }) {
+    if (isGroup) {
+      final name = _groupNameFor(groupId);
+      return inThread
+          ? tr('in a thread in {name}', {'name': name})
+          : tr('in {name}', {'name': name});
+    }
+    return inThread ? tr('PM thread') : null;
   }
 
   /// Group display name for a notification title/context (falls back to "Group").
@@ -2100,14 +2156,19 @@ class NostrController {
     String? eventId,
     int? tsMs,
     String? contextLabel,
+    String? threadRoot,
     bool silent = false,
   }) {
     // The tap target, shared with the bell row so both open the same place.
     final tapRoute = route ?? senderPubkey;
+    // A notification raised BY a thread reply opens that thread, not just the
+    // conversation around it — otherwise the tap lands the user in front of the
+    // "N replies" row the message is hidden behind.
     final payload = encodeNotificationPayload(
       type: historyType,
       route: tapRoute,
       senderPubkey: senderPubkey,
+      threadRoot: threadRoot,
     );
     // One OS notification per conversation, replaced as it goes — keyed the same
     // way the bell routes, so `pm`/`reaction` from one peer collapse together.
@@ -2165,11 +2226,13 @@ class NostrController {
             body: body,
             notifyFriendsOnly: _notifyFriendsOnly,
             groupNotifyMentionsOnly: _groupNotifyMentionsOnly,
+            threadNotifyMentionsOnly: _threadNotifyMentionsOnly,
             context: NotifyContext(
               senderPubkey: senderPubkey,
               isFriend: isFriend,
               isMention: isMention,
               isGroup: isGroup,
+              isThreadReply: threadRoot != null && threadRoot.isNotEmpty,
               // The service gates on this too. It was never passed, so that
               // check could only ever read false — a backstop that backstopped
               // nothing. The central gate above already returned; this keeps
@@ -2206,6 +2269,7 @@ class NostrController {
             eventId: eventId,
             senderPubkey: senderPubkey,
             contextLabel: contextLabel,
+            threadRoot: threadRoot,
           );
     } catch (_) {
       // History store may be unavailable in teardown; alerting still happened.
@@ -10746,6 +10810,13 @@ class NostrController {
       try {
         kvStore.setString(
             StorageKeys.groupNotifyMentionsOnly, '$groupMentions');
+      } catch (_) {}
+    }
+    final threadMentions = p['threadNotifyMentionsOnly'];
+    if (threadMentions is bool) {
+      try {
+        kvStore.setString(
+            StorageKeys.threadNotifyMentionsOnly, '$threadMentions');
       } catch (_) {}
     }
     final friendsOnly = p['notifyFriendsOnly'];
