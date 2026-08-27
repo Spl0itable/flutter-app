@@ -69,6 +69,21 @@ class NativeSchnorr {
     }
   }
 
+  /// Derives the x-only (BIP340) public key for [privkey] natively, as
+  /// 64-char lowercase hex. Returns null when the library isn't loaded in
+  /// this isolate or the key is invalid — the caller falls back to the
+  /// pure-Dart derivation. Pure-Dart `getPublicKey` is ~10 ms of BigInt
+  /// point math and the CPU profile showed it as the top main-isolate cost
+  /// once ECDH went native — every ephemeral gift-wrap key pays it.
+  static String? xOnlyPubkeyHex(Uint8List privkey) {
+    if (!isAvailable) return null;
+    try {
+      return coinlib.ECPrivateKey(privkey).pubkey.xhex;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Verifies a BIP340 signature natively. Call only when [isAvailable];
   /// returns false on any malformed input or verify failure.
   static bool verify({

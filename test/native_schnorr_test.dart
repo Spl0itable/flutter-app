@@ -5,6 +5,7 @@
 // isn't present the suite skips rather than fails, since every runtime call
 // site falls back to pure Dart in exactly that situation.
 
+import 'package:bip340/bip340.dart' as bip340;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/constants/event_kinds.dart';
 import 'package:nym_bar/core/crypto/keys.dart' as keys;
@@ -118,6 +119,21 @@ void main() {
       expect(schnorr.verifyEvent(e), isTrue);
       e.sig = schnorr.signId(e.id, sk);
       expect(schnorr.verifyEvent(e), isTrue);
+    }
+  });
+
+  test('native pubkey derivation agrees with pure-Dart bip340', () async {
+    if (!native) {
+      markTestSkipped('libsecp256k1 not available');
+      return;
+    }
+    for (var i = 0; i < 10; i++) {
+      final sk = keys.generatePrivateKey();
+      expect(
+        NativeSchnorr.xOnlyPubkeyHex(sk),
+        bip340.getPublicKey(keys.bytesToHex(sk)),
+        reason: 'x-only pubkey must match the pure-Dart derivation',
+      );
     }
   });
 
