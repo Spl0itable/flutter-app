@@ -236,6 +236,76 @@ void main() {
     });
   });
 
+  group('a thread the user started (threadRootIsOwn)', () {
+    // "Someone replied to you" only reaches a channel's bell through this: the
+    // flat channel rule is mention-only, so a plain reply under the user's own
+    // message would otherwise notify nothing at all.
+    Message own(String id, int ts) =>
+        _msg(id, ts)..isOwn = true;
+
+    test('a reply under the user\'s own message is in their thread', () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier)..goLive('self', 'me#0001');
+      n.state.messages['#room'] = [
+        own(_rootId, now),
+        _msg('b' * 64, now + 1, threadRoot: _rootId),
+      ];
+      expect(
+        threadRootIsOwn(
+            state: n.state, storageKey: '#room', threadRoot: _rootId),
+        isTrue,
+      );
+    });
+
+    test("a reply under someone else's message is not", () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier)..goLive('self', 'me#0001');
+      n.state.messages['#room'] = [
+        _msg(_rootId, now),
+        _msg('b' * 64, now + 1, threadRoot: _rootId),
+      ];
+      expect(
+        threadRootIsOwn(
+            state: n.state, storageKey: '#room', threadRoot: _rootId),
+        isFalse,
+      );
+    });
+
+    test('a root we do not hold cannot be claimed', () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier)..goLive('self', 'me#0001');
+      n.state.messages['#room'] = [_msg('b' * 64, now, threadRoot: _rootId)];
+      expect(
+        threadRootIsOwn(
+            state: n.state, storageKey: '#room', threadRoot: _rootId),
+        isFalse,
+      );
+    });
+
+    test('threads off means no message is a thread reply', () {
+      appThreadsEnabled = false;
+      expect(isThreadReplyMarker(_rootId), isFalse);
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier)..goLive('self', 'me#0001');
+      n.state.messages['#room'] = [own(_rootId, now)];
+      expect(
+        threadRootIsOwn(
+            state: n.state, storageKey: '#room', threadRoot: _rootId),
+        isFalse,
+      );
+    });
+
+    test('a marker is only a thread reply when it names a root', () {
+      expect(isThreadReplyMarker(_rootId), isTrue);
+      expect(isThreadReplyMarker(null), isFalse);
+      expect(isThreadReplyMarker(''), isFalse);
+    });
+  });
+
   group('flat-view filtering (visibleMessagesFor)', () {
     test('replies collapse into their thread when the root is present', () {
       final c = ProviderContainer();

@@ -1887,6 +1887,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
       applyEditOrDefer(editId, e.content);
       return;
     }
+    // Cross-transport dedup. A `['nymmesh', <id>]` tag marks this event as the
+    // Nostr replay of a message the Bluetooth mesh already carried — the
+    // sender's outbox publishing, once their internet came back, what the radio
+    // delivered while it was down. Anyone who was in radio range already holds
+    // that message under the mesh copy's id, so registering the id here drops
+    // whichever copy arrives second. `add` returning false IS the "already
+    // held" answer, so this covers both orders: mesh first, or relay first and
+    // the radio copy arriving after.
+    final meshReplayId = e.tagValue('nymmesh');
+    if (meshReplayId != null &&
+        meshReplayId.isNotEmpty &&
+        !_seenIds.add(meshReplayId)) {
+      return;
+    }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
     // A backlog restore is historical by PROVENANCE regardless of the mapper's
@@ -5147,6 +5161,32 @@ bool threadReplyHidden({
       openThread.view.storageKey != storageKey;
 }
 
+/// True when the root of [threadRoot]'s thread in [storageKey] is a message the
+/// USER wrote.
+///
+/// Opening a thread on your own message is joining a conversation, so its
+/// replies reach you the way a mention does. Without this a plain "someone
+/// replied to you" notified nothing at all in a channel, whose flat rule is
+/// mention-only — the reported bug. False when the root is not held locally
+/// (nothing to attribute) or threads are off.
+bool threadRootIsOwn({
+  required AppState state,
+  required String storageKey,
+  required String? threadRoot,
+}) {
+  if (!appThreadsEnabled) return false;
+  if (threadRoot == null || threadRoot.isEmpty || storageKey.isEmpty) {
+    return false;
+  }
+  return threadRootMessage(state, storageKey, threadRoot)?.isOwn ?? false;
+}
+
+/// Whether [threadRoot] marks this message as a reply inside a thread at all —
+/// the switch that hands its notification to the thread rules rather than the
+/// flat conversation's.
+bool isThreadReplyMarker(String? threadRoot) =>
+    appThreadsEnabled && threadRoot != null && threadRoot.isNotEmpty;
+
 /// Ordered messages for the active view (oldest first), via
 /// [visibleMessagesFor] — mirrors the PWA's `.message.blocked` hiding
 /// (messages.js §11) plus the `spamHit` term of the non-own hide branch
@@ -5394,6 +5434,7 @@ class NotificationEntry {
     this.eventId,
     this.senderPubkey,
     this.contextLabel,
+    this.threadRoot,
     this.viewed = false,
   }) : receivedAt = (receivedAt != null && receivedAt > 0) ? receivedAt : ts;
 
@@ -5431,6 +5472,11 @@ class NotificationEntry {
   /// .js:519-533). Null for PM/mention sources, which the panel labels from the
   /// type. Preferred by the panel over the type-derived label when present.
   final String? contextLabel;
+
+  /// The thread this notification came FROM, when it came from one — so tapping
+  /// the row opens that thread rather than the flat conversation the reply is
+  /// collapsed inside. Null for an ordinary conversation message.
+  final String? threadRoot;
   bool viewed;
 
   /// Serializes for the persisted history (N3). Mirrors the PWA's stored
@@ -5447,6 +5493,7 @@ class NotificationEntry {
         if (eventId != null) 'eventId': eventId,
         if (senderPubkey != null) 'senderPubkey': senderPubkey,
         if (contextLabel != null) 'contextLabel': contextLabel,
+        if (threadRoot != null) 'threadRoot': threadRoot,
         if (viewed) 'viewed': true,
       };
 
@@ -5470,10 +5517,14 @@ class NotificationEntry {
     String? ciRoute;
     String? ciEventId;
     String? ciPubkey;
+    String? ciThreadRoot;
     final ci = raw['channelInfo'];
     if (ci is Map) {
       if (ci['eventId'] is String) ciEventId = ci['eventId'] as String;
       if (ci['pubkey'] is String) ciPubkey = ci['pubkey'] as String;
+      // The PWA files the thread on `channelInfo` (nostr-core/pms/groups), so a
+      // synced entry written there still opens its thread here.
+      if (ci['threadRoot'] is String) ciThreadRoot = ci['threadRoot'] as String;
       String? str(String k) => ci[k] is String ? ci[k] as String : null;
       switch (ci['type']) {
         case 'pm':
@@ -5510,6 +5561,9 @@ class NotificationEntry {
           : ciPubkey,
       contextLabel:
           raw['contextLabel'] is String ? raw['contextLabel'] as String : null,
+      threadRoot: raw['threadRoot'] is String
+          ? raw['threadRoot'] as String
+          : ciThreadRoot,
       viewed: raw['viewed'] == true,
     );
   }
@@ -5833,6 +5887,7 @@ class NotificationHistoryNotifier
     String? eventId,
     String? senderPubkey,
     String? contextLabel,
+    String? threadRoot,
     int? receivedAtMs,
   }) {
     // The PWA's digest gate (`body.includes('10 recent messages:')`,
@@ -5858,6 +5913,7 @@ class NotificationHistoryNotifier
         eventId: eventId,
         senderPubkey: senderPubkey,
         contextLabel: contextLabel,
+        threadRoot: threadRoot,
       ));
       _pendingRecords.add(() => record(
             type: type,
@@ -5868,6 +5924,7 @@ class NotificationHistoryNotifier
             eventId: eventId,
             senderPubkey: senderPubkey,
             contextLabel: contextLabel,
+            threadRoot: threadRoot,
             receivedAtMs: observedAt,
           ));
       return;
@@ -5904,6 +5961,7 @@ class NotificationHistoryNotifier
       eventId: eventId,
       senderPubkey: senderPubkey,
       contextLabel: contextLabel,
+      threadRoot: threadRoot,
     );
     // N26: silence a notification already seen/dismissed on another device (its
     // key is in the synced seen-map), observed before the synced last-read
