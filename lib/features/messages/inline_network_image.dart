@@ -455,9 +455,31 @@ class _RenderEmojiBaselineDrop extends RenderProxyBox {
     markNeedsLayout();
   }
 
+  /// Height recorded during [performLayout], because the baseline getter below
+  /// MUST NOT read [size]: the paragraph queries a placeholder's baseline
+  /// during ITS OWN performLayout, and on Flutter < 3.41 (before upstream
+  /// fix flutter#176906) a RenderBox that isn't the paragraph's direct child
+  /// (this one sits under a Padding) may not read its size in that scope —
+  /// the debug assert threw MID-LAYOUT of every emoji-bearing paragraph,
+  /// aborting it before placeholder dimensions were set and corrupting the
+  /// whole message-list subtree into a per-frame exception storm
+  /// ("RenderBox.size accessed beyond the scope…", "dimensions != null",
+  /// "RenderBox was not laid out…") — the app-wide lag while messages load.
+  double _layoutHeight = 0.0;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    _layoutHeight = size.height; // own size during own layout: always legal
+  }
+
   @override
   double? computeDistanceToActualBaseline(TextBaseline baseline) =>
-      size.height - _drop;
+      _layoutHeight - _drop;
+
+  @override
+  double? computeDryBaseline(BoxConstraints constraints, TextBaseline baseline) =>
+      getDryLayout(constraints).height - _drop;
 }
 
 /// Paints a pre-compiled SVG [ui.Picture] (sized to its intrinsic viewport; the

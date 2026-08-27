@@ -32,6 +32,16 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Debug builds no longer collapse into a per-frame exception storm (and the
+  heavy lag it caused on startup as messages load) whenever a conversation
+  contains a custom `:shortcode:` emoji. The emoji's inline baseline-shift
+  render object read its `size` while the surrounding paragraph was still
+  laying out, which Flutter's debug asserts (before the framework's 3.41 fix,
+  flutter/flutter#176906) treat as an error — the thrown assert aborted the
+  paragraph's layout mid-flight and corrupted the whole message list into
+  re-throwing every frame. The baseline is now computed from a height recorded
+  during the render object's own layout pass, which is legal on every Flutter
+  version.
 - Tapping a quoted block inside an open thread now leaves the thread and jumps
   to the original message in the conversation, instead of silently doing
   nothing because the thread list never held it.
