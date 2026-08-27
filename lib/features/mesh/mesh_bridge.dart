@@ -214,6 +214,14 @@ class MeshBridge {
   void start() {
     _loadGhostPins();
     _restoreGossipArchive();
+    // The courier gates need to know about ghosting, and only the bridge holds
+    // that state. Wiring them here keeps the refusal rules ([CourierStore.
+    // mayDeposit]) in one place rather than duplicated inside the radio layer.
+    _service.isGhostMode = () => _ref.read(ghostModeProvider).enabled;
+    _service.isGhostPinned = (staticKeyHex) {
+      final pubkey = _pubkeyForNoiseKey(staticKeyHex);
+      return pubkey != null && _ghostPinnedPms.contains(pubkey.toLowerCase());
+    };
     MeshService.debugLog = MeshDiagnostics.instance.log;
     _subs.add(_service.peersStream.listen(_onPeers));
     _subs.add(_service.onPublicMessage.listen(_onPublic));
@@ -291,6 +299,24 @@ class MeshBridge {
   /// always-available peerID-derived pubkey ([meshStablePubkeyForPeerId]) —
   /// NOT the Noise key, which binds late (after the handshake) and so isn't
   /// known when a DM is opened first.
+  /// The conversation pubkey for a peer identified by its 32-byte Noise static
+  /// key (hex) — how a courier deposit names its recipient. Null when we have
+  /// never met that peer, in which case there is no pinned conversation to
+  /// protect and the deposit gate falls through to its other checks.
+  String? _pubkeyForNoiseKey(String staticKeyHex) {
+    if (staticKeyHex.length != 64) return null;
+    final bytes = Uint8List(32);
+    for (var i = 0; i < 32; i++) {
+      final b =
+          int.tryParse(staticKeyHex.substring(i * 2, i * 2 + 2), radix: 16);
+      if (b == null) return null;
+      bytes[i] = b;
+    }
+    // peerID is the first 16 hex chars of SHA-256 over the static key.
+    final peerID = _hex(NoiseCrypto.sha256(bytes)).substring(0, 16);
+    return _pubkeyByPeerId[peerID];
+  }
+
   String _pubkeyForPeerId(String peerID) {
     final peer = _service.peerById(peerID);
     final cached = _pubkeyByPeerId[peerID];
@@ -647,6 +673,11 @@ class MeshBridge {
           threadRoot: threadRoot,
           echo: echo,
         );
+        // Last resort: hand a sealed copy to peers who ARE in range, to carry
+        // and deliver if they meet the recipient. This is the only path that
+        // works when neither side has internet — the outbox above needs relays
+        // to come back, and the radio needs the recipient to walk into range.
+        unawaited(_depositWithCouriers(view.id, content, echo));
         return;
       }
       final id = await _service.sendPrivateMessage(peerId, content);
@@ -663,6 +694,49 @@ class MeshBridge {
         nymMessageId: id,
       );
     }
+  }
+
+  /// Seals an out-of-range DM to the peer's Noise static key and hands copies
+  /// to nearby peers to carry.
+  ///
+  /// The payload is the SAME Noise transport payload a live session would have
+  /// carried, so a message delivered out of a courier's hands behaves exactly
+  /// like one that arrived over the air — including its delivery receipt.
+  ///
+  /// The refusal rules live in [MeshService.depositWithCouriers] /
+  /// [CourierStore.mayDeposit]: a ghost-pinned conversation and a ghosted
+  /// sender never deposit, because asking a stranger to carry mail is precisely
+  /// the link a ghost identity exists to prevent.
+  Future<void> _depositWithCouriers(
+      String pubkey, String content, Message? echo) async {
+    final staticKeyHex = _noiseKeyHexForPubkey(pubkey);
+    if (staticKeyHex == null) return;
+    try {
+      final payload = MeshService.privateMessagePayload(
+        messageId: echo?.nymMessageId ?? echo?.id ?? '',
+        content: content,
+      );
+      if (payload == null) return;
+      final handed = await _service.depositWithCouriers(
+        recipientStaticKeyHex: staticKeyHex,
+        payload: payload,
+      );
+      MeshDiagnostics.instance.log('courier deposit for '
+          '${_short(pubkey)}: $handed carrier(s)');
+    } catch (_) {
+      // Best-effort: a refused deposit leaves the message no worse off.
+    }
+  }
+
+  /// The Noise static key we last saw for a conversation pubkey, or null when
+  /// that peer has never been met over the radio (nothing to seal to).
+  String? _noiseKeyHexForPubkey(String pubkey) {
+    for (final entry in _pubkeyByPeerId.entries) {
+      if (entry.value.toLowerCase() != pubkey.toLowerCase()) continue;
+      final hex = _service.noiseKeyHexForPeer(entry.key);
+      if (hex != null && hex.length == 64) return hex;
+    }
+    return null;
   }
 
   /// Retains a mesh-carried send so it reaches Nostr once relays return.
