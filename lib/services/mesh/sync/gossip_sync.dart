@@ -34,6 +34,7 @@ class GossipSyncConfig {
     this.capacity = 1000,
     this.publicMessageMaxAgeMs = 6 * 60 * 60 * 1000,
     this.announceMaxAgeMs = 15 * 60 * 1000,
+    this.prekeyBundleMaxAgeMs = 24 * 60 * 60 * 1000,
     this.gcsMaxBytes = 400,
     this.gcsTargetFpr = 0.01,
     this.syncIntervalMs = 15 * 1000,
@@ -51,6 +52,10 @@ class GossipSyncConfig {
   /// Announces age out faster: they are presence, and a stale one advertises a
   /// peer who has long since walked away.
   final int announceMaxAgeMs;
+
+  /// Prekey bundles live longest — 24h, matching bitchat. Their whole purpose
+  /// is to be available while the owner is away.
+  final int prekeyBundleMaxAgeMs;
 
   /// Filter size budget on the wire.
   final int gcsMaxBytes;
@@ -84,6 +89,10 @@ class GossipSync {
   /// the newest describes where a peer actually is.
   final Map<String, BitchatPacket> _announces = <String, BitchatPacket>{};
 
+  /// One prekey bundle per device, newest wins — an older bundle would offer
+  /// keys its owner has already deleted.
+  final Map<String, BitchatPacket> _prekeyBundles = <String, BitchatPacket>{};
+
   /// When each peer was last answered, for the response rate limit.
   final Map<String, int> _lastAnsweredAt = <String, int>{};
 
@@ -113,6 +122,13 @@ class GossipSync {
       _announces[_hex(packet.senderID)] = packet;
       return;
     }
+    if (packet.type == MeshMessageType.prekeyBundle) {
+      final key = _hex(packet.senderID);
+      final held = _prekeyBundles[key];
+      if (held != null && held.timestamp >= packet.timestamp) return;
+      _prekeyBundles[key] = packet;
+      return;
+    }
     final id = _idHexFor(packet);
     if (_messages.containsKey(id)) return;
     _messages[id] = packet;
@@ -132,12 +148,19 @@ class GossipSync {
   static bool isSyncable(int type) =>
       type == MeshMessageType.announce ||
       type == MeshMessageType.message ||
-      type == MeshMessageType.nymChannelMessage;
+      type == MeshMessageType.nymChannelMessage ||
+      // A bundle has to reach senders while its owner is away — the one time
+      // it matters. Signed, so gossip cannot forge one.
+      type == MeshMessageType.prekeyBundle;
 
   bool _isFresh(BitchatPacket packet) {
-    final maxAge = packet.type == MeshMessageType.announce
-        ? config.announceMaxAgeMs
-        : config.publicMessageMaxAgeMs;
+    final maxAge = switch (packet.type) {
+      MeshMessageType.announce => config.announceMaxAgeMs,
+      // A bundle stays useful far longer than a message: its owner is away, and
+      // stale prekeys are refused by the owner rather than being dangerous.
+      MeshMessageType.prekeyBundle => config.prekeyBundleMaxAgeMs,
+      _ => config.publicMessageMaxAgeMs,
+    };
     final age = _now() - packet.timestamp;
     // A packet stamped in the future is clock skew, not a time traveller: keep
     // it rather than discarding a perfectly good message over a bad clock.
@@ -147,10 +170,12 @@ class GossipSync {
 
   /// Drops everything that has aged out. Returns whether anything went.
   bool prune() {
-    final before = _messages.length + _announces.length;
+    final before = _messages.length + _announces.length + _prekeyBundles.length;
     _messages.removeWhere((_, p) => !_isFresh(p));
     _announces.removeWhere((_, p) => !_isFresh(p));
-    return (_messages.length + _announces.length) != before;
+    _prekeyBundles.removeWhere((_, p) => !_isFresh(p));
+    return (_messages.length + _announces.length + _prekeyBundles.length) !=
+        before;
   }
 
   /// Whether [peerID] is due a reconciliation request.
@@ -194,6 +219,8 @@ class GossipSync {
         ..._announces.values.where(_isFresh),
       if (want.contains(MeshMessageType.message))
         ..._messages.values.where(_isFresh),
+      if (want.contains(MeshMessageType.prekeyBundle))
+        ..._prekeyBundles.values.where(_isFresh),
     ]..sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
     if (candidates.isEmpty) {
@@ -261,6 +288,16 @@ class GossipSync {
       final since = request.sinceTimestampMs;
       for (final pkt in messages) {
         if (since != null && pkt.timestamp < since) continue;
+        if (mightContain(pkt)) continue;
+        out.add(pkt.copyWith(ttl: 0));
+      }
+    }
+    if (want.contains(MeshMessageType.prekeyBundle)) {
+      // Exempt from the cursor, like announces: there is at most one per
+      // device, and a sender without it falls back to the non-forward-secret
+      // static seal — a real loss for a negligible resend.
+      for (final pkt in _prekeyBundles.values) {
+        if (!_isFresh(pkt)) continue;
         if (mightContain(pkt)) continue;
         out.add(pkt.copyWith(ttl: 0));
       }
