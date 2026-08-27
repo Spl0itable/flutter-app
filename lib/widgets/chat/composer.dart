@@ -2274,6 +2274,11 @@ class _ComposerState extends ConsumerState<Composer> {
     // beneath it the moment the upload lands.
     if (matches.isNotEmpty || _attachments.isNotEmpty) {
       panels.add(ComposerMediaStrip(
+        // The strip is the TOP face of the panel stack, so an open command
+        // palette / autocomplete sits flush on it — square the touching
+        // corners while it shows, exactly like the toolbar below (PWA
+        // `.media-preview-strip` mirrors `.format-toolbar`).
+        squareTop: _overlayActive,
         matches: matches,
         attachments: _attachments,
         onRemoveAttachment: _removeAttachment2,
