@@ -32,6 +32,17 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Force-closing and reopening the app no longer visibly re-downloads and
+  re-renders the whole message history (and no longer re-uploads already-
+  archived PM wraps). Boot previously gave the local cache only 1.5 seconds
+  before connecting to relays; a heavy account's hydration — decoding tens of
+  thousands of cached messages, previously on the UI thread — lost that race,
+  so the app came up empty and re-fetched everything. Cache decoding now runs
+  in a worker isolate and the network waits for hydration to land.
+- Link previews no longer fire an unfurl request for every link-bearing
+  message the moment it scrolls into range — the card waits until it has been
+  on screen ~300ms, so flinging through history stops causing a burst of
+  network fetches and mid-scroll relayouts.
 - Event signature verification now uses the native libsecp256k1 library
   (bundled per platform) instead of pure Dart — ~70 µs per event instead of
   ~12 ms (~150×) — with the pure-Dart implementation kept as an automatic

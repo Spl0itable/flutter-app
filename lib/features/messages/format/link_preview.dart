@@ -9,6 +9,8 @@
 // is collapsed/lazy (fetched only when mounted), and dismiss/error tolerant:
 // any failure or an empty `{title, description}` renders nothing.
 
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
@@ -88,6 +90,7 @@ class _LinkPreviewCardState extends State<LinkPreviewCard> {
   late final ApiClient _api = widget.api ?? ApiClient();
   LinkPreviewData? _data;
   bool _failed = false;
+  Timer? _dwell;
 
   @override
   void initState() {
@@ -100,7 +103,22 @@ class _LinkPreviewCardState extends State<LinkPreviewCard> {
         return;
       }
     }
-    _load();
+    // DWELL before fetching: rows mount while flinging through history (and
+    // ahead of the viewport, in the list's cache extent), and an immediate
+    // fetch per link-bearing row fired a burst of unfurl requests mid-scroll —
+    // network churn plus a mid-scroll relayout when each response landed. A
+    // card the user scrolls straight past is disposed before the timer fires
+    // and never fetches; one they actually stop on unfurls ~instantly.
+    _dwell = Timer(const Duration(milliseconds: 300), () {
+      _dwell = null;
+      if (mounted) _load();
+    });
+  }
+
+  @override
+  void dispose() {
+    _dwell?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
