@@ -165,6 +165,26 @@ class MeshBridge {
     return peerIdForPubkey(view.id) == null;
   }
 
+  /// Restores the public history this device carries, and keeps it written.
+  ///
+  /// This is what makes a phone a town crier rather than a live relay: walk
+  /// between two mesh partitions, or relaunch hours later, and the backlog is
+  /// still there to hand to whoever missed it. Contents are signed public
+  /// broadcasts, already visible to anyone who was in radio range, so they are
+  /// stored as-is — nothing private ever reaches this store.
+  void _restoreGossipArchive() {
+    final kv = _ref.read(keyValueStoreProvider);
+    try {
+      _service.gossip
+          .decodeArchive(kv.getString(StorageKeys.meshGossipArchive));
+    } catch (_) {}
+    _service.onGossipArchiveChanged = (archive) {
+      try {
+        kv.setString(StorageKeys.meshGossipArchive, archive);
+      } catch (_) {}
+    };
+  }
+
   void _loadGhostPins() {
     _ghostPinnedPms.addAll(
       _ref
@@ -193,6 +213,7 @@ class MeshBridge {
 
   void start() {
     _loadGhostPins();
+    _restoreGossipArchive();
     MeshService.debugLog = MeshDiagnostics.instance.log;
     _subs.add(_service.peersStream.listen(_onPeers));
     _subs.add(_service.onPublicMessage.listen(_onPublic));

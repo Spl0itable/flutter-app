@@ -182,6 +182,10 @@ class StorageKeys {
   /// internet route was down, replayed to Nostr when relays return.
   static const meshOutbox = 'nym_mesh_outbox';
 
+  /// The gossip-sync public history this device carries, so the backlog it can
+  /// serve to a peer who missed it survives a restart.
+  static const meshGossipArchive = 'nym_mesh_gossip_archive';
+
   // Notifications / sync
   static const notificationsEnabled = 'nym_notifications_enabled';
   static const groupNotifyMentionsOnly = 'nym_group_notify_mentions_only';
