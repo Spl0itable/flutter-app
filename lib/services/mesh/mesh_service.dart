@@ -1292,6 +1292,10 @@ class MeshService {
   /// announce-verified signing key can check it offline, so it can spread
   /// through devices that have never spoken to us.
   Future<bool> publishPrekeyBundle() async {
+    // Never while ghosted. Courier mail to or from a ghost is refused at both
+    // ends ([CourierStore.mayDeposit]), so the bundle could not deliver
+    // anything — it would only be one more thing the epoch broadcasts.
+    if (isGhostMode?.call() ?? false) return false;
     if (await prekeys.replenish()) {
       onPrekeysChanged?.call(prekeys.encode());
     }
@@ -1642,6 +1646,10 @@ class MeshService {
     // Mail we are carrying expires too — someone else's message is not worth
     // holding forever.
     couriers.prune();
+    // Delete consumed prekeys whose grace window has lapsed. This is where
+    // forward secrecy actually happens: until the private half is really gone,
+    // [LocalPrekeys.privateKeyFor] only declines to use it.
+    if (prekeys.prune()) onPrekeysChanged?.call(prekeys.encode());
     if (_gossipDirty) {
       _gossipDirty = false;
       _persistGossipArchive();
