@@ -22,6 +22,8 @@ import 'protocol/fragment_payload.dart';
 import 'protocol/identity_announcement.dart';
 import 'protocol/mesh_message_identity.dart';
 import 'protocol/mesh_message_type.dart';
+import 'sync/gossip_sync.dart';
+import 'sync/request_sync_packet.dart';
 import 'protocol/mesh_profile.dart';
 import 'protocol/noise_payload.dart';
 import 'transport/mesh_transport.dart';
@@ -92,7 +94,23 @@ class MeshService {
   StreamSubscription<MeshLinkEvent>? _linkSub;
   Timer? _announceTimer;
   Timer? _cleanupTimer;
+  Timer? _syncTimer;
   bool _running = false;
+
+  /// Recent public history, reconciled with neighbours so a peer that was out
+  /// of range — or in another mesh partition — still receives it. See
+  /// [GossipSync]; the radio work lives here, the policy lives there.
+  final GossipSync gossip = GossipSync();
+
+  /// Called whenever the gossip store changes enough to be worth persisting, so
+  /// the carried history survives a restart. Wired by the bridge; null in
+  /// tests.
+  void Function(String archive)? onGossipArchiveChanged;
+
+  /// Set when the store has changed since the last archive write. Encoding the
+  /// whole store per packet would be absurd in a busy room, so the tick does
+  /// it.
+  bool _gossipDirty = false;
 
   // ---- Public API -----------------------------------------------------------
 
@@ -268,6 +286,10 @@ class MeshService {
     _scheduleAnnounce();
     _cleanupTimer = Timer.periodic(
         const Duration(seconds: 30), (_) => _cleanupStalePeers());
+    // Reconcile public history with whoever is in range. The per-peer schedule
+    // lives in [GossipSync]; this tick just gives it a heartbeat.
+    _syncTimer = Timer.periodic(
+        const Duration(seconds: 5), (_) => unawaited(_gossipTick()));
     await _broadcastAnnounce();
     debugLog?.call('sent initial identity announce — awaiting peers');
     return availability;
@@ -283,6 +305,7 @@ class MeshService {
     ));
     _announceTimer?.cancel();
     _cleanupTimer?.cancel();
+    _syncTimer?.cancel();
     await _inboundSub?.cancel();
     await _linkSub?.cancel();
     await _transport.stop();
@@ -332,6 +355,7 @@ class MeshService {
         sign: true,
       );
       await _sendPacket(packet);
+      _rememberOwnPublic(packet);
       return msg.id;
     }
 
@@ -354,6 +378,7 @@ class MeshService {
       sign: true,
     );
     await _sendPacket(packet);
+    _rememberOwnPublic(packet);
     return MeshMessageIdentity.stableId(
       senderIdHex: identity.peerID,
       timestampMs: timestampMs,
@@ -490,6 +515,16 @@ class MeshService {
         packet.isBroadcast ||
         _hex(packet.recipientID!) == identity.peerID;
 
+    // Remember public traffic so this device can serve it to a peer who was
+    // out of range when it went by. Directed packets are refused inside — the
+    // store is public history, never anybody's private mail.
+    if (packet.isBroadcast && GossipSync.isSyncable(packet.type)) {
+      gossip.onPublicPacketSeen(packet);
+      // Persisting on the tick rather than here: encoding the whole store is
+      // far too expensive to do per packet in a busy room.
+      _gossipDirty = true;
+    }
+
     switch (packet.type) {
       case MeshMessageType.announce:
         await _handleAnnounce(packet, senderPeerID, rssi);
@@ -535,6 +570,13 @@ class MeshService {
         break;
       case MeshMessageType.nymReaction:
         _handleReactionBroadcast(packet, senderPeerID);
+        break;
+      case MeshMessageType.requestSync:
+        // Local-only by design: a sync request is answered by the peer that
+        // heard it and never relayed, which is why it carries TTL 0 below.
+        if (forUs || packet.isBroadcast) {
+          await _handleRequestSync(packet, senderPeerID);
+        }
         break;
       default:
         break;
@@ -1010,6 +1052,116 @@ class MeshService {
   }
 
   /// Builds a packet from us with the standard TTL, optionally Ed25519-signed.
+  // ---- Gossip sync ----------------------------------------------------------
+
+  /// Files one of OUR public sends into the gossip store.
+  ///
+  /// The inbound path never sees our own packets (it drops self-echoes), so
+  /// without this a device would carry everyone's history except its own — and
+  /// the message a user actually sent in a dead spot would be the one thing it
+  /// could not serve to the peer who arrived a minute later.
+  void _rememberOwnPublic(BitchatPacket packet) {
+    if (!packet.isBroadcast || !GossipSync.isSyncable(packet.type)) return;
+    gossip.onPublicPacketSeen(packet);
+    _gossipDirty = true;
+  }
+
+  /// Asks each connected peer, on its own schedule, to reconcile public
+  /// history: "here is a compact set of what I hold — send me the rest".
+  ///
+  /// Directed rather than broadcast, and TTL 0 so it is never relayed: a sync
+  /// request is a question for the peer that can hear it, and flooding it would
+  /// ask the whole mesh a question only its neighbours can answer.
+  Future<void> _gossipTick() async {
+    if (!_running) return;
+    if (gossip.prune()) _gossipDirty = true;
+    if (_gossipDirty) {
+      _gossipDirty = false;
+      _persistGossipArchive();
+    }
+    final peerIds = _peers.keys.toList(growable: false);
+    if (peerIds.isEmpty) return;
+    for (final peerID in peerIds) {
+      if (!gossip.shouldAsk(peerID)) continue;
+      gossip.markAsked(peerID);
+      final recipient = _peerIdBytes(peerID);
+      if (recipient == null) continue;
+      try {
+        await _sendPacket(await _buildPacket(
+          type: MeshMessageType.requestSync,
+          payload: gossip.buildRequest(),
+          recipientID: recipient,
+          ttl: 0,
+        ));
+      } catch (_) {
+        // Best-effort: a failed sync round costs history, never the session.
+      }
+    }
+  }
+
+  /// Answers a peer's reconciliation request with whatever their filter says
+  /// they are missing.
+  ///
+  /// Responses go out DIRECTED and with TTL 0 — the requester asked, nobody
+  /// else did, and a replayed public message re-entering the flood would go
+  /// round the mesh a second time.
+  Future<void> _handleRequestSync(
+      BitchatPacket packet, String senderPeerID) async {
+    if (!gossip.shouldAnswer(senderPeerID)) {
+      debugLog?.call('  ↳ sync from $senderPeerID rate-limited');
+      return;
+    }
+    final request = RequestSyncPacket.decode(packet.payload);
+    if (request == null) {
+      debugLog?.call('  ↳ sync from $senderPeerID — undecodable');
+      return;
+    }
+    gossip.markAnswered(senderPeerID);
+    final missing = gossip.packetsMissingFrom(request);
+    if (missing.isEmpty) return;
+    debugLog?.call('  ↳ sync to $senderPeerID: ${missing.length} packet(s)');
+    final recipient = _peerIdBytes(senderPeerID);
+    for (final pkt in missing) {
+      try {
+        // Re-addressed to the requester: the original was a broadcast, and
+        // re-broadcasting it would hand it to peers who already have it.
+        await _sendPacket(BitchatPacket(
+          version: pkt.version,
+          type: pkt.type,
+          senderID: pkt.senderID,
+          recipientID: recipient,
+          timestamp: pkt.timestamp,
+          payload: pkt.payload,
+          signature: pkt.signature,
+          ttl: 0,
+        ));
+      } catch (_) {
+        // One packet failing must not abandon the rest of the round.
+      }
+      await Future<void>.delayed(MeshConstants.interFragmentDelay);
+    }
+  }
+
+  /// The 8 raw bytes of a 16-hex peerID, or null when it is not one.
+  static Uint8List? _peerIdBytes(String peerID) {
+    if (peerID.length != 16) return null;
+    final out = Uint8List(8);
+    for (var i = 0; i < 8; i++) {
+      final byte = int.tryParse(peerID.substring(i * 2, i * 2 + 2), radix: 16);
+      if (byte == null) return null;
+      out[i] = byte;
+    }
+    return out;
+  }
+
+  void _persistGossipArchive() {
+    final hook = onGossipArchiveChanged;
+    if (hook == null) return;
+    try {
+      hook(gossip.encodeArchive());
+    } catch (_) {}
+  }
+
   Future<BitchatPacket> _buildPacket({
     required int type,
     required Uint8List payload,
