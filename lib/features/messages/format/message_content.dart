@@ -2277,7 +2277,10 @@ Message? resolveQuotedMessage(
     final suffix = m.pubkey.length >= 4
         ? m.pubkey.substring(m.pubkey.length - 4).toLowerCase()
         : m.pubkey.toLowerCase();
-    if (quotedSuffix != null && suffix != quotedSuffix) return false;
+    // When the quote recorded a #suffix, that IS the identity — the nym beside
+    // it is only how it was spelled at quote time, so don't also demand the
+    // name agree.
+    if (quotedSuffix != null) return suffix == quotedSuffix;
     final trimmed = m.author.trim();
     final baseAuthor = stripPubkeySuffix(trimmed);
     if (quotedName.isNotEmpty &&
