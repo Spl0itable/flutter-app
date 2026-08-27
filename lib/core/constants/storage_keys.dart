@@ -178,6 +178,10 @@ class StorageKeys {
   static String lastPmSyncFor(String pubkey) => 'nym_last_pm_sync_$pubkey';
   static const pendingGroupInvite = 'nym_pending_group_invite';
 
+  /// The mesh sender outbox: sends the Bluetooth mesh carried because the
+  /// internet route was down, replayed to Nostr when relays return.
+  static const meshOutbox = 'nym_mesh_outbox';
+
   // Notifications / sync
   static const notificationsEnabled = 'nym_notifications_enabled';
   static const groupNotifyMentionsOnly = 'nym_group_notify_mentions_only';

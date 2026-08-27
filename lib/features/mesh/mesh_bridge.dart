@@ -34,6 +34,7 @@ import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import 'mesh_controller.dart';
 import 'mesh_diagnostics.dart';
+import 'mesh_outbox.dart';
 
 /// The bare storage key of the mesh "Nearby" public channel (renders as
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
@@ -588,26 +589,115 @@ class MeshBridge {
   // ---- Outbound (from the canonical composer) ------------------------------
 
   /// Routes a composer send for the active mesh [view].
-  Future<void> sendFromComposer(ChatView view, String content) async {
+  Future<void> sendFromComposer(ChatView view, String content,
+      {String? threadRoot}) async {
     if (view.kind == ViewKind.channel) {
-      _app.sendLocal(content)?.viaMesh = true;
+      final echo = _app.sendLocal(content, threadRoot: threadRoot)
+        ?..viaMesh = true;
       final channel = '#${view.id.toLowerCase()}';
-      await _service.sendPublicMessage(
+      final meshId = await _service.sendPublicMessage(
         content,
         channel: view.id.toLowerCase() == kMeshNearbyChannel ? null : channel,
       );
       // The echo stays; the round-trip is deduped in ingestMeshChannelMessage.
+      _queueForNostr(
+        kind: MeshOutboxKind.channel,
+        target: view.id,
+        content: content,
+        threadRoot: threadRoot,
+        echo: echo,
+        meshMessageId: meshId,
+      );
     } else if (view.kind == ViewKind.pm) {
       _pinIfGhosted(view.id);
       final peerId = peerIdForPubkey(view.id);
       if (peerId == null) {
-        // Out of radio range. The echo stays local and nothing is published —
-        // for a pinned peer this is the fail-closed path, NOT a fallback.
-        _app.sendLocal(content)?.viaMesh = true;
+        // Out of radio range. The echo stays local and the radio publishes
+        // nothing — for a pinned peer this is the fail-closed path, NOT a
+        // fallback. It can still be queued for Nostr when the peer has a real
+        // identity there (the queue applies the same ghost/mesh-only rules), so
+        // an out-of-range send is not simply lost.
+        final echo = _app.sendLocal(content, threadRoot: threadRoot)
+          ?..viaMesh = true;
+        _queueForNostr(
+          kind: MeshOutboxKind.pm,
+          target: view.id,
+          content: content,
+          threadRoot: threadRoot,
+          echo: echo,
+        );
         return;
       }
       final id = await _service.sendPrivateMessage(peerId, content);
-      _app.sendLocal(content, nymMessageId: id)?.viaMesh = true;
+      final echo = _app.sendLocal(content,
+          nymMessageId: id, threadRoot: threadRoot)
+        ?..viaMesh = true;
+      _queueForNostr(
+        kind: MeshOutboxKind.pm,
+        target: view.id,
+        content: content,
+        threadRoot: threadRoot,
+        echo: echo,
+        meshMessageId: id,
+        nymMessageId: id,
+      );
+    }
+  }
+
+  /// Retains a mesh-carried send so it reaches Nostr once relays return.
+  ///
+  /// The radio delivers to whoever is in range NOW; everyone else — another
+  /// room, another device, anyone who reads this later — only ever sees the
+  /// message if it also reaches the relays. [NostrController.flushMeshOutbox]
+  /// publishes it on the next reconnect.
+  ///
+  /// Three things are never queued, and the exclusions matter more than the
+  /// feature:
+  ///  * a GHOST-PINNED PM. The peer met us as a ghost and knows us only as
+  ///    that; the Nostr copy signs with the real key and would hand them the
+  ///    link. `shouldSendOverMesh` fails such a send closed rather than falling
+  ///    through to Nostr for exactly this reason — the queue must not undo it.
+  ///  * a MESH-ONLY peer. Its pubkey is a local `sha256("mesh:<peerID>")`
+  ///    placeholder, not an identity anyone can receive at, so a gift wrap to
+  ///    it would encrypt to nothing and leak the conversation's existence for
+  ///    no delivery.
+  ///  * a send made while ONLINE. `#mesh` rides the radio even with the
+  ///    internet up; that is the channel's nature, not a fallback, and the
+  ///    composer already publishes everything else to Nostr directly.
+  void _queueForNostr({
+    required MeshOutboxKind kind,
+    required String target,
+    required String content,
+    required Message? echo,
+    String? threadRoot,
+    String? meshMessageId,
+    String? nymMessageId,
+  }) {
+    if (echo == null) return;
+    if (_online) return;
+    final id = target.toLowerCase();
+    if (kind == MeshOutboxKind.pm) {
+      if (_ghostPinnedPms.contains(id)) return;
+      if (_meshOnlyPmPubkeys.contains(id)) return;
+    }
+    try {
+      _ref.read(nostrControllerProvider).enqueueMeshOutbox(
+            MeshOutboxEntry(
+              kind: kind,
+              target: target,
+              content: content,
+              // The queue replays with the time the user actually sent, so the
+              // message keeps its place in the conversation.
+              createdAtSec: echo.createdAt,
+              localId: echo.id,
+              threadRoot: threadRoot,
+              meshMessageId: meshMessageId,
+              nymMessageId: nymMessageId,
+            ),
+          );
+    } catch (_) {
+      // Best-effort: a queue failure must never cost the radio send that
+      // already went out.
     }
   }
 

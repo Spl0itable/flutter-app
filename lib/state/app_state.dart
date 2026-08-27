@@ -1887,6 +1887,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
       applyEditOrDefer(editId, e.content);
       return;
     }
+    // Cross-transport dedup. A `['nymmesh', <id>]` tag marks this event as the
+    // Nostr replay of a message the Bluetooth mesh already carried — the
+    // sender's outbox publishing, once their internet came back, what the radio
+    // delivered while it was down. Anyone who was in radio range already holds
+    // that message under the mesh copy's id, so registering the id here drops
+    // whichever copy arrives second. `add` returning false IS the "already
+    // held" answer, so this covers both orders: mesh first, or relay first and
+    // the radio copy arriving after.
+    final meshReplayId = e.tagValue('nymmesh');
+    if (meshReplayId != null &&
+        meshReplayId.isNotEmpty &&
+        !_seenIds.add(meshReplayId)) {
+      return;
+    }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
     // A backlog restore is historical by PROVENANCE regardless of the mapper's
