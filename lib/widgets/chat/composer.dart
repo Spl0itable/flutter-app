@@ -1720,10 +1720,14 @@ class _ComposerState extends ConsumerState<Composer> {
   /// when neither is pending. Rendered in-flow above the field normally, or
   /// inside the popout overlay while the field floats (see [_inputWithChips]).
   Widget? _chipBlock() {
+    // The chip is the top face of the composer stack unless an
+    // autocomplete/palette is open above it — then its top corners square
+    // off like every other stacked layer (PWA `.quote-preview` pairing).
     final chip = _pendingEdit != null
         ? _EditPreviewChip(
             text: _quotePreviewText(_pendingEdit!.content),
             onClose: _cancelEdit,
+            squareTop: _overlayActive,
           )
         : (_pendingQuote != null
             ? _QuotePreviewChip(
@@ -1732,6 +1736,7 @@ class _ComposerState extends ConsumerState<Composer> {
                 // send text (messages.js:1845-1846).
                 text: _quotePreviewText(_pendingQuote!.fullText),
                 onClose: _clearQuote,
+                squareTop: _overlayActive,
               )
             : null);
     if (chip == null) return null;
@@ -2269,16 +2274,20 @@ class _ComposerState extends ConsumerState<Composer> {
         composerMediaMatches(_controller.text, knownMedia: _uploadedMedia);
     final panels = <Widget>[];
 
+    // Corner pairing across the whole composer stack (top to bottom:
+    // autocomplete/palette → quote/edit chip → media strip → toolbar →
+    // input): each layer rounds across the top only, and squares its top
+    // corners whenever ANY layer is stacked above it — so the middle layers
+    // read as one continuous surface (PWA styles-chat.css pairing rules).
+    final chipShowing = _pendingEdit != null || _pendingQuote != null;
+    final stripShowing = matches.isNotEmpty || _attachments.isNotEmpty;
+
     // Order matters: the strip goes in FIRST so the preview of what is being
     // uploaded sits directly above its own progress bar, and the bar drops away
     // beneath it the moment the upload lands.
-    if (matches.isNotEmpty || _attachments.isNotEmpty) {
+    if (stripShowing) {
       panels.add(ComposerMediaStrip(
-        // The strip is the TOP face of the panel stack, so an open command
-        // palette / autocomplete sits flush on it — square the touching
-        // corners while it shows, exactly like the toolbar below (PWA
-        // `.media-preview-strip` mirrors `.format-toolbar`).
-        squareTop: _overlayActive,
+        squareTop: _overlayActive || chipShowing,
         matches: matches,
         attachments: _attachments,
         onRemoveAttachment: _removeAttachment2,
@@ -2302,11 +2311,9 @@ class _ComposerState extends ConsumerState<Composer> {
     }
 
     if (_formatToolbarOpen) {
-      // An open command palette / autocomplete sits flush on the toolbar's
-      // top edge — square the touching corners while it shows (PWA parity).
       panels.add(FormatToolbar(
         onTool: _applyFormatTool,
-        squareTop: _overlayActive,
+        squareTop: _overlayActive || chipShowing || stripShowing,
       ));
     }
 
@@ -3056,6 +3063,7 @@ class _PreviewChip extends StatelessWidget {
     required this.content,
     required this.onClose,
     required this.closeTooltip,
+    this.squareTop = false,
   });
 
   final Color barColor;
@@ -3063,35 +3071,47 @@ class _PreviewChip extends StatelessWidget {
   final VoidCallback onClose;
   final String closeTooltip;
 
+  /// True while an autocomplete/palette is stacked directly above the chip —
+  /// same animated corner contract as [FormatToolbar.squareTop].
+  final bool squareTop;
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        // solid-ui repaints the chip opaque: `body.solid-ui .quote-preview,
-        // .edit-preview { background: #1c1c2c }` — which IS the solid dark
-        // bg-tertiary — but light `#ececea` (styles-themes-responsive.css:
-        // 1836-1843), NOT the solid light bg-tertiary `#f0f0ed`, so the token
-        // alone can't carry the light plate.
-        color: c.solidUi && c.isLight ? const Color(0xFFECECEA) : c.bgTertiary,
-        // `border: 1px solid var(--glass-border)`; `body.light-mode
-        // .quote-preview/.edit-preview` re-states rgba(0,0,0,0.08) — the light
-        // glassBorder — so both themes resolve to glassBorder.
-        border: Border.all(color: c.glassBorder),
-        borderRadius:
-            const BorderRadius.vertical(top: Radius.circular(NymRadius.md)),
-        // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); `body.light-mode` softens
-        // it to 0 8px 32px rgba(0,0,0,0.12) (styles-themes-responsive.css:
-        // 1070-1083).
-        boxShadow: [
-          BoxShadow(
-            color:
-                c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
-            blurRadius: 32,
-            offset: const Offset(0, 8),
-          ),
-        ],
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(end: squareTop ? 0 : NymRadius.md),
+      duration: NymMotion.transition,
+      curve: NymMotion.curve,
+      builder: (context, topRadius, child) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          // solid-ui repaints the chip opaque: `body.solid-ui .quote-preview,
+          // .edit-preview { background: #1c1c2c }` — which IS the solid dark
+          // bg-tertiary — but light `#ececea` (styles-themes-responsive.css:
+          // 1836-1843), NOT the solid light bg-tertiary `#f0f0ed`, so the token
+          // alone can't carry the light plate.
+          color:
+              c.solidUi && c.isLight ? const Color(0xFFECECEA) : c.bgTertiary,
+          // `border: 1px solid var(--glass-border)`; `body.light-mode
+          // .quote-preview/.edit-preview` re-states rgba(0,0,0,0.08) — the
+          // light glassBorder — so both themes resolve to glassBorder.
+          border: Border.all(color: c.glassBorder),
+          // Top corners round only while the chip is the stack's top face
+          // (see [squareTop]); the bottom is always square, like every layer.
+          borderRadius: BorderRadius.vertical(top: Radius.circular(topRadius)),
+          // `--shadow-lg`: 0 8px 32px rgba(0,0,0,0.5); `body.light-mode`
+          // softens it to 0 8px 32px rgba(0,0,0,0.12)
+          // (styles-themes-responsive.css:1070-1083).
+          boxShadow: [
+            BoxShadow(
+              color:
+                  c.isLight ? const Color(0x1F000000) : const Color(0x80000000),
+              blurRadius: 32,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -3170,11 +3190,13 @@ class _QuotePreviewChip extends ConsumerWidget {
     required this.author,
     required this.text,
     required this.onClose,
+    this.squareTop = false,
   });
 
   final String author;
   final String text;
   final VoidCallback onClose;
+  final bool squareTop;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -3190,6 +3212,7 @@ class _QuotePreviewChip extends ConsumerWidget {
       barColor: c.primary,
       onClose: onClose,
       closeTooltip: tr('Cancel reply'),
+      squareTop: squareTop,
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -3261,12 +3284,17 @@ class _QuotePreviewChip extends ConsumerWidget {
 /// `.edit-preview`: an amber (`#F0AD4E`) bar + a fixed "Editing message" label
 /// (amber 12/w600) over the truncated original text (dim 12).
 class _EditPreviewChip extends StatelessWidget {
-  const _EditPreviewChip({required this.text, required this.onClose});
+  const _EditPreviewChip({
+    required this.text,
+    required this.onClose,
+    this.squareTop = false,
+  });
 
   static const Color amber = Color(0xFFF0AD4E);
 
   final String text;
   final VoidCallback onClose;
+  final bool squareTop;
 
   @override
   Widget build(BuildContext context) {
@@ -3275,6 +3303,7 @@ class _EditPreviewChip extends StatelessWidget {
       barColor: amber,
       onClose: onClose,
       closeTooltip: tr('Cancel edit'),
+      squareTop: squareTop,
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
