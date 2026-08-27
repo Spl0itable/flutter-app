@@ -1111,6 +1111,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// column keeps accruing unread until it scrolls back to the bottom.
   bool Function(String storageKey)? columnsReadGate;
 
+  /// The thread currently open ([activeThreadProvider]), when one is showing.
+  /// Wired by the UI the same way [columnsReadGate] is, so ingest can tell a
+  /// reply the user is looking at from one collapsed behind its root's
+  /// reply-count row ([threadReplyHidden]) without a Riverpod dependency here.
+  /// Unwired (single view, tests, pre-boot) reads as "no thread open".
+  ActiveThread? Function()? openThreadGate;
+
   /// True when a NEW message for [storageKey] should be treated as SEEN (no
   /// unread bump, watermark advanced): single view → it is the active
   /// conversation; columns view → the deck's [columnsReadGate] says the
@@ -1126,6 +1133,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// (messages.js:546 sends `sendChannelReadReceipt` only when
   /// `_cvMarkColumnRead` says the message was seen).
   bool isConversationSeen(String storageKey) => _isConversationSeen(storageKey);
+
+  /// Whether [m] landed in a thread the user cannot see — collapsed behind its
+  /// root's reply-count row in [storageKey]. Such a reply must not advance the
+  /// conversation's read watermark: doing so lands its notification pre-viewed
+  /// (`_alreadySeenByWatermark`) and the bell badge never moves for a thread
+  /// @-mention, which is half of the bug [threadReplyHidden] exists to fix.
+  bool _hiddenThreadReply(String storageKey, Message m) => threadReplyHidden(
+        state: state,
+        openThread: openThreadGate?.call(),
+        storageKey: storageKey,
+        threadRoot: m.threadRoot,
+      );
 
   /// Clears [key]'s unread badge and stamps its read watermark to
   /// max(now, newest message) — the PWA's `clearUnreadCount`
@@ -2043,9 +2062,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final seen = _isConversationSeen(key);
     if (!seen && state.countsTowardUnread(m) && _isUnreadByWatermark(key, m)) {
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
-    } else if (seen && columnsReadGate != null) {
+    } else if (seen && columnsReadGate != null && !_hiddenThreadReply(key, m)) {
       // A seen column keeps its badge clear and its watermark pinned to the
-      // newest message (`_cvMarkColumnRead` → `_markChannelRead`).
+      // newest message (`_cvMarkColumnRead` → `_markChannelRead`) — but not for
+      // a reply the column keeps collapsed inside a thread, which was never on
+      // screen ([_hiddenThreadReply]).
       state.unreadCounts.remove(key);
       markChannelRead(key, m.createdAt);
     }
@@ -2623,7 +2644,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         state.countsTowardUnread(m) &&
         _isUnreadByWatermark(peer, m)) {
       state.unreadCounts[peer] = (state.unreadCounts[peer] ?? 0) + 1;
-    } else if (seenPm && columnsReadGate != null) {
+    } else if (seenPm &&
+        columnsReadGate != null &&
+        !_hiddenThreadReply(key, m)) {
       state.unreadCounts.remove(peer);
       state.unreadCounts.remove(key);
       markChannelRead(peer, m.createdAt);
@@ -2680,7 +2703,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
       // `_recomputeUnreadCount` (keyword/heuristic-spam still count; see
       // [AppState.countsTowardUnread]) + the `created_at > lastRead` watermark.
       state.unreadCounts[key] = (state.unreadCounts[key] ?? 0) + 1;
-    } else if (seenGroup && columnsReadGate != null) {
+    } else if (seenGroup &&
+        columnsReadGate != null &&
+        !_hiddenThreadReply(key, m)) {
       state.unreadCounts.remove(key);
       markChannelRead(key, m.createdAt);
     }
@@ -5088,6 +5113,38 @@ Message? threadRootMessage(AppState s, String storageKey, String rootId) {
     if (m.threadRoot == null && threadKeyForMessage(m) == rootId) return m;
   }
   return null;
+}
+
+/// True when a message is HIDDEN behind a COLLAPSED thread: it is a reply whose
+/// root we hold — so [visibleMessagesFor] keeps it out of the flat conversation
+/// and only the root's reply-count row shows for it — and whose thread view is
+/// not the one currently open.
+///
+/// Such a message never reaches the screen even while its conversation is on
+/// screen, so "this is the active view" must NOT be read as "the user saw it".
+/// Without the distinction, an @-mention or quote-reply landing in a thread of
+/// the open conversation was swallowed by the active-view gate: nothing in the
+/// notifications modal for a message that addressed the user directly.
+///
+/// [threadRoot] is the reply's marker ([Message.threadRoot] / the NIP-10 root
+/// tag) and [storageKey] the conversation it belongs to. A reply whose root we
+/// never saw renders inline (the "never lost" fallback in
+/// [visibleMessagesFor]), so it counts as visible like any other message — as
+/// does every reply when threads are off.
+bool threadReplyHidden({
+  required AppState state,
+  required ActiveThread? openThread,
+  required String storageKey,
+  required String? threadRoot,
+}) {
+  if (!appThreadsEnabled) return false;
+  if (threadRoot == null || threadRoot.isEmpty || storageKey.isEmpty) {
+    return false;
+  }
+  if (threadRootMessage(state, storageKey, threadRoot) == null) return false;
+  return openThread == null ||
+      openThread.rootId != threadRoot ||
+      openThread.view.storageKey != storageKey;
 }
 
 /// Ordered messages for the active view (oldest first), via
