@@ -489,11 +489,21 @@ class NostrController {
       // the PWA's `_loadCustomEmojiCache`; live 30030/10030 events then top it up.
       _ref.read(liveCustomEmojiProvider);
 
-      // Hydrate channel/profile/reaction caches before connecting (raced
-      // ≤1500ms so a slow disk never blocks boot — mirrors app.js
-      // `Promise.race([hydrateFromCache(), 1500ms])`).
+      // Hydrate channel/profile/reaction caches before connecting. This gate
+      // MUST normally win: connecting with still-empty stores makes the relay
+      // replay re-download, re-verify, re-unwrap, re-UPLOAD (pm-put/deposit
+      // dedup is seeded from the hydrated PM store) and visibly re-render the
+      // entire history a heavy account already has on disk — the
+      // force-close-and-reopen "everything loads again" behavior. The old
+      // 1500ms race (mirroring app.js) lost on exactly those accounts: the
+      // hydration decode used to run on the main isolate and could take
+      // several seconds at tens of thousands of cached messages. Decode now
+      // runs in a worker isolate (CacheStore._loadAllMessages), so typical
+      // hydration is well under a second; the cap only exists so a
+      // pathologically broken disk can't hold the network offline forever,
+      // and a timed-out hydration still completes + seeds in the background.
       await _hydrateFromCache(appState).timeout(
-        const Duration(milliseconds: 1500),
+        const Duration(seconds: 10),
         onTimeout: () {},
       );
 

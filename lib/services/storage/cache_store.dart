@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
@@ -379,19 +380,22 @@ class CacheStore {
 
   Future<Map<String, List<Message>>> _loadAllMessages(String table) async {
     final rows = await _database.query(table, columns: ['key', 'json']);
-    final out = <String, List<Message>>{};
+    // Decode OFF the main isolate: a heavy account's boot hydration decodes
+    // tens of thousands of message maps, and doing that jsonDecode +
+    // Message.fromJson loop on the UI thread both janked the first seconds of
+    // the app AND made hydration lose the boot race against the relay
+    // connect gate — the empty stores then re-downloaded and re-rendered the
+    // whole history from the network. One compute hop per table keeps the
+    // main isolate free while the worker chews through the JSON.
+    final raw = <String, String>{};
     for (final r in rows) {
       final key = r['key'] as String?;
-      if (key == null || key.isEmpty) continue;
-      final List<Message> msgs;
-      try {
-        msgs = _decodeMessages(r['json'] as String?);
-      } catch (_) {
-        continue; // One corrupt record must not abort the whole hydration.
-      }
-      if (msgs.isNotEmpty) out[key] = msgs;
+      final json = r['json'] as String?;
+      if (key == null || key.isEmpty || json == null || json.isEmpty) continue;
+      raw[key] = json;
     }
-    return out;
+    if (raw.isEmpty) return {};
+    return compute(decodeMessageStores, raw);
   }
 
   /// Wipe the `pms` table (`clearPMCache`). Used when the user disables PM
@@ -415,6 +419,30 @@ class CacheStore {
             Message.fromJson(e.cast<String, dynamic>())..isHistorical = true);
       }
     }
+    return out;
+  }
+
+  /// `compute` entry point for [_loadAllMessages]: decodes every conversation's
+  /// JSON blob into [Message] lists in a worker isolate. Top-level (as
+  /// `compute` requires); per-record try/catch so one corrupt row can't abort
+  /// the whole hydration. Same historical-marking as [_decodeMessages].
+  static Map<String, List<Message>> decodeMessageStores(
+      Map<String, String> raw) {
+    final out = <String, List<Message>>{};
+    raw.forEach((key, json) {
+      try {
+        final decoded = jsonDecode(json);
+        if (decoded is! List) return;
+        final msgs = <Message>[
+          for (final e in decoded)
+            if (e is Map)
+              Message.fromJson(e.cast<String, dynamic>())..isHistorical = true,
+        ];
+        if (msgs.isNotEmpty) out[key] = msgs;
+      } catch (_) {
+        // Skip the corrupt record.
+      }
+    });
     return out;
   }
 
