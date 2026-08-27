@@ -90,7 +90,20 @@ class _PausableAnimatedImageState extends State<PausableAnimatedImage> {
     final stream = _stream;
     if (!_visible || _listening || stream == null) return;
     _listener ??= ImageStreamListener(_onFrame, onError: _onError);
-    stream.addListener(_listener!);
+    try {
+      stream.addListener(_listener!);
+    } on Object {
+      // The completer was disposed while we were detached (the framework
+      // drops a completer with no listeners and no keep-alive handles, and
+      // addListener on a disposed one THROWS — in release builds too).
+      // Start over with a fresh resolve; the bytes are still in the disk /
+      // memory caches, so this is cheap.
+      _stream = null;
+      _keepAlive?.dispose();
+      _keepAlive = null;
+      _resolve();
+      return;
+    }
     _listening = true;
     // Listening keeps the completer alive on its own; drop the pause pin.
     _keepAlive?.dispose();
@@ -100,10 +113,22 @@ class _PausableAnimatedImageState extends State<PausableAnimatedImage> {
   /// Stops frame delivery (and thereby the codec) without losing the decoded
   /// state: the keep-alive handle pins the completer so a later
   /// [_attachIfVisible] resumes instantly from where it froze.
+  ///
+  /// Never pauses BEFORE the first frame: rows materialize inside the list's
+  /// cache extent, where the visibility detector reports `visibleFraction ==
+  /// 0` immediately — often while the network fetch is still in flight and
+  /// `stream.completer` is null. Detaching at that point leaves nothing
+  /// pinned, so the framework disposes the completer as soon as its own
+  /// bookkeeping listener drops, and the image can never load ("GIFs stopped
+  /// loading"). Once the first frame lands, [_onFrame] re-checks visibility
+  /// and freezes offscreen images on that frame.
   void _pause() {
     final stream = _stream;
-    if (!_listening || stream == null) return;
-    _keepAlive = stream.completer?.keepAlive();
+    final completer = stream?.completer;
+    if (!_listening || stream == null || completer == null || _frame == null) {
+      return;
+    }
+    _keepAlive = completer.keepAlive();
     stream.removeListener(_listener!);
     _listening = false;
   }
@@ -117,6 +142,10 @@ class _PausableAnimatedImageState extends State<PausableAnimatedImage> {
       _frame?.dispose();
       _frame = info;
     });
+    // Deferred pause (see [_pause]): the widget went offscreen before its
+    // first frame arrived — freeze on this frame now that there is a
+    // completer to pin and a sized frame to keep the layout alive.
+    if (!_visible) _pause();
   }
 
   void _onError(Object error, StackTrace? stackTrace) {

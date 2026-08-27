@@ -112,6 +112,76 @@ void main() {
     expect(completer.listeners, 0);
   });
 
+  testWidgets(
+      'stays attached until the first frame when it materializes OFFSCREEN '
+      '(the pause-before-load deadlock that broke GIF loading)',
+      (tester) async {
+    final completer = _FakeCompleter();
+    final provider = _FakeProvider(completer);
+    final scroll = ScrollController();
+    addTearDown(scroll.dispose);
+
+    final image = await tester.runAsync(() => createTestImage(width: 4));
+
+    // The image starts VISIBLE with its fetch still "in flight" (no frame
+    // yet), then scrolls away before the first frame lands — exactly the
+    // fast-scroll / route-change window that broke GIF loading.
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          height: 400,
+          child: ListView(
+            controller: scroll,
+            cacheExtent: 2000, // keep the item MOUNTED while scrolled away
+            children: [
+              PausableAnimatedImage(
+                image: provider,
+                visibilityKey: const ValueKey('offscreen-gif'),
+                width: 100,
+                height: 100,
+              ),
+              const SizedBox(height: 3000),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    VisibilityDetectorController.instance.notifyNow();
+    await tester.pump();
+
+    // Scrolled away BEFORE any frame was delivered.
+    scroll.jumpTo(1500);
+    await tester.pump();
+    VisibilityDetectorController.instance.notifyNow();
+    await tester.pump();
+    // The pause must be deferred: detaching now (nothing decoded, nothing to
+    // pin) lets the framework dispose the completer and the image could
+    // never load.
+    expect(completer.listeners, greaterThan(0),
+        reason: 'hidden but unloaded → must stay listening so the fetch '
+            'and first decode can complete');
+
+    // First frame arrives while still hidden → NOW it freezes (detaches).
+    completer.pushFrame(image!);
+    await tester.pump();
+    expect(completer.listeners, 0,
+        reason: 'first frame landed while hidden → frozen on it');
+
+    // Scrolling it into view resumes playback and shows the frame.
+    scroll.jumpTo(0);
+    await tester.pump();
+    VisibilityDetectorController.instance.notifyNow();
+    await tester.pump();
+    expect(completer.listeners, 1, reason: 'back on screen → re-attached');
+    expect(find.byType(RawImage), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    VisibilityDetectorController.instance.notifyNow();
+    await tester.pump();
+    expect(completer.listeners, 0);
+  });
+
   test('isAnimatedImageUrl matches gif/apng incl. the proxied url= form', () {
     expect(isAnimatedImageUrl('https://x.test/a.gif'), isTrue);
     expect(isAnimatedImageUrl('https://x.test/a.GIF?x=1'), isTrue);
