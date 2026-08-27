@@ -32,6 +32,17 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- The whole-app freezes during the first minutes after opening (scroll not
+  responding, the sidebar stalling) are fixed at their two sources. The
+  periodic cache flush serialized every dirty conversation, every known
+  profile and every reaction tally to JSON on the UI thread every few seconds
+  while the catch-up backfill kept marking stores dirty — that now happens in
+  a worker isolate, writes only what actually changed, and the finished rows
+  are committed as before in one transaction. And the live relay inflow,
+  which rebuilt the visible message list for every arriving batch (many per
+  second during catch-up), is paced to at most ~6 list updates per second —
+  plus unchanged visible rows are now reused verbatim across those rebuilds
+  instead of being rebuilt from scratch each time.
 - Force-closing and reopening the app no longer visibly re-downloads and
   re-renders the whole message history (and no longer re-uploads already-
   archived PM wraps). Boot previously gave the local cache only 1.5 seconds

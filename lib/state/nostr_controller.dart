@@ -1529,13 +1529,34 @@ class NostrController {
   /// Relay-service handler (wired in place of a direct `onEvent: _onEvent`):
   /// buffers the event and schedules a coalesced flush so a connect burst is
   /// one rebuild, not N. See [_liveInboundBuffer].
+  /// Wall-clock of the last [_flushLiveInbound], for [_kLiveInboundMinGapMs].
+  int _lastLiveFlushMs = 0;
+
+  /// Minimum spacing between live-inbound flushes. During a boot/resume
+  /// catch-up the relay pipeline delivers many small verified batches per
+  /// second, and every flush costs a full message-list rebuild (a merge over
+  /// the whole conversation plus every visible row) — back-to-back flushes
+  /// saturated the UI thread, so scroll input and even the sidebar froze
+  /// until the inflow settled. Pacing the DRAIN (events simply wait in
+  /// [_liveInboundBuffer]; nothing observes them until ingested, so there is
+  /// no stale-state hazard) bounds that to ~6 rebuilds/s while keeping the
+  /// first event of a quiet period instant. The size cap still flushes a
+  /// large backlog immediately.
+  static const int _kLiveInboundMinGapMs = 150;
+
   void _enqueueLiveEvent(NostrEvent event) {
     _liveInboundBuffer.add(event);
     if (_liveInboundBuffer.length >= _kLiveInboundFlushCap) {
       _flushLiveInbound();
-    } else {
-      _liveInboundTimer ??= Timer(Duration.zero, _flushLiveInbound);
+      return;
     }
+    if (_liveInboundTimer != null) return;
+    final since =
+        DateTime.now().millisecondsSinceEpoch - _lastLiveFlushMs;
+    final delayMs =
+        since >= _kLiveInboundMinGapMs ? 0 : _kLiveInboundMinGapMs - since;
+    _liveInboundTimer =
+        Timer(Duration(milliseconds: delayMs), _flushLiveInbound);
   }
 
   /// Drains the live inbound buffer, replaying each event through [_onEvent]
@@ -1546,6 +1567,7 @@ class NostrController {
   void _flushLiveInbound() {
     _liveInboundTimer?.cancel();
     _liveInboundTimer = null;
+    _lastLiveFlushMs = DateTime.now().millisecondsSinceEpoch;
     if (_liveInboundBuffer.isEmpty) return;
     final batch = List<NostrEvent>.of(_liveInboundBuffer);
     _liveInboundBuffer.clear();
@@ -8798,6 +8820,15 @@ class NostrController {
     });
   }
 
+  /// Profiles as of their last successful persist (by object identity —
+  /// profile updates replace the object), so a flush only writes CHANGED
+  /// profiles instead of re-serializing every known user each time.
+  final Map<String, UserProfile> _lastPersistedProfile = {};
+
+  /// Reaction rows as of their last successful persist (the encoded JSON), so
+  /// unchanged tallies are neither re-encoded into writes nor re-inserted.
+  final Map<String, String> _lastPersistedReactionJson = {};
+
   Future<void> _flush() async {
     // A flush scheduled before the panic fired must not re-persist the live
     // AppState into the just-shredded cache DB (panic.js `_cacheDisabled`).
@@ -8811,55 +8842,97 @@ class NostrController {
       final pmKeys = _dirtyPmKeys.toList();
       final reactionEntries =
           _ref.read(appStateProvider.notifier).reactionEntriesSnapshot();
+
+      // Assemble the payload on the main isolate (cheap: filters + list
+      // copies, no serialization), encode it in a WORKER isolate, then write
+      // the finished strings. The old flush jsonEncoded whole conversations,
+      // every profile and every reaction tally inline — during a backfill that
+      // was hundreds of ms of main-thread block every few seconds, felt as the
+      // recurring whole-app freezes (scroll, sidebar) that only stopped once
+      // the backfill settled.
+      final channelPayload = <String, List<Message>>{};
+      for (final key in channelKeys) {
+        final msgs = state.messages[key];
+        if (msgs == null) continue;
+        // Never persist an UNRECONCILED optimistic row (`_optim_*`): its id
+        // isn't the real event id, so on reload it re-hydrates as a stale
+        // placeholder that the merge loop can mis-pair (or that lingers if
+        // its real event has aged out of relay/D1 retention), re-injecting a
+        // duplicate. Only real, reconciled sends belong in the cache.
+        channelPayload[key] = _capChannel(msgs
+            .where((m) => !m.optimistic && !m.id.startsWith('_optim_'))
+            .toList());
+      }
+      final pmPayload = <String, List<Message>>{};
+      if (cachePms) {
+        for (final key in pmKeys) {
+          final msgs = state.messages[key];
+          if (msgs == null) continue;
+          // Transient Nymbot info bubbles never persist (the PWA's
+          // `_displayBotInfoMessage`/help/welcome rows are display-only —
+          // pms.js persists real messages via `persistPMMessages` but never
+          // these synthetic ids). Unreconciled optimistic rows are excluded
+          // for the same reason as channels (above).
+          pmPayload[key] = _capPm(msgs
+              .where((m) =>
+                  !m.optimistic &&
+                  !m.id.startsWith('_optim_') &&
+                  !m.id.startsWith('nymbot-info-') &&
+                  !m.id.startsWith('nymbot-help-') &&
+                  m.id != 'nymbot-welcome')
+              .toList());
+        }
+      }
+      // Only profiles that changed since their last persist (updates replace
+      // the profile object, so identity is the cheap change check).
+      final profilePayload = <String, UserProfile>{};
+      for (final entry in state.users.entries) {
+        final p = entry.value.profile;
+        if (p == null) continue;
+        if (identical(_lastPersistedProfile[entry.key], p)) continue;
+        profilePayload[entry.key] = p;
+      }
+
+      final encoded = await compute(
+          encodeCacheFlush,
+          CacheFlushPayload(
+            channels: channelPayload,
+            pms: pmPayload,
+            profiles: profilePayload,
+            reactions: reactionEntries,
+          ));
+
+      // Drop reaction rows whose encoded JSON is unchanged since last persist.
+      final changedReactions = <String, String>{};
+      encoded.reactions.forEach((id, json) {
+        if (_lastPersistedReactionJson[id] != json) {
+          changedReactions[id] = json;
+        }
+      });
+
       // Commit the whole flush as ONE transaction so a busy channel's hundreds
       // of channel/PM/profile/reaction rows don't queue up as hundreds of
       // separately-locked inserts (which tripped sqflite's 10s lock warning and
       // stalled D1 ingest). Dirty sets are cleared only after the tx succeeds.
       await cache.runInTransaction((txn) async {
-        for (final key in channelKeys) {
-          final msgs = state.messages[key];
-          if (msgs != null) {
-            // Never persist an UNRECONCILED optimistic row (`_optim_*`): its id
-            // isn't the real event id, so on reload it re-hydrates as a stale
-            // placeholder that the merge loop can mis-pair (or that lingers if
-            // its real event has aged out of relay/D1 retention), re-injecting a
-            // duplicate. Only real, reconciled sends belong in the cache.
-            final persistable =
-                msgs.where((m) => !m.optimistic && !m.id.startsWith('_optim_'));
-            await cache.saveChannelMessages(
-                key, _capChannel(persistable.toList()), txn);
-          }
+        for (final e in encoded.channels.entries) {
+          await cache.saveChannelMessagesJson(e.key, e.value, txn);
         }
-        for (final key in pmKeys) {
-          final msgs = state.messages[key];
-          if (msgs != null) {
-            // Transient Nymbot info bubbles never persist (the PWA's
-            // `_displayBotInfoMessage`/help/welcome rows are display-only —
-            // pms.js persists real messages via `persistPMMessages` but never
-            // these synthetic ids). Unreconciled optimistic rows are excluded for
-            // the same reason as channels (above).
-            final persistable = msgs
-                .where((m) =>
-                    !m.optimistic &&
-                    !m.id.startsWith('_optim_') &&
-                    !m.id.startsWith('nymbot-info-') &&
-                    !m.id.startsWith('nymbot-help-') &&
-                    m.id != 'nymbot-welcome')
-                .toList();
-            await cache.savePmMessages(key, _capPm(persistable),
-                enabled: cachePms, executor: txn);
-          }
+        for (final e in encoded.pms.entries) {
+          await cache.savePmMessagesJson(e.key, e.value, txn);
         }
-        for (final entry in state.users.entries) {
-          final p = entry.value.profile;
-          if (p != null) await cache.saveProfile(entry.key, p, txn);
+        for (final e in encoded.profiles.entries) {
+          await cache.saveProfileJson(
+              e.key, e.value, encoded.profileKind0Ts[e.key] ?? 0, txn);
         }
-        for (final e in reactionEntries.entries) {
-          await cache.saveReactions(e.key, e.value, txn);
+        for (final e in changedReactions.entries) {
+          await cache.saveReactionsJson(e.key, e.value, txn);
         }
       });
       _dirtyChannelKeys.clear();
       _dirtyPmKeys.clear();
+      profilePayload.forEach((pk, p) => _lastPersistedProfile[pk] = p);
+      changedReactions.forEach((id, j) => _lastPersistedReactionJson[id] = j);
       await cache.enforceLruLimits();
     } catch (e) {
       debugPrint('cache flush failed: $e');
