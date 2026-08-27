@@ -362,9 +362,31 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
     );
   }
 
+  /// The decode-width cap (physical px) for the current display box, or null
+  /// when the caller gave no finite width/height (full-size surfaces like the
+  /// fullscreen viewer, which want the native resolution).
+  ///
+  /// Without a cap every raster decodes at its INTRINSIC size — a 12MP photo
+  /// shown in a 300px tile, a 2MP avatar in a 40px circle — costing tens of MB
+  /// of decode + GPU texture upload EACH, evicting the whole ImageCache (so
+  /// scrolled-away rows re-decode on every pass) and hammering both CPU and
+  /// GPU exactly while messages stream in. Capping the decode to the on-screen
+  /// physical size is the single biggest lever on that. Only ONE dimension is
+  /// ever passed to the codec so the aspect ratio is always preserved
+  /// (width preferred, else height); [BoxFit.cover] gets a 1.5× margin so the
+  /// crop of a non-matching aspect ratio can't render soft.
+  int? _decodeCacheWidth(BuildContext context) {
+    final logical = (widget.width ?? widget.height);
+    if (logical == null || !logical.isFinite || logical <= 0) return null;
+    final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1.0;
+    final cover = widget.fit == BoxFit.cover ? 1.5 : 1.0;
+    return (logical * dpr * cover).ceil();
+  }
+
   @override
   Widget build(BuildContext context) {
     final url = _effectiveUrl;
+    final cacheWidth = _decodeCacheWidth(context);
     // The in-memory http path handles BOTH svg and raster (and never touches the
     // sqflite-backed disk cache). Use it for SVG-looking URLs and whenever the
     // caller opts out of the disk cache ([memoryOnly], i.e. emoji).
@@ -398,6 +420,10 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
               width: widget.width,
               height: widget.height,
               fit: widget.fit,
+              // Decode at the display size, not the intrinsic size (see
+              // [_decodeCacheWidth]). Applies per-frame for animated GIF/WebP
+              // emoji, which otherwise decode every frame at full resolution.
+              cacheWidth: cacheWidth,
               gaplessPlayback: true,
               errorBuilder: (ctx, _, __) => _fallback(ctx),
             );
@@ -412,6 +438,9 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
+      // Decode at the display size (see [_decodeCacheWidth]); the disk cache
+      // still stores the original bytes, so nothing is lost across surfaces.
+      memCacheWidth: cacheWidth,
       placeholder:
           widget.placeholder == null ? null : (_, __) => widget.placeholder!,
       errorWidget: (ctx, _, __) => _fallback(ctx),

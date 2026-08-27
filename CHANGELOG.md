@@ -32,6 +32,23 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Opening the app on an account with lots of history no longer pegs the CPU
+  for seconds while messages stream in. Signatures verified in past sessions
+  are now remembered on disk, so the boot/resume relay replay of already-seen
+  reactions, profiles, presence and history skips the ~12 ms-per-event
+  signature math (a seeded replay measures ~460× faster in the benchmark), and
+  verification batches now run one at a time instead of fanning out across
+  every core.
+- Images decode at the size they are shown instead of their full resolution:
+  avatars, inline media tiles, link previews, GIF-picker cells, banners and
+  composer thumbnails all cap their decode to the on-screen pixels, cutting
+  the decode CPU, GPU texture uploads and image-cache churn that made
+  media-heavy conversations stutter.
+- The loading skeleton no longer rebuilds its entire placeholder tree on every
+  animation frame — the shimmer is repaint-only now — and the wallpaper,
+  ambient glow, typing dots and skeletons each render in their own layer, so a
+  tiny animation can't force the full-screen background patterns to re-draw at
+  60fps.
 - Debug builds no longer collapse into a per-frame exception storm (and the
   heavy lag it caused on startup as messages load) whenever a conversation
   contains a custom `:shortcode:` emoji. The emoji's inline baseline-shift

@@ -615,6 +615,12 @@ class _GifTileState extends State<_GifTile> {
                         // IP is never exposed to the CDN (PWA getProxiedMediaUrl).
                         imageUrl: proxiedMedia(widget.gif.url),
                         fit: BoxFit.cover,
+                        // A gridful of ANIMATED GIFs decodes every frame; cap
+                        // the decode to the ~half-width cell so the picker
+                        // doesn't peg the CPU re-rasterizing full-size frames.
+                        memCacheWidth:
+                            (240 * MediaQuery.devicePixelRatioOf(context))
+                                .ceil(),
                         placeholder: (_, __) => const SizedBox.shrink(),
                         errorWidget: (_, __, ___) => Icon(Icons.broken_image,
                             size: 18, color: c.textDim),

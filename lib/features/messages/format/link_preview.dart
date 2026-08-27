@@ -168,6 +168,12 @@ class _Card extends StatelessWidget {
                       child: CachedNetworkImage(
                         imageUrl: api.mediaProxyUrl(data.image!),
                         fit: BoxFit.cover,
+                        // og:image files are frequently full-size photos —
+                        // decode at the 80/120px card slot, not intrinsic size.
+                        memCacheWidth: ((narrow ? 80 : 120) *
+                                MediaQuery.devicePixelRatioOf(context) *
+                                1.5)
+                            .ceil(),
                         // The PWA hides a broken preview image; collapse it.
                         errorWidget: (_, __, ___) => const SizedBox.shrink(),
                       ),
@@ -183,7 +189,7 @@ class _Card extends StatelessWidget {
                           mainAxisSize: MainAxisSize.min,
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            _siteRow(c, size),
+                            _siteRow(context, c, size),
                             if (data.title.isNotEmpty) ...[
                               const SizedBox(height: 3),
                               Text(
@@ -236,7 +242,7 @@ class _Card extends StatelessWidget {
 
   /// `.link-preview-site`: an UPPERCASE text-dim label with a 14×14 favicon and
   /// `letter-spacing:0.3` (`styles-features.css:4390`).
-  Widget _siteRow(NymColors c, double size) {
+  Widget _siteRow(BuildContext context, NymColors c, double size) {
     final favicon = data.favicon;
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -249,6 +255,8 @@ class _Card extends StatelessWidget {
               width: 14,
               height: 14,
               fit: BoxFit.cover,
+              memCacheWidth:
+                  (14 * MediaQuery.devicePixelRatioOf(context) * 1.5).ceil(),
               errorWidget: (_, __, ___) => const SizedBox.shrink(),
             ),
           ),

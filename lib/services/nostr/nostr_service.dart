@@ -268,6 +268,18 @@ class NostrService {
   static void seedVerifiedIds(Iterable<String> ids) =>
       _verifier.markVerified(ids);
 
+  /// The newest verified event ids, for persisting across launches (see
+  /// [IsolateVerifier.snapshotVerifiedIds]) — restored via [seedVerifiedIds] on
+  /// the next boot so the relay/D1 replay of reactions, profiles, presence and
+  /// out-of-cache history skips the expensive signature math.
+  static List<String> snapshotVerifiedIds({int max = 20000}) =>
+      _verifier.snapshotVerifiedIds(max: max);
+
+  /// Hook fired whenever a signature newly verifies (the persistable set grew).
+  /// The controller wires a debounced disk persist here.
+  static set onVerifiedIdsChanged(void Function()? cb) =>
+      _verifier.onNewVerified = cb;
+
   /// Seeds [wrapIds] as already-unwrapped (e.g. cached PM message ids, which
   /// ARE their wrap ids — see `_onGiftWrap`) so the cold-boot PM restore skips
   /// re-unwrapping history already on disk.

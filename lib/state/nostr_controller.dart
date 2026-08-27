@@ -1185,6 +1185,9 @@ class NostrController {
     _deletedIdsPersistTimer = null;
     _pqKeysPersistTimer?.cancel();
     _pqKeysPersistTimer = null;
+    _verifiedIdsPersistTimer?.cancel();
+    _verifiedIdsPersistTimer = null;
+    NostrService.onVerifiedIdsChanged = null;
     _pqAnnounceTimer?.cancel();
     _pqAnnounceTimer = null;
     // Flush any pending debounced group-store / read-watermark writes before we
@@ -4590,6 +4593,28 @@ class NostrController {
   /// loudly — it makes the next message to every peer classical while their
   /// announcements are looked up again, which is invisible apart from a
   /// downgraded badge. See [PqRegistry.hydrate] for why restoring is safe.
+  /// Debounced (30s) persist of the verified-signature id cache
+  /// ([NostrService.snapshotVerifiedIds]) so the NEXT launch's relay/D1 replay
+  /// skips re-verifying everything this session already verified. The long
+  /// debounce keeps the boot flood from re-writing the (up to ~1.4 MB) row
+  /// every few seconds; the trailing write after the last verification covers
+  /// the tail. Rides the [_schedulePersistPqKeys] pattern.
+  Timer? _verifiedIdsPersistTimer;
+  void _schedulePersistVerifiedIds() {
+    if (_verifiedIdsPersistTimer != null) return;
+    if (PanicWipe.inProgress) return;
+    _verifiedIdsPersistTimer = Timer(const Duration(seconds: 30), () {
+      _verifiedIdsPersistTimer = null;
+      final cache = _cache;
+      if (cache == null || !cache.isOpen) return;
+      if (PanicWipe.inProgress) return;
+      unawaited(cache
+          .saveMetaSet(CacheStore.metaVerifiedEventIds,
+              NostrService.snapshotVerifiedIds().toSet())
+          .catchError((_) {}));
+    });
+  }
+
   Timer? _pqKeysPersistTimer;
   void _schedulePersistPqKeys() {
     if (_pqKeysPersistTimer != null) return;
@@ -8671,6 +8696,17 @@ class NostrController {
               if (m.id.isNotEmpty) m.id,
         ]);
       }
+      // Restore the persisted verified-signature ids from PAST sessions and
+      // keep persisting new ones (debounced). The message-cache seeding above
+      // only covers what the message stores hold; a heavy returning account
+      // also replays thousands of reactions, kind-0 profiles, presence and
+      // vouch events on every boot/resume, each costing ~12 ms of pure-Dart
+      // BIP340 math without this cache — several seconds of pegged CPU that
+      // read as the whole app lagging while history streamed in.
+      final verifiedIds =
+          await cache.loadMetaSet(CacheStore.metaVerifiedEventIds);
+      if (verifiedIds.isNotEmpty) NostrService.seedVerifiedIds(verifiedIds);
+      NostrService.onVerifiedIdsChanged = _schedulePersistVerifiedIds;
       if (!cachePms) unawaited(cache.clearPms());
       // Reactions hydrate AFTER messages so their tallies attach to rows that
       // now exist (same effective order as the PWA's single hydration pass).
