@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/foundation.dart' show compute, kIsWeb;
 
 import '../../models/nostr_event.dart';
+import 'native_schnorr.dart';
 import 'schnorr.dart' as schnorr;
 
 /// Off-main-thread BIP340 signature verification for inbound relay events.
@@ -212,7 +213,13 @@ class IsolateVerifier {
 /// Each verdict is independent and self-contained (`schnorr.verifyEvent`
 /// recomputes the id from the event's own fields and checks the signature), so
 /// a bad event in the batch can only fail its own slot.
-List<bool> verifyEventsBatch(List<Map<String, dynamic>> events) {
+///
+/// Loads native libsecp256k1 into THIS worker isolate first (per-isolate
+/// statics — the one-time dlopen is microseconds against a batch of
+/// signatures); where the library is unavailable [schnorr.verifyEvent] falls
+/// back to pure Dart, so the verdicts are the same either way.
+Future<List<bool>> verifyEventsBatch(List<Map<String, dynamic>> events) async {
+  await NativeSchnorr.ensureLoaded();
   final out = List<bool>.filled(events.length, false);
   for (var i = 0; i < events.length; i++) {
     try {

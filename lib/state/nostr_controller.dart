@@ -11,6 +11,7 @@ import '../core/crypto/bitchat.dart' as bitchat;
 import '../core/crypto/gift_wrap.dart' as giftwrap;
 import '../core/crypto/keys.dart' as keys;
 import '../core/crypto/ml_kem.dart';
+import '../core/crypto/native_schnorr.dart';
 import '../core/crypto/pow.dart' as pow;
 import '../core/crypto/pq.dart' as pq;
 import '../core/crypto/schnorr.dart' as schnorr;
@@ -353,6 +354,12 @@ class NostrController {
     if (_settingsHydratedC.isCompleted) {
       _settingsHydratedC = Completer<void>();
     }
+    // Load native libsecp256k1 into the MAIN isolate (fire-and-forget; falls
+    // back to pure-Dart bip340 until/unless it resolves) so the few inline
+    // `schnorr.verifyEvent` call sites — build-integrity rows, the canary,
+    // emoji-pack checks — take the ~100× faster path. The batch verifier's
+    // worker isolates load it themselves (see `verifyEventsBatch`).
+    unawaited(NativeSchnorr.ensureLoaded());
     try {
       final kv = _ref.read(keyValueStoreProvider);
       // `secretWrite` routes identity-secret persistence through the vault

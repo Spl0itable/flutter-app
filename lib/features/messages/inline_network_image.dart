@@ -29,6 +29,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 
+import 'pausable_animated_image.dart';
+
 /// True when [url] looks like an SVG (by extension, ignoring any query string),
 /// including the proxied form `…/api/proxy?url=<encoded …/foo.svg>`.
 bool isSvgUrl(String url) {
@@ -38,6 +40,51 @@ bool isSvgUrl(String url) {
   final q = Uri.tryParse(url)?.queryParameters['url'];
   if (q != null && RegExp(r'\.svg(\?|#|$)').hasMatch(q.toLowerCase())) {
     return true;
+  }
+  return false;
+}
+
+/// True when [url] names a format that ANIMATES (by extension, like
+/// [isSvgUrl] — including the proxied `url=` form). Only clearly-animated
+/// extensions are matched: `.gif` / `.apng`. Animated WebP can't be told from
+/// static WebP by URL; the in-memory path sniffs its bytes instead
+/// ([looksAnimatedImageBytes]).
+bool isAnimatedImageUrl(String url) {
+  if (url.isEmpty) return false;
+  final rx = RegExp(r'\.(gif|apng)(\?|#|$)');
+  if (rx.hasMatch(url.toLowerCase())) return true;
+  final q = Uri.tryParse(url)?.queryParameters['url'];
+  return q != null && rx.hasMatch(q.toLowerCase());
+}
+
+/// True when [bytes] begin like an animated image: any GIF (`GIF8…` — GIFs in
+/// chat are effectively always animated, and a static GIF through the
+/// pausable path renders identically), or a WebP whose VP8X header carries
+/// the animation flag.
+bool looksAnimatedImageBytes(Uint8List bytes) {
+  if (bytes.length >= 4 &&
+      bytes[0] == 0x47 && // G
+      bytes[1] == 0x49 && // I
+      bytes[2] == 0x46 && // F
+      bytes[3] == 0x38) {
+    return true;
+  }
+  // RIFF....WEBP + VP8X chunk with the animation bit (0x02) set.
+  if (bytes.length >= 21 &&
+      bytes[0] == 0x52 && // R
+      bytes[1] == 0x49 && // I
+      bytes[2] == 0x46 && // F
+      bytes[3] == 0x46 && // F
+      bytes[8] == 0x57 && // W
+      bytes[9] == 0x45 && // E
+      bytes[10] == 0x42 && // B
+      bytes[11] == 0x50 && // P
+      bytes[12] == 0x56 && // V
+      bytes[13] == 0x50 && // P
+      bytes[14] == 0x38 && // 8
+      bytes[15] == 0x58) {
+    // X
+    return (bytes[20] & 0x02) != 0;
   }
   return false;
 }
@@ -415,6 +462,25 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
             );
           }
           if (d.raster != null) {
+            // Animated GIF / animated-WebP: visibility-gated playback so a
+            // pile of animated emoji only burns frame decodes while actually
+            // on screen (see [PausableAnimatedImage]).
+            if (looksAnimatedImageBytes(d.raster!)) {
+              ImageProvider provider = MemoryImage(d.raster!);
+              if (cacheWidth != null) {
+                provider = ResizeImage(provider,
+                    width: cacheWidth, allowUpscaling: false);
+              }
+              return PausableAnimatedImage(
+                image: provider,
+                visibilityKey: ValueKey('anim-mem:$url'),
+                width: widget.width,
+                height: widget.height,
+                fit: widget.fit,
+                placeholder: widget.placeholder,
+                errorBuilder: _fallback,
+              );
+            }
             return Image.memory(
               d.raster!,
               width: widget.width,
@@ -430,6 +496,24 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
           }
           return _fallback(ctx);
         },
+      );
+    }
+    // Animated media (`.gif`/`.apng` — Giphy picks, GIF spam): same
+    // disk-cached provider, but rendered through the visibility-gated player
+    // so offscreen GIFs stop decoding frames instead of animating forever.
+    if (isAnimatedImageUrl(url)) {
+      return PausableAnimatedImage(
+        image: CachedNetworkImageProvider(
+          url,
+          headers: InlineNetworkImage.imageFetchHeaders,
+          maxWidth: cacheWidth,
+        ),
+        visibilityKey: ValueKey('anim-net:$url'),
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        placeholder: widget.placeholder,
+        errorBuilder: _fallback,
       );
     }
     return CachedNetworkImage(

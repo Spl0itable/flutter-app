@@ -32,6 +32,16 @@ Each released version corresponds to a tag on
   encrypted rumor.
 
 ### Fixed
+- Event signature verification now uses the native libsecp256k1 library
+  (bundled per platform) instead of pure Dart — ~70 µs per event instead of
+  ~12 ms (~150×) — with the pure-Dart implementation kept as an automatic
+  fallback wherever the library is unavailable. Together with the persisted
+  verification cache this removes the boot/resume CPU grind entirely, first
+  run included.
+- Animated GIFs and animated custom emoji now pause whenever they are off
+  screen (scrolled away, behind another screen) instead of decoding frames
+  forever, and resume exactly where they froze when scrolled back — a chat
+  full of GIFs no longer keeps the CPU/GPU busy for as long as it is open.
 - Opening the app on an account with lots of history no longer pegs the CPU
   for seconds while messages stream in. Signatures verified in past sessions
   are now remembered on disk, so the boot/resume relay replay of already-seen

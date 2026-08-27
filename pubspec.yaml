@@ -17,6 +17,12 @@ dependencies:
 
   # Nostr / crypto
   bip340: ^0.3.0
+  # Native libsecp256k1 BIP340 verification (~100× the pure-Dart bip340 verify
+  # speed); coinlib_flutter bundles the shared library per platform. Pure-Dart
+  # bip340 remains the signing path and the verify fallback (see
+  # core/crypto/native_schnorr.dart).
+  coinlib: ^5.0.0
+  coinlib_flutter: ^5.0.1
   pointycastle: ^3.9.1
   cryptography: ^2.7.0
   elliptic: ^0.3.11
