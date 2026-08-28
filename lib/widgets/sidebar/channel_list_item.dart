@@ -291,7 +291,7 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _prime();
+    _prime(initial: true);
   }
 
   @override
@@ -320,13 +320,22 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
     }
   }
 
-  void _prime({bool force = false}) {
+  void _prime({bool force = false, bool initial = false}) {
     final gh = widget.geohash;
     if (gh.isEmpty) return;
     final cache = ref.read(geohashPlaceCacheProvider);
     final hit = cache.cached(gh);
     if (hit != null) {
-      _place = hit;
+      // `_prime` also runs from `didUpdateWidget` and the app-resume handler,
+      // where a bare assignment paints nothing — the row would keep showing
+      // the coordinates until something else happened to rebuild it. The
+      // initState call is exempt: its build has not run yet, and setState
+      // during it is not allowed.
+      if (initial) {
+        _place = hit;
+      } else {
+        setState(() => _place = hit);
+      }
       return;
     }
     cache.resolve(gh, force: force).then((place) {

@@ -5479,6 +5479,23 @@ class NotificationEntry {
   final String? threadRoot;
   bool viewed;
 
+  /// A copy with [ts] pulled back to [now]. Used to repair a future-dated
+  /// entry read from the persisted blob or from another device's synced copy,
+  /// which would otherwise sort above every real notification.
+  NotificationEntry clampedTo(int now) => NotificationEntry(
+        type: type,
+        title: title,
+        body: body,
+        ts: ts > now ? now : ts,
+        receivedAt: receivedAt,
+        route: route,
+        eventId: eventId,
+        senderPubkey: senderPubkey,
+        contextLabel: contextLabel,
+        threadRoot: threadRoot,
+        viewed: viewed,
+      );
+
   /// Serializes for the persisted history (N3). Mirrors the PWA's stored
   /// notification objects (`nym_notification_history`, notifications.js:228) —
   /// `timestamp` is the PWA field name so a value written by either client
@@ -5713,7 +5730,10 @@ class NotificationHistoryNotifier
         final e = NotificationEntry.fromJson(item);
         if (e == null) continue;
         if (now - e.ts >= _maxAgeMs) continue; // 24h window
-        entries.add(e);
+        // Written before the clamp above, or synced from a device that still
+        // lacks it: it is already pinned to the top of the bell, and would
+        // stay there for as long as its timestamp is ahead of us.
+        entries.add(e.ts > now ? e.clampedTo(now) : e);
       }
       if (entries.isEmpty || !mounted) return;
       entries.sort((a, b) => b.ts.compareTo(a.ts)); // newest first
@@ -5930,7 +5950,16 @@ class NotificationHistoryNotifier
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    final stamp = ts ?? now;
+    // Clamped at now. A notification's time is when the thing HAPPENED, and
+    // nothing happens in the future — but an event's `created_at` can be ahead
+    // of us (a sender whose clock runs fast, or a pool/proxy re-stamping an
+    // ephemeral event forward when it replays cached history, which is exactly
+    // why `EventMapper` clamps the display timestamp). The panel sorts
+    // newest-first, so one future-dated entry pins itself to the top of the
+    // bell and stays there until its own time ages out of the 24h window —
+    // the "old notification stuck at the top" report.
+    final raw = ts ?? now;
+    final stamp = raw > now ? now : raw;
     // The PWA's `_addNotificationToHistory` age gate (notifications.js:135):
     // an event older than the 24h bell window never lands, no matter which
     // path delivered it — the caller-side silent gate isn't the only defense.
@@ -5978,10 +6007,17 @@ class NotificationHistoryNotifier
       entry.viewed = true;
       if (_rememberSeen(entry)) _persistSeenKeys();
     }
+    // The store's documented order is newest-first (`_hydrate` and
+    // `mergeHistory` both sort that way). A plain prepend broke it for a
+    // BACKLOG record — a D1 backfill or reconnect replay lands older than what
+    // is already here — and the two things that read the list positionally
+    // then went wrong: the `_cap` trim below drops from the tail, so it could
+    // evict a NEWER entry than the one just inserted, and `historyForSync`
+    // takes the first 100 by position rather than the newest 100.
     final kept = [
       entry,
       ...state.entries.where((e) => now - e.ts < _maxAgeMs),
-    ];
+    ]..sort((a, b) => b.ts.compareTo(a.ts));
     if (kept.length > _cap) kept.removeRange(_cap, kept.length);
     final unread = _countUnread(kept);
     state = NotificationHistoryState(entries: kept, unread: unread);
@@ -6311,9 +6347,13 @@ class NotificationHistoryNotifier
 
     var changed = false;
     var seenAdded = false;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
     for (final raw in incoming) {
-      final n = NotificationEntry.fromJson(raw);
+      var n = NotificationEntry.fromJson(raw);
       if (n == null || n.ts <= cutoff) continue;
+      // A device with a fast clock (or one on a build without the clamp) syncs
+      // future-dated entries; adopting one pins it to the top here too.
+      if (n.ts > nowMs) n = n.clampedTo(nowMs);
       final existing = findLocalMatch(n);
       if (existing != null) {
         if (n.viewed && !existing.viewed) {

@@ -242,7 +242,8 @@ class _ChatHeader extends ConsumerStatefulWidget {
   ConsumerState<_ChatHeader> createState() => _ChatHeaderState();
 }
 
-class _ChatHeaderState extends ConsumerState<_ChatHeader> {
+class _ChatHeaderState extends ConsumerState<_ChatHeader>
+    with WidgetsBindingObserver {
   // A simple back/forward navigation history (channels.js `navigationHistory` /
   // `navigationIndex`). Each entry is a [ChatView] plus, when a thread was
   // open, its root id — so Back closes an open thread and Forward reopens it
@@ -268,8 +269,10 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   // late response can't force a redundant rebuild after the view moved on.
   int _geocodeToken = 0;
 
-  /// Pending retry for a place name that missed.
-  Timer? _placeRetry;
+  /// Pending retries for place names that missed, keyed by geohash. One shared
+  /// timer meant switching channels cancelled the previous geohash's retry, so
+  /// whichever header you left behind kept its coordinates for good.
+  final Map<String, Timer> _placeRetries = {};
 
   bool get _canBack => _index > 0;
   bool get _canForward => _index >= 0 && _index < _history.length - 1;
@@ -277,6 +280,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Columns mode: the deck may already be focused on the bot column when the
     // header mounts (restored layout), so run the bot-header activation for
     // the initial view too — `_renderPMHeader` fires on every open/focus in
@@ -287,8 +291,28 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Coming back to the app is the natural moment to retry a place name that
+    // failed earlier, INCLUDING one the backoff has given up on — the same
+    // rule the sidebar row already follows (`channel_list_item.dart`) and the
+    // PWA's `visibilitychange` → `refreshUnresolvedPlaces(true)`. Without it a
+    // header that burned its four attempts showed raw coordinates for the rest
+    // of the app's life.
+    if (state != AppLifecycleState.resumed) return;
+    if (_placeFailed.isEmpty) return;
+    for (final gh in _placeFailed.toList()) {
+      _placeFailed.remove(gh);
+      _resolvePlaceName(gh, force: true);
+    }
+  }
+
+  @override
   void dispose() {
-    _placeRetry?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    for (final t in _placeRetries.values) {
+      t.cancel();
+    }
+    _placeRetries.clear();
     super.dispose();
   }
 
@@ -958,14 +982,20 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
       if (place.isEmpty) {
         _placeFailed.add(ghKey);
         // Nothing else re-triggers a lookup, so schedule the retry the cache's
-        // backoff allows — otherwise the header keeps the coordinates.
+        // backoff allows — otherwise the header keeps the coordinates. Keyed
+        // per geohash: one shared timer meant opening a second channel
+        // cancelled the first one's retry and stranded it on coordinates. When
+        // the cache has run out of automatic attempts (`retryAt == null`) the
+        // key stays in `_placeFailed` and the app-resume handler above is what
+        // gives it another go.
         final at = cache.retryAt(ghKey);
         if (at != null) {
           final wait = at.difference(DateTime.now());
-          _placeRetry?.cancel();
-          _placeRetry = Timer(
+          _placeRetries.remove(ghKey)?.cancel();
+          _placeRetries[ghKey] = Timer(
             wait.isNegative ? const Duration(seconds: 1) : wait,
             () {
+              _placeRetries.remove(ghKey);
               if (!mounted) return;
               _placeFailed.remove(ghKey);
               _resolvePlaceName(ghKey);
@@ -973,7 +1003,13 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader> {
           );
         }
       }
-      if (!mounted || token != _geocodeToken) return;
+      // A resolved place must repaint even when the token moved on: the token
+      // only guards against a STALE answer overwriting a newer one, and
+      // `resolve` hands every caller for a geohash the same future, so an
+      // extra rebuild during "Loading location…" bumps the token and used to
+      // swallow the very answer it was waiting for.
+      if (!mounted) return;
+      if (place.isEmpty && token != _geocodeToken) return;
       setState(() {});
     });
   }
