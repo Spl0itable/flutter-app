@@ -113,6 +113,12 @@ dev_dependencies:
   build_runner: ^2.4.13
   riverpod_lint: ^2.3.13
   sqflite_common_ffi: ^2.3.0
+  # Imported directly by wallpaper_cache_test's fake path provider. They arrive
+  # transitively via path_provider, but a direct import needs a direct
+  # dependency (`depend_on_referenced_packages`) or the version it compiles
+  # against is whatever another package happens to pull in.
+  path_provider_platform_interface: any
+  plugin_platform_interface: any
 
 flutter:
   uses-material-design: true

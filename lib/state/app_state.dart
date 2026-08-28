@@ -424,8 +424,9 @@ class AppState {
     if (isFriend(m.pubkey)) return false;
     if (nymchatPubkeys.contains(m.pubkey)) return false;
     // _isPubkeyGated: trusted via dev/bot identity or earned trust.
-    if (verifiedDeveloper != null && m.pubkey == verifiedDeveloper)
+    if (verifiedDeveloper != null && m.pubkey == verifiedDeveloper) {
       return false;
+    }
     if (verifiedBots.contains(m.pubkey)) return false;
     if (trustedPubkeys.contains(m.pubkey)) return false;
     return true;
@@ -1955,8 +1956,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
           matchIdx = i; // a live placeholder — the just-sent message; take it.
           break;
         }
-        if (matchIdx < 0)
+        if (matchIdx < 0) {
           matchIdx = i; // remember the first failed as fallback.
+        }
       }
     }
     if (matchIdx >= 0) {
