@@ -657,11 +657,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // styles-features.css:1224-1227) alongside the 700 nym bolding.
     final suffixWeight =
         hasGenesisFlair(_cosmetics) ? FontWeight.w400 : FontWeight.w100;
-    // `message.author` carries the stored nym which already includes its
-    // `#suffix` (User.nym / the `anon#xxxx` fallback). Strip it so the canonical
-    // suffix below isn't appended twice (PWA renders the base nym + a separate
-    // `.nym-suffix` span — `parseNymFromDisplay`, `messages.js:1781`).
-    final baseNym = stripPubkeySuffix(message.author);
+    // `message.author` is the nym FROZEN onto the message when it was ingested,
+    // so a message that arrived before its sender's kind 0 keeps whatever
+    // fallback was current then — usually the literal "nym". The PWA does not
+    // have that problem: `updatePMNicknameFromProfile` rewrites
+    // `.message[data-pubkey] .message-author` in place on every kind 0
+    // (pms.js:3163), so already-painted rows pick the real name up.
+    //
+    // Prefer the LIVE profile and keep the stored author only as the fallback.
+    // Watched, so the row repaints when the profile lands — the native
+    // equivalent of that sweep. An ephemeral/pseudonymous sender has no entry
+    // in the map, so those keep the nym they were sent under.
+    final liveNym = ref.watch(
+        usersProvider.select((u) => u[message.pubkey]?.nym));
+    // It already includes its `#suffix` (User.nym / the `anon#xxxx` fallback).
+    // Strip it so the canonical suffix below isn't appended twice (PWA renders
+    // the base nym + a separate `.nym-suffix` span — `parseNymFromDisplay`,
+    // `messages.js:1781`).
+    final baseNym = stripPubkeySuffix(
+        (liveNym != null && liveNym.isNotEmpty) ? liveNym : message.author);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2633,7 +2647,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// `slap`/`hug` → the rate-limited `/me` command, `none` → no-op.
   void _dispatchSwipeAction(BuildContext context, String action) {
     final controller = ref.read(nostrControllerProvider);
-    final baseNym = _baseNym(message.author);
+    // The nym the row is DISPLAYING, not the one frozen on the message — a
+    // quote that named the sender differently from the line above it would be
+    // its own small bug, and the quote matcher keys on the `#suffix` anyway.
+    final baseNym = _baseNym(_displayNym());
     final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
     switch (action) {
       case 'quote':
@@ -2727,7 +2744,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// action — sets the composer quote preview to this message.
   void _quoteReply() {
     if (message.content.isEmpty) return;
-    final baseNym = _baseNym(message.author);
+    final baseNym = _baseNym(_displayNym());
     final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
     ref
         .read(pendingComposerActionProvider.notifier)
@@ -2762,6 +2779,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   // Trailing-`#xxxx`-only strip (users.js:1093-1098): a `#` inside the name
   // (e.g. `player#1`) belongs to the name.
   String _baseNym(String nym) => splitNymSuffix(nym).base;
+
+  /// The sender's display nym, live profile preferred over the one frozen onto
+  /// the message at ingest. See [_authorLine] for why the stored value goes
+  /// stale. Read (not watched) so the action paths can call it outside build;
+  /// the rendered author watches the same source.
+  String _displayNym() {
+    final live = ref.read(appStateProvider).users[message.pubkey]?.nym;
+    return (live != null && live.isNotEmpty) ? live : message.author;
+  }
 
   BorderRadius _bubbleRadius(bool self) {
     const r = Radius.circular(16);
