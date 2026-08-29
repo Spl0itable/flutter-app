@@ -3,13 +3,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/channels/channel_share.dart';
 import '../../features/emoji/emoji_prefetch.dart';
+import '../../features/globe/geohash_explorer.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/mesh/mesh_controller.dart';
 import '../../features/notifications/notifications_panel.dart';
@@ -818,7 +818,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
     // "Long City Na…, Country" rather than losing the country. The split only
     // applies to the geohash link's place text; the PM/group/plain variants
     // stay a single run.
-    final splitIdx = loc.url != null ? loc.text.lastIndexOf(', ') : -1;
+    final splitIdx = loc.geohash != null ? loc.text.lastIndexOf(', ') : -1;
     final Widget placeText;
     if (splitIdx > 0 && splitIdx < loc.text.length - 2) {
       placeText = Row(
@@ -852,37 +852,20 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
         textBaseline: TextBaseline.alphabetic,
         children: [
           Flexible(
-            // A geohash channel's place name is an external hyperlink
-            // (`<a href="https://www.geohash.es/decode?geohash=…"
-            // target="_blank">`, channels.js:1000-1007); the `<a>` keeps the
-            // line's text-dim colour, so only the tap action (and pointer)
-            // differs. The dist span stays OUTSIDE the link.
-            child: loc.url == null
+            // A geohash channel's place name is tappable and keeps the line's
+            // text-dim colour, so only the tap action (and pointer) differ. The
+            // dist span stays OUTSIDE the tap target. The tap opens the
+            // in-app geohash explorer framed on this cell — no browser hand-off
+            // any more, so nothing here can fail on a third party's outage.
+            child: loc.geohash == null
                 ? placeText
                 : MouseRegion(
                     cursor: SystemMouseCursors.click,
                     child: GestureDetector(
                       // Opaque: the tap target is the whole rendered text box,
-                      // not just glyph pixels. externalApplication can report
-                      // failure on some iOS/Android configurations — fall back
-                      // to the platform default (in-app browser view), which
-                      // still leaves the app like the PWA's target="_blank".
+                      // not just glyph pixels.
                       behavior: HitTestBehavior.opaque,
-                      onTap: () async {
-                        final uri = Uri.parse(loc.url!);
-                        var ok = false;
-                        try {
-                          ok = await launchUrl(
-                            uri,
-                            mode: LaunchMode.externalApplication,
-                          );
-                        } catch (_) {}
-                        if (!ok) {
-                          try {
-                            await launchUrl(uri);
-                          } catch (_) {}
-                        }
-                      },
+                      onTap: () => _openExplorerAt(loc.geohash!),
                       child: placeText,
                     ),
                   ),
@@ -899,7 +882,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
     );
   }
 
-  ({String text, String dist, String? url}) _locationFor(
+  ({String text, String dist, String? geohash}) _locationFor(
       AppState app, ChatView view) {
     switch (view.kind) {
       case ViewKind.channel:
@@ -911,7 +894,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
         if (!isValidGeohash(gh)) {
           // `loc-country` → "Not a geohash" for a named channel (plain text —
           // only the geohash branch below builds the decode hyperlink).
-          return (text: tr('Not a geohash'), dist: '', url: null);
+          return (text: tr('Not a geohash'), dist: '', geohash: null);
         }
         // `.channel-location` text (channels.js:1005-1006,1029): the resolved
         // reverse-geocoded place name when cached, "Loading location…" while a
@@ -941,16 +924,14 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
             dist = ' (${km.toStringAsFixed(1)}km)';
           } catch (_) {}
         }
-        // The place name links to the geohash decode page
-        // (`https://www.geohash.es/decode?geohash=<gh>`, channels.js:1000-1002).
-        return (
-          text: place,
-          dist: dist,
-          url: 'https://www.geohash.es/decode?geohash='
-              '${Uri.encodeComponent(ghKey)}',
-        );
+        // The place name opens OUR geohash explorer zoomed to this cell,
+        // rather than handing the user off to geohash.es — a third party we do
+        // not control, currently erroring on its own map provider's API key,
+        // and unnecessary: the cell's bounds are decoded locally
+        // (`geohashBounds`) and the explorer draws the map from data we ship.
+        return (text: place, dist: dist, geohash: ghKey);
       case ViewKind.pm:
-        return (text: _pmLastSeenText(app, view.id), dist: '', url: null);
+        return (text: _pmLastSeenText(app, view.id), dist: '', geohash: null);
       case ViewKind.group:
         for (final g in app.groups) {
           if (g.id == view.id) {
@@ -958,12 +939,24 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
               text: tr('{count} members',
                   {'count': _abbreviateCount(g.members.length)}),
               dist: '',
-              url: null,
+              geohash: null,
             );
           }
         }
-        return (text: '', dist: '', url: null);
+        return (text: '', dist: '', geohash: null);
     }
+  }
+
+  /// Opens the geohash explorer framed on [geohash], and switches to whatever
+  /// cell the user joins from there — the same contract the sidebar's Discover
+  /// entry point uses (`sidebar.dart` `_openDiscover`), so a join made from
+  /// either place behaves identically.
+  Future<void> _openExplorerAt(String geohash) async {
+    final gh = await Navigator.of(context).push<String>(
+      GeohashExplorer.route(focusGeohash: geohash),
+    );
+    if (gh == null || gh.isEmpty || !mounted) return;
+    ref.read(nostrControllerProvider).switchChannel(gh, geohash: gh);
   }
 
   /// Kicks off a reverse geocode for [ghKey] through the shared, persistent
