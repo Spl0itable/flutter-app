@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/constants/event_kinds.dart';
+import '../core/constants/history_window.dart';
 import '../core/utils/nym_utils.dart';
 import '../features/channels/channel_manager.dart';
 import '../features/emoji/custom_emoji.dart'
@@ -1702,6 +1703,59 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// re-capped once the batch's deferred sort has restored newest-last order.
   /// Only populated while [_batchDepth] > 0.
   final Set<String> _channelCapPending = <String>{};
+
+  /// Public channel history is a rolling window as well as a capped one — see
+  /// [CacheStore.channelHistoryMaxAge]. The D1 archive floors `channel-get` at
+  /// the same 24 hours and the relay filters ask for `since: now - 86400`, so
+  /// anything older exists on no other client and cannot be re-fetched by this
+  /// one either; holding it in memory shows history nobody else can see.
+  ///
+  /// Returns the ids dropped, so the caller can clear the reactions targeting
+  /// them (reactions are keyed by their target message id, which makes that
+  /// exactly "kind 7 events whose `k` tag is 20000/23333").
+  Set<String> pruneChannelHistoryWindow() {
+    final floor = channelWindowFloorSec();
+    final dropped = <String>{};
+    for (final entry in state.messages.entries) {
+      final key = entry.key;
+      if (key.startsWith('pm-') || key.startsWith('group-')) continue;
+      final list = entry.value;
+      if (list.isEmpty || !list.any((m) => m.createdAt < floor)) continue;
+
+      // Same thread-root pin as the count cap: an in-window reply whose root
+      // aged out would otherwise reflow inline with a dead-end thread.
+      final keep = <Message>[];
+      final wanted = <String>{};
+      for (final m in list) {
+        if (m.createdAt < floor) continue;
+        keep.add(m);
+        final root = m.threadRoot;
+        if (root != null && root.isNotEmpty) wanted.add(root);
+      }
+      for (final m in keep) {
+        wanted.remove(threadKeyForMessage(m));
+      }
+      final pinned = <Message>[];
+      for (final m in list) {
+        if (m.createdAt >= floor) continue;
+        if (wanted.isNotEmpty && wanted.remove(threadKeyForMessage(m))) {
+          pinned.add(m);
+        } else {
+          dropped.add(m.id);
+          final shared = m.nymMessageId;
+          if (shared != null && shared.isNotEmpty) dropped.add(shared);
+          _unindexMessage(m);
+          state.reactions.remove(m.id);
+        }
+      }
+      list
+        ..clear()
+        ..addAll(pinned)
+        ..addAll(keep);
+    }
+    if (dropped.isNotEmpty) _scheduleEmit();
+    return dropped;
+  }
 
   /// Trims a public-channel conversation to the newest [_kChannelHistoryCap]
   /// messages. [list] must already be in ascending (oldest-first) order, which

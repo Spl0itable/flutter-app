@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:nym_bar/core/constants/event_kinds.dart';
+import 'package:nym_bar/core/constants/history_window.dart';
 import 'package:nym_bar/models/message.dart';
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/storage/cache_store.dart';
@@ -30,13 +31,19 @@ NostrEvent _channelMsg(int i, int ts, {String? root}) => NostrEvent(
       content: 'm$i',
     );
 
+/// Channel fixtures must sit inside the rolling 24-hour window
+/// ([kChannelHistoryMaxAge]) or the persisted-window tests would be measuring
+/// the age prune instead of the count cap. [createdAt] is an offset in seconds
+/// from a base an hour ago.
+int get _base => (DateTime.now().millisecondsSinceEpoch ~/ 1000) - 3600;
+
 Message _msg(int i, {required int createdAt, String? threadRoot, String? nymMessageId, bool isPM = false}) =>
     Message(
       id: _hex(i),
       author: 'alice',
       pubkey: 'alice_pk',
       content: 'm$i',
-      createdAt: createdAt,
+      createdAt: _base + createdAt,
       threadRoot: threadRoot,
       nymMessageId: nymMessageId,
       isPM: isPM,
@@ -133,10 +140,13 @@ void main() {
     test('a channel root outside the last-N slice is pinned into it', () async {
       final store = await openStore();
       final rootId = _hex(1);
+      // Sized off the constant so the fixture keeps overflowing the slice if
+      // the cap moves again.
+      final n = CacheStore.channelMessageLimit + 100;
       final msgs = <Message>[
         _msg(1, createdAt: 1000),
-        for (var i = 2; i < 200; i++) _msg(i, createdAt: 1000 + i),
-        for (var i = 200; i < 205; i++) _msg(i, createdAt: 1000 + i, threadRoot: rootId),
+        for (var i = 2; i < n; i++) _msg(i, createdAt: 1000 + i),
+        for (var i = n; i < n + 5; i++) _msg(i, createdAt: 1000 + i, threadRoot: rootId),
       ];
       await store.saveChannelMessages('#flood', msgs);
 
@@ -150,10 +160,11 @@ void main() {
     test('a PM root is pinned by its shared nymMessageId', () async {
       final store = await openStore();
       final rootShared = _hex(0x40);
+      final n = CacheStore.pmStorageLimit + 100;
       final msgs = <Message>[
         _msg(1, createdAt: 1000, nymMessageId: rootShared, isPM: true),
-        for (var i = 2; i < 700; i++) _msg(i, createdAt: 1000 + i, isPM: true),
-        for (var i = 700; i < 705; i++)
+        for (var i = 2; i < n; i++) _msg(i, createdAt: 1000 + i, isPM: true),
+        for (var i = n; i < n + 5; i++)
           _msg(i, createdAt: 1000 + i, threadRoot: rootShared, isPM: true),
       ];
       await store.savePmMessages('pm-peer', msgs, enabled: true);
@@ -178,11 +189,13 @@ void main() {
 
     test('a trimmed history with no threads keeps the plain last-N slice', () async {
       final store = await openStore();
-      final msgs = [for (var i = 0; i < 150; i++) _msg(i, createdAt: 1000 + i)];
+      final over = 50;
+      final n = CacheStore.channelMessageLimit + over;
+      final msgs = [for (var i = 0; i < n; i++) _msg(i, createdAt: 1000 + i)];
       await store.saveChannelMessages('#flat', msgs);
       final loaded = await store.loadChannelMessages('#flat');
       expect(loaded.length, CacheStore.channelMessageLimit);
-      expect(loaded.first.id, _hex(50));
+      expect(loaded.first.id, _hex(over));
     });
   });
 }
