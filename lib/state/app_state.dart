@@ -1710,10 +1710,31 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void _capChannelHistory(List<Message> list) {
     if (list.length <= _kChannelHistoryCap) return;
     final drop = list.length - _kChannelHistoryCap;
-    for (var i = 0; i < drop; i++) {
-      _unindexMessage(list[i]);
+    // Keep thread ROOTS the surviving window still references. The cap is a
+    // plain front trim, so a root older than the window falls out while its
+    // replies stay — and a reply whose root is gone reflows INLINE, as though
+    // it were a top-level message, with a thread affordance that dead-ends
+    // (`visibleMessages` only hides a reply whose root is present locally).
+    // Same pinning the PWA gives both its live and persisted windows
+    // (`persistence.js#_withPinnedThreadRoots`).
+    final wanted = <String>{};
+    for (var i = drop; i < list.length; i++) {
+      final root = list[i].threadRoot;
+      if (root != null && root.isNotEmpty) wanted.add(root);
     }
-    list.removeRange(0, drop);
+    for (var i = drop; i < list.length && wanted.isNotEmpty; i++) {
+      wanted.remove(threadKeyForMessage(list[i]));
+    }
+    final pinned = <Message>[];
+    for (var i = 0; i < drop; i++) {
+      final m = list[i];
+      if (wanted.isNotEmpty && wanted.remove(threadKeyForMessage(m))) {
+        pinned.add(m);
+      } else {
+        _unindexMessage(m);
+      }
+    }
+    list.replaceRange(0, drop, pinned);
   }
 
   // ---------------------------------------------------------------------------

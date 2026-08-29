@@ -287,6 +287,35 @@ class CacheStore {
   // Channel messages
   // ---------------------------------------------------------------------------
 
+  /// Keep thread ROOTS in the persisted window (PWA
+  /// `persistence.js#_withPinnedThreadRoots`). The window is a plain last-N
+  /// slice, so a root older than the window drops off while its replies stay —
+  /// and after a reload those replies can never re-thread: they render inline,
+  /// as though they were top-level messages, and their thread affordance
+  /// dead-ends. Any message the kept window references as a thread root is
+  /// pinned in front of the slice.
+  static List<Message> _withPinnedThreadRoots(
+    List<Message> messages,
+    List<Message> trimmed,
+    String Function(Message) keyOf,
+  ) {
+    if (identical(trimmed, messages)) return trimmed;
+    final kept = <String>{for (final m in trimmed) keyOf(m)};
+    final wanted = <String>{};
+    for (final m in trimmed) {
+      final root = m.threadRoot;
+      if (root != null && root.isNotEmpty && !kept.contains(root)) {
+        wanted.add(root);
+      }
+    }
+    if (wanted.isEmpty) return trimmed;
+    final pinned = <Message>[];
+    for (final m in messages) {
+      if (wanted.remove(keyOf(m))) pinned.add(m);
+    }
+    return pinned.isEmpty ? trimmed : [...pinned, ...trimmed];
+  }
+
   /// Persist a channel's messages, keeping only the last [channelMessageLimit]
   /// (mirrors `persistChannelMessages`: `messages.slice(-limit)`). Stamps
   /// `lastTouched`. An empty list deletes the record, as in the PWA.
@@ -298,9 +327,11 @@ class CacheStore {
       await db.delete('channels', where: 'key = ?', whereArgs: [key]);
       return;
     }
-    final trimmed = msgs.length > channelMessageLimit
+    var trimmed = msgs.length > channelMessageLimit
         ? msgs.sublist(msgs.length - channelMessageLimit)
         : msgs;
+    // Channel thread keys are event ids (`threadKeyForMessage`).
+    trimmed = _withPinnedThreadRoots(msgs, trimmed, (m) => m.id);
     final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
     await db.insert(
       'channels',
@@ -348,9 +379,11 @@ class CacheStore {
       await db.delete('pms', where: 'key = ?', whereArgs: [key]);
       return;
     }
-    final trimmed = msgs.length > pmStorageLimit
+    var trimmed = msgs.length > pmStorageLimit
         ? msgs.sublist(msgs.length - pmStorageLimit)
         : msgs;
+    // PM/group thread keys are the shared nymMessageId when present.
+    trimmed = _withPinnedThreadRoots(msgs, trimmed, (m) => m.nymMessageId ?? m.id);
     final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
     await db.insert(
       'pms',
