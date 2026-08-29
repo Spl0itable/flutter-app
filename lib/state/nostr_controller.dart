@@ -1228,6 +1228,8 @@ class NostrController {
     _profileBackfillTimer = null;
     _profileBackfillQueue.clear();
     _profileBackfillQueued.clear();
+    _channelWindowPruneTimer?.cancel();
+    _channelWindowPruneTimer = null;
     _flushScheduled = false;
     _dirtyChannelKeys.clear();
     _dirtyPmKeys.clear();
@@ -9169,6 +9171,11 @@ class NostrController {
       // vouch events on every boot/resume, each costing ~12 ms of pure-Dart
       // BIP340 math without this cache — several seconds of pegged CPU that
       // read as the whole app lagging while history streamed in.
+      // Public channel history is a rolling 24-hour window. The cache load
+      // already refused to bring aged-out messages back, but a session left
+      // running crosses the boundary while it is open, so sweep on a timer too.
+      _startChannelWindowPrune();
+
       final verifiedIds =
           await cache.loadMetaSet(CacheStore.metaVerifiedEventIds);
       if (verifiedIds.isNotEmpty) NostrService.seedVerifiedIds(verifiedIds);
@@ -9176,7 +9183,26 @@ class NostrController {
       if (!cachePms) unawaited(cache.clearPms());
       // Reactions hydrate AFTER messages so their tallies attach to rows that
       // now exist (same effective order as the PWA's single hydration pass).
-      if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
+      // A row whose target message is no longer held is dead weight nothing can
+      // render — and for a public channel message pruned by the 24-hour window
+      // it is exactly the aged-out kind 7 that window is meant to drop, so it is
+      // deleted rather than reloaded.
+      if (reactions.isNotEmpty) {
+        final held = <String>{};
+        for (final list in [...channelMsgs.values, ...pmMsgs.values]) {
+          for (final m in list) {
+            if (m.id.isNotEmpty) held.add(m.id);
+            final shared = m.nymMessageId;
+            if (shared != null && shared.isNotEmpty) held.add(shared);
+          }
+        }
+        final orphans = reactions.keys.where((id) => !held.contains(id)).toList();
+        if (orphans.isNotEmpty) {
+          reactions.removeWhere((id, _) => !held.contains(id));
+          unawaited(cache.deleteReactionsFor(orphans).catchError((_) {}));
+        }
+        if (reactions.isNotEmpty) appState.hydrateReactions(reactions);
+      }
       // Web-of-trust graph: restore the persisted nymchatPubkeys / vouches /
       // trusted sets so the spam gate isn't cold on launch (it still grows live
       // from PoW-valid messages + receipts + vouches).
@@ -9364,6 +9390,44 @@ class NostrController {
     } catch (e) {
       debugPrint('cache flush failed: $e');
     }
+  }
+
+  Timer? _channelWindowPruneTimer;
+
+  /// Sweep public channel history back inside its 24-hour window — memory, the
+  /// cached rows for the channels that changed, and the reactions targeting the
+  /// messages dropped (reactions are keyed by their target's id, which is what
+  /// makes that exactly the kind 7 events tagged `k` 20000/23333).
+  void _startChannelWindowPrune() {
+    _channelWindowPruneTimer?.cancel();
+    Future<void> run() async {
+      if (PanicWipe.inProgress) return;
+      final notifier = _ref.read(appStateProvider.notifier);
+      Set<String> dropped;
+      try {
+        dropped = notifier.pruneChannelHistoryWindow();
+      } catch (e) {
+        debugPrint('channel window prune failed: $e');
+        return;
+      }
+      if (dropped.isEmpty) return;
+      try {
+        await _cache?.deleteReactionsFor(dropped);
+      } catch (e) {
+        debugPrint('channel window reaction prune failed: $e');
+      }
+      // The pruned conversations must be rewritten, not left on disk holding
+      // the messages we just dropped from memory.
+      for (final key in _ref.read(appStateProvider).messages.keys) {
+        if (key.startsWith('pm-') || key.startsWith('group-')) continue;
+        _dirtyChannelKeys.add(key);
+      }
+      _scheduleFlush();
+    }
+
+    run();
+    _channelWindowPruneTimer =
+        Timer.periodic(const Duration(minutes: 15), (_) => run());
   }
 
   // ---------------------------------------------------------------------------
