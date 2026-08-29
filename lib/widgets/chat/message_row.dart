@@ -657,11 +657,25 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // styles-features.css:1224-1227) alongside the 700 nym bolding.
     final suffixWeight =
         hasGenesisFlair(_cosmetics) ? FontWeight.w400 : FontWeight.w100;
-    // `message.author` carries the stored nym which already includes its
-    // `#suffix` (User.nym / the `anon#xxxx` fallback). Strip it so the canonical
-    // suffix below isn't appended twice (PWA renders the base nym + a separate
-    // `.nym-suffix` span — `parseNymFromDisplay`, `messages.js:1781`).
-    final baseNym = stripPubkeySuffix(message.author);
+    // `message.author` is the nym FROZEN onto the message when it was ingested,
+    // so a message that arrived before its sender's kind 0 keeps whatever
+    // fallback was current then — usually the literal "nym". The PWA does not
+    // have that problem: `updatePMNicknameFromProfile` rewrites
+    // `.message[data-pubkey] .message-author` in place on every kind 0
+    // (pms.js:3163), so already-painted rows pick the real name up.
+    //
+    // Prefer the LIVE profile and keep the stored author only as the fallback.
+    // Watched, so the row repaints when the profile lands — the native
+    // equivalent of that sweep. An ephemeral/pseudonymous sender has no entry
+    // in the map, so those keep the nym they were sent under.
+    final liveNym = ref.watch(
+        usersProvider.select((u) => u[message.pubkey]?.nym));
+    // It already includes its `#suffix` (User.nym / the `anon#xxxx` fallback).
+    // Strip it so the canonical suffix below isn't appended twice (PWA renders
+    // the base nym + a separate `.nym-suffix` span — `parseNymFromDisplay`,
+    // `messages.js:1781`).
+    final baseNym = stripPubkeySuffix(
+        (liveNym != null && liveNym.isNotEmpty) ? liveNym : message.author);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
