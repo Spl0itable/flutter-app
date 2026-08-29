@@ -815,7 +815,18 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
   Widget _locationLine(NymColors c, AppState app, ChatView view) {
     final loc = _locationFor(app, view);
     if (loc.text.isEmpty) return const SizedBox.shrink();
-    final style = TextStyle(color: c.textDim, fontSize: 12);
+    // A geohash channel's place name is a LINK (`.channel-location a`), and the
+    // PWA declares no `text-decoration` on it, so it keeps the browser's
+    // default underline. Only the tappable variant gets one — the PM last-seen
+    // line and "Not a geohash" are plain text there too.
+    final style = TextStyle(
+      color: c.textDim,
+      fontSize: 12,
+      decoration: loc.geohash != null ? TextDecoration.underline : null,
+      // Match the text colour rather than defaulting to the foreground, so the
+      // rule reads as dim as the words it sits under.
+      decorationColor: c.textDim,
+    );
     // `_fillLocationLink` (channels.js:1037-1055) splits the resolved place at
     // its last ', ' into `.loc-city` (flex:0 1 auto — the only part that
     // ellipsizes) and `.loc-country` (flex:0 0 auto — never shrinks,
