@@ -3329,8 +3329,9 @@ class NostrController {
     }
     // The announcement may still be in flight; fill the verdict in rather
     // than leaving the opening message of a conversation marked legacy.
-    if (m.pqEncrypted) _resolvePqRootVerdict(m.conversationPubkey ?? m.pubkey,
-        m.nymMessageId);
+    if (m.pqEncrypted) {
+      _resolvePqRootVerdict(m.conversationPubkey ?? m.pubkey, m.nymMessageId);
+    }
     // Resolve the display author against the users map — the PWA's
     // `author: isOwn ? this.nym : this.getNymFromPubkey(senderPubkey)`
     // (pms.js:1258 via the `peerName` resolution at :1321). `mapPmRumor` is
@@ -8734,8 +8735,9 @@ class NostrController {
         }
       } catch (_) {}
     }
-    if (ids.isNotEmpty || times.isNotEmpty)
+    if (ids.isNotEmpty || times.isNotEmpty) {
       appState.mergeLeftGroups(ids, times);
+    }
   }
 
   /// Persists the live left-group state to KV — the PWA's `_saveLeftGroups()`
