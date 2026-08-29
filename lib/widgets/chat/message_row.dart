@@ -2647,7 +2647,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// `slap`/`hug` → the rate-limited `/me` command, `none` → no-op.
   void _dispatchSwipeAction(BuildContext context, String action) {
     final controller = ref.read(nostrControllerProvider);
-    final baseNym = _baseNym(message.author);
+    // The nym the row is DISPLAYING, not the one frozen on the message — a
+    // quote that named the sender differently from the line above it would be
+    // its own small bug, and the quote matcher keys on the `#suffix` anyway.
+    final baseNym = _baseNym(_displayNym());
     final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
     switch (action) {
       case 'quote':
@@ -2741,7 +2744,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// action — sets the composer quote preview to this message.
   void _quoteReply() {
     if (message.content.isEmpty) return;
-    final baseNym = _baseNym(message.author);
+    final baseNym = _baseNym(_displayNym());
     final fullNym = '$baseNym#${getPubkeySuffix(message.pubkey)}';
     ref
         .read(pendingComposerActionProvider.notifier)
@@ -2776,6 +2779,15 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   // Trailing-`#xxxx`-only strip (users.js:1093-1098): a `#` inside the name
   // (e.g. `player#1`) belongs to the name.
   String _baseNym(String nym) => splitNymSuffix(nym).base;
+
+  /// The sender's display nym, live profile preferred over the one frozen onto
+  /// the message at ingest. See [_authorLine] for why the stored value goes
+  /// stale. Read (not watched) so the action paths can call it outside build;
+  /// the rendered author watches the same source.
+  String _displayNym() {
+    final live = ref.read(appStateProvider).users[message.pubkey]?.nym;
+    return (live != null && live.isNotEmpty) ? live : message.author;
+  }
 
   BorderRadius _bubbleRadius(bool self) {
     const r = Radius.circular(16);
