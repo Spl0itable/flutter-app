@@ -285,6 +285,11 @@ class _ChannelLocationLine extends ConsumerStatefulWidget {
 class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
     with WidgetsBindingObserver {
   String? _place;
+
+  /// A locally-derived description ("Arctic Ocean", "Antarctica", "Off the
+  /// coast of Ireland") for a cell the geocoder cannot name. Never promoted to
+  /// [_place]: a real name still wins if one arrives.
+  String? _region;
   Timer? _retry;
 
   @override
@@ -315,6 +320,7 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
     super.didUpdateWidget(old);
     if (old.geohash != widget.geohash) {
       _place = null;
+      _region = null;
       _retry?.cancel();
       _prime();
     }
@@ -344,9 +350,17 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
         setState(() => _place = place);
         return;
       }
-      // Missed. Nothing else re-triggers a lookup, so the row schedules its
-      // own retry — otherwise it keeps the coordinates until the sidebar
-      // happens to rebuild.
+      // Missed. Some cells genuinely have no address (open ocean, the
+      // Antarctic plateau), so say what the place IS from the bundled map data
+      // rather than showing raw coordinates. Held separately from `_place` so
+      // a real geocoded name still replaces it if one ever lands.
+      cache.describeRegionFor(gh).then((desc) {
+        if (!mounted || widget.geohash != gh || desc.isEmpty) return;
+        if (_place != null) return;
+        setState(() => _region = desc);
+      });
+      // Nothing else re-triggers a lookup, so the row schedules its own retry —
+      // otherwise it keeps the fallback until the sidebar happens to rebuild.
       _scheduleRetry(cache, gh);
     });
   }
@@ -365,8 +379,9 @@ class _ChannelLocationLineState extends ConsumerState<_ChannelLocationLine>
   Widget build(BuildContext context) {
     final c = context.nym;
     final gh = widget.geohash;
-    final text =
-        gh.isEmpty ? 'Not a geohash' : (_place ?? geohashLocationLabel(gh));
+    final text = gh.isEmpty
+        ? 'Not a geohash'
+        : (_place ?? _region ?? geohashLocationLabel(gh));
     if (text.isEmpty) return const SizedBox.shrink();
     final style = TextStyle(
       color: c.textDim,

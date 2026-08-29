@@ -25,8 +25,6 @@ import 'topojson.dart';
 /// button group collapses into a `<select>`).
 const double kGlobeNarrowBreakpoint = 768;
 
-/// Path to the bundled world map TopoJSON (`countries-110m.json`).
-const String kWorldTopoAsset = 'assets/data/countries-110m.json';
 
 /// Path to the bundled admin-1 (state/province) GeoJSON (F2/F3).
 const String kAdmin1Asset =

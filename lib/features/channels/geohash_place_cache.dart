@@ -22,7 +22,12 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/services.dart' show rootBundle;
+
 import '../../features/globe/geo_projection.dart' show geohashBounds;
+import '../../features/globe/topojson.dart'
+    show GeoFeature, decodeWorldTopoJson, describeRegion, kWorldTopoAsset;
 import '../../models/channel.dart';
 import '../../services/api/api_client.dart';
 import '../../services/storage/key_value_store.dart';
@@ -112,6 +117,51 @@ class GeohashPlaceCache {
   /// Callers render [geohashLocationLabel] (decoded locally, no network) until
   /// this returns something.
   String? cached(String geohash) => _cache[geohash.toLowerCase()];
+
+  /// The bundled Natural Earth country polygons, decoded once and kept.
+  ///
+  /// Loaded lazily — only once a lookup has actually failed — so a session that
+  /// never hits an unnamed cell never pays for it. Decoded on a background
+  /// isolate, like the globe does.
+  Future<List<GeoFeature>>? _worldFeatures;
+
+  Future<List<GeoFeature>> _loadWorldFeatures() {
+    return _worldFeatures ??= () async {
+      try {
+        final jsonStr = await rootBundle.loadString(kWorldTopoAsset);
+        return await compute(decodeWorldTopoJson, jsonStr);
+      } catch (_) {
+        return const <GeoFeature>[];
+      }
+    }();
+  }
+
+  /// What to show when the geocoder can name nothing in a cell.
+  ///
+  /// Some cells genuinely have no address: `12` is the Antarctic plateau,
+  /// `zxnjj` is open Arctic Ocean. Falling back to raw coordinates told the
+  /// user nothing they could read. This answers from the map data the app
+  /// already ships — the same countries file the globe draws — so it needs no
+  /// network and cannot fail on somebody else's outage.
+  ///
+  /// Deliberately NOT written into [_cache]: it is a display fallback, not a
+  /// resolved place, and caching it would end the search for a real name
+  /// exactly the way caching "Unknown location" once did.
+  Future<String> describeRegionFor(String geohash) async {
+    final b = geohashBounds(geohash.toLowerCase());
+    if (b == null) return '';
+    try {
+      final feats = await _loadWorldFeatures();
+      if (feats.isEmpty) return '';
+      return describeRegion(
+        feats,
+        (b.latLo + b.latHi) / 2,
+        (b.lngLo + b.lngHi) / 2,
+      );
+    } catch (_) {
+      return '';
+    }
+  }
 
   /// When a missed [geohash] may be looked up again. `null` once the attempt
   /// cap is reached, meaning the cell is accepted as having no name.

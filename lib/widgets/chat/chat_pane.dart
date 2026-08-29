@@ -265,6 +265,11 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
   // (the PWA's catch branch, channels.js:1029). Failures are deliberately not
   // cached by the service, so they retry on a later visit.
   final Set<String> _placeFailed = {};
+
+  /// Locally-derived descriptions ("Arctic Ocean", "Antarctica", "Off the coast
+  /// of Ireland") for cells the geocoder cannot name, keyed by geohash. Never
+  /// promoted into the place cache: a real name still wins if one arrives.
+  final Map<String, String> _placeRegions = {};
   // Monotonic token (mirrors `_geocodeToken`, geohash_explorer.dart:382) so a
   // late response can't force a redundant rebuild after the view moved on.
   int _geocodeToken = 0;
@@ -906,7 +911,11 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
         if (cached != null) {
           place = cached;
         } else if (_placeFailed.contains(ghKey)) {
-          place = geohashLocationLabel(ghKey);
+          // Some cells genuinely have no address (open ocean, the Antarctic
+          // plateau). Say what the place IS from the bundled map data rather
+          // than showing raw coordinates; the coordinates remain the last
+          // resort while that description is still being worked out.
+          place = _placeRegions[ghKey] ?? geohashLocationLabel(ghKey);
         } else {
           _resolvePlaceName(ghKey);
           // Three-dot literal, as the PWA writes it (channels.js:1006).
@@ -974,6 +983,12 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
     cache.resolve(ghKey, force: force).then((place) {
       if (place.isEmpty) {
         _placeFailed.add(ghKey);
+        if (!_placeRegions.containsKey(ghKey)) {
+          cache.describeRegionFor(ghKey).then((desc) {
+            if (!mounted || desc.isEmpty) return;
+            setState(() => _placeRegions[ghKey] = desc);
+          });
+        }
         // Nothing else re-triggers a lookup, so schedule the retry the cache's
         // backoff allows — otherwise the header keeps the coordinates. Keyed
         // per geohash: one shared timer meant opening a second channel
