@@ -2820,7 +2820,7 @@ class _PickerBodyState extends State<_PickerBody> {
       child: TextField(
         controller: _ctrl,
         focusNode: _focusNode,
-        style: TextStyle(color: c.textBright, fontSize: 14),
+        style: TextStyle(color: c.inputText, fontSize: 14),
         cursorColor: c.isLight ? Colors.black : Colors.white,
         onChanged: (v) => setState(() => _term = v),
         decoration: InputDecoration(

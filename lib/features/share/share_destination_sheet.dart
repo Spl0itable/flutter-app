@@ -200,7 +200,7 @@ class _ShareDestinationSheetState
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
               child: TextField(
                 onChanged: (v) => setState(() => _query = v),
-                style: TextStyle(color: c.text),
+                style: TextStyle(color: c.inputText),
                 decoration: InputDecoration(
                   isDense: true,
                   prefixIcon: Icon(Icons.search, size: 18, color: c.textDim),

@@ -2471,7 +2471,7 @@ class _ComposerState extends ConsumerState<Composer> {
                       child: TextField(
                         controller: _translateSearchController,
                         onChanged: (v) => setState(() => _translateQuery = v),
-                        style: TextStyle(color: c.text, fontSize: 13),
+                        style: TextStyle(color: c.inputText, fontSize: 13),
                         cursorColor: c.isLight ? Colors.black : Colors.white,
                         decoration: InputDecoration(
                           isDense: true,

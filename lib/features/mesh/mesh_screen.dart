@@ -76,7 +76,7 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             TextField(
               controller: nameCtrl,
               autofocus: true,
-              style: TextStyle(color: c.text),
+              style: TextStyle(color: c.inputText),
               decoration: InputDecoration(
                 prefixText: '#',
                 prefixStyle: TextStyle(color: c.textDim),
@@ -89,7 +89,7 @@ class _MeshScreenState extends ConsumerState<MeshScreen> {
             TextField(
               controller: passCtrl,
               obscureText: true,
-              style: TextStyle(color: c.text),
+              style: TextStyle(color: c.inputText),
               decoration: InputDecoration(
                 hintText: tr('password (optional — encrypts the group)'),
                 hintStyle: TextStyle(color: c.textDim),

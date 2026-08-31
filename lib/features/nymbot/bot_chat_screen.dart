@@ -1603,7 +1603,7 @@ class _BotComposerState extends ConsumerState<_BotComposer> {
                       child: TextField(
                         controller: _translateSearchController,
                         onChanged: (v) => setState(() => _translateQuery = v),
-                        style: TextStyle(color: c.text, fontSize: 13),
+                        style: TextStyle(color: c.inputText, fontSize: 13),
                         cursorColor: c.isLight ? Colors.black : Colors.white,
                         decoration: InputDecoration(
                           isDense: true,
@@ -2857,7 +2857,7 @@ class _GitConnectModalState extends State<_GitConnectModal> {
         TextField(
           controller: ctrl,
           obscureText: obscure,
-          style: TextStyle(color: c.text, fontSize: 14),
+          style: TextStyle(color: c.inputText, fontSize: 14),
           decoration: InputDecoration(
             hintText: hint,
             hintStyle: TextStyle(color: c.textDim),

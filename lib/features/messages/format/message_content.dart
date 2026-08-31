@@ -239,6 +239,8 @@ class MessageContent extends ConsumerWidget {
           NostrRefCard(
             token: token,
             onJump: (id) => _jumpToEvent(ref, id),
+            onOpenProfile: (pubkey, nym) =>
+                _openProfileCtx(context, ref, pubkey, nym),
           ),
       ],
     );
@@ -291,19 +293,65 @@ class MessageContent extends ConsumerWidget {
     return out;
   }
 
-  /// Scrolls to the event a reference card points at, when this client holds
-  /// it in the list the card is rendered in.
+  /// Scrolls to the event a reference card points at.
+  ///
+  /// The referenced event is very often in ANOTHER conversation — that is
+  /// rather the point of pasting a reference — so a miss in the list the card
+  /// is rendered in is not the answer. Find whichever conversation holds the
+  /// id, switch to it, and scroll there, the way a tapped blockquote jumps to
+  /// its quoted source.
   void _jumpToEvent(WidgetRef ref, String eventId) {
     final key = scrollKey ?? ref.read(appStateProvider).view.storageKey;
-    final scroller = ref.read(messageListScrollerProvider(key));
-    if (scroller.scrollToMessage(eventId)) {
-      ref.read(flashedMessageProvider.notifier).flash(eventId);
+    final flash = ref.read(flashedMessageProvider.notifier);
+    if (ref.read(messageListScrollerProvider(key)).scrollToMessage(eventId)) {
+      flash.flash(eventId);
       return;
     }
-    ref.read(appStateProvider.notifier).addSystemMessage(
+
+    final app = ref.read(appStateProvider.notifier);
+    void reportUnavailable() => app.addSystemMessage(
           tr('Original message is not available'),
-          storageKey: key,
+          storageKey: ref.read(appStateProvider).view.storageKey,
         );
+
+    final target = conversationHoldingEvent(ref.read(appStateProvider), eventId);
+    if (target == null) {
+      reportUnavailable();
+      return;
+    }
+
+    // A thread panel owns the list; leave it so the conversation's own list is
+    // the one that rebinds and can be scrolled.
+    if (ref.read(activeThreadProvider) != null) {
+      ref.read(activeThreadProvider.notifier).state = null;
+    }
+    if (target != ref.read(appStateProvider).view) app.switchView(target);
+    // Switching remounts the list, and MessageListScroller only rebinds on its
+    // next build, so the first frame can still miss.
+    _jumpWhenBound(
+      ref.read(messageListScrollerProvider(target.storageKey)),
+      flash,
+      eventId,
+      onGiveUp: reportUnavailable,
+    );
+  }
+
+  /// Opens the context menu for the person a profile card points at — the same
+  /// menu a tapped `@mention` or nym opens.
+  void _openProfileCtx(
+      BuildContext context, WidgetRef ref, String pubkey, String nym) {
+    if (pubkey.isEmpty) return;
+    final app = ref.read(appStateProvider);
+    final known = app.users[pubkey]?.nym ?? '';
+    final display = known.isNotEmpty ? known : nym;
+    ContextMenuPanel.show(
+      context,
+      target: CtxTarget(
+        pubkey: pubkey,
+        nym: stripPubkeySuffix(display),
+        isSelf: pubkey == app.selfPubkey,
+      ),
+    );
   }
 
   /// The distinct NIP-19 references in [blocks], capped: a message pasting a
@@ -2403,6 +2451,52 @@ Message? resolveQuotedMessage(
   return bestScore > 0 ? best : null;
 }
 
+/// The conversation holding [eventId], or null when this client has no copy.
+///
+/// A reference card points wherever the referenced event actually is, which is
+/// usually not the conversation the card is rendered in.
+ChatView? conversationHoldingEvent(AppState app, String eventId) {
+  if (eventId.isEmpty) return null;
+  for (final entry in app.messages.entries) {
+    final holds =
+        entry.value.any((m) => m.id == eventId || m.nymMessageId == eventId);
+    if (!holds) continue;
+    final key = entry.key;
+    if (key.startsWith('pm-')) return ChatView.pm(key.substring(3));
+    if (key.startsWith('group-')) return ChatView.group(key.substring(6));
+    if (key.startsWith('#')) return ChatView.channel(key.substring(1));
+    return ChatView.channel(key);
+  }
+  return null;
+}
+
+/// Retries a jump across a few frames: switching conversation (or closing the
+/// thread view) remounts the list, and [MessageListScroller] only rebinds its
+/// controller + id→index map on that list's next build, so the first frame can
+/// still miss. [onGiveUp] fires once the retries are spent.
+void _jumpWhenBound(
+  MessageListScroller scroller,
+  FlashedMessageNotifier flash,
+  String id, {
+  required VoidCallback onGiveUp,
+  int attempts = 8,
+}) {
+  WidgetsBinding.instance
+    ..addPostFrameCallback((_) {
+      if (scroller.scrollToMessage(id)) {
+        flash.flash(id);
+      } else if (attempts > 1) {
+        _jumpWhenBound(scroller, flash, id,
+            onGiveUp: onGiveUp, attempts: attempts - 1);
+      } else {
+        onGiveUp();
+      }
+    })
+    // A post-frame callback only runs when a frame is actually scheduled; the
+    // retries would otherwise stall once the app goes idle.
+    ..scheduleFrame();
+}
+
 /// Left-bordered quote block, with an optional author header.
 class _QuoteBox extends ConsumerWidget {
   const _QuoteBox({
@@ -2612,32 +2706,6 @@ class _QuoteBox extends ConsumerWidget {
     }
   }
 
-  /// Retries the jump across a few frames: closing the thread view remounts the
-  /// conversation list, and [MessageListScroller] only rebinds its controller +
-  /// id→index map on that list's next build, so the first frame can still miss.
-  /// [onGiveUp] fires once the retries are spent.
-  static void _jumpWhenBound(
-    MessageListScroller scroller,
-    FlashedMessageNotifier flash,
-    String id, {
-    required VoidCallback onGiveUp,
-    int attempts = 8,
-  }) {
-    WidgetsBinding.instance
-      ..addPostFrameCallback((_) {
-        if (scroller.scrollToMessage(id)) {
-          flash.flash(id);
-        } else if (attempts > 1) {
-          _jumpWhenBound(scroller, flash, id,
-              onGiveUp: onGiveUp, attempts: attempts - 1);
-        } else {
-          onGiveUp();
-        }
-      })
-      // A post-frame callback only runs when a frame is actually scheduled;
-      // the retries would otherwise stall once the app goes idle.
-      ..scheduleFrame();
-  }
 
   /// The `<span class="quote-author">author#suffix:</span>` header, splitting
   /// the base nym (secondary 600) from a dimmed `.nym-suffix` (`#xxxx`).
