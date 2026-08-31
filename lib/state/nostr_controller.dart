@@ -127,6 +127,11 @@ class NostrController {
   final Ref _ref;
   Identity? _identity;
   NostrService? _service;
+
+  /// The live relay service, or null before boot finishes. Exposed for callers
+  /// that need one bounded query of their own (the NIP-19 reference cards).
+  NostrService? get relayService => _service;
+
   GroupManager? _groups;
   EventSigner? _signer;
   bool _started = false;

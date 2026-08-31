@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
+import '../../core/constants/relays.dart';
+import '../../core/crypto/bech32_codec.dart' show encodeNevent;
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
@@ -1388,6 +1390,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   fontSize: 12,
                   powEventId: message.id,
                   powTarget: message.powTarget,
+                  copyPubkey: message.pubkey,
                   // Public channel messages only: PM/group rows are
                   // gift-wrapped and carry no mined work.
                   powApplies: !message.isPM && !message.isGroup,
@@ -1902,6 +1905,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
         _TimestampText(
           powEventId: message.id,
           powTarget: message.powTarget,
+          copyPubkey: message.pubkey,
           powApplies: !message.isPM && !message.isGroup,
           label: formatRelativeTime(message.dateTime),
           fullTimestamp: formatFullTimestamp(
@@ -3795,6 +3799,61 @@ class _HoverActionButtonState extends State<_HoverActionButton> {
   }
 }
 
+/// A small button in the timestamp popup that puts an event reference on the
+/// clipboard and says so in place for a moment.
+class _CopyRefButton extends StatefulWidget {
+  const _CopyRefButton({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  State<_CopyRefButton> createState() => _CopyRefButtonState();
+}
+
+class _CopyRefButtonState extends State<_CopyRefButton> {
+  bool _copied = false;
+  Timer? _reset;
+
+  @override
+  void dispose() {
+    _reset?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.value));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _reset?.cancel();
+    _reset = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return InkWell(
+      onTap: _copy,
+      borderRadius: NymRadius.rsm,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Text(
+          _copied ? tr('Copied') : widget.label,
+          softWrap: false,
+          style: TextStyle(
+              color: _copied ? c.primary : c.text, fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
 /// The tappable message timestamp (`.clickable-timestamp`, messages.js:936-938).
 /// Hover tints it `--primary` over 120ms (`.clickable-timestamp:hover`,
 /// styles-chat.css:596-604) and shows the glass full-timestamp tooltip
@@ -3814,12 +3873,17 @@ class _TimestampText extends StatefulWidget {
     this.powEventId,
     this.powTarget,
     this.powApplies = false,
+    this.copyPubkey = '',
   });
 
   final String label;
   final String fullTimestamp;
   final double fontSize;
   final double? height;
+
+  /// The referenced event's author, so the copied `nevent` carries it and the
+  /// reference resolves for someone who was never in this channel.
+  final String copyPubkey;
 
   /// The event id whose leading zero bits are the work actually proven.
   final String? powEventId;
@@ -3902,6 +3966,41 @@ class _TimestampTextState extends State<_TimestampText> {
     ];
   }
 
+  /// The copy-reference row, or nothing when this row carries no real event id
+  /// (an optimistic echo, a system line, a poll).
+  ///
+  /// The clipboard gets an `nevent` as well as the bare id: it carries the
+  /// author and relay hints, so the reference still resolves for someone who
+  /// was never subscribed to the channel it was posted in.
+  List<Widget> _copyRows(NymColors c) {
+    final id = widget.powEventId ?? '';
+    if (!RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(id)) {
+      return const [];
+    }
+    final nevent = encodeNevent(id,
+        author: widget.copyPubkey,
+        relays: RelayConfig.defaultRelays.take(3).toList());
+    return [
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Divider(height: 1, thickness: 1, color: c.glassBorder),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (nevent.isNotEmpty) ...[
+              _CopyRefButton(label: tr('Copy nevent'), value: nevent),
+              const SizedBox(width: 6),
+            ],
+            _CopyRefButton(label: tr('Copy event ID'), value: id),
+          ],
+        ),
+      ),
+    ];
+  }
+
   @override
   void dispose() {
     _popup?.remove();
@@ -3949,7 +4048,7 @@ class _TimestampTextState extends State<_TimestampText> {
                 child: Container(
                   // `.reactors-modal { min-width:160; max-width:240 }`.
                   constraints:
-                      const BoxConstraints(minWidth: 160, maxWidth: 240),
+                      const BoxConstraints(minWidth: 160, maxWidth: 280),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   decoration: BoxDecoration(
@@ -3991,6 +4090,7 @@ class _TimestampTextState extends State<_TimestampText> {
                         style: TextStyle(color: c.text, fontSize: 13),
                       ),
                       ..._powRows(c),
+                      ..._copyRows(c),
                     ],
                   ),
                 ),

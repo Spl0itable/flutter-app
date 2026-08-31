@@ -35,6 +35,7 @@ import '../../i18n/i18n.dart';
 import '../../nymbot/nymbot_threads.dart' show threadChainFor;
 import '../../shop/cosmetics.dart';
 import '../expanded_messages.dart';
+import '../nostr_ref_card.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
 import 'link_preview.dart';
@@ -141,6 +142,7 @@ class MessageContent extends ConsumerWidget {
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
     final previewUrls = _collectPreviewUrls(blocks);
+    final nostrRefs = _collectNostrRefs(blocks);
 
     // Tapping a `#ref` / `app.nym.bar/#…` link switches the active channel
     // (`channelLink` / `channelReference` data-actions).
@@ -232,6 +234,14 @@ class MessageContent extends ConsumerWidget {
         else
           body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
+        // NIP-19 reference cards sit alongside the link previews, OUTSIDE the
+        // collapsible body — a reference card is context for the message, not
+        // part of the text the read-more clamp measures.
+        for (final token in nostrRefs)
+          NostrRefCard(
+            token: token,
+            onJump: (id) => _jumpToEvent(ref, id),
+          ),
       ],
     );
   }
@@ -248,6 +258,67 @@ class MessageContent extends ConsumerWidget {
           case LinkNode(:final url):
             if (isInlineMediaUrl(url)) break;
             if (seen.add(url)) out.add(url);
+          case BoldNode(:final children):
+            visitInlines(children);
+          case ItalicNode(:final children):
+            visitInlines(children);
+          case StrikeNode(:final children):
+            visitInlines(children);
+          default:
+            break;
+        }
+      }
+    }
+
+    void visitBlock(FormatBlock b) {
+      switch (b) {
+        case ParagraphBlock(:final inlines):
+          visitInlines(inlines);
+        case HeadingBlock(:final inlines):
+          visitInlines(inlines);
+        case QuoteBlock(:final children):
+          for (final ch in children) {
+            visitBlock(ch);
+          }
+        case CodeBlock():
+        case MediaBlock():
+        case AudioBlock():
+          break;
+      }
+    }
+
+    for (final b in blocks) {
+      visitBlock(b);
+    }
+    return out;
+  }
+
+  /// Scrolls to the event a reference card points at, when this client holds
+  /// it in the list the card is rendered in.
+  void _jumpToEvent(WidgetRef ref, String eventId) {
+    final key = scrollKey ?? ref.read(appStateProvider).view.storageKey;
+    final scroller = ref.read(messageListScrollerProvider(key));
+    if (scroller.scrollToMessage(eventId)) {
+      ref.read(flashedMessageProvider.notifier).flash(eventId);
+      return;
+    }
+    ref.read(appStateProvider.notifier).addSystemMessage(
+          tr('Original message is not available'),
+          storageKey: key,
+        );
+  }
+
+  /// The distinct NIP-19 references in [blocks], capped: a message pasting a
+  /// dozen of them must not open a dozen relay queries.
+  List<String> _collectNostrRefs(List<FormatBlock> blocks) {
+    final seen = <String>{};
+    final out = <String>[];
+    void visitInlines(List<InlineNode> inlines) {
+      for (final n in inlines) {
+        if (out.length >= 4) return;
+        switch (n) {
+          case NostrRefNode(:final token):
+            if (seen.add(token)) out.add(token);
           case BoldNode(:final children):
             visitInlines(children);
           case ItalicNode(:final children):
@@ -639,6 +710,22 @@ class _RichInline extends StatelessWidget {
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: _InviteChip(name: name, token: token, size: size),
+        );
+      case NostrRefNode(:final token, :final raw):
+        // A bare hex id keeps its own text: 64 hex characters are not always an
+        // event id, so restyling every one of them would be a guess. The card
+        // below the body is what actually says whether it resolved.
+        if (raw) return TextSpan(text: token, style: base);
+        return TextSpan(
+          text: token.length > 20
+              ? '${token.substring(0, 12)}…${token.substring(token.length - 6)}'
+              : token,
+          style: base.merge(TextStyle(
+            color: c.primary,
+            fontFamily: 'monospace',
+            decoration: TextDecoration.underline,
+            decorationStyle: TextDecorationStyle.dotted,
+          )),
         );
       default:
         // _MediaInline is flattened to blocks and never reaches here.
@@ -2122,6 +2209,8 @@ int _inlineTextLength(InlineNode node) {
       return name.length + 1; // leading '#'
     case ChannelLinkChip(:final label):
       return label.length;
+    case NostrRefNode(:final token):
+      return token.length;
     case CustomEmojiNode():
     case GroupInviteChip():
       return 0; // rendered as an image / chip, no text content
@@ -2206,6 +2295,8 @@ void _appendInlineText(StringBuffer buf, InlineNode node) {
       buf.write('#$name');
     case ChannelLinkChip(:final label):
       buf.write(label);
+    case NostrRefNode(:final token):
+      buf.write(token);
     case CustomEmojiNode():
     case GroupInviteChip():
       break; // rendered as image / chip — no text content
