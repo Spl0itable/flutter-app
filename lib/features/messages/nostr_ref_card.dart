@@ -238,7 +238,8 @@ String nostrRefKindLabel(int kind) => switch (kind) {
 /// while the lookup is out and nothing at all if it comes back empty, so an
 /// unresolvable reference costs the row no height.
 class NostrRefCard extends ConsumerStatefulWidget {
-  const NostrRefCard({super.key, required this.token, this.onJump});
+  const NostrRefCard(
+      {super.key, required this.token, this.onJump, this.onOpenProfile});
 
   /// The reference as pasted, scheme already stripped by the formatter.
   final String token;
@@ -246,6 +247,11 @@ class NostrRefCard extends ConsumerStatefulWidget {
   /// Invoked with the event id when the user taps a card for a message this
   /// client holds.
   final void Function(String eventId)? onJump;
+
+  /// Invoked with the pubkey when the user taps a PROFILE card. A shared npub
+  /// is a person, so the card offers what tapping that person anywhere else in
+  /// the app offers: their context menu.
+  final void Function(String pubkey, String nym)? onOpenProfile;
 
   @override
   ConsumerState<NostrRefCard> createState() => _NostrRefCardState();
@@ -386,13 +392,22 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
     );
 
     final jump = widget.onJump;
+    final openProfile = widget.onOpenProfile;
+    final VoidCallback? onTap;
+    if (data.kind == NostrRefKind.profile) {
+      onTap = (openProfile != null && data.pubkey.isNotEmpty)
+          ? () => openProfile(data.pubkey, data.author)
+          : null;
+    } else {
+      onTap = (data.local && data.id.isNotEmpty && jump != null)
+          ? () => jump(data.id)
+          : null;
+    }
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 400),
-        child: (data.local && data.id.isNotEmpty && jump != null)
-            ? InkWell(onTap: () => jump(data.id), child: card)
-            : card,
+        child: onTap != null ? InkWell(onTap: onTap, child: card) : card,
       ),
     );
   }
