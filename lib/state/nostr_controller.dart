@@ -8147,7 +8147,7 @@ class NostrController {
       final entry =
           state.channels.where((c) => c.key == state.view.id.toLowerCase());
       if (entry.isNotEmpty && entry.first.isGeohash) {
-        geohash = entry.first.geohash;
+        geohash = entry.first.geohashKey;
       } else {
         channel = state.view.id;
       }
@@ -11403,7 +11403,8 @@ class NostrController {
       };
       joinedEntries = [
         for (final k in keys)
-          if (k != kDefaultChannel) ChannelEntry(channel: k, geohash: k),
+          if (k != kDefaultChannel)
+            ChannelEntry(channel: k, geohash: isChannelGeohash(k) ? k : ''),
       ];
     }
     if (pinnedSet != null ||

@@ -906,7 +906,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
           (c) => c.key == view.id,
           orElse: () => ChannelEntry(channel: view.id),
         );
-        final gh = ch.isGeohash ? ch.geohash : view.id;
+        final gh = ch.isGeohash ? ch.geohashKey : view.id;
         if (!isValidGeohash(gh)) {
           // `loc-country` → "Not a geohash" for a named channel (plain text —
           // only the geohash branch below builds the decode hyperlink).
@@ -1301,7 +1301,7 @@ class _ChatHeaderState extends ConsumerState<_ChatHeader>
           (c) => c.key == view.id,
           orElse: () => ChannelEntry(channel: view.id),
         );
-        return '#${ch.isGeohash ? ch.geohash : ch.channel}';
+        return '#${ch.isGeohash ? ch.geohashKey : ch.channel}';
       case ViewKind.pm:
         return app.users[view.id]?.nym ?? tr('PM');
       case ViewKind.group:
