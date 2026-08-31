@@ -76,6 +76,45 @@ void main() {
     });
   });
 
+  // The PWA's equivalent fix broke every named channel: there, the geohash
+  // field doubles as the row's ROUTING key, so deriving it emptied the key for
+  // kind-23333 channels — their storage key stopped matching `#name` and their
+  // posts fell back to #nymchat. Here `key`/`storageKey` are derived from the
+  // same answer, so they must come out byte-identical to the old
+  // `geohash.isNotEmpty` rule for every shape of entry.
+  group('identity is untouched by the derivation', () {
+    const cases = <List<String>>[
+      ['bitcoin', 'bitcoin'],
+      ['bitcoin', ''],
+      ['u4pruy', 'u4pruy'],
+      ['u4pruy', ''],
+      [kDefaultChannel, ''],
+      [kDefaultChannel, kDefaultChannel],
+      ['dev', 'dev'],
+      ['dev', ''],
+      ['crew', ''],
+      ['news', 'news'],
+    ];
+
+    for (final c in cases) {
+      final label = '${c[0]}/${c[1].isEmpty ? '-' : c[1]}';
+      test('$label keys the same as before', () {
+        final e = ChannelEntry(channel: c[0], geohash: c[1]);
+        final wasGeo = c[1].isNotEmpty;
+        expect(e.key, (wasGeo ? c[1] : c[0]).toLowerCase());
+        expect(e.storageKey, '#${wasGeo ? c[1] : c[0]}');
+      });
+    }
+
+    test('and every entry routes on the kind its key implies', () {
+      for (final c in cases) {
+        final e = ChannelEntry(channel: c[0], geohash: c[1]);
+        expect(e.isGeohash, channelWire(e.key).isGeohash,
+            reason: '${c[0]}/${c[1]} must render as what it is sent as');
+      }
+    });
+  });
+
   group('registration paths agree', () {
     test('a mesh-delivered geohash channel is not registered as named', () {
       final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
