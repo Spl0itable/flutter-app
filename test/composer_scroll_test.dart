@@ -1,6 +1,7 @@
 // A draft taller than the composer's popout box must stay reachable: the box
 // may not run under the status bar, the field may not ask for more height than
 // the box can give, and a drag inside it must scroll rather than only select.
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -86,7 +87,10 @@ ScrollPosition _fieldScroll(WidgetTester tester) {
 }
 
 void main() {
-  testWidgets('a tall draft scrolls inside the popout field', (tester) async {
+  // A FINGER drag, on both mobile platforms: a vertical drag inside a text
+  // field competes with the field's own selection gestures, and the two
+  // platforms wire that arena differently.
+  testWidgets('a tall draft scrolls under a finger', (tester) async {
     await _pumpPhone(tester,
         size: const Size(390, 844), topPadding: 47, keyboard: 336);
 
@@ -101,11 +105,13 @@ void main() {
         reason: 'typing keeps the caret line in view');
 
     // Drag DOWN to scroll back toward the top of the draft.
-    await tester.drag(field, const Offset(0, 150), warnIfMissed: false);
+    await tester.drag(field, const Offset(0, 150),
+        kind: PointerDeviceKind.touch, warnIfMissed: false);
     await tester.pumpAndSettle();
     expect(pos.pixels, lessThan(pos.maxScrollExtent),
-        reason: 'a drag inside the field scrolls it');
-  });
+        reason: 'a finger drag inside the field scrolls it rather than only '
+            'selecting text');
+  }, variant: TargetPlatformVariant.mobile());
 
   testWidgets('the popout box stays clear of the status bar', (tester) async {
     // A small screen with OS font scaling: the case where a fixed 12-line
