@@ -13,16 +13,13 @@ import 'event_time_ceilings.dart';
 class EventMapper {
   EventMapper._();
 
-  /// Registry of first-seen clamps for future-dated events. Left null in tests
-  /// and before boot wires one up, in which case the clamp falls back to the
-  /// volatile "now" it used before.
+  /// Registry of first-seen clamps for future-dated events. Null in tests and
+  /// before boot wires one up, where the clamp falls back to a volatile "now".
   static EventTimeCeilings? ceilings;
 
   /// The ceiling a future-dated event is pulled back to, and the `created_at`
-  /// that follows from it. A `stored_at` from the D1 archive is the pool's real
-  /// receipt time and is already stable, so it wins; otherwise the clamp is
-  /// remembered per event id so the next replay of the same event does not
-  /// re-stamp it to a newer "now".
+  /// that follows. A D1 `stored_at` is already stable and wins; otherwise the
+  /// clamp is remembered per event id so the next replay cannot re-stamp it.
   static ({int ceilingMs, int createdAt}) _clampFuture(NostrEvent e, int nowMs) {
     final nowSec = nowMs ~/ 1000;
     if (e.createdAt <= nowSec + 60) {
@@ -97,9 +94,8 @@ class EventMapper {
     // newest — the "stale D1 messages resurface as now" bug. The D1 backfill
     // injects the archive row's `stored_at` (the pool's real receipt time, ms)
     // which is a STABLE value once the event was archived, so it wins when
-    // present; an event with no `stored_at` at all — a relay-only geohash
-    // message — has its first clamp REMEMBERED by [ceilings] instead, which is
-    // what stops the replay after each launch re-stamping it to "now" again.
+    // present; an event with no `stored_at` has its first clamp REMEMBERED by
+    // [ceilings] instead, which stops each launch's replay re-stamping it.
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final clamped = _clampFuture(e, nowMs);
     final ceilingMs = clamped.ceilingMs;

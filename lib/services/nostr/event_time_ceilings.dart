@@ -4,15 +4,12 @@ import '../../core/constants/history_window.dart';
 /// future-dated event back to "now".
 ///
 /// A sender whose clock runs fast publishes an event whose `created_at` is
-/// ahead of ours. Clamping it to the current time is right once — but the clamp
-/// was recomputed on every ingest, and the relay/D1 replay after each launch
-/// re-ingests the same event, so it was re-stamped to each new "now" and the
-/// message read `now` forever. Pinning the first clamp and replaying it from
-/// the cache makes the correction settle: the message ages normally from the
-/// moment it was actually seen.
+/// ahead of ours. Clamping it to the current time is right once, but the clamp
+/// was recomputed on every ingest and the replay after each launch re-ingests
+/// the same event — so it was re-stamped to each new "now" and the message read
+/// `now` forever. Pinning the first clamp makes the correction settle.
 ///
-/// Entries outside [kChannelHistoryMaxAge] are dropped — nothing older can
-/// still be on screen.
+/// Entries outside [kChannelHistoryMaxAge] are dropped.
 class EventTimeCeilings {
   final Map<String, int> _byId = <String, int>{};
 

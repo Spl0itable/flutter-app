@@ -40,10 +40,9 @@ class _MessageTranslationState extends ConsumerState<MessageTranslation> {
   /// Null until a target language is resolved (either it was already set, or
   Future<TranslationResult>? _future;
 
-  /// The already-finished translation for this text, when the cache has one.
-  /// Seeds the builder so a row rebuilt from scratch — which is what re-entering
-  /// a channel does to every row in it — paints the translation immediately
-  /// instead of showing a frame of "Translating..." for work that is long done.
+  /// The already-finished translation, when the cache has one. Seeds the
+  /// builder so a row rebuilt from scratch paints it immediately instead of a
+  /// frame of "Translating..." for work that is long done.
   TranslationResult? _seed;
 
   late final TranslateService _service = widget.service ?? TranslateService();

@@ -24,15 +24,11 @@ class TranslationCache {
 
   final Map<String, Future<TranslationResult>> _entries = {};
 
-  /// The SETTLED result for each finished entry.
-  ///
-  /// A `FutureBuilder` handed an already-complete Future still renders one
-  /// waiting frame — it delivers the value through a `.then`. So every
-  /// already-translated row flashed "Translating..." each time it was built
-  /// from scratch, which is what re-entering a channel does to every row in it:
-  /// no request was actually made, but the whole conversation looked like it
-  /// was translating itself all over again. Held separately so the builder can
-  /// be seeded synchronously.
+  /// The SETTLED result for each finished entry. A `FutureBuilder` handed an
+  /// already-complete Future still renders one waiting frame, so every
+  /// already-translated row flashed "Translating..." whenever it was built from
+  /// scratch — which is what re-entering a channel does to every row in it.
+  /// Held separately so the builder can be seeded synchronously.
   final Map<String, TranslationResult> _settled = {};
 
   static String keyFor(String text, String targetLang) => '$targetLang $text';

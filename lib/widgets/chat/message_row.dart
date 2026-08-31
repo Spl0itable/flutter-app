@@ -3881,8 +3881,7 @@ class _TimestampText extends StatefulWidget {
   final double fontSize;
   final double? height;
 
-  /// The referenced event's author, so the copied `nevent` carries it and the
-  /// reference resolves for someone who was never in this channel.
+  /// The event's author, so the copied `nevent` carries it.
   final String copyPubkey;
 
   /// The event id whose leading zero bits are the work actually proven.
@@ -3968,10 +3967,6 @@ class _TimestampTextState extends State<_TimestampText> {
 
   /// The copy-reference row, or nothing when this row carries no real event id
   /// (an optimistic echo, a system line, a poll).
-  ///
-  /// The clipboard gets an `nevent` as well as the bare id: it carries the
-  /// author and relay hints, so the reference still resolves for someone who
-  /// was never subscribed to the channel it was posted in.
   List<Widget> _copyRows(NymColors c) {
     final id = widget.powEventId ?? '';
     if (!RegExp(r'^[0-9a-f]{64}$', caseSensitive: false).hasMatch(id)) {

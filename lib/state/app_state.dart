@@ -1714,8 +1714,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// them (reactions are keyed by their target message id, which makes that
   /// exactly "kind 7 events whose `k` tag is 20000/23333").
   /// Called when an ingested channel message is already outside the 24-hour
-  /// window, so the owner can bring the sweep forward instead of waiting out
-  /// its interval. Set by [NostrController]; null in tests.
+  /// window. Set by [NostrController]; null in tests.
   void Function()? onAgedChannelMessage;
 
   Set<String> pruneChannelHistoryWindow() {
@@ -1984,12 +1983,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
-    // Public channel history is a rolling 24-hour window. A relay that ignores
-    // `since` and a stale D1 read cache can both hand back events older than
-    // that, and the periodic sweep is 15 minutes wide — long enough for them to
-    // sit on screen. Ask for a sweep NOW instead of dropping the message here:
-    // [pruneChannelHistoryWindow] is the one place that knows the whole rule,
-    // including keeping an aged-out root an in-window reply still needs.
+    // Already outside the 24-hour window; ask for the sweep rather than
+    // waiting out its interval.
     if (m.createdAt < channelWindowFloorSec()) onAgedChannelMessage?.call();
     // A backlog restore is historical by PROVENANCE regardless of the mapper's
     // timestamp-age guess (the archived event can read as ≈now). Keeps it out of

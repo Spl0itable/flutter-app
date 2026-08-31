@@ -51,10 +51,9 @@ class NostrRefCardData {
   final bool local;
 }
 
-/// Resolves NIP-19 references to card content: the local message store first
-/// (the referenced message is very often already on screen), then one bounded
-/// relay query. Results and misses are both remembered for the session, and
-/// concurrent callers for the same reference share one lookup.
+/// Resolves NIP-19 references to card content: the local message store first,
+/// then one bounded relay query. Results and misses are both remembered for the
+/// session, and concurrent callers for the same reference share one lookup.
 class NostrRefResolver {
   NostrRefResolver(this._ref);
 
@@ -271,10 +270,9 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
       _resolved = true;
       return;
     }
-    // DWELL before querying, for the same reason [LinkPreviewCard] does: rows
-    // mount while flinging through history, and a relay query per referencing
-    // row would fire a burst of subscriptions for messages the user scrolls
-    // straight past.
+    // DWELL before querying, like [LinkPreviewCard]: rows mount while flinging
+    // through history, and a query each would burst subscriptions for messages
+    // the user scrolls straight past.
     _dwell = Timer(const Duration(milliseconds: 300), () {
       _dwell = null;
       if (mounted) _load(ref0);

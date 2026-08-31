@@ -234,9 +234,7 @@ class MessageContent extends ConsumerWidget {
         else
           body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
-        // NIP-19 reference cards sit alongside the link previews, OUTSIDE the
-        // collapsible body — a reference card is context for the message, not
-        // part of the text the read-more clamp measures.
+        // Alongside the link previews, OUTSIDE the collapsible body.
         for (final token in nostrRefs)
           NostrRefCard(
             token: token,
@@ -712,9 +710,8 @@ class _RichInline extends StatelessWidget {
           child: _InviteChip(name: name, token: token, size: size),
         );
       case NostrRefNode(:final token, :final raw):
-        // A bare hex id keeps its own text: 64 hex characters are not always an
-        // event id, so restyling every one of them would be a guess. The card
-        // below the body is what actually says whether it resolved.
+        // A bare hex id keeps its own text — 64 hex characters are not always
+        // an event id; the card below is what says whether it resolved.
         if (raw) return TextSpan(text: token, style: base);
         return TextSpan(
           text: token.length > 20
@@ -3642,10 +3639,8 @@ class _Collapsible extends ConsumerStatefulWidget {
   const _Collapsible({required this.child, this.collapseKey});
   final Widget child;
 
-  /// Identity of this collapsible across rebuilds. Non-null wherever the body
-  /// belongs to a real message, so the expanded/collapsed choice lives in
-  /// [expandedMessagesProvider] and survives the row being disposed off-screen
-  /// or re-parented by an arriving message. Null on surfaces with no backing
+  /// Identity of this collapsible across rebuilds, so the expanded choice can
+  /// live in [expandedMessagesProvider]. Null on surfaces with no backing
   /// message, which fall back to local state.
   final String? collapseKey;
 

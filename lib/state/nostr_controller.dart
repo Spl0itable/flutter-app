@@ -4675,8 +4675,7 @@ class NostrController {
   /// what makes them post-quantum capable (features/identity/pq_registry.dart).
   final PqRegistry _pqRegistry = PqRegistry();
 
-  /// First-seen clamps for future-dated events, shared with [EventMapper] so
-  /// the correction is stable across relaunches. Persisted debounced.
+  /// First-seen clamps for future-dated events, shared with [EventMapper].
   final EventTimeCeilings _eventTimeCeilings = EventTimeCeilings();
 
   Timer? _eventTimeCeilingsPersistTimer;
@@ -9252,9 +9251,8 @@ class NostrController {
         _pqRegistry.hydrate(pqKeys,
             nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000);
       }
-      // First-seen clamps for future-dated (clock-skewed) events. Restored
-      // BEFORE the relay layer starts so the launch replay reuses last
-      // session's correction instead of re-stamping those messages to "now".
+      // Restored BEFORE the relay layer starts, so the launch replay reuses
+      // last session's correction instead of re-stamping to "now".
       final ceilings = await cache.loadMetaMap(CacheStore.metaEventTimeCeilings);
       if (ceilings.isNotEmpty) _eventTimeCeilings.hydrate(ceilings);
     } catch (e) {
@@ -9430,11 +9428,8 @@ class NostrController {
   /// cached rows for the channels that changed, and the reactions targeting the
   /// messages dropped (reactions are keyed by their target's id, which is what
   /// makes that exactly the kind 7 events tagged `k` 20000/23333).
-  /// Debounce for a sweep asked for out of band (a backfill or a `since`-
-  /// ignoring relay landing something already outside the window). Short, so
-  /// an aged-out message is on screen for a moment rather than up to the
-  /// 15-minute interval, but long enough that a whole backfill batch is swept
-  /// once instead of per message.
+  /// Debounce for a sweep asked for out of band, long enough that a whole
+  /// backfill batch is swept once instead of once per message.
   Timer? _channelWindowPruneSoonTimer;
 
   void _scheduleChannelWindowPrune() {
