@@ -111,6 +111,34 @@ void main() {
     expect(find.textContaining('hello'), findsOneWidget);
   });
 
+  testWidgets('re-entering the channel repaints the translation without a flash',
+      (tester) async {
+    await _newContainer();
+    final service = _CountingTranslate();
+
+    await tester.pumpWidget(_host(_atSlot(0, service)));
+    service.completeAll('hello');
+    await tester.pump();
+    expect(find.textContaining('hello'), findsOneWidget);
+
+    // Leave the channel: the whole message list goes away, so nothing of the
+    // row's State survives.
+    await tester.pumpWidget(_host(const Text('another channel')));
+    await tester.pump();
+
+    // Come back. The FIRST frame must already carry the translation — a
+    // FutureBuilder handed an even already-complete future renders one waiting
+    // frame, so without the settled result seeding it every translated row in
+    // the channel flashed "Translating..." on the way back in, which reads as
+    // the app re-translating the whole conversation.
+    await tester.pumpWidget(_host(_atSlot(0, service)));
+
+    expect(find.text('Translating...'), findsNothing,
+        reason: 'no waiting frame for a translation that is already done');
+    expect(find.textContaining('hello'), findsOneWidget);
+    expect(service.calls, 1, reason: 'and no second API call');
+  });
+
   testWidgets('a rebuild MID-FLIGHT joins the request rather than starting one',
       (tester) async {
     await _newContainer();

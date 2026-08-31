@@ -79,6 +79,7 @@ class CacheStore {
   static const String metaNymchatVouches = 'nymchatVouches';
   static const String metaTrustedPubkeys = 'trustedPubkeys';
   static const String metaPoolShardLastSeen = 'poolShardLastSeen';
+  static const String metaEventTimeCeilings = 'eventTimeCeilings';
   static const String metaPqKeys = 'pqKeys';
 
   /// Event ids whose BIP340 signatures verified in past sessions (bounded,

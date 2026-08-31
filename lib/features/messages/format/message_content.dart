@@ -34,6 +34,7 @@ import '../../commands/command_handler.dart' show resolveTarget;
 import '../../i18n/i18n.dart';
 import '../../nymbot/nymbot_threads.dart' show threadChainFor;
 import '../../shop/cosmetics.dart';
+import '../expanded_messages.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
 import 'link_preview.dart';
@@ -226,7 +227,10 @@ class MessageContent extends ConsumerWidget {
       children: [
         // Link-preview cards (`_attachLinkPreviews`) are appended OUTSIDE the
         // `.truncated-inner` in the PWA, so they stay below the collapsible body.
-        if (replyText.length > threshold) _Collapsible(child: body) else body,
+        if (replyText.length > threshold)
+          _Collapsible(collapseKey: hostMessageId, child: body)
+        else
+          body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
       ],
     );
@@ -2359,7 +2363,10 @@ class _QuoteBox extends ConsumerWidget {
     // there; this is what clamps it.)
     final clamped =
         topLevel && _quoteTextLength(block) > truncateThreshold(context)
-            ? _Collapsible(child: inner)
+            ? _Collapsible(
+                collapseKey:
+                    hostMessageId == null ? null : '$hostMessageId#quote',
+                child: inner)
             : inner;
     // `blockquote`: border-left 3px primary@0.4, padding-left 12 ONLY (no
     // vertical/right padding), bg secondary@0.1, radius `0 8 8 0`, with
@@ -3541,20 +3548,42 @@ double _truncateHeight(BuildContext context) =>
 /// the body is measured to already fit the collapsed height (PWA: `scrollHeight
 /// <= clientHeight + 2` → remove the button + expand).
 class _Collapsible extends ConsumerStatefulWidget {
-  const _Collapsible({required this.child});
+  const _Collapsible({required this.child, this.collapseKey});
   final Widget child;
+
+  /// Identity of this collapsible across rebuilds. Non-null wherever the body
+  /// belongs to a real message, so the expanded/collapsed choice lives in
+  /// [expandedMessagesProvider] and survives the row being disposed off-screen
+  /// or re-parented by an arriving message. Null on surfaces with no backing
+  /// message, which fall back to local state.
+  final String? collapseKey;
 
   @override
   ConsumerState<_Collapsible> createState() => _CollapsibleState();
 }
 
 class _CollapsibleState extends ConsumerState<_Collapsible> {
-  bool _expanded = false;
+  bool _localExpanded = false;
 
   /// The body's natural (unclamped) height, learned after the first layout.
   /// Null until measured; `<= collapsed height + 2` means it fits and needs no
   /// toggle.
   double? _fullHeight;
+
+  bool get _expanded {
+    final key = widget.collapseKey;
+    if (key == null || key.isEmpty) return _localExpanded;
+    return ref.watch(expandedMessagesProvider).contains(key);
+  }
+
+  void _setExpanded(bool value) {
+    final key = widget.collapseKey;
+    if (key == null || key.isEmpty) {
+      setState(() => _localExpanded = value);
+      return;
+    }
+    ref.read(expandedMessagesProvider.notifier).toggle(key, expanded: value);
+  }
 
   void _onMeasured(double height) {
     if (_fullHeight != null && (height - _fullHeight!).abs() < 0.5) return;
@@ -3596,7 +3625,7 @@ class _CollapsibleState extends ConsumerState<_Collapsible> {
         if (!fits)
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _expanded = !_expanded),
+            onTap: () => _setExpanded(!_expanded),
             child: Container(
               width: double.infinity,
               margin: bubbles ? null : const EdgeInsets.only(top: 2),

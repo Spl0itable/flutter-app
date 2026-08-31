@@ -24,11 +24,27 @@ class TranslationCache {
 
   final Map<String, Future<TranslationResult>> _entries = {};
 
+  /// The SETTLED result for each finished entry.
+  ///
+  /// A `FutureBuilder` handed an already-complete Future still renders one
+  /// waiting frame — it delivers the value through a `.then`. So every
+  /// already-translated row flashed "Translating..." each time it was built
+  /// from scratch, which is what re-entering a channel does to every row in it:
+  /// no request was actually made, but the whole conversation looked like it
+  /// was translating itself all over again. Held separately so the builder can
+  /// be seeded synchronously.
+  final Map<String, TranslationResult> _settled = {};
+
   static String keyFor(String text, String targetLang) => '$targetLang $text';
 
   /// True when [text] to [targetLang] is already translated or in flight.
   bool has(String text, String targetLang) =>
       _entries.containsKey(keyFor(text, targetLang));
+
+  /// The finished translation of [text] to [targetLang], or null when there
+  /// isn't one yet (never asked, still in flight, or it failed).
+  TranslationResult? settled(String text, String targetLang) =>
+      _settled[keyFor(text, targetLang)];
 
   /// The cached request for [text] to [targetLang], starting one via [start] on
   /// a miss. [onStarted] runs ONLY for a real request, so a caller's per-request
@@ -54,17 +70,24 @@ class TranslationCache {
     // than replay a stale error for the rest of the session. Swallowed here so
     // this bookkeeping never becomes a second unhandled rejection — callers
     // still see the error through the future they were handed.
-    future.then<void>((_) {}, onError: (Object _) {
+    future.then<void>((TranslationResult result) {
+      if (identical(_entries[key], future)) _settled[key] = result;
+    }, onError: (Object _) {
       if (identical(_entries[key], future)) _entries.remove(key);
     });
     while (_entries.length > max) {
-      _entries.remove(_entries.keys.first);
+      final oldest = _entries.keys.first;
+      _entries.remove(oldest);
+      _settled.remove(oldest);
     }
     onStarted?.call(future);
     return future;
   }
 
-  void clear() => _entries.clear();
+  void clear() {
+    _entries.clear();
+    _settled.clear();
+  }
 }
 
 /// Container-scoped so tests are isolated from one another. A plain [Provider]
