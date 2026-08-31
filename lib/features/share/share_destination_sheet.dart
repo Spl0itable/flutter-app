@@ -92,12 +92,12 @@ class _ShareDestinationSheetState
     // Channels
     final chanMatches = [
       for (final ch in channels)
-        if (_matches(ch.isGeohash ? ch.geohash : ch.channel)) ch
+        if (_matches(ch.isGeohash ? ch.geohashKey : ch.channel)) ch
     ];
     if (chanMatches.isNotEmpty) {
       section(tr('Channels'));
       for (final ch in chanMatches) {
-        final label = '#${ch.isGeohash ? ch.geohash : ch.channel}';
+        final label = '#${ch.isGeohash ? ch.geohashKey : ch.channel}';
         rows.add(_row(
             c,
             Text('#',

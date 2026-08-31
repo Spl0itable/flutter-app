@@ -34,6 +34,8 @@ import '../../commands/command_handler.dart' show resolveTarget;
 import '../../i18n/i18n.dart';
 import '../../nymbot/nymbot_threads.dart' show threadChainFor;
 import '../../shop/cosmetics.dart';
+import '../expanded_messages.dart';
+import '../nostr_ref_card.dart';
 import '../inline_network_image.dart';
 import '../media_fallbacks.dart';
 import 'link_preview.dart';
@@ -140,6 +142,7 @@ class MessageContent extends ConsumerWidget {
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
     final previewUrls = _collectPreviewUrls(blocks);
+    final nostrRefs = _collectNostrRefs(blocks);
 
     // Tapping a `#ref` / `app.nym.bar/#…` link switches the active channel
     // (`channelLink` / `channelReference` data-actions).
@@ -226,8 +229,17 @@ class MessageContent extends ConsumerWidget {
       children: [
         // Link-preview cards (`_attachLinkPreviews`) are appended OUTSIDE the
         // `.truncated-inner` in the PWA, so they stay below the collapsible body.
-        if (replyText.length > threshold) _Collapsible(child: body) else body,
+        if (replyText.length > threshold)
+          _Collapsible(collapseKey: hostMessageId, child: body)
+        else
+          body,
         for (final url in previewUrls) LinkPreviewCard(url: url),
+        // Alongside the link previews, OUTSIDE the collapsible body.
+        for (final token in nostrRefs)
+          NostrRefCard(
+            token: token,
+            onJump: (id) => _jumpToEvent(ref, id),
+          ),
       ],
     );
   }
@@ -244,6 +256,67 @@ class MessageContent extends ConsumerWidget {
           case LinkNode(:final url):
             if (isInlineMediaUrl(url)) break;
             if (seen.add(url)) out.add(url);
+          case BoldNode(:final children):
+            visitInlines(children);
+          case ItalicNode(:final children):
+            visitInlines(children);
+          case StrikeNode(:final children):
+            visitInlines(children);
+          default:
+            break;
+        }
+      }
+    }
+
+    void visitBlock(FormatBlock b) {
+      switch (b) {
+        case ParagraphBlock(:final inlines):
+          visitInlines(inlines);
+        case HeadingBlock(:final inlines):
+          visitInlines(inlines);
+        case QuoteBlock(:final children):
+          for (final ch in children) {
+            visitBlock(ch);
+          }
+        case CodeBlock():
+        case MediaBlock():
+        case AudioBlock():
+          break;
+      }
+    }
+
+    for (final b in blocks) {
+      visitBlock(b);
+    }
+    return out;
+  }
+
+  /// Scrolls to the event a reference card points at, when this client holds
+  /// it in the list the card is rendered in.
+  void _jumpToEvent(WidgetRef ref, String eventId) {
+    final key = scrollKey ?? ref.read(appStateProvider).view.storageKey;
+    final scroller = ref.read(messageListScrollerProvider(key));
+    if (scroller.scrollToMessage(eventId)) {
+      ref.read(flashedMessageProvider.notifier).flash(eventId);
+      return;
+    }
+    ref.read(appStateProvider.notifier).addSystemMessage(
+          tr('Original message is not available'),
+          storageKey: key,
+        );
+  }
+
+  /// The distinct NIP-19 references in [blocks], capped: a message pasting a
+  /// dozen of them must not open a dozen relay queries.
+  List<String> _collectNostrRefs(List<FormatBlock> blocks) {
+    final seen = <String>{};
+    final out = <String>[];
+    void visitInlines(List<InlineNode> inlines) {
+      for (final n in inlines) {
+        if (out.length >= 4) return;
+        switch (n) {
+          case NostrRefNode(:final token):
+            if (seen.add(token)) out.add(token);
           case BoldNode(:final children):
             visitInlines(children);
           case ItalicNode(:final children):
@@ -635,6 +708,21 @@ class _RichInline extends StatelessWidget {
         return WidgetSpan(
           alignment: PlaceholderAlignment.middle,
           child: _InviteChip(name: name, token: token, size: size),
+        );
+      case NostrRefNode(:final token, :final raw):
+        // A bare hex id keeps its own text — 64 hex characters are not always
+        // an event id; the card below is what says whether it resolved.
+        if (raw) return TextSpan(text: token, style: base);
+        return TextSpan(
+          text: token.length > 20
+              ? '${token.substring(0, 12)}…${token.substring(token.length - 6)}'
+              : token,
+          style: base.merge(TextStyle(
+            color: c.primary,
+            fontFamily: 'monospace',
+            decoration: TextDecoration.underline,
+            decorationStyle: TextDecorationStyle.dotted,
+          )),
         );
       default:
         // _MediaInline is flattened to blocks and never reaches here.
@@ -2118,6 +2206,8 @@ int _inlineTextLength(InlineNode node) {
       return name.length + 1; // leading '#'
     case ChannelLinkChip(:final label):
       return label.length;
+    case NostrRefNode(:final token):
+      return token.length;
     case CustomEmojiNode():
     case GroupInviteChip():
       return 0; // rendered as an image / chip, no text content
@@ -2202,6 +2292,8 @@ void _appendInlineText(StringBuffer buf, InlineNode node) {
       buf.write('#$name');
     case ChannelLinkChip(:final label):
       buf.write(label);
+    case NostrRefNode(:final token):
+      buf.write(token);
     case CustomEmojiNode():
     case GroupInviteChip():
       break; // rendered as image / chip — no text content
@@ -2359,7 +2451,10 @@ class _QuoteBox extends ConsumerWidget {
     // there; this is what clamps it.)
     final clamped =
         topLevel && _quoteTextLength(block) > truncateThreshold(context)
-            ? _Collapsible(child: inner)
+            ? _Collapsible(
+                collapseKey:
+                    hostMessageId == null ? null : '$hostMessageId#quote',
+                child: inner)
             : inner;
     // `blockquote`: border-left 3px primary@0.4, padding-left 12 ONLY (no
     // vertical/right padding), bg secondary@0.1, radius `0 8 8 0`, with
@@ -3541,20 +3636,40 @@ double _truncateHeight(BuildContext context) =>
 /// the body is measured to already fit the collapsed height (PWA: `scrollHeight
 /// <= clientHeight + 2` → remove the button + expand).
 class _Collapsible extends ConsumerStatefulWidget {
-  const _Collapsible({required this.child});
+  const _Collapsible({required this.child, this.collapseKey});
   final Widget child;
+
+  /// Identity of this collapsible across rebuilds, so the expanded choice can
+  /// live in [expandedMessagesProvider]. Null on surfaces with no backing
+  /// message, which fall back to local state.
+  final String? collapseKey;
 
   @override
   ConsumerState<_Collapsible> createState() => _CollapsibleState();
 }
 
 class _CollapsibleState extends ConsumerState<_Collapsible> {
-  bool _expanded = false;
+  bool _localExpanded = false;
 
   /// The body's natural (unclamped) height, learned after the first layout.
   /// Null until measured; `<= collapsed height + 2` means it fits and needs no
   /// toggle.
   double? _fullHeight;
+
+  bool get _expanded {
+    final key = widget.collapseKey;
+    if (key == null || key.isEmpty) return _localExpanded;
+    return ref.watch(expandedMessagesProvider).contains(key);
+  }
+
+  void _setExpanded(bool value) {
+    final key = widget.collapseKey;
+    if (key == null || key.isEmpty) {
+      setState(() => _localExpanded = value);
+      return;
+    }
+    ref.read(expandedMessagesProvider.notifier).toggle(key, expanded: value);
+  }
 
   void _onMeasured(double height) {
     if (_fullHeight != null && (height - _fullHeight!).abs() < 0.5) return;
@@ -3596,7 +3711,7 @@ class _CollapsibleState extends ConsumerState<_Collapsible> {
         if (!fits)
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _expanded = !_expanded),
+            onTap: () => _setExpanded(!_expanded),
             child: Container(
               width: double.infinity,
               margin: bubbles ? null : const EdgeInsets.only(top: 2),

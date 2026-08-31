@@ -1713,6 +1713,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Returns the ids dropped, so the caller can clear the reactions targeting
   /// them (reactions are keyed by their target message id, which makes that
   /// exactly "kind 7 events whose `k` tag is 20000/23333").
+  /// Called when an ingested channel message is already outside the 24-hour
+  /// window. Set by [NostrController]; null in tests.
+  void Function()? onAgedChannelMessage;
+
   Set<String> pruneChannelHistoryWindow() {
     final floor = channelWindowFloorSec();
     final dropped = <String>{};
@@ -1979,6 +1983,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
+    // Already outside the 24-hour window; ask for the sweep rather than
+    // waiting out its interval.
+    if (m.createdAt < channelWindowFloorSec()) onAgedChannelMessage?.call();
     // A backlog restore is historical by PROVENANCE regardless of the mapper's
     // timestamp-age guess (the archived event can read as ≈now). Keeps it out of
     // the flood dim and the snap-in entrance, matching the PWA restore path.
@@ -4674,12 +4681,25 @@ class AppStateNotifier extends StateNotifier<AppState> {
         final byStorage = _channelLastRead[storageKey] ?? 0;
         final byBare = _channelLastRead[key] ?? 0;
         final lastRead = byStorage > byBare ? byStorage : byBare;
-        final span = lastRead > 0
-            ? ((nowSec - lastRead) / 3600).ceil().clamp(0, 24)
-            : 24;
+        // Rounding the unread window UP to whole hours credited the whole
+        // boundary bucket, so a channel read minutes ago was seeded with every
+        // message of the past hour — ones it had just shown as read. Sum the
+        // whole hours exactly and prorate the boundary bucket to the slice of
+        // it that actually falls after the watermark. `last` is the newest
+        // created_at D1 knows of: at or before the watermark there is nothing
+        // unread at all, whatever the buckets total.
+        final newest = last[key] ?? last[rawKey] ?? 0;
+        if (lastRead > 0 && newest > 0 && newest <= lastRead) return;
+        final windowSec =
+            lastRead > 0 ? (nowSec - lastRead).clamp(0, 24 * 3600) : 24 * 3600;
+        final whole = (windowSec ~/ 3600).clamp(0, 24);
         var count = 0;
-        for (var h = 0; h < span && h < buckets.length; h++) {
+        for (var h = 0; h < whole && h < buckets.length; h++) {
           if (buckets[h] > 0) count += buckets[h];
+        }
+        if (whole < 24 && whole < buckets.length && buckets[whole] > 0) {
+          final fraction = (windowSec - whole * 3600) / 3600;
+          if (fraction > 0) count += (buckets[whole] * fraction).floor();
         }
         if (count <= 0) return;
         // D1 is a FLOOR: only ever raise the badge, never lower it.

@@ -6,11 +6,35 @@ import '../../features/p2p/p2p_models.dart';
 import '../../models/message.dart';
 import '../../models/nostr_event.dart';
 import '../../models/user.dart';
+import 'event_time_ceilings.dart';
 
 /// Pure mappers from Nostr [NostrEvent]s to app models. Kept side-effect free so
 /// they can be unit-tested without networking.
 class EventMapper {
   EventMapper._();
+
+  /// Registry of first-seen clamps for future-dated events. Null in tests and
+  /// before boot wires one up, where the clamp falls back to a volatile "now".
+  static EventTimeCeilings? ceilings;
+
+  /// The ceiling a future-dated event is pulled back to, and the `created_at`
+  /// that follows. A D1 `stored_at` is already stable and wins; otherwise the
+  /// clamp is remembered per event id so the next replay cannot re-stamp it.
+  static ({int ceilingMs, int createdAt}) _clampFuture(NostrEvent e, int nowMs) {
+    final nowSec = nowMs ~/ 1000;
+    if (e.createdAt <= nowSec + 60) {
+      return (ceilingMs: nowMs, createdAt: e.createdAt);
+    }
+    final storedAtMs = e.storedAt > 0 ? e.storedAt : 0;
+    final createdAtMs = e.createdAt * 1000;
+    final candidateMs =
+        (storedAtMs > 0 && storedAtMs < createdAtMs) ? storedAtMs : createdAtMs;
+    final registry = ceilings;
+    final ceilingMs = registry != null
+        ? registry.stableCeiling(e.id, candidateMs, nowMs)
+        : (candidateMs < nowMs ? candidateMs : nowMs);
+    return (ceilingMs: ceilingMs, createdAt: ceilingMs ~/ 1000);
+  }
 
   /// The channel storage key for a channel-message event (`#<geohash|name>`),
   /// or null if it isn't a channel message.
@@ -38,13 +62,10 @@ class EventMapper {
   static int effectiveMsOf(NostrEvent e) {
     final ms = int.tryParse(e.tagValue('ms') ?? '') ?? 0;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final nowSec = nowMs ~/ 1000;
-    final storedAtMs = e.storedAt > 0 ? e.storedAt : 0;
-    final future = e.createdAt > nowSec + 60;
-    final ceilingMs =
-        (future && storedAtMs > 0 && storedAtMs < nowMs) ? storedAtMs : nowMs;
-    final createdAt = future ? ceilingMs ~/ 1000 : e.createdAt;
-    return ms > 0 ? (ms < ceilingMs ? ms : ceilingMs) : createdAt * 1000;
+    final clamped = _clampFuture(e, nowMs);
+    return ms > 0
+        ? (ms < clamped.ceilingMs ? ms : clamped.ceilingMs)
+        : clamped.createdAt * 1000;
   }
 
   /// Maps a channel message event (kind 20000/23333) to a [Message].
@@ -72,18 +93,13 @@ class EventMapper {
     // isn't persisted across reloads), so it never settles and always sorts as
     // newest — the "stale D1 messages resurface as now" bug. The D1 backfill
     // injects the archive row's `stored_at` (the pool's real receipt time, ms)
-    // which is a STABLE value once the event was archived. So for a
-    // future-dated event carrying a valid past `stored_at`, anchor to it
-    // instead of `nowMs`. Everything else (normal past events, events within
-    // 60s of now, live events, and any event without a `stored_at`) falls back
-    // to `nowMs`, exactly as before.
+    // which is a STABLE value once the event was archived, so it wins when
+    // present; an event with no `stored_at` has its first clamp REMEMBERED by
+    // [ceilings] instead, which stops each launch's replay re-stamping it.
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final nowSec = nowMs ~/ 1000;
-    final storedAtMs = e.storedAt > 0 ? e.storedAt : 0;
-    final future = e.createdAt > nowSec + 60;
-    final ceilingMs =
-        (future && storedAtMs > 0 && storedAtMs < nowMs) ? storedAtMs : nowMs;
-    final createdAt = future ? ceilingMs ~/ 1000 : e.createdAt;
+    final clamped = _clampFuture(e, nowMs);
+    final ceilingMs = clamped.ceilingMs;
+    final createdAt = clamped.createdAt;
 
     // Authoritative display/age timestamp (PWA `_extractEventMs` + `message.
     // timestamp`): the `ms` tag is the sender's REAL millisecond send time and is

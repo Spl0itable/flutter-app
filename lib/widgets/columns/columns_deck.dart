@@ -662,7 +662,7 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
         final channels = ref.read(channelsProvider);
         for (final ch in channels) {
           if (ch.key == v.id.toLowerCase()) {
-            return _ColumnDesc.channel(ch.channel, ch.geohash);
+            return _ColumnDesc.channel(ch.channel, ch.geohashKey);
           }
         }
         return isValidGeohash(v.id)
@@ -1061,11 +1061,11 @@ class _ColumnsDeckState extends ConsumerState<ColumnsDeck> {
     final out = <_PickerEntry>[];
     if (!pmOnly) {
       for (final ch in channels) {
-        final d = _ColumnDesc.channel(ch.channel, ch.geohash);
+        final d = _ColumnDesc.channel(ch.channel, ch.geohashKey);
         if (open.contains(d)) continue;
         out.add((
           desc: d,
-          label: '#${ch.geohash.isNotEmpty ? ch.geohash : ch.channel}',
+          label: '#${ch.geohashKey.isNotEmpty ? ch.geohashKey : ch.channel}',
           icon: _pickerRowIcon(context, d),
         ));
       }

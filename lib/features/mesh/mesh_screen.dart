@@ -652,7 +652,7 @@ class _PeersList extends ConsumerWidget {
               // A peer list says who is out there; it cannot say whether they
               // are in the same room or three relays away. The echo can.
               IconButton(
-                icon: NymSvgIcon(NymIcons.shareNodes,
+                icon: NymSvgIcon(NymIcons.radar,
                     size: 16, color: colors.textDim),
                 tooltip: tr('Ping'),
                 // An IconButton defaults to a 48px tap target, which is wider

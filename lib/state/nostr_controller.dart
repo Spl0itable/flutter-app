@@ -73,6 +73,7 @@ import '../features/identity/vault_settings_modal.dart'
     show identityVaultProvider;
 import '../services/nostr/event_mapper.dart';
 import '../services/nostr/event_signer.dart';
+import '../services/nostr/event_time_ceilings.dart';
 import '../services/nostr/identity_service.dart';
 import '../services/nostr/nostr_service.dart';
 import '../services/nostr/nym_generator.dart';
@@ -126,6 +127,11 @@ class NostrController {
   final Ref _ref;
   Identity? _identity;
   NostrService? _service;
+
+  /// The live relay service, or null before boot finishes. Exposed for callers
+  /// that need one bounded query of their own (the NIP-19 reference cards).
+  NostrService? get relayService => _service;
+
   GroupManager? _groups;
   EventSigner? _signer;
   bool _started = false;
@@ -4669,6 +4675,24 @@ class NostrController {
   /// what makes them post-quantum capable (features/identity/pq_registry.dart).
   final PqRegistry _pqRegistry = PqRegistry();
 
+  /// First-seen clamps for future-dated events, shared with [EventMapper].
+  final EventTimeCeilings _eventTimeCeilings = EventTimeCeilings();
+
+  Timer? _eventTimeCeilingsPersistTimer;
+  void _schedulePersistEventTimeCeilings() {
+    if (_eventTimeCeilingsPersistTimer != null) return;
+    if (PanicWipe.inProgress) return;
+    _eventTimeCeilingsPersistTimer = Timer(const Duration(seconds: 5), () {
+      _eventTimeCeilingsPersistTimer = null;
+      final cache = _cache;
+      if (cache == null || !cache.isOpen) return;
+      unawaited(cache
+          .saveMetaMap(
+              CacheStore.metaEventTimeCeilings, _eventTimeCeilings.toJson())
+          .catchError((_) {}));
+    });
+  }
+
   /// In-flight and recently-failed announcement lookups, so two sends racing
   /// for the same new peer open one subscription rather than two, and a peer
   /// who simply has no announcement is not re-queried on every send.
@@ -8123,7 +8147,7 @@ class NostrController {
       final entry =
           state.channels.where((c) => c.key == state.view.id.toLowerCase());
       if (entry.isNotEmpty && entry.first.isGeohash) {
-        geohash = entry.first.geohash;
+        geohash = entry.first.geohashKey;
       } else {
         channel = state.view.id;
       }
@@ -9119,6 +9143,8 @@ class NostrController {
       final cache = CacheStore();
       await cache.open();
       _cache = cache;
+      _eventTimeCeilings.onChanged = _schedulePersistEventTimeCeilings;
+      EventMapper.ceilings = _eventTimeCeilings;
       // PMs hydrate only when caching is enabled; disabled → wipe the store,
       // exactly the PWA's `cachePMsAllowed ? … : this.clearPMCache()`
       // (persistence.js:455-475).
@@ -9225,6 +9251,10 @@ class NostrController {
         _pqRegistry.hydrate(pqKeys,
             nowSec: DateTime.now().millisecondsSinceEpoch ~/ 1000);
       }
+      // Restored BEFORE the relay layer starts, so the launch replay reuses
+      // last session's correction instead of re-stamping to "now".
+      final ceilings = await cache.loadMetaMap(CacheStore.metaEventTimeCeilings);
+      if (ceilings.isNotEmpty) _eventTimeCeilings.hydrate(ceilings);
     } catch (e) {
       debugPrint('hydrateFromCache failed: $e');
     }
@@ -9398,31 +9428,49 @@ class NostrController {
   /// cached rows for the channels that changed, and the reactions targeting the
   /// messages dropped (reactions are keyed by their target's id, which is what
   /// makes that exactly the kind 7 events tagged `k` 20000/23333).
+  /// Debounce for a sweep asked for out of band, long enough that a whole
+  /// backfill batch is swept once instead of once per message.
+  Timer? _channelWindowPruneSoonTimer;
+
+  void _scheduleChannelWindowPrune() {
+    if (_channelWindowPruneSoonTimer != null) return;
+    _channelWindowPruneSoonTimer = Timer(const Duration(milliseconds: 600), () {
+      _channelWindowPruneSoonTimer = null;
+      _runChannelWindowPrune();
+    });
+  }
+
+  Future<void> _runChannelWindowPrune() async {
+    if (PanicWipe.inProgress) return;
+    final notifier = _ref.read(appStateProvider.notifier);
+    Set<String> dropped;
+    try {
+      dropped = notifier.pruneChannelHistoryWindow();
+    } catch (e) {
+      debugPrint('channel window prune failed: $e');
+      return;
+    }
+    if (dropped.isEmpty) return;
+    try {
+      await _cache?.deleteReactionsFor(dropped);
+    } catch (e) {
+      debugPrint('channel window reaction prune failed: $e');
+    }
+    // The pruned conversations must be rewritten, not left on disk holding
+    // the messages we just dropped from memory.
+    for (final key in _ref.read(appStateProvider).messages.keys) {
+      if (key.startsWith('pm-') || key.startsWith('group-')) continue;
+      _dirtyChannelKeys.add(key);
+    }
+    _scheduleFlush();
+  }
+
   void _startChannelWindowPrune() {
     _channelWindowPruneTimer?.cancel();
+    _ref.read(appStateProvider.notifier).onAgedChannelMessage =
+        _scheduleChannelWindowPrune;
     Future<void> run() async {
-      if (PanicWipe.inProgress) return;
-      final notifier = _ref.read(appStateProvider.notifier);
-      Set<String> dropped;
-      try {
-        dropped = notifier.pruneChannelHistoryWindow();
-      } catch (e) {
-        debugPrint('channel window prune failed: $e');
-        return;
-      }
-      if (dropped.isEmpty) return;
-      try {
-        await _cache?.deleteReactionsFor(dropped);
-      } catch (e) {
-        debugPrint('channel window reaction prune failed: $e');
-      }
-      // The pruned conversations must be rewritten, not left on disk holding
-      // the messages we just dropped from memory.
-      for (final key in _ref.read(appStateProvider).messages.keys) {
-        if (key.startsWith('pm-') || key.startsWith('group-')) continue;
-        _dirtyChannelKeys.add(key);
-      }
-      _scheduleFlush();
+      await _runChannelWindowPrune();
     }
 
     run();
@@ -11355,7 +11403,8 @@ class NostrController {
       };
       joinedEntries = [
         for (final k in keys)
-          if (k != kDefaultChannel) ChannelEntry(channel: k, geohash: k),
+          if (k != kDefaultChannel)
+            ChannelEntry(channel: k, geohash: isChannelGeohash(k) ? k : ''),
       ];
     }
     if (pinnedSet != null ||
