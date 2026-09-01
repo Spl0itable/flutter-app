@@ -196,6 +196,24 @@ class NostrRefResolver {
     );
   }
 
+  /// One-shot kind 0 for the author of a referenced event.
+  ///
+  /// The whole point of a shared nevent is that it came from somewhere else, so
+  /// its author is very often somebody this client has never seen and D1 has
+  /// never heard of — D1 only ever holds a profile its own owner mirrored
+  /// there. Nothing on the event path asked for their kind 0 (only the profile
+  /// branch did), so the card named them by the bare `nym#xxxx` fallback
+  /// forever. The event lands in the store through the usual ingest path, so
+  /// this returns nothing: the card watches `usersProvider` and repaints
+  /// itself. Attempted once per pubkey per session.
+  Future<void> ensureAuthor(String pubkey) async {
+    if (pubkey.isEmpty || !_authorAttempted.add(pubkey)) return;
+    if (_ref.read(appStateProvider).users[pubkey] != null) return;
+    await _queryOne(NostrFilter(kinds: [0], authors: [pubkey], limit: 1));
+  }
+
+  final Set<String> _authorAttempted = {};
+
   /// One bounded query across the pool for a single event. Returns the newest
   /// match, or null when nothing answers in time.
   Future<NostrEvent?> _queryOne(NostrFilter filter) async {
@@ -302,12 +320,18 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
   }
 
   Future<void> _load(NostrRef ref0) async {
-    final data = await ref.read(nostrRefResolverProvider).resolve(ref0);
+    final resolver = ref.read(nostrRefResolverProvider);
+    final data = await resolver.resolve(ref0);
     if (!mounted) return;
     setState(() {
       _data = data;
       _resolved = true;
     });
+    // The head reads the author's nym and avatar out of `usersProvider`, so a
+    // kind 0 that lands later repaints the card with no further work here.
+    if (data != null && data.pubkey.isNotEmpty) {
+      unawaited(resolver.ensureAuthor(data.pubkey));
+    }
   }
 
   @override
@@ -316,13 +340,31 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
     if (!_resolved || data == null) return const SizedBox.shrink();
     final c = context.nym;
 
+    final users = ref.watch(usersProvider);
+    // Prefer whatever the store knows now: `data.author` was resolved when the
+    // card first painted, and `ensureAuthor` may have brought their kind 0 in
+    // since. Both sides can already carry `#xxxx` — a stored nym, a
+    // `getNymFromPubkey` fallback and a stored message's author all do — so
+    // strip before re-adding or the suffix printed twice.
+    final knownNym = users[data.pubkey]?.nym ?? '';
+    final baseNym =
+        stripPubkeySuffix(knownNym.isNotEmpty ? knownNym : data.author);
+    final openProfileCb = widget.onOpenProfile;
+    final nymText = Text(
+      data.pubkey.isEmpty ? baseNym : '$baseNym#${getPubkeySuffix(data.pubkey)}',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style:
+          TextStyle(color: c.text, fontSize: 12, fontWeight: FontWeight.w600),
+    );
+
     final headRow = Row(
       children: [
         if (data.pubkey.isNotEmpty) ...[
           NymAvatar(
             seed: data.pubkey,
             size: 20,
-            imageUrl: ref.watch(usersProvider)[data.pubkey]?.profile?.picture,
+            imageUrl: users[data.pubkey]?.profile?.picture,
           ),
           const SizedBox(width: 6),
         ],
@@ -331,16 +373,18 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (data.author.isNotEmpty)
-                Text(
-                  data.pubkey.isEmpty
-                      ? data.author
-                      : '${data.author}#${getPubkeySuffix(data.pubkey)}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      color: c.text, fontSize: 12, fontWeight: FontWeight.w600),
-                ),
+              // The person named in the card opens their menu, like a tapped
+              // nym anywhere else. Nested inside the head's own tap target, so
+              // it wins the gesture arena and the rest of the head still jumps.
+              if (baseNym.isNotEmpty)
+                if (openProfileCb != null && data.pubkey.isNotEmpty)
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => openProfileCb(data.pubkey, baseNym),
+                    child: nymText,
+                  )
+                else
+                  nymText,
               if (data.channel.isNotEmpty)
                 Text(data.channel,
                     maxLines: 1,
@@ -372,11 +416,10 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
     // and a tap target wrapped around all of it would compete with every one
     // of them.
     final jump = widget.onJump;
-    final openProfile = widget.onOpenProfile;
     final VoidCallback? onTap;
     if (data.kind == NostrRefKind.profile) {
-      onTap = (openProfile != null && data.pubkey.isNotEmpty)
-          ? () => openProfile(data.pubkey, data.author)
+      onTap = (openProfileCb != null && data.pubkey.isNotEmpty)
+          ? () => openProfileCb(data.pubkey, baseNym)
           : null;
     } else {
       onTap = (data.local && data.id.isNotEmpty && jump != null)

@@ -107,8 +107,9 @@ void main() {
     await _pump(tester, c, onJump: jumped.add);
 
     // The body is real content now, so the tap target lives on the head rather
-    // than wrapped around links, media and the toggle.
-    await tester.tap(find.textContaining('alice'));
+    // than wrapped around links, media and the toggle. Not the nym inside it:
+    // that opens the author's menu (nostr_card_author_test.dart).
+    await tester.tap(find.text('#geo'));
     await tester.pumpAndSettle();
     expect(jumped, [_id]);
   });
