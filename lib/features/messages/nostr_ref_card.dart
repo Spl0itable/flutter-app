@@ -11,6 +11,7 @@ import '../../core/crypto/bech32_codec.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
+import '../../models/channel.dart';
 import '../../models/nostr_event.dart';
 import '../../services/relay/relay_message.dart';
 import '../../state/app_state.dart';
@@ -189,8 +190,7 @@ class NostrRefResolver {
       pubkey: event.pubkey,
       author: author,
       body: event.content,
-      channel:
-          (channelTag != null && channelTag.isNotEmpty) ? '#$channelTag' : '',
+      channel: isValidChannelTag(channelTag) ? '#$channelTag' : '',
       createdAt: event.createdAt,
       eventKind: event.kind,
     );

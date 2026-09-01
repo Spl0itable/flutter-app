@@ -8021,7 +8021,9 @@ class NostrController {
 
     final status = event.tagValue('typing');
     final geohash = event.tagValue('g') ?? event.tagValue('d');
-    if (status == null || geohash == null || geohash.isEmpty) return;
+    if (status == null || geohash == null || !isValidChannelTag(geohash)) {
+      return;
+    }
 
     // The typing store keys on the active view's storageKey; a geohash channel
     // view is `ChatView.channel(geohash)` → storageKey `'#<geohash>'`
@@ -8051,7 +8053,12 @@ class NostrController {
 
     final messageId = event.tagValue('e');
     final geohash = event.tagValue('g') ?? event.tagValue('d');
-    if (messageId == null || messageId.isEmpty || geohash == null) return;
+    if (messageId == null ||
+        messageId.isEmpty ||
+        geohash == null ||
+        !isValidChannelTag(geohash)) {
+      return;
+    }
 
     final appState = _ref.read(appStateProvider);
     if (appState.blockedUsers.contains(event.pubkey)) return;
@@ -12672,6 +12679,10 @@ class NostrController {
         // Publish the worker-signed event VERBATIM (`['EVENT', data.event]`,
         // commands.js:203-216); it arrives back via the channel subscription.
         final botEvent = NostrEvent.fromJson(Map<String, dynamic>.from(event));
+        if (EventMapper.channelKeyOf(botEvent) == null) {
+          _setBotChannelThinking(storageKey, false);
+          return;
+        }
         await _service?.pool.publish(botEvent);
       }
     } catch (e) {
