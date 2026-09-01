@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../../core/constants/event_kinds.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../features/p2p/p2p_models.dart';
+import '../../models/channel.dart';
 import '../../models/message.dart';
 import '../../models/nostr_event.dart';
 import '../../models/user.dart';
@@ -36,18 +37,35 @@ class EventMapper {
     return (ceilingMs: ceilingMs, createdAt: ceilingMs ~/ 1000);
   }
 
+  /// The channel a channel-message event names, bare, or null when the event
+  /// is not a well-formed channel message.
+  ///
+  /// The kind and the channel's SHAPE have to agree, exactly as [channelWire]
+  /// pairs them on the way out: a geohash channel is kind 20000 + `g`, a named
+  /// one is 23333 + `d`. The kind picks WHICH tag to read, but nothing checked
+  /// the value it found — so a kind 20000 carrying `['g','nymchat']` filed
+  /// itself under `#nymchat` and rendered among the real 23333 traffic, a
+  /// message in a kind this app would never send there and indistinguishable
+  /// from the rest. The reverse smuggled a 23333 into a geohash channel.
+  /// Nothing upstream stops it: the subscription is kind-only, with no tag
+  /// filter. Neither case can be repaired by guessing which the sender meant,
+  /// so both are refused here — the one place every reader of a channel key
+  /// goes through, so a refused event cannot be stored, keyed, notified on or
+  /// receipted either.
+  static String? channelNameOf(NostrEvent e) {
+    final isGeo = e.kind == EventKind.geoChannel;
+    if (!isGeo && e.kind != EventKind.namedChannel) return null;
+    final name = isGeo ? e.tagValue('g') : e.tagValue('d');
+    if (name == null || name.isEmpty) return null;
+    if (isValidGeohash(name) != isGeo) return null;
+    return name;
+  }
+
   /// The channel storage key for a channel-message event (`#<geohash|name>`),
   /// or null if it isn't a channel message.
   static String? channelKeyOf(NostrEvent e) {
-    if (e.kind == EventKind.geoChannel) {
-      final g = e.tagValue('g');
-      return g == null ? null : '#$g';
-    }
-    if (e.kind == EventKind.namedChannel) {
-      final d = e.tagValue('d');
-      return d == null ? null : '#$d';
-    }
-    return null;
+    final name = channelNameOf(e);
+    return name == null ? null : '#$name';
   }
 
   /// The event's authoritative display/age time in milliseconds — the same
@@ -75,11 +93,14 @@ class EventMapper {
     if (e.kind != EventKind.geoChannel && e.kind != EventKind.namedChannel) {
       return null;
     }
+    // [channelNameOf] is the single shape gate: it refuses a kind whose channel
+    // does not match it, covering the live pool, the D1 backfill and the mesh
+    // carrier (handleMeshCarriedEvent) alike, since all three map through here.
     final isGeo = e.kind == EventKind.geoChannel;
-    final geohash = isGeo ? e.tagValue('g') : null;
-    final channel = isGeo ? null : e.tagValue('d');
-    if (isGeo && geohash == null) return null;
-    if (!isGeo && channel == null) return null;
+    final name = channelNameOf(e);
+    if (name == null) return null;
+    final geohash = isGeo ? name : null;
+    final channel = isGeo ? null : name;
 
     final baseNym = e.tagValue('n') ?? 'nym';
     final author = getNymFromPubkey(baseNym, e.pubkey);
