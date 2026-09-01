@@ -81,6 +81,7 @@ class MessageContent extends ConsumerWidget {
     this.blurImages = false,
     this.glyphShadows,
     this.monospace = false,
+    this.nostrRefCards = true,
   });
 
   final String content;
@@ -112,6 +113,11 @@ class MessageContent extends ConsumerWidget {
   /// Render the body in a monospace family (the CRT style). (`F13`.)
   final bool monospace;
 
+  /// Unfurl NIP-19 references in this body into cards. False inside a card's
+  /// own body, which would otherwise unfurl a card inside a card, and again
+  /// inside that one.
+  final bool nostrRefCards;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
@@ -142,7 +148,7 @@ class MessageContent extends ConsumerWidget {
     // Collect bare http(s) links to unfurl below the body (ui-context.js
     // `_attachLinkPreviews`), skipping inline-media URLs (already embedded).
     final previewUrls = _collectPreviewUrls(blocks);
-    final nostrRefs = _collectNostrRefs(blocks);
+    final nostrRefs = nostrRefCards ? _collectNostrRefs(blocks) : const <String>[];
 
     // Tapping a `#ref` / `app.nym.bar/#…` link switches the active channel
     // (`channelLink` / `channelReference` data-actions).
@@ -238,6 +244,7 @@ class MessageContent extends ConsumerWidget {
         for (final token in nostrRefs)
           NostrRefCard(
             token: token,
+            blurImages: blurImages,
             onJump: (id) => _jumpToEvent(ref, id),
             onOpenProfile: (pubkey, nym) =>
                 _openProfileCtx(context, ref, pubkey, nym),

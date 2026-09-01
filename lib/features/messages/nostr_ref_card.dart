@@ -16,6 +16,7 @@ import '../../services/relay/relay_message.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../widgets/chat/message_row.dart' show formatRelativeTime;
+import 'format/message_content.dart';
 import '../../widgets/common/nym_avatar.dart';
 import '../i18n/i18n.dart';
 
@@ -238,8 +239,13 @@ String nostrRefKindLabel(int kind) => switch (kind) {
 /// while the lookup is out and nothing at all if it comes back empty, so an
 /// unresolvable reference costs the row no height.
 class NostrRefCard extends ConsumerStatefulWidget {
-  const NostrRefCard(
-      {super.key, required this.token, this.onJump, this.onOpenProfile});
+  const NostrRefCard({
+    super.key,
+    required this.token,
+    this.onJump,
+    this.onOpenProfile,
+    this.blurImages = false,
+  });
 
   /// The reference as pasted, scheme already stripped by the formatter.
   final String token;
@@ -252,6 +258,10 @@ class NostrRefCard extends ConsumerStatefulWidget {
   /// is a person, so the card offers what tapping that person anywhere else in
   /// the app offers: their context menu.
   final void Function(String pubkey, String nym)? onOpenProfile;
+
+  /// Blur media in the referenced body behind a tap-to-reveal, under the same
+  /// others'-images setting the surrounding message obeys.
+  final bool blurImages;
 
   @override
   ConsumerState<NostrRefCard> createState() => _NostrRefCardState();
@@ -306,7 +316,7 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
     if (!_resolved || data == null) return const SizedBox.shrink();
     final c = context.nym;
 
-    final head = Row(
+    final headRow = Row(
       children: [
         if (data.pubkey.isNotEmpty) ...[
           NymAvatar(
@@ -357,7 +367,27 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
       ],
     );
 
-    final body = data.body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    // The HEAD is the jump/profile affordance, not the whole card: the body
+    // below is real message content now — links, media, the Read more toggle —
+    // and a tap target wrapped around all of it would compete with every one
+    // of them.
+    final jump = widget.onJump;
+    final openProfile = widget.onOpenProfile;
+    final VoidCallback? onTap;
+    if (data.kind == NostrRefKind.profile) {
+      onTap = (openProfile != null && data.pubkey.isNotEmpty)
+          ? () => openProfile(data.pubkey, data.author)
+          : null;
+    } else {
+      onTap = (data.local && data.id.isNotEmpty && jump != null)
+          ? () => jump(data.id)
+          : null;
+    }
+    final head = onTap == null
+        ? headRow
+        : InkWell(onTap: onTap, child: headRow);
+
+    final body = data.body.trim();
     final card = Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
@@ -381,33 +411,29 @@ class _NostrRefCardState extends ConsumerState<NostrRefCard> {
                     fontSize: 12,
                     fontStyle: FontStyle.italic))
           else
-            Text(
-              body.length > 280 ? '${body.substring(0, 280)}…' : body,
-              maxLines: 4,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: c.text, fontSize: 12, height: 1.4),
+            // The referenced event's body renders as a message body: media,
+            // code, mentions, emoji, link previews, and the same height-based
+            // "Read more" clamp. A hard-truncated excerpt could not show any of
+            // it, and a referenced event is often exactly the media it carries.
+            // Keyed on the event's own id so an expansion sticks, and with
+            // reference cards off — a card inside a card, and again inside
+            // that one, is not a thread of context.
+            MessageContent(
+              content: body,
+              hostMessageId: data.id.isNotEmpty ? 'nostrcard-${data.id}' : null,
+              fontSize: 12,
+              blurImages: widget.blurImages,
+              nostrRefCards: false,
             ),
         ],
       ),
     );
 
-    final jump = widget.onJump;
-    final openProfile = widget.onOpenProfile;
-    final VoidCallback? onTap;
-    if (data.kind == NostrRefKind.profile) {
-      onTap = (openProfile != null && data.pubkey.isNotEmpty)
-          ? () => openProfile(data.pubkey, data.author)
-          : null;
-    } else {
-      onTap = (data.local && data.id.isNotEmpty && jump != null)
-          ? () => jump(data.id)
-          : null;
-    }
     return Padding(
       padding: const EdgeInsets.only(top: 6),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 400),
-        child: onTap != null ? InkWell(onTap: onTap, child: card) : card,
+        child: card,
       ),
     );
   }
