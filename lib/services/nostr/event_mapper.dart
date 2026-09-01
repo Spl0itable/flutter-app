@@ -56,7 +56,7 @@ class EventMapper {
     final isGeo = e.kind == EventKind.geoChannel;
     if (!isGeo && e.kind != EventKind.namedChannel) return null;
     final name = isGeo ? e.tagValue('g') : e.tagValue('d');
-    if (name == null || name.isEmpty) return null;
+    if (name == null || !isValidChannelTag(name)) return null;
     if (isValidGeohash(name) != isGeo) return null;
     return name;
   }

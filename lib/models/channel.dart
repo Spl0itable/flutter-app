@@ -9,6 +9,11 @@ final RegExp _geohashRe = RegExp(r'^[0-9bcdefghjkmnpqrstuvwxyz]{1,12}$');
 /// True if [s] is a valid geohash (docs/specs/03 §1.1).
 bool isValidGeohash(String s) => _geohashRe.hasMatch(s.toLowerCase());
 
+final RegExp _channelTagWhitespaceRe = RegExp(r'\s');
+
+bool isValidChannelTag(String? s) =>
+    s != null && s.isNotEmpty && !_channelTagWhitespaceRe.hasMatch(s);
+
 /// The default channel, which cannot be left or blocked.
 const String kDefaultChannel = 'nymchat';
 
