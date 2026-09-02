@@ -491,6 +491,44 @@ class PqRegistry {
   }
 }
 
+/// Why one conversation is sending classical, in one line.
+///
+/// [PqPmPlan.decide] reaches its verdict through four terms, and every one of
+/// them can be false for a different reason. From the outside all four look
+/// identical — a shield reading "Not quantum-resistant" — so a report of "it is
+/// not working" cannot be told apart from any other, and neither can a fix.
+/// This names the FIRST term that failed, in the order the plan evaluates them.
+String pqPeerDiagnosis({
+  required bool supported,
+  required bool modeOff,
+  required bool haveEntry,
+  required bool haveKey,
+  required bool acceptsLayered,
+  required int bitchatSeenAtSec,
+  required int announcedAtSec,
+  int? lookupAgeSec,
+}) {
+  if (!supported) return 'ML-KEM did not load on this device';
+  if (modeOff) return 'post-quantum mode is off';
+  if (!haveEntry) {
+    if (lookupAgeSec != null) {
+      return 'no announcement found (looked ${lookupAgeSec}s ago)';
+    }
+    return 'no announcement held, and none has been looked up yet';
+  }
+  if (!haveKey) return 'their announcement carries no ML-KEM key';
+  if (!acceptsLayered) {
+    return 'their announcement offers only the legacy format (pk without pk2), '
+        'which is never sent';
+  }
+  if (bitchatSeenAtSec > 0 &&
+      !(announcedAtSec > 0 && announcedAtSec >= bitchatSeenAtSec)) {
+    return 'a Bitchat-format message from them is NEWER than their '
+        'announcement, so they get a readable Bitchat copy instead';
+  }
+  return 'post-quantum';
+}
+
 /// Policy: whether this identity is capable of, and configured for,
 /// post-quantum messaging.
 class PqPolicy {

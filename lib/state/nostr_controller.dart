@@ -4681,6 +4681,77 @@ class NostrController {
 
   int _nowSecForBitchat() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
+  /// Everything the post-quantum path decided, as copyable text.
+  ///
+  /// Deliberately the live values rather than a summary: the question a stuck
+  /// conversation raises is always "which of these is not what I think it is",
+  /// and only the values answer it. Read on demand — every one of them can
+  /// change on the next announcement, and a stale readout is worse than none.
+  String pqDiagnosticsText() {
+    final identity = _identity;
+    if (identity == null) return 'not signed in';
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // There is no "unsupported" state on this platform — ML-KEM is compiled
+    // in rather than loaded — so the term is constant here and the readout
+    // says so rather than omitting a line the PWA's has.
+    const supported = true;
+    final modeOff = _pqMode == PqMode.off;
+    final capable =
+        PqPolicy.capable(privkey: identity.privkey, root: _pqRoot);
+    final out = <String>[
+      'supported=$supported capable=$capable '
+          'enabled=${PqPolicy.enabled(privkey: identity.privkey, mode: _pqMode)}',
+      'mode=$_pqMode epoch=$_pqEpoch devices=${_pqDevices.length}',
+      'root: held=${_pqRoot != null} settled=$_pqRootSettled '
+          'locked=$_pqRootLocked',
+      'announced: ${_pqLastPublishMs == 0 ? 'never this session' : '${(DateTime.now().millisecondsSinceEpoch - _pqLastPublishMs) ~/ 1000}s ago'}'
+          ' withKey=${_pqSelfSignedAnnouncement != null}',
+      '',
+    ];
+    final peers = _appPmPeers();
+    out.add('${peers.length} PM contact${peers.length == 1 ? '' : 's'}:');
+    for (final pk in peers) {
+      final key = _pqRegistry.keyFor(pk, nowSec: nowSec, enabled: true);
+      final layered =
+          _pqRegistry.acceptsLayered(pk, nowSec: nowSec, enabled: true);
+      final announcedAt = _pqRegistry.announcedAtFor(pk, nowSec: nowSec);
+      final bitchatAt = _bitchatSeenAt[pk] ?? 0;
+      final miss = _pqLookupMisses[pk];
+      final why = pqPeerDiagnosis(
+        supported: supported,
+        modeOff: modeOff,
+        haveEntry: _pqRegistry.isKnownNymchatClient(pk, nowSec: nowSec),
+        haveKey: key != null,
+        acceptsLayered: layered,
+        bitchatSeenAtSec: bitchatAt,
+        announcedAtSec: announcedAt,
+        lookupAgeSec: miss == null
+            ? null
+            : (DateTime.now().millisecondsSinceEpoch - miss) ~/ 1000,
+      );
+      out
+        ..add('  ${pk.substring(0, 8)}… -> '
+            '${why == 'post-quantum' ? 'POST-QUANTUM' : 'classical'}')
+        ..add('    $why')
+        ..add('    key=${key != null} layered=$layered '
+            'announced=${announcedAt == 0 ? '-' : '${nowSec - announcedAt}s ago'} '
+            'bitchatSeen=${bitchatAt == 0 ? 'never' : '${nowSec - bitchatAt}s ago'}');
+    }
+    return out.join('\n');
+  }
+
+  /// The PM peers the diagnostics reports on — the conversations the user
+  /// actually has, which is where a stuck shield is noticed.
+  List<String> _appPmPeers() {
+    final seen = <String>{};
+    for (final key in _ref.read(appStateProvider).messages.keys) {
+      if (!key.startsWith('pm-')) continue;
+      final pk = key.substring(3);
+      if (pk.length == 64 && pk != _identity?.pubkey) seen.add(pk);
+    }
+    return seen.toList();
+  }
+
   /// Records that a bitchat-format wrap from [pubkey] opened, at [atSec].
   void _noteBitchatFormatSeen(String pubkey, int atSec) {
     if (pubkey.isEmpty) return;
