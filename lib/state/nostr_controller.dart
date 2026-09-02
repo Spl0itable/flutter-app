@@ -3309,15 +3309,17 @@ class NostrController {
     }
 
     // 1:1 PM message.
+    final anonAuthor = _isAnonBotPubkey(rumor['pubkey']);
     final m = PmLogic.mapPmRumor(
       rumor: rumor,
       wrapId: u.wrapId,
-      selfPubkey: self,
+      selfPubkey: anonAuthor ? (rumor['pubkey'] as String) : self,
       senderVerified: u.senderVerified,
       pqEncrypted: u.isPq,
       pqRootFor: (peer) => pqSealRootVerdict(peer) == true,
     );
     if (m == null) return;
+    if (anonAuthor) m.pubkey = self;
     // Our OWN message, rebuilt from a wrap. The only wrap of it we can receive
     // is the self-addressed archive copy, sealed to OUR key — so `u.isPq`
     // describes our archive, never how the message reached the recipient. Ask
@@ -3385,7 +3387,7 @@ class NostrController {
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
     _maybeBackfillProfiles(m.pubkey);
     // Delivery receipt back to the sender (not for our own self-copy).
-    if (!m.isOwn && m.nymMessageId != null) {
+    if (!m.isOwn && m.nymMessageId != null && !anonSuppressSendTo(m.pubkey)) {
       _service?.publishReceipt(
         messageId: m.nymMessageId!,
         receiptType: 'delivered',
@@ -7764,6 +7766,7 @@ class NostrController {
     }
 
     if (view.kind == ViewKind.pm) {
+      if (anonSuppressSendTo(view.id)) return;
       await service.publishTyping(status: 'start', recipients: [view.id]);
     } else {
       final group = _ref.read(appStateProvider.notifier).groupById(view.id);
@@ -7815,6 +7818,7 @@ class NostrController {
     if (messageId.isEmpty || peerPubkey.isEmpty) return;
     final service = _service;
     if (service == null) return;
+    if (anonSuppressSendTo(peerPubkey)) return;
     if (!_sentPmReadReceipts.add(messageId)) return;
     if (_sentPmReadReceipts.length > 2000) {
       final keep = _sentPmReadReceipts
@@ -8176,6 +8180,7 @@ class NostrController {
     final service = _service;
     final identity = _identity;
     if (service == null || identity == null) return false;
+    if (anonSuppressSendTo(target)) return true;
     final appState = _ref.read(appStateProvider.notifier);
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     // NIP-30 declarations for a custom `:shortcode:` reaction — the PWA
@@ -10228,7 +10233,7 @@ class NostrController {
     if (_groupBackfillInFlight) return;
     _groupBackfillInFlight = true;
     try {
-      final ephPks = groups.allEphemeralPubkeys();
+      final ephPks = [...groups.allEphemeralPubkeys(), ..._anonBotPubkeys()];
       if (ephPks.isEmpty) return;
       final wraps = await sync.pmGetByPubkeys(ephPks);
       for (final w in wraps) {
@@ -10547,6 +10552,15 @@ class NostrController {
       ephemeralKeys: result.groupEphemeralKeys,
       history: result.groupMessageHistory,
     );
+    final anon = result.botAnon;
+    if (anon != null) applyBotAnonSync(anon);
+  }
+
+  void applyBotAnonSync(Map<String, dynamic> payload) {
+    try {
+      _ref.read(botChatControllerProvider.notifier).anon.applySynced(payload);
+    } catch (_) {
+    }
   }
 
   /// Shared apply for the three per-group cross-device maps, used by the boot
@@ -10642,6 +10656,44 @@ class NostrController {
   /// ephemeral keys plus, in Ghost Mode, one per live epoch. Registering them
   /// together is what lets a reply sent to an identity we have already rotated
   /// away from still decrypt.
+  bool anonSuppressSendTo(String pubkey) {
+    if (pubkey.isEmpty || !isVerifiedBot(pubkey)) return false;
+    try {
+      return _ref.read(botChatControllerProvider.notifier).anon.enabled;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isAnonBotPubkey(Object? pubkey) =>
+      pubkey is String && pubkey.isNotEmpty && _anonBotPubkeys().contains(pubkey);
+
+  List<String> _anonBotPubkeys() {
+    try {
+      return _ref.read(botChatControllerProvider.notifier).anon.pubkeys;
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
+  List<({Uint8List sk, Uint8List kemSk, Uint8List kemPk})> _anonBotKeys() {
+    try {
+      final anon = _ref.read(botChatControllerProvider.notifier).anon;
+      final out = <({Uint8List sk, Uint8List kemSk, Uint8List kemPk})>[];
+      final st = anon.state;
+      if (st == null) return out;
+      for (final id in [if (st.current != null) st.current!, ...st.prev]) {
+        final kem = anon.kemFor(id);
+        if (kem != null) {
+          out.add((sk: id.sk, kemSk: kem.secretKey, kemPk: kem.publicKey));
+        }
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
   void _applyEphemeralKeys() {
     final service = _service;
     final groups = _groups;
@@ -10650,6 +10702,7 @@ class NostrController {
       ...groups.allEphemeralSecretKeys(),
       ..._ref.read(ghostModeProvider).secretKeys,
     ]);
+    service.setAnonBotKeys(_anonBotKeys());
     // Refreshed alongside the ephemeral keys so a rotation or a login change
     // takes effect on the same tick.
     service.setPqSelfKeys(pqCapable ? pqSelfCandidateKeys() : const []);
@@ -10705,6 +10758,7 @@ class NostrController {
     final pks = [
       ...groups.allEphemeralPubkeys(),
       ..._ref.read(ghostModeProvider).pubkeys,
+      ..._anonBotPubkeys(),
     ];
     if (pks.isEmpty) return;
     // Filter split per relays.js:2711-2721: in PROXY/D1 mode the REQ is
@@ -11811,6 +11865,12 @@ class NostrController {
       historyByConvKey: history,
       leftGroups: appState.leftGroups,
     );
+    try {
+      final anonPayload =
+          _ref.read(botChatControllerProvider.notifier).anon.syncPayload();
+      if (anonPayload != null) await sync.botAnonSyncSet(anonPayload);
+    } catch (_) {
+    }
   }
 
   /// Serializes a [Group] for the `nymchat-groups` category, byte-matching the
@@ -12896,6 +12956,8 @@ class NostrController {
     // (`_debouncedNostrSettingsSave`, pms.js:1878/1903).
     bot.pmArchivePurger = purgeBotPmArchive;
     bot.settingsSyncRequester = syncSettings;
+    bot.anonKeysChanged = _refreshEphemeralSubscriptions;
+    _applyEphemeralKeys();
     return true;
   }
 
