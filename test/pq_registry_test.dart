@@ -201,7 +201,10 @@ void main() {
           'c' * 64: [pq.b64uEncode(pk)], // too short
           'd' * 64: [pq.b64uEncode(Uint8List(32)), after, 0], // wrong length
           'e' * 64: [12345, after, 0], // pk not a string
-          author: [pq.b64uEncode(pk), after, 0],
+          // A full row, so the surviving entry keeps its key: a short row is
+          // valid but pre-split, and restores keyless by design (see
+          // 'a pre-split registry row does not pin a peer classical').
+          author: [pq.b64uEncode(pk), after, 0, 1, 1, 1],
         }, nowSec: before);
       expect(r.knownPeers(nowSec: before), [author]);
     });
@@ -340,6 +343,65 @@ void main() {
                       .toJson())!
               .postQuantumCapable,
           isFalse);
+    });
+  });
+
+  group('a pre-split registry row does not pin a peer classical', () {
+    // The registry is persisted and restored so a reload does not send the next
+    // message classically while it looks every peer up again. Rows written
+    // BEFORE the pq1/pq2 split carry no format fields, and reading their
+    // absence as "layered: no" made them both unusable — the send path only
+    // seals the layered format — and unrefreshable, because the lookup ended on
+    // any entry that had a key at all. Every message to such a peer went
+    // classical, in both directions, for as long as the cache lived: which is
+    // every account that predates the split.
+    final key = unhex(a['kemPublicKey'] as String);
+    const peer =
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final exp = nowSec + 3 * 86400;
+    final b64 = pq.b64uEncode(key);
+
+    PqRegistry hydrated(List<Object?> row) {
+      final r = PqRegistry();
+      r.hydrate({peer: row}, nowSec: nowSec);
+      return r;
+    }
+
+    test('a current row restores a usable key', () {
+      final r = hydrated([b64, exp, 0, 1, 1, 1]);
+      expect(r.keyFor(peer, nowSec: nowSec, enabled: true), isNotNull);
+      expect(r.acceptsLayered(peer, nowSec: nowSec, enabled: true), isTrue);
+    });
+
+    test('a pre-split row restores without its key', () {
+      final r = hydrated([b64, exp, 0, 1]);
+      expect(r.keyFor(peer, nowSec: nowSec, enabled: true), isNull,
+          reason: 'a key the send path must refuse to seal to is not a key');
+      expect(r.acceptsLayered(peer, nowSec: nowSec, enabled: true), isFalse);
+    });
+
+    test('...but the peer is still a known Nymchat client', () {
+      // Which is what suppresses the Bitchat wrap, and what leaves the
+      // announcement lookup a reason to go and ask again.
+      final r = hydrated([b64, exp, 0, 1]);
+      expect(r.isKnownNymchatClient(peer, nowSec: nowSec), isTrue);
+    });
+
+    test('a fresh announcement repairs it', () {
+      final r = hydrated([b64, exp, 0, 1]);
+      r.record(peer, key, exp, 0,
+          rootSeeded: true, acceptsLegacy: false, acceptsLayered: true);
+      expect(r.acceptsLayered(peer, nowSec: nowSec, enabled: true), isTrue);
+      expect(
+          PqPmPlan.decide(
+            recipientKemKey: r.keyFor(peer, nowSec: nowSec, enabled: true),
+            recipientAcceptsLayered:
+                r.acceptsLayered(peer, nowSec: nowSec, enabled: true),
+            knownBitchat: false,
+            knownNym: false,
+          ).pq,
+          isTrue);
     });
   });
 
@@ -1017,8 +1079,21 @@ void main() {
         peer: [pq.b64uEncode(pk), exp, 0]
       };
       final back = PqRegistry()..hydrate(legacyRow, nowSec: now);
-      expect(back.keyFor(peer, nowSec: now, enabled: true), isNotNull);
       expect(back.isRootSeeded(peer, nowSec: now, enabled: true), isFalse);
+      // And, being pre-split, it restores WITHOUT its key: the only format
+      // still produced is the layered one, and the row does not say the peer
+      // accepts it. The entry still proves them a Nymchat client.
+      expect(back.keyFor(peer, nowSec: now, enabled: true), isNull);
+      expect(back.isKnownNymchatClient(peer, nowSec: now), isTrue);
+    });
+
+    test('a row that records the formats keeps its key', () {
+      final back = PqRegistry()
+        ..hydrate({
+          peer: [pq.b64uEncode(pk), exp, 0, 0, 1, 1]
+        }, nowSec: now);
+      expect(back.keyFor(peer, nowSec: now, enabled: true), isNotNull);
+      expect(back.acceptsLayered(peer, nowSec: now, enabled: true), isTrue);
     });
   });
 }

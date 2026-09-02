@@ -474,11 +474,17 @@ class PqRegistry {
         }
         if (pk.length != mlKemPublicKeyLength) continue;
       }
+      // A row written BEFORE the formats were recorded says nothing about
+      // which one this peer accepts, and the only format still produced is the
+      // layered one. Restoring such a row's key would hand the send path a key
+      // it must refuse to seal to, so the entry comes back KEYLESS: still proof
+      // the peer runs Nymchat — which is what suppresses the Bitchat wrap —
+      // while leaving the announcement lookup a reason to go and ask again.
+      final preSplit = v.length <= 5;
       // Absent on rows written before the root existed — those peers were
       // legacy, so the default is the truth rather than a guess.
-      record(entry.key, pk, exp, epoch,
+      record(entry.key, preSplit ? null : pk, exp, epoch,
           rootSeeded: v.length > 3 && v[3] == 1,
-          // Rows written before the split carried the combined format only.
           acceptsLegacy: v.length > 4 ? v[4] == 1 : true,
           acceptsLayered: v.length > 5 && v[5] == 1);
     }

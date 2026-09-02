@@ -4750,14 +4750,22 @@ class NostrController {
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final nowSec = nowMs ~/ 1000;
-    // Only an entry WITH A KEY ends the search. A keyless one says "this is a
-    // Nymchat client that published no post-quantum key" — true when we
-    // recorded it, and recorded for a week. A peer who was on an older build,
+    // Only an entry we can actually SEND to ends the search, which means the
+    // LAYERED format: it is the only one still produced, so an entry carrying a
+    // key we would never seal to is no better than a keyless one. Testing for a
+    // key alone made a restored PRE-SPLIT row — written before the formats were
+    // recorded, so `acceptsLayered` reads false — both unusable and
+    // unrefreshable: the send path withheld the key and this returned early
+    // rather than fetching the announcement that would have set the flag, so
+    // every message to that peer went classical, in both directions, for as
+    // long as the cache survived.
+    //
+    // A keyless entry is likewise a reason to look again, not to stop. It says
+    // "a Nymchat client that published no post-quantum key" — true when we
+    // recorded it, and recorded for a week; a peer who was on an older build,
     // or signed in with an extension, and has since switched to their nsec
-    // would go on getting classical messages for the rest of that week if this
-    // returned early on the stale answer. The point of this lookup is the key,
-    // so not having one is a reason to look again, not to stop.
-    if (_pqRegistry.keyFor(pubkey, nowSec: nowSec, enabled: true) != null) {
+    // would go on getting classical messages for the rest of that week.
+    if (_pqRegistry.acceptsLayered(pubkey, nowSec: nowSec, enabled: true)) {
       return Future<void>.value();
     }
     final existing = _pqLookups[pubkey];
