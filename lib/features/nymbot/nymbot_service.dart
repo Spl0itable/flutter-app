@@ -354,6 +354,7 @@ class NymbotService {
   Future<Map<String, dynamic>> voucherKeys() async {
     final res = await _postRaw(
       const <String, dynamic>{'action': 'voucher-keys'},
+      timeout: _defaultTimeout,
     );
     _throwOnError(res);
     return res.data;
