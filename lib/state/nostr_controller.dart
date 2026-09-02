@@ -2856,7 +2856,10 @@ class NostrController {
     final sender = rumor['pubkey'] as String?;
     if (sender != null && sender.isNotEmpty && sender != self) {
       if (u.isBitchat) {
-        _bitchatUsers.add(sender);
+        // WITH the time it happened: the post-quantum send plan weighs this
+        // against the peer's announcement, and the older evidence must not win.
+        _noteBitchatFormatSeen(
+            sender, (rumor['created_at'] as int?) ?? _nowSecForBitchat());
       } else if (_tags(rumor).any((t) => t.length > 1 && t[0] == 'x')) {
         _nymUsers.add(sender);
       }
@@ -4669,6 +4672,25 @@ class NostrController {
   /// send them a parallel `bitchat1:` wrap so the bitchat app can decrypt us.
   final Set<String> _bitchatUsers = <String>{};
 
+  /// WHEN a bitchat-format wrap from each of them last opened. The set above
+  /// answers "does this peer speak Bitchat at all", which a dozen call sites
+  /// ask; only the send plan needs the time, to weigh it against the peer's
+  /// announcement ([PqPmPlan.decide]). A pubkey with no entry reads as 0 —
+  /// older than any announcement.
+  final Map<String, int> _bitchatSeenAt = <String, int>{};
+
+  int _nowSecForBitchat() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  /// Records that a bitchat-format wrap from [pubkey] opened, at [atSec].
+  void _noteBitchatFormatSeen(String pubkey, int atSec) {
+    if (pubkey.isEmpty) return;
+    _bitchatUsers.add(pubkey);
+    if (atSec > (_bitchatSeenAt[pubkey] ?? 0)) _bitchatSeenAt[pubkey] = atSec;
+    while (_bitchatSeenAt.length > 5000) {
+      _bitchatSeenAt.remove(_bitchatSeenAt.keys.first);
+    }
+  }
+
   /// Peers we've received a Nymchat-format PM/receipt from (PWA `nymUsers`) —
   /// they get a NIP-17 wrap. An UNKNOWN peer (in neither set) gets BOTH.
   final Set<String> _nymUsers = <String>{};
@@ -5570,6 +5592,10 @@ class NostrController {
             _pqRegistry.isKnownNymchatClient(recipientPubkey, nowSec: nowSec),
         recipientAcceptsLayered: _pqRegistry.acceptsLayered(recipientPubkey,
             nowSec: nowSec, enabled: pqOn),
+        // The two dated facts the plan weighs against each other.
+        bitchatSeenAtSec: _bitchatSeenAt[recipientPubkey] ?? 0,
+        announcedAtSec:
+            _pqRegistry.announcedAtFor(recipientPubkey, nowSec: nowSec),
       );
     } catch (e) {
       debugPrint('[PQ] send plan failed, falling back to dual-send: $e');
