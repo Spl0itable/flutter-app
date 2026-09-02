@@ -4836,7 +4836,19 @@ class NostrController {
     // recorded it, and recorded for a week; a peer who was on an older build,
     // or signed in with an extension, and has since switched to their nsec
     // would go on getting classical messages for the rest of that week.
-    if (_pqRegistry.acceptsLayered(pubkey, nowSec: nowSec, enabled: true)) {
+    // ...and only while it can still settle the recency question the send plan
+    // is about to ask. We stop refreshing an announcement once it is usable, so
+    // a cached one goes stale by design — a peer who republishes every few
+    // hours can easily have a two-day-old entry here while a Bitchat-format
+    // message from them arrived last night. Concluding "Bitchat is newer" off
+    // that comparison is concluding off our own staleness, and it is
+    // self-reinforcing: their client makes the same call about us, so each side
+    // keeps replying in the format that keeps the other pinned.
+    final announcedAt = _pqRegistry.announcedAtFor(pubkey, nowSec: nowSec);
+    final staleVsBitchat =
+        announcedAt > 0 && (_bitchatSeenAt[pubkey] ?? 0) > announcedAt;
+    if (!staleVsBitchat &&
+        _pqRegistry.acceptsLayered(pubkey, nowSec: nowSec, enabled: true)) {
       return Future<void>.value();
     }
     final existing = _pqLookups[pubkey];

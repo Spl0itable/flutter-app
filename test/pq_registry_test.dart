@@ -388,6 +388,17 @@ void main() {
       expect(r.isKnownNymchatClient(peer, nowSec: nowSec), isTrue);
     });
 
+    test('a restored row dates itself from its expiry', () {
+      // Every publish stamps `exp = now + pqTtl`, so the expiry IS the signing
+      // time. The send plan weighs that against the last Bitchat-format message
+      // from the same peer; a restore that could not answer "when" handed the
+      // verdict to any Bitchat traffic, however old.
+      final r = hydrated([b64, exp, 0, 1, 1, 1]);
+      expect(r.announcedAtFor(peer, nowSec: nowSec),
+          exp - pqTtl.inSeconds);
+      expect(r.announcedAtFor(peer, nowSec: nowSec), greaterThan(0));
+    });
+
     test('a fresh announcement repairs it', () {
       final r = hydrated([b64, exp, 0, 1]);
       r.record(peer, key, exp, 0,
