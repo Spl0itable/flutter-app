@@ -17,8 +17,6 @@ String why({
   bool haveEntry = true,
   bool haveKey = true,
   bool acceptsLayered = true,
-  int bitchatSeenAtSec = 0,
-  int announcedAtSec = 1000,
   int? lookupAgeSec,
 }) =>
     pqPeerDiagnosis(
@@ -27,8 +25,6 @@ String why({
       haveEntry: haveEntry,
       haveKey: haveKey,
       acceptsLayered: acceptsLayered,
-      bitchatSeenAtSec: bitchatSeenAtSec,
-      announcedAtSec: announcedAtSec,
       lookupAgeSec: lookupAgeSec,
     );
 
@@ -53,13 +49,14 @@ void main() {
     expect(why(acceptsLayered: false), contains('legacy format'));
   });
 
-  test('newer Bitchat traffic is named as the reason', () {
-    expect(why(bitchatSeenAtSec: 2000, announcedAtSec: 1000),
-        contains('Bitchat-format message'));
-  });
-
-  test('older Bitchat traffic is not', () {
-    expect(why(bitchatSeenAtSec: 500, announcedAtSec: 1000), 'post-quantum');
+  test('a live layered key settles it, whatever the Bitchat traffic', () {
+    // The Bitchat app cannot publish an announcement, so a `v2:` wrap from a
+    // peer who publishes one is their Nymchat client dual-sending. Bitchat
+    // traffic only decides for a peer with no usable key, and there the
+    // missing key is the nearer reason.
+    expect(why(), 'post-quantum');
+    expect(why(haveKey: false), contains('no ML-KEM key'));
+    expect(why(acceptsLayered: false), contains('legacy format'));
   });
 
   test('an unsupported build says so before anything else', () {
@@ -85,11 +82,7 @@ void main() {
             bitchatSeenAtSec: bAt,
             announcedAtSec: 1000,
           );
-          final d = why(
-              haveKey: key,
-              acceptsLayered: layered,
-              bitchatSeenAtSec: bAt,
-              announcedAtSec: 1000);
+          final d = why(haveKey: key, acceptsLayered: layered);
           expect(d == 'post-quantum', plan.pq,
               reason: 'key=$key layered=$layered bitchatAt=$bAt -> "$d"');
         }

@@ -4723,8 +4723,6 @@ class NostrController {
         haveEntry: _pqRegistry.isKnownNymchatClient(pk, nowSec: nowSec),
         haveKey: key != null,
         acceptsLayered: layered,
-        bitchatSeenAtSec: bitchatAt,
-        announcedAtSec: announcedAt,
         lookupAgeSec: miss == null
             ? null
             : (DateTime.now().millisecondsSinceEpoch - miss) ~/ 1000,
@@ -5179,7 +5177,8 @@ class NostrController {
   /// Ingests a peer's (already signature-verified) `nym-pq` announcement.
   void _ingestPqAnnouncement(NostrEvent event) {
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    _pqRegistry.ingest(event.pubkey, event.content, nowSec: nowSec);
+    _pqRegistry.ingest(event.pubkey, event.content,
+        nowSec: nowSec, createdAt: event.createdAt);
     if (event.pubkey == _identity?.pubkey) {
       final ann = PqAnnouncement.parse(event.content);
       if (ann != null && !ann.retracted) {

@@ -307,12 +307,27 @@ class PqRegistry {
   /// A KEM-less announcement is recorded, not dropped: it still proves the peer
   /// runs Nymchat, which is what [isKnownNymchatClient] reports and what stops
   /// the send path wasting a Bitchat wrap on them.
-  void ingest(String pubkey, String content, {required int nowSec}) {
+  void ingest(String pubkey, String content,
+      {required int nowSec, int createdAt = 0}) {
     final ann = PqAnnouncement.parse(content);
     if (ann == null) return;
     if (ann.retracted || ann.expiresAt <= nowSec) {
       _keys.remove(pubkey);
       return;
+    }
+    // Kind 30078 is ADDRESSABLE: one event per (kind, pubkey, d-tag), and the
+    // NEWEST wins. Applying whichever arrived last instead let older copies
+    // undo a good one, and older copies arrive constantly — the standing
+    // subscription replays on reconnect, the archive returns several rows, and
+    // a peer's own boot publish goes out KEYLESS a moment before the one
+    // carrying the key (it is withheld until their settings load resolves the
+    // root). Any of those landing second replaced a live ML-KEM key with
+    // `nym:1` and nothing else. Every publish stamps `exp = now + pqTtl`, so
+    // the expiry dates the announcement without storing anything extra.
+    final held = _entry(pubkey, nowSec);
+    if (held != null && createdAt > 0) {
+      final heldAt = held.exp - pqTtl.inSeconds;
+      if (createdAt < heldAt) return;
     }
     record(pubkey, ann.publicKey, ann.expiresAt, ann.epoch,
         rootSeeded: ann.rootSeeded,
@@ -504,8 +519,6 @@ String pqPeerDiagnosis({
   required bool haveEntry,
   required bool haveKey,
   required bool acceptsLayered,
-  required int bitchatSeenAtSec,
-  required int announcedAtSec,
   int? lookupAgeSec,
 }) {
   if (!supported) return 'ML-KEM did not load on this device';
@@ -521,11 +534,11 @@ String pqPeerDiagnosis({
     return 'their announcement offers only the legacy format (pk without pk2), '
         'which is never sent';
   }
-  if (bitchatSeenAtSec > 0 &&
-      !(announcedAtSec > 0 && announcedAtSec >= bitchatSeenAtSec)) {
-    return 'a Bitchat-format message from them is NEWER than their '
-        'announcement, so they get a readable Bitchat copy instead';
-  }
+  // Nothing below can take it away: a live layered key settles it, because the
+  // Bitchat app cannot publish an announcement, so a `v2:` wrap from a peer who
+  // publishes one is their Nymchat client dual-sending. Bitchat traffic only
+  // decides for a peer with no usable key, and there the missing key is already
+  // the nearer reason — reported above.
   return 'post-quantum';
 }
 
@@ -739,7 +752,26 @@ class PqPmPlan {
     final bitchatIsCurrent = knownBitchat &&
         bitchatSeenAtSec > 0 &&
         !(announcedAtSec > 0 && announcedAtSec >= bitchatSeenAtSec);
-    final bitchat = bitchatIsCurrent || !proven;
+
+    // ...but a peer holding a LIVE key we can seal to is a Nymchat client, and
+    // that settles it, because the Bitchat app cannot publish a kind-30078
+    // announcement at all.
+    //
+    // The `v2:` wrap we decrypted from them is that same Nymchat client
+    // DUAL-SENDING: its plan reached this line about us, found no announcement
+    // of ours yet, and sent both formats — exactly what ours does. Reading it
+    // as "they run Bitchat" is reading our own protocol back as evidence
+    // against itself, and it is symmetric, so both sides do it to each other:
+    // each keeps replying in the format that keeps the other pinned to
+    // classical. That is the loop that left established conversations
+    // non-post-quantum while new ones worked.
+    //
+    // A peer who really moved from Nymchat to Bitchat keeps their announcement
+    // for its remaining TTL and would get a wrap they cannot open until it
+    // lapses. That is the accepted cost: bounded by an expiry nobody is
+    // republishing, where the loop above never ends on its own.
+    final bitchat =
+        announced != null ? false : (bitchatIsCurrent || !proven);
 
     // A post-quantum wrap never accompanies a Bitchat copy of the same
     // plaintext: the copy is the easier target, so pairing them buys a quantum
