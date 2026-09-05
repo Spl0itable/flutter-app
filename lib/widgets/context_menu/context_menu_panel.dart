@@ -127,7 +127,7 @@ class ContextMenuPanel extends ConsumerWidget {
     final targetIsMod = group != null && group.mods.contains(target.pubkey);
     return CtxTarget(
       pubkey: target.pubkey,
-      nym: target.nym,
+      nym: pickDisplayNym(s.users[target.pubkey]?.nym, target.nym),
       isSelf: target.isSelf,
       content: target.content,
       messageId: target.messageId,
