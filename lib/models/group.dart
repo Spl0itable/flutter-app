@@ -10,6 +10,8 @@ class GroupControlType {
   static const revokeMod = 'group-revoke-mod';
   static const promoteAdmin = 'group-promote-admin';
   static const revokeAdmin = 'group-revoke-admin';
+  static const rosterReq = 'group-roster-req';
+  static const roster = 'group-roster';
   static const transferOwner = 'group-transfer-owner';
   static const metadata = 'group-metadata';
   static const deleteMessage = 'group-delete-message';

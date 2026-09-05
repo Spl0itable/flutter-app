@@ -3016,6 +3016,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// on regular traffic reaches members who missed the `group-metadata`
   /// control event — this is how the PWA keeps sidebar/header titles current
   /// even when the owner's rename broadcast never arrived.
+  void notifyGroupsChanged() {
+    _scheduleEmit();
+    onGroupStoreChanged?.call();
+  }
+
   void mergeGroupFromMessage({
     required String groupId,
     required String name,

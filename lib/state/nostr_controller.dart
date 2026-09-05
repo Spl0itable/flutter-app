@@ -3272,6 +3272,10 @@ class NostrController {
           timestampMs: m.createdAt * 1000,
           senderPubkey: senderPubkey,
         );
+        final advertised = _tagValue(tags, 'rh');
+        if (advertised != null && advertised.isNotEmpty) {
+          unawaited(_maybeRepairRoster(groupId, advertised, senderPubkey));
+        }
         // `meta_ts` piggyback (groups.js:1293-1296): the owner's recent
         // metadata change rides regular messages for a window
         // (`_attachGroupMetaTags`), so members who missed the control event
@@ -3626,6 +3630,44 @@ class NostrController {
     // :2583, which sends `invite_epoch`) lands in the void — the whole invite-link
     // join never completes (F04-H2). This must run BEFORE the generic
     // `applyGroupControl` (join-request has no `applyControlEvent` case → ignored).
+    if (type == GroupControlType.rosterReq) {
+      final group = appState.groupById(groupId);
+      final identity = _identity;
+      final groups = _groups;
+      if (group == null || identity == null || groups == null) return;
+      if (senderPubkey == identity.pubkey) return;
+      if (!GroupLogic.canModerate(group, identity.pubkey)) return;
+      if (!group.members.contains(senderPubkey)) return;
+      final key = '$groupId:$senderPubkey';
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if ((_rosterReplyTs[key] ?? 0) > nowMs - kGroupRosterRepairCooldownMs) {
+        return;
+      }
+      _rosterReplyTs[key] = nowMs;
+      final replyTags = GroupLogic.buildRosterReplyTags(group, senderPubkey);
+      unawaited(groups.sendControl(
+        group: group,
+        selfPubkey: identity.pubkey,
+        type: GroupControlType.roster,
+        extraTags: replyTags
+            .where((t) => t[0] != 'g' && t[0] != 'subject' && t[0] != 'type')
+            .toList(),
+        recipients: [senderPubkey],
+      ));
+      return;
+    }
+
+    if (type == GroupControlType.roster) {
+      final group = appState.groupById(groupId);
+      final identity = _identity;
+      if (group == null || identity == null) return;
+      if (senderPubkey == identity.pubkey) return;
+      if (GroupLogic.applyRoster(group, tags, senderPubkey, identity.pubkey)) {
+        appState.notifyGroupsChanged();
+      }
+      return;
+    }
+
     if (type == GroupControlType.joinRequest) {
       final group = appState.groupById(groupId);
       if (group == null) return;
@@ -6886,6 +6928,35 @@ class NostrController {
   /// per-member state, so the control goes to every member plus the unbanned
   /// user: a member that keeps the ban filters the re-added user back out of
   /// its roster and never wraps to them again.
+  final Map<String, int> _rosterReplyTs = {};
+  final Map<String, int> _rosterRepairTs = {};
+
+  Future<void> _maybeRepairRoster(
+      String groupId, String advertised, String senderPubkey) async {
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    final identity = _identity;
+    final groups = _groups;
+    if (group == null || identity == null || groups == null) return;
+    if (GroupLogic.rosterHash(groupId, group.members) == advertised) return;
+    if (!GroupLogic.isBareShell(group, identity.pubkey) &&
+        !group.members.contains(senderPubkey)) {
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if ((_rosterRepairTs[groupId] ?? 0) > nowMs - kGroupRosterRepairCooldownMs) {
+      return;
+    }
+    _rosterRepairTs[groupId] = nowMs;
+    await groups.sendControl(
+      group: group,
+      selfPubkey: identity.pubkey,
+      type: GroupControlType.rosterReq,
+      extraTags: const [],
+      recipients: [senderPubkey],
+    );
+  }
+
   Future<bool> unbanFromGroup(String groupId, String pubkey) async {
     final identity = _identity;
     final groups = _groups;
@@ -7989,6 +8060,7 @@ class NostrController {
       if (group == null) return;
       final ek = _groups!.keysFor(group.id);
       final others = group.members.where((p) => p != identity.pubkey).toList();
+      if (others.length > kGroupTypingMaxMembers) return;
       await service.publishTyping(
         status: 'start',
         recipients: others,

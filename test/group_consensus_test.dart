@@ -379,4 +379,82 @@ void main() {
       expect(GroupLogic.joinAdmitRank(g, owner, _pk(9)), 0);
     });
   });
+
+  group('the roster digest', () {
+    test('vectors match the PWA byte for byte', () {
+      expect(GroupLogic.rosterHash('ab' * 16, ['11' * 32, '22' * 32]),
+          '93184dc64e871a48');
+      expect(GroupLogic.rosterHash('cd' * 16, const <String>[]),
+          '02cfadbb08532833');
+    });
+
+    test('order and duplicates do not change it', () {
+      final gid = 'ab' * 16;
+      final m = [_pk(1), _pk(2), _pk(3)];
+      final h = GroupLogic.rosterHash(gid, m);
+      expect(GroupLogic.rosterHash(gid, m.reversed), h);
+      expect(GroupLogic.rosterHash(gid, [...m, _pk(1)]), h);
+      expect(GroupLogic.rosterHash(gid, [...m, _pk(4)]), isNot(h));
+      expect(GroupLogic.rosterHash('cd' * 16, m), isNot(h));
+    });
+
+    test('an ordinary message carries the digest, not the roster', () {
+      final owner = _pk(0);
+      final g = Group(
+        id: 'ab' * 16,
+        name: 'Room',
+        members: [owner, _pk(1), _pk(2)],
+        createdBy: owner,
+      );
+      final rumor = GroupLogic.buildGroupMessageRumor(
+        group: g,
+        selfPubkey: owner,
+        content: 'hi',
+        nymMessageId: 'x' * 64,
+        ephemeralPk: _pk(5),
+      );
+      expect(rumor.tags.where((t) => t[0] == 'p'), isEmpty);
+      final rh = rumor.tags.firstWhere((t) => t[0] == 'rh');
+      expect(rh[1], GroupLogic.rosterHash(g.id, g.members));
+    });
+
+    test('a served roster converges the asker and respects authority', () {
+      final owner = _pk(0), mod = _pk(1), plain = _pk(2), asker = _pk(3);
+      final source = Group(
+        id: 'g13',
+        members: [owner, mod, plain, asker, _pk(4)],
+        createdBy: owner,
+        admins: [_pk(4)],
+        mods: [mod],
+        banned: [_pk(9)],
+      );
+      final tags = GroupLogic.buildRosterReplyTags(source, asker);
+
+      final target = Group(
+          id: 'g13', members: [owner, asker], createdBy: owner, mods: [mod]);
+      expect(GroupLogic.applyRoster(target, tags, mod, asker), isTrue);
+      expect(target.members.length, 5);
+      expect(GroupLogic.rosterHash('g13', target.members),
+          GroupLogic.rosterHash('g13', source.members));
+      expect(target.admins, contains(_pk(4)));
+      expect(target.mods, contains(mod));
+      expect(target.members, isNot(contains(_pk(9))));
+
+      final unauthorized =
+          Group(id: 'g13', members: [owner, asker], createdBy: owner);
+      expect(GroupLogic.applyRoster(unauthorized, tags, plain, asker), isFalse);
+      expect(unauthorized.members.length, 2);
+
+      final evicted =
+          Group(id: 'g13', members: [owner, _pk(7)], createdBy: owner, mods: [mod]);
+      expect(GroupLogic.applyRoster(evicted, tags, mod, _pk(7)), isFalse);
+      expect(evicted.members, contains(_pk(7)));
+
+      final shell = Group(id: 'g13', members: [asker]);
+      expect(GroupLogic.applyRoster(shell, tags, mod, asker), isTrue);
+      expect(shell.members.length, 5);
+      expect(shell.createdBy, owner);
+      expect(GroupLogic.applyRoster(shell, tags, plain, asker), isFalse);
+    });
+  });
 }

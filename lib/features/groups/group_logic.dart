@@ -15,10 +15,13 @@ const int kEphemeralPrevKeysMax = 30;
 
 /// Membership cap: every group message costs one gift wrap per member, so
 /// membership is bounded to keep per-message fan-out (encrypt + publish work)
-/// bounded (PWA `MAX_GROUP_MEMBERS`).
-const int kMaxGroupMembers = 100;
+const int kMaxGroupMembers = 500;
 
 const int kGroupAdmitBackoffMs = 4000;
+
+const int kGroupRosterRepairCooldownMs = 300000;
+
+const int kGroupTypingMaxMembers = 50;
 
 /// Key-resync heartbeat: after being offline this long, our stored view of
 /// other members' rotating ephemeral keys may have expired off relays, so we
@@ -275,7 +278,7 @@ class GroupLogic {
     final ms = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final sec = nowSec ?? (ms ~/ 1000);
     final tags = <List<String>>[
-      for (final pk in group.members) ['p', pk],
+      ['rh', rosterHash(group.id, group.members)],
       ['g', group.id],
       if (group.name.isNotEmpty) ['subject', group.name],
       ['x', nymMessageId],
@@ -528,6 +531,68 @@ class GroupLogic {
     if (isOwner(g, target)) return false;
     if (spec.grant && isAdmin(g, target)) return false;
     return isOwner(g, actor) || outranks(g, actor, target) || isMod(g, target);
+  }
+
+  static List<List<String>> buildRosterReplyTags(Group g, String requester) {
+    return <List<String>>[
+      for (final pk in g.members) ['p', pk],
+      ['g', g.id],
+      if (g.name.isNotEmpty) ['subject', g.name],
+      ['type', GroupControlType.roster],
+      if (g.createdBy != null) ['owner', g.createdBy!],
+      for (final pk in g.admins) ['admin', pk],
+      for (final pk in g.mods) ['mod', pk],
+      for (final pk in g.banned) ['ban', pk],
+    ];
+  }
+
+  static bool isBareShell(Group g, String selfPubkey) =>
+      (g.createdBy == null || g.createdBy!.isEmpty) &&
+      g.members.where((pk) => pk != selfPubkey).isEmpty;
+
+  static bool applyRoster(
+      Group g, List<List<String>> tags, String senderPubkey, String selfPubkey) {
+    final bootstrap = isBareShell(g, selfPubkey);
+    if (!bootstrap && !canModerate(g, senderPubkey)) return false;
+    List<String> tagged(String k) => [
+          for (final t in tags)
+            if (t.length > 1 && t[0] == k) t[1]
+        ];
+    final members = tagged('p');
+    if (members.isEmpty) return false;
+    final banned = tagged('ban').toSet();
+    final next = members.where((pk) => !banned.contains(pk)).toSet().toList();
+    if (!next.contains(selfPubkey)) return false;
+    final admins =
+        tagged('admin').where((pk) => next.contains(pk)).toSet().toList();
+    final mods = tagged('mod')
+        .where((pk) => next.contains(pk) && !admins.contains(pk))
+        .toSet()
+        .toList();
+    if (bootstrap) {
+      final owner = tagValue(tags, 'owner');
+      if (owner != null && owner.isNotEmpty) g.createdBy = owner;
+    }
+    g.members
+      ..clear()
+      ..addAll(next);
+    g.banned
+      ..clear()
+      ..addAll(banned);
+    g.admins
+      ..clear()
+      ..addAll(admins);
+    g.mods
+      ..clear()
+      ..addAll(mods);
+    return true;
+  }
+
+  static String rosterHash(String groupId, Iterable<String> members) {
+    final sorted = members.toSet().toList()..sort();
+    final digest =
+        sha256.convert(utf8.encode('nym-roster-v1:$groupId:${sorted.join(',')}'));
+    return hex.encode(digest.bytes.sublist(0, 8));
   }
 
   static String genesisId(String genesisOwner, String nonceHex) => hex.encode(
