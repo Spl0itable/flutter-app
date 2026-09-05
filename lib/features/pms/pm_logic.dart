@@ -276,7 +276,6 @@ class TypingInfo {
   final String? groupId;
   final String? pubkey;
 
-  /// How long the sender says the indicator stays valid; 0 when not stated.
   final int ttlSec;
 
   bool get isStart => status == 'start';
