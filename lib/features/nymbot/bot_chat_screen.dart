@@ -2690,12 +2690,17 @@ class _ProModelPickerSheetState extends State<ProModelPickerSheet> {
         m.description.toLowerCase().contains(q);
   }
 
-  /// "vision · reasoning · tools" — only the flags the catalog actually set.
+  /// "vision · reasoning · tools · cloudflare" — only the flags the catalog
+  /// actually set. Cloudflare-hosted weights run on the worker's AI binding,
+  /// with no gateway hop and no upstream provider to reject the call, which is
+  /// worth saying on the row.
   String _tagLine(ProModel m) {
     final tags = <String>[
       if (m.vision) tr('vision'),
       if (m.reasoning) tr('reasoning'),
       if (m.tools) tr('tools'),
+      // A brand name, so it is not run through tr().
+      if (m.cloudflareHosted) 'cloudflare',
     ];
     return tags.join(' · ');
   }

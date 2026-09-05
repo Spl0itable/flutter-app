@@ -588,7 +588,25 @@ class BotChatController extends StateNotifier<BotChatState> {
   /// Show/clear the synthetic "Nymbot is thinking" indicator in the bot PM —
   /// `_setBotTyping` (pms.js:1980-1995): 30s auto-expiry, rendered by the
   /// shared typing-indicator strip (verb 'thinking' for the bot).
+  /// Keeps the 30s expiry refreshed while a reply is still in flight. The
+  /// expiry exists so a killed app doesn't leave the indicator stuck forever,
+  /// but a Nymbot turn can run to the 180s request timeout — a frontier model
+  /// thinking, or the transport walk trying a second route — so setting it
+  /// once made the indicator vanish mid-reply on anything slower than 30s.
+  Timer? _typingHeartbeat;
+
   void _setBotTyping(bool on) {
+    _typingHeartbeat?.cancel();
+    _typingHeartbeat = null;
+    _pushBotTyping(on);
+    if (!on) return;
+    _typingHeartbeat = Timer.periodic(const Duration(seconds: 20), (t) {
+      if (!mounted) { t.cancel(); return; }
+      _pushBotTyping(true);
+    });
+  }
+
+  void _pushBotTyping(bool on) {
     _app.setTyping(
       storageKey: conversationKey,
       pubkey: kNymbotPubkey,
@@ -1505,6 +1523,12 @@ class BotChatController extends StateNotifier<BotChatState> {
   }
 
   // --- ?help (pms.js `_displayBotPmHelp`, :1733-1770) -------------------------
+
+  @override
+  void dispose() {
+    _typingHeartbeat?.cancel();
+    super.dispose();
+  }
 
   /// The live Pro model catalog, or the built-in list when it hasn't loaded.
   ProModelCatalog get _catalog {
