@@ -3516,6 +3516,16 @@ class NostrController {
           .where((t) => t.length > 1 && t[0] == 'mod')
           .map((t) => t[1])
           .toList();
+      final admins = tags
+          .where((t) => t.length > 1 && t[0] == 'admin')
+          .map((t) => t[1])
+          .toList();
+      final genesisOwner = _tagValue(tags, 'gowner');
+      final genesisNonce = _tagValue(tags, 'gnonce');
+      final genesis =
+          GroupLogic.verifyGenesis(groupId, genesisOwner, genesisNonce);
+      if (genesis == false) return;
+      if (genesis == true && senderPubkey != genesisOwner) return;
       // A bare shell (learned via a group MESSAGE before this invite, planted by
       // `mergeGroupFromMessage` with no owner/avatar) already exists: BACKFILL
       // its owner + appearance from the invite bootstrap instead of dropping them
@@ -3539,7 +3549,10 @@ class NostrController {
         name: name,
         members: members,
         mods: mods,
+        admins: admins,
         createdBy: owner,
+        genesisOwner: genesis == true ? genesisOwner : null,
+        genesisNonce: genesis == true ? genesisNonce : null,
         avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
         banner: (banner != null && banner.isNotEmpty) ? banner : null,
         description: (description != null && description.isNotEmpty)
@@ -3626,7 +3639,21 @@ class NostrController {
       if (reqEpoch != group.inviteEpoch) return;
       if (group.members.contains(senderPubkey)) return;
       if (group.banned.contains(senderPubkey)) return;
-      unawaited(addGroupMembers(groupId, [senderPubkey]));
+      final rank = GroupLogic.joinAdmitRank(group, identity.pubkey, senderPubkey);
+      if (rank <= 0) {
+        unawaited(addGroupMembers(groupId, [senderPubkey]));
+        return;
+      }
+      unawaited(Future<void>.delayed(
+          Duration(milliseconds: (rank > 6 ? 6 : rank) * kGroupAdmitBackoffMs),
+          () {
+        final now = appState.groupById(groupId);
+        if (now == null) return;
+        if (now.members.contains(senderPubkey)) return;
+        if (now.banned.contains(senderPubkey)) return;
+        if (!GroupLogic.canAddMembers(now, identity.pubkey)) return;
+        unawaited(addGroupMembers(groupId, [senderPubkey]));
+      }));
       return;
     }
 
@@ -3662,8 +3689,25 @@ class NostrController {
             .where((t) => t.length > 1 && t[0] == 'mod')
             .map((t) => t[1])
             .toList();
-        if (appState.groupById(groupId) == null) {
-          if (claimedOwner != null && claimedOwner == senderPubkey) {
+        final admins = tags
+            .where((t) => t.length > 1 && t[0] == 'admin')
+            .map((t) => t[1])
+            .toList();
+        final genesisOwner = _tagValue(tags, 'gowner');
+        final genesisNonce = _tagValue(tags, 'gnonce');
+        final genesis =
+            GroupLogic.verifyGenesis(groupId, genesisOwner, genesisNonce);
+        if (genesis == false) return;
+        final existing = appState.groupById(groupId);
+        if (existing?.genesisOwner != null &&
+            genesis == true &&
+            genesisOwner != existing!.genesisOwner) {
+          return;
+        }
+        if (existing == null) {
+          if (claimedOwner != null &&
+              claimedOwner == senderPubkey &&
+              (genesis != true || claimedOwner == genesisOwner)) {
             final allowInv = _tagValue(tags, 'allow_invites');
             final inviteEnabledTag = _tagValue(tags, 'invite_enabled');
             final inviteEpochTag = _tagValue(tags, 'invite_epoch');
@@ -3672,7 +3716,10 @@ class NostrController {
               name: name,
               members: members,
               mods: mods,
+              admins: admins,
               createdBy: claimedOwner,
+              genesisOwner: genesis == true ? genesisOwner : null,
+              genesisNonce: genesis == true ? genesisNonce : null,
               avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
               banner: (banner != null && banner.isNotEmpty) ? banner : null,
               description: (description != null && description.isNotEmpty)
@@ -6787,6 +6834,14 @@ class NostrController {
       _sendModRoleControl(groupId, targetPubkey, GroupControlType.transferOwner,
           ['owner', targetPubkey]);
 
+  Future<bool> promoteAdmin(String groupId, String targetPubkey) =>
+      _sendModRoleControl(groupId, targetPubkey, GroupControlType.promoteAdmin,
+          ['admin', targetPubkey]);
+
+  Future<bool> revokeAdmin(String groupId, String targetPubkey) =>
+      _sendModRoleControl(groupId, targetPubkey, GroupControlType.revokeAdmin,
+          ['admin', targetPubkey]);
+
   Future<bool> _sendModRoleControl(
     String groupId,
     String targetPubkey,
@@ -6798,8 +6853,15 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     final group = appState.groupById(groupId);
     if (identity == null || groups == null || group == null) return false;
-    // Promote/revoke/transfer are owner-only (group_logic §4.1).
-    if (!GroupLogic.isOwner(group, identity.pubkey)) return false;
+    final spec = groupRoleEvents[type];
+    if (spec != null) {
+      if (!GroupLogic.roleEventAuthorized(
+          group, spec, identity.pubkey, targetPubkey)) {
+        return false;
+      }
+    } else if (!GroupLogic.isOwner(group, identity.pubkey)) {
+      return false; // transfer stays owner-only
+    }
     final extraTags = [tag];
     final ok = await groups.sendControl(
       group: group,

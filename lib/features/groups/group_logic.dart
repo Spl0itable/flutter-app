@@ -1,4 +1,8 @@
+import 'dart:convert';
 import 'dart:typed_data';
+
+import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart';
 
 import '../../core/constants/event_kinds.dart';
 import '../../core/crypto/keys.dart';
@@ -13,6 +17,8 @@ const int kEphemeralPrevKeysMax = 30;
 /// membership is bounded to keep per-message fan-out (encrypt + publish work)
 /// bounded (PWA `MAX_GROUP_MEMBERS`).
 const int kMaxGroupMembers = 100;
+
+const int kGroupAdmitBackoffMs = 4000;
 
 /// Key-resync heartbeat: after being offline this long, our stored view of
 /// other members' rotating ephemeral keys may have expired off relays, so we
@@ -198,6 +204,41 @@ class GroupEphemeralKeys {
 
 /// Pure, socket-free group logic: rumor construction, role checks, control
 /// event application + stale guard. (docs/specs/03 §4)
+class GroupRoleSpec {
+  const GroupRoleSpec({
+    required this.tag,
+    required this.list,
+    required this.grant,
+    required this.ownerOnly,
+    required this.log,
+  });
+
+  final String tag;
+  final String list;
+  final bool grant;
+  final bool ownerOnly;
+  final String log;
+}
+
+const Map<String, GroupRoleSpec> groupRoleEvents = {
+  GroupControlType.promoteAdmin: GroupRoleSpec(
+      tag: 'admin',
+      list: 'admins',
+      grant: true,
+      ownerOnly: true,
+      log: 'promote-admin'),
+  GroupControlType.revokeAdmin: GroupRoleSpec(
+      tag: 'admin',
+      list: 'admins',
+      grant: false,
+      ownerOnly: true,
+      log: 'revoke-admin'),
+  GroupControlType.promoteMod: GroupRoleSpec(
+      tag: 'mod', list: 'mods', grant: true, ownerOnly: false, log: 'promote'),
+  GroupControlType.revokeMod: GroupRoleSpec(
+      tag: 'mod', list: 'mods', grant: false, ownerOnly: false, log: 'revoke'),
+};
+
 class GroupLogic {
   GroupLogic._();
 
@@ -272,7 +313,8 @@ class GroupLogic {
   /// mirrors `_attachGroupMetaTags` (groups.js:2135-2141): meta_ts, banner,
   /// avatar, description, allow_invites, invite_enabled, invite_epoch.
   static List<List<String>> groupMetaPiggybackTags(Group g, String selfPubkey) {
-    if (g.createdBy != selfPubkey || g.metaUpdatedAt <= 0) return const [];
+    if (!canAdminister(g, selfPubkey) || g.metaUpdatedAt <= 0) return const [];
+    if (g.metaUpdatedBy != null && g.metaUpdatedBy != selfPubkey) return const [];
     return [
       ['meta_ts', '${g.metaUpdatedAt}'],
       ['banner', g.banner ?? ''],
@@ -310,6 +352,8 @@ class GroupLogic {
       if (group.name.isNotEmpty) ['subject', group.name],
       ['type', GroupControlType.invite],
       ['owner', selfPubkey],
+      if (group.genesisOwner != null) ['gowner', group.genesisOwner!],
+      if (group.genesisNonce != null) ['gnonce', group.genesisNonce!],
       if (avatar != null && avatar.isNotEmpty) ['avatar', avatar],
       if (banner != null && banner.isNotEmpty) ['banner', banner],
       if (description != null && description.isNotEmpty)
@@ -396,7 +440,10 @@ class GroupLogic {
       if (group.name.isNotEmpty) ['subject', group.name],
       ['type', GroupControlType.addMember],
       if (owner != null && owner.isNotEmpty) ['owner', owner],
+      if (group.genesisOwner != null) ['gowner', group.genesisOwner!],
+      if (group.genesisNonce != null) ['gnonce', group.genesisNonce!],
       for (final mod in group.mods) ['mod', mod],
+      for (final admin in group.admins) ['admin', admin],
       if (avatar != null && avatar.isNotEmpty) ['avatar', avatar],
       if (banner != null && banner.isNotEmpty) ['banner', banner],
       if (description != null && description.isNotEmpty)
@@ -451,12 +498,63 @@ class GroupLogic {
   // ---- role checks ---------------------------------------------------------
 
   static bool isOwner(Group g, String pubkey) => g.createdBy == pubkey;
+  static bool isAdmin(Group g, String pubkey) => g.admins.contains(pubkey);
   static bool isMod(Group g, String pubkey) => g.mods.contains(pubkey);
+
+  static bool canAdminister(Group g, String pubkey) =>
+      isOwner(g, pubkey) || isAdmin(g, pubkey);
+
   static bool canModerate(Group g, String pubkey) =>
-      isOwner(g, pubkey) || isMod(g, pubkey);
+      canAdminister(g, pubkey) || isMod(g, pubkey);
+
   static bool canAddMembers(Group g, String pubkey) =>
       canModerate(g, pubkey) ||
       (g.members.contains(pubkey) && g.allowMemberInvites);
+
+  static int roleRank(Group g, String pubkey) {
+    if (isOwner(g, pubkey)) return 0;
+    if (isAdmin(g, pubkey)) return 1;
+    if (isMod(g, pubkey)) return 2;
+    return 3;
+  }
+
+  static bool outranks(Group g, String actor, String target) =>
+      roleRank(g, actor) < roleRank(g, target);
+
+  static bool roleEventAuthorized(
+      Group g, GroupRoleSpec spec, String actor, String target) {
+    if (spec.ownerOnly) return isOwner(g, actor);
+    if (!canAdminister(g, actor)) return false;
+    if (isOwner(g, target)) return false;
+    if (spec.grant && isAdmin(g, target)) return false;
+    return isOwner(g, actor) || outranks(g, actor, target) || isMod(g, target);
+  }
+
+  static String genesisId(String genesisOwner, String nonceHex) => hex.encode(
+      sha256.convert(utf8.encode('nym-group-v1:$genesisOwner:$nonceHex')).bytes);
+
+  static int joinAdmitRank(Group g, String selfPubkey, String joinerPubkey) {
+    final candidates =
+        g.members.where((pk) => canAddMembers(g, pk)).toList(growable: false);
+    if (!candidates.contains(selfPubkey)) return -1;
+    String score(String pk) => hex.encode(sha256
+        .convert(utf8.encode('${g.id}:$joinerPubkey:$pk'))
+        .bytes
+        .sublist(0, 8));
+    final ordered = candidates.toList()
+      ..sort((a, b) {
+        final c = score(a).compareTo(score(b));
+        return c != 0 ? c : a.compareTo(b);
+      });
+    return ordered.indexOf(selfPubkey);
+  }
+
+  static bool? verifyGenesis(String groupId, String? owner, String? nonce) {
+    if (owner == null || nonce == null) return null;
+    final hexRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+    if (!hexRe.hasMatch(owner) || !hexRe.hasMatch(nonce)) return null;
+    return genesisId(owner, nonce) == groupId;
+  }
 
   // ---- stale guard ---------------------------------------------------------
 
@@ -564,8 +662,6 @@ class GroupLogic {
   ///
   /// Role rules (docs/specs/03 §4.4–§4.5):
   /// - kick/ban: owner or mod; mods cannot act on the owner or other mods.
-  /// - unban: owner or mod.
-  /// - promote / revoke / transfer: owner only.
   /// - leave: the sender removes only themselves (no role required).
   /// - delete-message: owner or mod; mods cannot delete the owner's messages.
   static GroupControlResult applyControlEvent({
@@ -591,22 +687,21 @@ class GroupLogic {
           recordModEvent(group, ts, modKey, targetPubkey: target);
           group.members.remove(target);
           group.mods.remove(target);
+          group.admins.remove(target);
           _modLog(group, type: 'leave', actor: senderPubkey, target: target);
           return GroupControlResult.applied;
         }
-        final ownerAct = isOwner(group, senderPubkey);
-        final modAct = isMod(group, senderPubkey);
-        if (!ownerAct && !modAct) return GroupControlResult.unauthorized;
-        if (!ownerAct) {
-          // Mods can't kick the owner or other mods.
-          if (group.createdBy == target) return GroupControlResult.unauthorized;
-          if (group.mods.contains(target)) {
-            return GroupControlResult.unauthorized;
-          }
+        if (!canModerate(group, senderPubkey)) {
+          return GroupControlResult.unauthorized;
+        }
+        if (!isOwner(group, senderPubkey) &&
+            !outranks(group, senderPubkey, target)) {
+          return GroupControlResult.unauthorized;
         }
         recordModEvent(group, ts, modKey, targetPubkey: target);
         group.members.remove(target);
         group.mods.remove(target);
+        group.admins.remove(target);
         final banned = _hasTag(tags, 'ban', '1');
         if (banned && !group.banned.contains(target)) {
           group.banned.add(target);
@@ -630,31 +725,27 @@ class GroupLogic {
         return GroupControlResult.applied;
 
       case GroupControlType.promoteMod:
-        final target = tagValue(tags, 'mod');
-        if (target == null) return GroupControlResult.invalid;
-        if (isStaleModEvent(group, ts, modKey, targetPubkey: target)) {
-          return GroupControlResult.stale;
-        }
-        if (!isOwner(group, senderPubkey)) {
-          return GroupControlResult.unauthorized;
-        }
-        recordModEvent(group, ts, modKey, targetPubkey: target);
-        if (!group.mods.contains(target)) group.mods.add(target);
-        _modLog(group, type: 'promote', actor: senderPubkey, target: target);
-        return GroupControlResult.applied;
-
       case GroupControlType.revokeMod:
-        final target = tagValue(tags, 'mod');
+      case GroupControlType.promoteAdmin:
+      case GroupControlType.revokeAdmin:
+        final spec = groupRoleEvents[type]!;
+        final target = tagValue(tags, spec.tag);
         if (target == null) return GroupControlResult.invalid;
         if (isStaleModEvent(group, ts, modKey, targetPubkey: target)) {
           return GroupControlResult.stale;
         }
-        if (!isOwner(group, senderPubkey)) {
+        if (!roleEventAuthorized(group, spec, senderPubkey, target)) {
           return GroupControlResult.unauthorized;
         }
         recordModEvent(group, ts, modKey, targetPubkey: target);
-        group.mods.remove(target);
-        _modLog(group, type: 'revoke', actor: senderPubkey, target: target);
+        final list = spec.list == 'admins' ? group.admins : group.mods;
+        if (spec.grant) {
+          if (!list.contains(target)) list.add(target);
+          if (spec.list == 'admins') group.mods.remove(target);
+        } else {
+          list.remove(target);
+        }
+        _modLog(group, type: spec.log, actor: senderPubkey, target: target);
         return GroupControlResult.applied;
 
       case GroupControlType.transferOwner:
@@ -669,8 +760,15 @@ class GroupLogic {
           return GroupControlResult.unauthorized;
         }
         recordModEvent(group, ts, modKey);
+        final priorOwner = group.createdBy;
         group.createdBy = newOwner;
         group.mods.remove(newOwner);
+        group.admins.remove(newOwner);
+        if (priorOwner != null &&
+            group.members.contains(priorOwner) &&
+            !group.admins.contains(priorOwner)) {
+          group.admins.add(priorOwner);
+        }
         _modLog(group, type: 'transfer', actor: senderPubkey, target: newOwner);
         return GroupControlResult.applied;
 
@@ -732,15 +830,12 @@ class GroupLogic {
         final targetMessageId = tagValue(tags, 'e');
         if (targetMessageId == null) return GroupControlResult.invalid;
         final targetAuthor = tagValue(tags, 'target_pubkey');
-        final isOwnerSender = isOwner(group, senderPubkey);
-        final isModSender = isMod(group, senderPubkey);
-        if (!isOwnerSender && !isModSender) {
+        if (!canModerate(group, senderPubkey)) {
           return GroupControlResult.unauthorized;
         }
-        // Mods can't delete the owner's messages.
-        if (!isOwnerSender &&
+        if (!isOwner(group, senderPubkey) &&
             targetAuthor != null &&
-            group.createdBy == targetAuthor) {
+            !outranks(group, senderPubkey, targetAuthor)) {
           return GroupControlResult.unauthorized;
         }
         _modLog(
@@ -777,10 +872,14 @@ class GroupLogic {
     if (g.createdBy == null || g.createdBy!.isEmpty) {
       g.createdBy = senderPubkey;
       changed = true;
-    } else if (g.createdBy != senderPubkey) {
-      return false; // owner-issued only
+    } else if (!canAdminister(g, senderPubkey)) {
+      return false; // owner- or admin-issued only
     }
     if (ts < g.metaUpdatedAt) return changed;
+    if (ts == g.metaUpdatedAt &&
+        (g.metaUpdatedBy ?? '').compareTo(senderPubkey) > 0) {
+      return changed;
+    }
     final subject = tagValue(tags, 'subject');
     if (subject != null && subject.isNotEmpty && subject != g.name) {
       g.name = subject;
@@ -833,7 +932,10 @@ class GroupLogic {
         changed = true;
       }
     }
-    if (changed) g.metaUpdatedAt = ts;
+    if (changed) {
+      g.metaUpdatedAt = ts;
+      g.metaUpdatedBy = senderPubkey;
+    }
     return changed;
   }
 }

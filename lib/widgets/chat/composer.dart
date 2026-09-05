@@ -540,13 +540,15 @@ class _ComposerState extends ConsumerState<Composer> {
           _withCurrentGroup((gid) => controller.kickFromGroup(gid, pubkey)),
       ban: (pubkey) =>
           _withCurrentGroup((gid) => controller.banFromGroup(gid, pubkey)),
-      // `/unban @nym` → lift a group ban, owner-only (`cmdUnbanFromGroup` →
-      // `unbanFromGroup`, groups.js:1926-1968).
       unban: _unbanFromCurrentGroup,
       addMod: (pubkey) =>
           _withCurrentGroup((gid) => controller.promoteModerator(gid, pubkey)),
       removeMod: (pubkey) =>
           _withCurrentGroup((gid) => controller.revokeModerator(gid, pubkey)),
+      addAdmin: (pubkey) =>
+          _withCurrentGroup((gid) => controller.promoteAdmin(gid, pubkey)),
+      removeAdmin: (pubkey) =>
+          _withCurrentGroup((gid) => controller.revokeAdmin(gid, pubkey)),
       transferOwner: (pubkey) =>
           _withCurrentGroup((gid) => controller.transferOwner(gid, pubkey)),
       // `/nick <reserved>` → the developer-nsec challenge (cmdNick's reserved
@@ -653,7 +655,7 @@ class _ComposerState extends ConsumerState<Composer> {
     final ownerPk = group.createdBy;
     final mods = group.mods;
     String nymOf(String pk) => users[pk]?.nym ?? '';
-    int rank(String pk) => pk == ownerPk ? 0 : (mods.contains(pk) ? 1 : 2);
+    int rank(String pk) => GroupLogic.roleRank(group, pk);
     final sorted = [...group.members]..sort((a, b) {
         final ra = rank(a), rb = rank(b);
         if (ra != rb) return ra - rb;
@@ -664,7 +666,12 @@ class _ComposerState extends ConsumerState<Composer> {
         (
           pubkey: pk,
           labels: [
-            if (pk == ownerPk) 'owner' else if (mods.contains(pk)) 'mod',
+            if (pk == ownerPk)
+              'owner'
+            else if (group.admins.contains(pk))
+              'admin'
+            else if (mods.contains(pk))
+              'mod',
             if (pk == app.selfPubkey) 'you',
           ],
         ),

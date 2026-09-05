@@ -193,6 +193,115 @@ void main() {
       expect(n.groupById(gid)!.banned, contains(carol));
     });
 
+    test('an admin may lift a ban but may not demote a peer admin', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final n = container.read(appStateProvider.notifier);
+      const gid = 'g3c';
+      final owner = _pk(0), a1 = _pk(1), a2 = _pk(2), carol = _pk(3);
+      _seed(n,
+          gid: gid,
+          owner: owner,
+          members: [owner, a1, a2],
+          mods: const [],
+          banned: [carol]);
+      n.groupById(gid)!.admins.addAll([a1, a2]);
+
+      expect(
+        n.applyGroupControl(
+          groupId: gid,
+          type: GroupControlType.unban,
+          tags: [
+            ['unban', carol]
+          ],
+          senderPubkey: a1,
+          ts: 500,
+          eventId: 'u3',
+        ),
+        GroupControlResult.applied,
+      );
+      expect(n.groupById(gid)!.banned, isNot(contains(carol)));
+
+      expect(
+        n.applyGroupControl(
+          groupId: gid,
+          type: GroupControlType.revokeAdmin,
+          tags: [
+            ['admin', a2]
+          ],
+          senderPubkey: a1,
+          ts: 510,
+          eventId: 'r1',
+        ),
+        GroupControlResult.unauthorized,
+      );
+      expect(n.groupById(gid)!.admins, contains(a2));
+    });
+
+    test('only the owner promotes an admin, and it clears the mod role', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final n = container.read(appStateProvider.notifier);
+      const gid = 'g3d';
+      final owner = _pk(0), admin = _pk(1), target = _pk(2);
+      _seed(n,
+          gid: gid,
+          owner: owner,
+          members: [owner, admin, target],
+          mods: [target]);
+      n.groupById(gid)!.admins.add(admin);
+
+      expect(
+        n.applyGroupControl(
+          groupId: gid,
+          type: GroupControlType.promoteAdmin,
+          tags: [
+            ['admin', target]
+          ],
+          senderPubkey: admin,
+          ts: 600,
+          eventId: 'p1',
+        ),
+        GroupControlResult.unauthorized,
+      );
+
+      expect(
+        n.applyGroupControl(
+          groupId: gid,
+          type: GroupControlType.promoteAdmin,
+          tags: [
+            ['admin', target]
+          ],
+          senderPubkey: owner,
+          ts: 610,
+          eventId: 'p2',
+        ),
+        GroupControlResult.applied,
+      );
+      expect(n.groupById(gid)!.admins, contains(target));
+      expect(n.groupById(gid)!.mods, isNot(contains(target)));
+    });
+
+    test('rank orders owner < admin < mod < member', () {
+      final owner = _pk(0), admin = _pk(1), mod = _pk(2), plain = _pk(3);
+      final g = Group(
+        id: 'g3e',
+        members: [owner, admin, mod, plain],
+        createdBy: owner,
+        admins: [admin],
+        mods: [mod],
+      );
+      expect(GroupLogic.roleRank(g, owner), 0);
+      expect(GroupLogic.roleRank(g, admin), 1);
+      expect(GroupLogic.roleRank(g, mod), 2);
+      expect(GroupLogic.roleRank(g, plain), 3);
+      expect(GroupLogic.outranks(g, admin, mod), isTrue);
+      expect(GroupLogic.outranks(g, mod, admin), isFalse);
+      expect(GroupLogic.canAdminister(g, admin), isTrue);
+      expect(GroupLogic.canAdminister(g, mod), isFalse);
+      expect(GroupLogic.canModerate(g, mod), isTrue);
+    });
+
     test('a moderator can add members when member invites are off', () {
       final owner = _pk(0), mod = _pk(1), plain = _pk(2);
       final off = Group(
@@ -213,6 +322,61 @@ void main() {
         mods: [mod],
       );
       expect(GroupLogic.canAddMembers(on, plain), isTrue);
+    });
+  });
+
+  group('group ids commit to their creator', () {
+    test('genesis vectors match the PWA byte for byte', () {
+      expect(GroupLogic.genesisId('00' * 32, 'ab' * 32),
+          '1b81ee5931be5bf82b294c2d72c554a4afce6271d9e74f3527e76e64df80a298');
+      expect(GroupLogic.genesisId('11' * 32, 'cd' * 32),
+          'eeb83ebd3245da063e596238a1d350a300dc362a70dda39d3fbe2b38daa10c06');
+      expect(GroupLogic.genesisId('deadbeef' * 8, '0123456789abcdef' * 4),
+          'a6261ffe2671fa66ca3c5f10acf00d2bca513be8f58ec6287f05bc2544d67971');
+    });
+
+    test('a real creator verifies and an impostor does not', () {
+      final owner = _pk(0), impostor = _pk(7);
+      final nonce = 'ab' * 32;
+      final gid = GroupLogic.genesisId(owner, nonce);
+      expect(GroupLogic.verifyGenesis(gid, owner, nonce), isTrue);
+      expect(GroupLogic.verifyGenesis(gid, impostor, nonce), isFalse);
+      expect(GroupLogic.verifyGenesis(gid, owner, 'cd' * 32), isFalse);
+      expect(GroupLogic.verifyGenesis(gid, null, null), isNull);
+      expect(GroupLogic.verifyGenesis(gid, 'nothex', nonce), isNull);
+    });
+  });
+
+  group('join requests elect a single admitter', () {
+    test('ranks are a permutation all clients agree on', () {
+      final owner = _pk(0);
+      final members = [owner, _pk(1), _pk(2), _pk(3), _pk(4)];
+      final g = Group(
+        id: 'g8',
+        members: members,
+        createdBy: owner,
+        admins: [_pk(1)],
+        mods: [_pk(2)],
+      );
+      final joiner = _pk(9);
+      final ranks = [
+        for (final pk in members) GroupLogic.joinAdmitRank(g, pk, joiner)
+      ];
+      expect(ranks.every((r) => r >= 0), isTrue);
+      expect((ranks.toList()..sort()), List.generate(members.length, (i) => i));
+      expect(ranks.where((r) => r == 0).length, 1);
+    });
+
+    test('a plain member is excluded when invites are off', () {
+      final owner = _pk(0), plain = _pk(3);
+      final g = Group(
+        id: 'g9',
+        members: [owner, plain],
+        createdBy: owner,
+        allowMemberInvites: false,
+      );
+      expect(GroupLogic.joinAdmitRank(g, plain, _pk(9)), -1);
+      expect(GroupLogic.joinAdmitRank(g, owner, _pk(9)), 0);
     });
   });
 }
