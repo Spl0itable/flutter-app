@@ -45,6 +45,19 @@ Map<String, dynamic> _payload() => {
           'authorSlug': 'google',
           'priced': false,
         },
+        {
+          'key': 'deepseek-v4-pro-0813',
+          'label': 'deepseek-v4-pro-0813',
+          'model': '@cf/deepseek-ai/deepseek-v4-pro-0813',
+          'credits': 1,
+          'max': 3,
+          'author': 'DeepSeek',
+          'authorSlug': 'deepseek',
+          'reasoning': true,
+          'tools': true,
+          'hosting': 'cloudflare-hosted',
+          'priced': true,
+        },
       ],
       'groups': [
         {
@@ -57,11 +70,19 @@ Map<String, dynamic> _payload() => {
           'authorSlug': 'google',
           'keys': ['gemini-3-6-flash'],
         },
+        {
+          'author': 'DeepSeek',
+          'authorSlug': 'deepseek',
+          'keys': ['deepseek-v4-pro-0813'],
+        },
       ],
       'aliases': {
         'claude-fable': 'claude-fable-5-1',
         'claude-opus': 'claude-opus-5',
         'gemini-flash': 'gemini-3-6-flash',
+        // The third-party DeepSeek row is retired in the overrides table; its
+        // replacedBy rides down to the client as an ordinary alias.
+        'deepseek-v4-pro': 'deepseek-v4-pro-0813',
       },
     };
 
@@ -69,7 +90,7 @@ void main() {
   group('ProModelCatalog.fromJson', () {
     test('parses models, groups and aliases', () {
       final cat = ProModelCatalog.fromJson(_payload());
-      expect(cat.models, hasLength(3));
+      expect(cat.models, hasLength(4));
       expect(cat.source, 'catalog');
       expect(cat.isEmpty, isFalse);
 
@@ -84,6 +105,35 @@ void main() {
       expect(fable.tools, isTrue);
       expect(fable.context, 1000000);
       expect(fable.description, isNotEmpty);
+    });
+
+    // Cloudflare-hosted models run on the worker's AI binding rather than
+    // going out through the gateway, so the client has to be able to tell them
+    // apart — the picker badges them, and DeepSeek is only reachable that way.
+    test('a Cloudflare-hosted model is parsed and flagged as one', () {
+      final cat = ProModelCatalog.fromJson(_payload());
+      final ds = cat.byKey('deepseek-v4-pro-0813')!;
+      expect(ds.hosting, 'cloudflare-hosted');
+      expect(ds.cloudflareHosted, isTrue);
+      expect(ds.modelId, startsWith('@cf/'));
+      expect(cat.byKey('claude-opus-5')!.cloudflareHosted, isFalse);
+    });
+
+    test('a @cf/ id alone marks a model Cloudflare-hosted', () {
+      // An older worker sends no hosting field; the id still settles it.
+      final cat = ProModelCatalog.fromJson({
+        'models': [
+          {'key': 'x', 'label': 'X', 'model': '@cf/meta/llama', 'credits': 1},
+        ],
+      });
+      expect(cat.byKey('x')!.hosting, isEmpty);
+      expect(cat.byKey('x')!.cloudflareHosted, isTrue);
+    });
+
+    test('a pin on a retired third-party model follows its replacement', () {
+      final cat = ProModelCatalog.fromJson(_payload());
+      expect(cat.byKey('deepseek-v4-pro')!.modelId,
+          '@cf/deepseek-ai/deepseek-v4-pro-0813');
     });
 
     test('a model Cloudflare prices only in its dashboard is flagged', () {
@@ -124,7 +174,8 @@ void main() {
       final again = ProModelCatalog.fromJson(cat.toJson());
       expect(again.models.map((m) => m.key), cat.models.map((m) => m.key));
       expect(again.aliases, cat.aliases);
-      expect(again.grouped().map((g) => g.key), ['Anthropic', 'Google']);
+      expect(again.grouped().map((g) => g.key),
+          ['Anthropic', 'Google', 'DeepSeek']);
       expect(again.byKey('claude-opus')!.key, 'claude-opus-5');
     });
   });
@@ -165,7 +216,7 @@ void main() {
   group('grouping', () {
     test('groups in the order the worker returned them', () {
       final grouped = ProModelCatalog.fromJson(_payload()).grouped();
-      expect(grouped.map((g) => g.key), ['Anthropic', 'Google']);
+      expect(grouped.map((g) => g.key), ['Anthropic', 'Google', 'DeepSeek']);
       expect(grouped.first.value.map((m) => m.key),
           ['claude-fable-5-1', 'claude-opus-5']);
     });
@@ -178,7 +229,7 @@ void main() {
         'keys': ['gemini-3-6-flash', 'vanished-model'],
       };
       final grouped = ProModelCatalog.fromJson(p).grouped();
-      expect(grouped.last.value.map((m) => m.key), ['gemini-3-6-flash']);
+      expect(grouped[1].value.map((m) => m.key), ['gemini-3-6-flash']);
     });
 
     test('a group left with nothing is omitted entirely', () {
@@ -189,7 +240,7 @@ void main() {
         'keys': ['vanished-model'],
       };
       expect(ProModelCatalog.fromJson(p).grouped().map((g) => g.key),
-          ['Anthropic']);
+          ['Anthropic', 'DeepSeek']);
     });
 
     test('no groups means one unnamed group holding everything', () {

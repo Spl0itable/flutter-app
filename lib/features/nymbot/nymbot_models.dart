@@ -24,6 +24,7 @@ class ProModel {
     this.reasoning = false,
     this.tools = false,
     this.context,
+    this.hosting = '',
     this.priced = true,
   });
 
@@ -46,6 +47,7 @@ class ProModel {
       reasoning: j['reasoning'] == true,
       tools: j['tools'] == true,
       context: asInt(j['context']),
+      hosting: (j['hosting'] ?? '').toString(),
       // Absent means "assume priced" so an older worker doesn't grey the list.
       priced: j['priced'] != false,
     );
@@ -64,6 +66,7 @@ class ProModel {
         'reasoning': reasoning,
         'tools': tools,
         if (context != null) 'context': context,
+        if (hosting.isNotEmpty) 'hosting': hosting,
         'priced': priced,
       };
 
@@ -74,12 +77,12 @@ class ProModel {
   final String label;
 
   /// Internal model id, mirroring `BOT_PRO_MODELS[key].model` in
-  /// `functions/api/bot.js`. Every Pro model is third-party and carries its
-  /// provider slug: `anthropic/…` goes to Anthropic's native endpoint through
-  /// the AI Gateway, everything else to the gateway's unified-billing one.
-  /// None of them is Cloudflare-hosted, so none takes a `@cf/` prefix — that
-  /// namespace belongs to the standard tier's `BOT_PM_MODELS`. Documentation
-  /// only: the client sends [key].
+  /// `functions/api/bot.js`. A `provider/…` slug is third-party: `anthropic/…`
+  /// goes to Anthropic's native endpoint through the AI Gateway, everything
+  /// else to the gateway's unified-billing one. A `@cf/…` prefix is
+  /// Cloudflare-hosted and runs on the worker's AI binding directly — no
+  /// gateway hop and no upstream credential, which is why DeepSeek's working
+  /// entries are the `@cf/` ones. Documentation only: the client sends [key].
   final String modelId;
 
   /// Base Pro credits charged per model call (before length scaling).
@@ -107,6 +110,15 @@ class ProModel {
   /// Context window in tokens, when the catalog knows it.
   final int? context;
 
+  /// `cloudflare-hosted` or `third-party`, from the catalog. Empty when the
+  /// worker predates the field. Only used to badge the row.
+  final String hosting;
+
+  /// Whether Cloudflare runs the weights itself, so the call needs no gateway
+  /// and no upstream provider credential.
+  bool get cloudflareHosted =>
+      hosting == 'cloudflare-hosted' || modelId.startsWith('@cf/');
+
   /// False when Cloudflare publishes no price for the model, so the worker is
   /// charging its conservative default. Shown as a caveat rather than hidden.
   final bool priced;
@@ -122,9 +134,10 @@ class ProModel {
   }
 }
 
-/// The 12 Pro models, in README order (line 172): Claude Fable 5, Claude Opus 5,
-/// Claude Sonnet 5, Claude Haiku 4.5, GPT-5.6 Sol, GPT-5.4 mini, Gemini 3.1 Pro,
-/// Gemini 3.6 Flash, Grok 4.6, Kimi K3, Qwen 3.5, MiniMax M3.
+/// The built-in Pro models, in README order (line 172): Claude Fable 5, Claude
+/// Opus 5, Claude Sonnet 5, Claude Haiku 4.5, GPT-5.6 Sol, GPT-5.4 mini, Gemini
+/// 3.1 Pro, Gemini 3.6 Flash, Grok 4.6, Kimi K3, Qwen 3.5, MiniMax M3, then the
+/// Cloudflare-hosted DeepSeek entries.
 const List<ProModel> kProModels = [
   ProModel(
     key: 'claude-fable',
@@ -210,6 +223,43 @@ const List<ProModel> kProModels = [
     baseCredits: 1,
     max: 3,
   ),
+  // Cloudflare-hosted. DeepSeek's third-party route is rejected by its
+  // upstream provider; these run on the worker's AI binding and answer.
+  ProModel(
+    key: 'deepseek-v4-pro',
+    label: 'DeepSeek V4 Pro',
+    modelId: '@cf/deepseek-ai/deepseek-v4-pro-0813',
+    baseCredits: 1,
+    max: 3,
+    author: 'DeepSeek',
+    authorSlug: 'deepseek',
+    hosting: 'cloudflare-hosted',
+    reasoning: true,
+    tools: true,
+  ),
+  ProModel(
+    key: 'deepseek-v4-flash',
+    label: 'DeepSeek V4 Flash',
+    modelId: '@cf/deepseek-ai/deepseek-v4-flash-0731',
+    baseCredits: 1,
+    max: 1,
+    author: 'DeepSeek',
+    authorSlug: 'deepseek',
+    hosting: 'cloudflare-hosted',
+    reasoning: true,
+    tools: true,
+  ),
+  ProModel(
+    key: 'deepseek-r1-distill-qwen-32b',
+    label: 'DeepSeek R1 Distill Qwen 32B',
+    modelId: '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b',
+    baseCredits: 1,
+    max: 3,
+    author: 'DeepSeek',
+    authorSlug: 'deepseek',
+    hosting: 'cloudflare-hosted',
+    reasoning: true,
+  ),
 ];
 
 /// Retired `?model` keys, mapped to their replacements. Mirrors
@@ -220,6 +270,8 @@ const Map<String, String> kProModelAliases = {
   'codex': 'gpt-5',
   'claude-opus-4.8': 'claude-opus',
   'claude-sonnet-4.6': 'claude-sonnet',
+  'deepseek': 'deepseek-v4-pro',
+  'deepseek-v4': 'deepseek-v4-pro',
 };
 
 /// One provider's models in the picker, in the order the worker returned them.
