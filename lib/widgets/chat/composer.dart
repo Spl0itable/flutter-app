@@ -42,7 +42,6 @@ import '../../features/shop/cosmetics.dart';
 import '../../features/translate/translate_languages.dart';
 import '../../features/translate/translate_service.dart';
 import '../../features/zaps/zap_modal.dart';
-import '../../models/group.dart' show GroupControlType;
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
@@ -607,15 +606,11 @@ class _ComposerState extends ConsumerState<Composer> {
         .addGroupMembers(view.id, [target.pubkey]));
   }
 
-  /// `/unban @nym` — a port of the PWA's owner-only `unbanFromGroup`
-  /// (groups.js:1926-1968): gate on ownership ("Only the group owner can unban
-  /// users."), require the target to actually be banned ("That user is not
-  /// banned."), then drop the pubkey from `group.banned` and append the
-  /// `{type:'unban'}` mod-log entry via the shared control-apply, confirming
-  /// with the PWA's system line. The gift-wrapped `group-unban` rumor that
-  /// notifies the unbanned user (tags `p`/`g`/`subject`/`type`/`unban`/`x`)
-  /// needs an outbound publish path on [NostrController] (`unbanFromGroup`),
-  /// which doesn't exist yet — see the handoff note.
+  /// `/unban @nym` — a port of the PWA's `unbanFromGroup` (groups.js): gate on
+  /// owner-or-moderator, require the target to actually be banned ("That user
+  /// is not banned."), then publish the `group-unban` control to every member
+  /// so their own banned lists clear too, confirming with the PWA's system
+  /// line.
   void _unbanFromCurrentGroup(String pubkey) {
     final view = ref.read(currentViewProvider);
     if (view.kind != ViewKind.group) return;
@@ -623,24 +618,17 @@ class _ComposerState extends ConsumerState<Composer> {
     final app = ref.read(appStateProvider);
     final group = appState.groupById(view.id);
     if (group == null) return;
-    if (!GroupLogic.isOwner(group, app.selfPubkey)) {
-      _onSystemMessage(tr('Only the group owner can unban users.'));
+    if (!GroupLogic.canModerate(group, app.selfPubkey)) {
+      _onSystemMessage(
+          tr('Only the group owner or a moderator can unban users.'));
       return;
     }
     if (!group.banned.contains(pubkey)) {
       _onSystemMessage(tr('That user is not banned.'));
       return;
     }
-    appState.applyGroupControl(
-      groupId: view.id,
-      type: GroupControlType.unban,
-      tags: [
-        ['unban', pubkey],
-      ],
-      senderPubkey: app.selfPubkey,
-      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      eventId: GroupLogic.generateGroupId(),
-    );
+    unawaited(
+        ref.read(nostrControllerProvider).unbanFromGroup(view.id, pubkey));
     // Resolve the target's profile if unknown (the PWA's fetchProfileDirect).
     ref.read(nostrControllerProvider).ensureProfiles([pubkey]);
     final nym = ref.read(usersProvider)[pubkey]?.nym ??

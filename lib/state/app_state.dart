@@ -3009,8 +3009,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Merges an inbound group MESSAGE's carried metadata into the group entry —
   /// the PWA's `addGroupConversation(groupId, groupName, memberPubkeys, ts)`
   /// call on every group message (groups.js:1292 → :2454). Existing group:
-  /// merge the members, adopt the message's `subject` as the name
-  /// (`name: name || existing.name`, :2506) and raise `lastMessageTime`.
+  /// merge the members (skipping anyone on this client's banned list), adopt
+  /// the message's `subject` as the name only when the sender is the group
+  /// owner, and raise `lastMessageTime`.
   /// Unknown group: create the entry (unless left, :2460) so a rename carried
   /// on regular traffic reaches members who missed the `group-metadata`
   /// control event — this is how the PWA keeps sidebar/header titles current
@@ -3020,6 +3021,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     required String name,
     required List<String> memberPubkeys,
     required int timestampMs,
+    String senderPubkey = '',
   }) {
     final existing = groupById(groupId);
     if (existing == null) {
@@ -3039,14 +3041,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
       return;
     }
     var changed = false;
-    // Merge members (new invitees may arrive with an updated list).
     for (final pk in memberPubkeys) {
+      if (existing.banned.contains(pk)) continue;
       if (!existing.members.contains(pk)) {
         existing.members.add(pk);
         changed = true;
       }
     }
-    if (name.isNotEmpty && name != existing.name) {
+    final nameAuthoritative =
+        senderPubkey.isNotEmpty && existing.createdBy == senderPubkey;
+    if (nameAuthoritative && name.isNotEmpty && name != existing.name) {
       existing.name = name;
       changed = true;
     }

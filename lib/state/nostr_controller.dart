@@ -3270,6 +3270,7 @@ class NostrController {
               if (t.length > 1 && t[0] == 'p') t[1],
           ],
           timestampMs: m.createdAt * 1000,
+          senderPubkey: senderPubkey,
         );
         // `meta_ts` piggyback (groups.js:1293-1296): the owner's recent
         // metadata change rides regular messages for a window
@@ -6816,6 +6817,43 @@ class NostrController {
         eventId: GroupLogic.generateGroupId(),
       );
     }
+    return ok;
+  }
+
+  /// Owner/mod lift of a ban (groups.js `unbanFromGroup`). The banned list is
+  /// per-member state, so the control goes to every member plus the unbanned
+  /// user: a member that keeps the ban filters the re-added user back out of
+  /// its roster and never wraps to them again.
+  Future<bool> unbanFromGroup(String groupId, String pubkey) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.canModerate(group, identity.pubkey)) return false;
+    if (!group.banned.contains(pubkey)) return false;
+    final extraTags = [
+      ['unban', pubkey]
+    ];
+    final recipients = <String>{...group.members, pubkey}
+        .where((pk) => pk != identity.pubkey)
+        .toList();
+    final ok = recipients.isEmpty ||
+        await groups.sendControl(
+          group: group,
+          selfPubkey: identity.pubkey,
+          type: GroupControlType.unban,
+          extraTags: extraTags,
+          recipients: recipients,
+        );
+    appState.applyGroupControl(
+      groupId: groupId,
+      type: GroupControlType.unban,
+      tags: extraTags,
+      senderPubkey: identity.pubkey,
+      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      eventId: GroupLogic.generateGroupId(),
+    );
     return ok;
   }
 

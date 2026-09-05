@@ -455,7 +455,7 @@ class GroupLogic {
   static bool canModerate(Group g, String pubkey) =>
       isOwner(g, pubkey) || isMod(g, pubkey);
   static bool canAddMembers(Group g, String pubkey) =>
-      isOwner(g, pubkey) ||
+      canModerate(g, pubkey) ||
       (g.members.contains(pubkey) && g.allowMemberInvites);
 
   // ---- stale guard ---------------------------------------------------------
@@ -564,7 +564,8 @@ class GroupLogic {
   ///
   /// Role rules (docs/specs/03 §4.4–§4.5):
   /// - kick/ban: owner or mod; mods cannot act on the owner or other mods.
-  /// - unban / promote / revoke / transfer: owner only.
+  /// - unban: owner or mod.
+  /// - promote / revoke / transfer: owner only.
   /// - leave: the sender removes only themselves (no role required).
   /// - delete-message: owner or mod; mods cannot delete the owner's messages.
   static GroupControlResult applyControlEvent({
@@ -620,7 +621,7 @@ class GroupLogic {
         if (isStaleModEvent(group, ts, modKey, targetPubkey: target)) {
           return GroupControlResult.stale;
         }
-        if (!isOwner(group, senderPubkey)) {
+        if (!canModerate(group, senderPubkey)) {
           return GroupControlResult.unauthorized;
         }
         recordModEvent(group, ts, modKey, targetPubkey: target);
