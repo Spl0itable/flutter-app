@@ -545,7 +545,8 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 final name = g.name.isEmpty ? 'Group' : g.name;
                 rendered = '$name · ${_abbreviateNumber(g.members.length)}';
               } else {
-                rendered = '${stripPubkeySuffix(e.pm!.nym)}'
+                rendered =
+                    '${pickDisplayNym(users[e.pm!.pubkey]?.nym, e.pm!.nym)}'
                     '#${getPubkeySuffix(e.pm!.pubkey)}';
               }
               return rendered.toLowerCase().contains(term);

@@ -2109,7 +2109,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       e.pubkey,
       () => User(pubkey: e.pubkey, nym: m.author),
     );
-    u.nym = m.author;
+    if (!isPlaceholderNym(m.author)) {
+      u.nym = m.author;
+    } else {
+      _seedAuthorFromStore(m);
+    }
     u.lastSeen = m.timestamp;
     // Channel membership for the header "N online nyms" count, /who, and
     // @-mention bucketing. The PWA stores the BARE key `channelKey =
@@ -2199,6 +2203,39 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return null;
   }
 
+  final Set<String> _placeholderAuthors = <String>{};
+
+  void _seedAuthorFromStore(Message m) {
+    if (!isPlaceholderNym(m.author)) return;
+    final known = state.users[m.pubkey]?.nym;
+    if (!isPlaceholderNym(known)) {
+      m.author = getNymFromPubkey(stripPubkeySuffix(known!), m.pubkey);
+      return;
+    }
+    if (m.pubkey.isEmpty) return;
+    _placeholderAuthors.add(m.pubkey);
+    if (_placeholderAuthors.length > 5000) {
+      _placeholderAuthors.remove(_placeholderAuthors.first);
+    }
+  }
+
+  bool _rewriteStoredAuthors(String pubkey) {
+    if (!_placeholderAuthors.contains(pubkey)) return false;
+    final known = state.users[pubkey]?.nym;
+    if (isPlaceholderNym(known)) return false;
+    final display = getNymFromPubkey(stripPubkeySuffix(known!), pubkey);
+    var changed = false;
+    for (final list in state.messages.values) {
+      for (final m in list) {
+        if (m.pubkey != pubkey || !isPlaceholderNym(m.author)) continue;
+        m.author = display;
+        changed = true;
+      }
+    }
+    _placeholderAuthors.remove(pubkey);
+    return changed;
+  }
+
   void _ingestProfile(NostrEvent e) {
     final p = EventMapper.profile(e);
     if (p == null) return;
@@ -2243,6 +2280,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (e.pubkey != state.selfPubkey && resolvedName != null) {
       if (_syncPmConversationNym(e.pubkey)) changed = true;
     }
+    if (resolvedName != null && _rewriteStoredAuthors(e.pubkey)) changed = true;
     // Self kind-0: also overwrite the sidebar HEADER nym, not just the avatar
     // (the PWA's `updateSidebarFromProfile` → `nym.nym = user.nym`,
     // app.js:5510). Without this, restoring our own profile on login fixes the
@@ -2732,6 +2770,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         m.pubkey,
         () => User(pubkey: m.pubkey, nym: m.author),
       );
+      _seedAuthorFromStore(m);
       u.lastSeen = m.timestamp;
     }
 
@@ -2787,6 +2826,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         m.pubkey,
         () => User(pubkey: m.pubkey, nym: m.author),
       );
+      _seedAuthorFromStore(m);
       u.lastSeen = m.timestamp;
     }
     // Seen = active group (single view) or focused + at-bottom + visible column
@@ -2849,7 +2889,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
         m.pubkey,
         () => User(pubkey: m.pubkey, nym: m.author),
       );
-      if (m.author.isNotEmpty) u.nym = m.author;
+      if (!isPlaceholderNym(m.author)) {
+        u.nym = m.author;
+      } else {
+        _seedAuthorFromStore(m);
+      }
       u.lastSeen = m.timestamp;
       final memberKey = (m.channel ?? '').toLowerCase();
       if (memberKey.isNotEmpty) u.channels.add(memberKey);
@@ -3601,7 +3645,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
       () => User(pubkey: pubkey, nym: nym ?? getNymFromPubkey('nym', pubkey)),
     );
     u.status = status;
-    if (nym != null && nym.isNotEmpty) u.nym = getNymFromPubkey(nym, pubkey);
+    if (nym != null && nym.isNotEmpty) {
+      u.nym = getNymFromPubkey(nym, pubkey);
+      _rewriteStoredAuthors(pubkey);
+      _syncPmConversationNym(pubkey);
+    }
     u.awayMessage = (awayMessage != null && awayMessage.isNotEmpty)
         ? awayMessage
         : (status == UserStatus.away ? u.awayMessage : null);
@@ -4436,6 +4484,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final isChannelKey = !key.startsWith('pm-') && !key.startsWith('group-');
     for (final m in msgs) {
       if (m.id.isNotEmpty && !_seenIds.add(m.id)) continue;
+      _seedAuthorFromStore(m);
       m.seq = _nextIngestSeq();
       list.add(m);
       _indexMessage(key, m);
@@ -4458,7 +4507,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   /// Hydrates cached profiles into the user store (boot from CacheStore).
   void hydrateProfiles(Map<String, UserProfile> profiles) {
+    final touched = <String>[];
     profiles.forEach((pubkey, p) {
+      touched.add(pubkey);
       final existing = state.users[pubkey];
       // PWA name chain `name || username || display_name`, 20-char cap
       // (nostr-core.js:697-700) — [UserProfile] parses `username`, so the
@@ -4482,6 +4533,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
         );
       }
     });
+    for (final pubkey in touched) {
+      _rewriteStoredAuthors(pubkey);
+      _syncPmConversationNym(pubkey);
+    }
     // Cached SELF profile → restore the header nym immediately, the native
     // analogue of the PWA applying the cached login profile name before
     // relays connect (`nym_nostr_login_profile`, app.js:4514-4522). Without

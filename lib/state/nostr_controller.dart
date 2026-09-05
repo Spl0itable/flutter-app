@@ -8192,8 +8192,9 @@ class NostrController {
     // || getNymFromPubkey(pubkey))`).
     final rawNym = event.tagValue('n');
     // Fallback 'nym', matching `getNymFromPubkey`'s default (users.js:1085).
-    final base =
-        stripPubkeySuffix(rawNym ?? appState.users[event.pubkey]?.nym ?? 'nym');
+    final base = !isPlaceholderNym(rawNym)
+        ? stripPubkeySuffix(rawNym!)
+        : pickDisplayNym(appState.users[event.pubkey]?.nym, 'nym');
     final readerNym = '$base#${getPubkeySuffix(event.pubkey)}';
 
     _ref.read(appStateProvider.notifier).applyChannelReader(
@@ -8602,8 +8603,11 @@ class NostrController {
           missing = pubkeys.where((pk) {
             final low = pk.toLowerCase();
             if (!found.containsKey(low)) return true; // D1 miss
-            final pic = (users[low] ?? users[pk])?.profile?.picture;
-            return pic == null || pic.isEmpty; // D1/cache had no avatar
+            final u = users[low] ?? users[pk];
+            final pic = u?.profile?.picture;
+            // D1/cache had no avatar, or no display name.
+            if (pic == null || pic.isEmpty) return true;
+            return isPlaceholderNym(u?.nym);
           }).toList();
         }
       } catch (_) {
@@ -10169,8 +10173,9 @@ class NostrController {
     // (nostr-core.js:440/1771): a nym-only kind-0, or a presence that cleared the
     // avatar, leaves a picture-less profile stub that must NOT permanently block
     // the avatar backfill (the old `profile != null` guard did exactly that).
-    final pic = _ref.read(appStateProvider).users[pubkey]?.profile?.picture;
-    if (pic != null && pic.isNotEmpty) return;
+    final known = _ref.read(appStateProvider).users[pubkey];
+    final pic = known?.profile?.picture;
+    if (pic != null && pic.isNotEmpty && !isPlaceholderNym(known?.nym)) return;
     // Staleness gate (PWA `profileFetchedAt`, 5 min): an AVATAR-LESS user (anon,
     // or a kind-0 with no picture) would otherwise re-queue a fetch on EVERY
     // presence/message/reaction — a steady background churn. Only re-attempt

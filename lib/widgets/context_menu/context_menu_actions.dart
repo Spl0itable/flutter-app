@@ -286,10 +286,11 @@ CtxTarget ctxTargetForMessage(
   required String selfPubkey,
   bool isFriend = false,
   bool isBlocked = false,
+  String? liveNym,
 }) {
   return CtxTarget(
     pubkey: message.pubkey,
-    nym: _baseNym(message.author),
+    nym: pickDisplayNym(liveNym, message.author),
     isSelf: message.pubkey == selfPubkey || message.isOwn,
     content: message.content,
     messageId: message.id,
@@ -299,7 +300,3 @@ CtxTarget ctxTargetForMessage(
     inGroup: message.isGroup || message.groupId != null,
   );
 }
-
-/// Trailing-`#xxxx`-only strip: a `#` inside the name (e.g. `player#1`)
-/// belongs to the name (users.js:1093-1098).
-String _baseNym(String nym) => splitNymSuffix(nym).base;

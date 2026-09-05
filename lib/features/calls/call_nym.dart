@@ -75,9 +75,11 @@ class CallNym extends ConsumerWidget {
 
     final users = ref.watch(usersProvider);
     final user = users[pubkey];
-    final rawNym = (nym != null && nym!.isNotEmpty)
-        ? nym!
-        : (user?.nym.isNotEmpty == true ? user!.nym : pubkey);
+    final rawNym = !isPlaceholderNym(user?.nym)
+        ? user!.nym
+        : ((nym != null && nym!.isNotEmpty)
+            ? nym!
+            : (user?.nym.isNotEmpty == true ? user!.nym : pubkey));
     final baseNym = stripPubkeySuffix(rawNym);
     final suffix = getPubkeySuffix(pubkey);
 

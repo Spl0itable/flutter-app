@@ -1828,35 +1828,39 @@ class StorageSync {
       }
       toFetch.add(pk);
     }
-    final batch = toFetch.take(100).toList();
     final out = <String, Map<String, dynamic>>{};
     // Report cache hits so the caller skips them; no event to return for those.
     for (final pk in foundFromCache) {
       out.putIfAbsent(pk, () => const {});
     }
-    if (batch.isEmpty) return out;
+    if (toFetch.isEmpty) return out;
 
-    StorageStream stream;
-    try {
-      // profile-get is a PUBLIC read (no auth, storage.js:589).
-      stream = await _api.storageStream({
-        'action': 'profile-get',
-        'pubkeys': batch,
-      });
-    } catch (_) {
-      return out;
-    }
-    for (final item in stream.items) {
-      // Each line is `[pubkey, rec]` where rec is `{event, updatedAt}` or null.
-      if (item is! List || item.length < 2) continue;
-      final pk = item[0];
-      final rec = item[1];
-      if (pk is! String) continue;
-      if (rec is! Map) continue;
-      final event = rec['event'];
-      if (event is! Map) continue;
-      out[pk.toLowerCase()] = Map<String, dynamic>.from(event);
-      _profileCacheAt[pk.toLowerCase()] = now;
+    for (var start = 0; start < toFetch.length; start += 100) {
+      final end = start + 100;
+      final batch =
+          toFetch.sublist(start, end > toFetch.length ? toFetch.length : end);
+      StorageStream stream;
+      try {
+        // profile-get is a PUBLIC read (no auth, storage.js:589).
+        stream = await _api.storageStream({
+          'action': 'profile-get',
+          'pubkeys': batch,
+        });
+      } catch (_) {
+        break;
+      }
+      for (final item in stream.items) {
+        // Each line is `[pubkey, rec]`: rec is `{event, updatedAt}` or null.
+        if (item is! List || item.length < 2) continue;
+        final pk = item[0];
+        final rec = item[1];
+        if (pk is! String) continue;
+        if (rec is! Map) continue;
+        final event = rec['event'];
+        if (event is! Map) continue;
+        out[pk.toLowerCase()] = Map<String, dynamic>.from(event);
+        _profileCacheAt[pk.toLowerCase()] = now;
+      }
     }
     return out;
   }

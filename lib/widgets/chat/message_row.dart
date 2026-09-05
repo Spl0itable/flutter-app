@@ -676,8 +676,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Strip it so the canonical suffix below isn't appended twice (PWA renders
     // the base nym + a separate `.nym-suffix` span — `parseNymFromDisplay`,
     // `messages.js:1781`).
-    final baseNym = stripPubkeySuffix(
-        (liveNym != null && liveNym.isNotEmpty) ? liveNym : message.author);
+    final baseNym = pickDisplayNym(liveNym, message.author);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1074,9 +1073,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   ) {
     final c = context.nym;
     final pk = member.pubkey;
-    final nym = users[pk]?.nym;
-    final baseNym =
-        (nym != null && nym.isNotEmpty) ? stripPubkeySuffix(nym) : 'nym';
+    final baseNym = pickDisplayNym(users[pk]?.nym, null);
     final suffix = getPubkeySuffix(pk);
     final nymStyle = TextStyle(color: c.textDim, fontSize: size, height: 1.3);
     return Row(
@@ -1215,7 +1212,10 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                           child: Text.rich(
                             TextSpan(children: [
                               TextSpan(
-                                text: stripPubkeySuffix(message.author),
+                                text: pickDisplayNym(
+                                    ref.watch(usersProvider.select(
+                                        (u) => u[message.pubkey]?.nym)),
+                                    message.author),
                                 style: TextStyle(
                                   color: c.secondary,
                                   fontWeight: FontWeight.w600,
@@ -2421,7 +2421,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       for (final e in message.readers.entries)
         ReactorEntry(
           pubkey: e.key,
-          nym: _baseNym(e.value),
+          nym: pickDisplayNym(users[e.key]?.nym, e.value),
           suffix: getPubkeySuffix(e.key),
           imageUrl: users[e.key]?.profile?.picture,
         ),
@@ -2530,7 +2530,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       for (final e in map.entries)
         ReactorEntry(
           pubkey: e.key,
-          nym: _baseNym(e.value),
+          nym: pickDisplayNym(users[e.key]?.nym, e.value),
           suffix: getPubkeySuffix(e.key),
           isYou: e.key == app.selfPubkey,
           imageUrl: users[e.key]?.profile?.picture,
@@ -2757,7 +2757,8 @@ class _MessageRowState extends ConsumerState<MessageRow> {
 
   void _openContextMenu(BuildContext context) {
     final app = ref.read(appStateProvider);
-    final target = ctxTargetForMessage(message, selfPubkey: app.selfPubkey);
+    final target = ctxTargetForMessage(message,
+        selfPubkey: app.selfPubkey, liveNym: app.users[message.pubkey]?.nym);
     ContextMenuPanel.show(
       context,
       target: target,
@@ -2790,7 +2791,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// the rendered author watches the same source.
   String _displayNym() {
     final live = ref.read(appStateProvider).users[message.pubkey]?.nym;
-    return (live != null && live.isNotEmpty) ? live : message.author;
+    return pickDisplayNym(live, message.author);
   }
 
   BorderRadius _bubbleRadius(bool self) {
@@ -4892,7 +4893,8 @@ class _MessageGroupState extends ConsumerState<MessageGroup> {
   /// `stack.lastElementChild` and calls `showContextMenu`).
   void _openAvatarMenu(BuildContext context, WidgetRef ref, Message last) {
     final app = ref.read(appStateProvider);
-    final target = ctxTargetForMessage(last, selfPubkey: app.selfPubkey);
+    final target = ctxTargetForMessage(last,
+        selfPubkey: app.selfPubkey, liveNym: app.users[last.pubkey]?.nym);
     ContextMenuPanel.show(
       context,
       target: target,
