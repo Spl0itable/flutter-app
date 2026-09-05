@@ -9937,6 +9937,7 @@ class NostrController {
     unawaited(_backfillFromD1OnReconnect());
     _ref.read(appStateProvider.notifier).markVisibleColumnsRead();
     unawaited(_reconcileShopPurchases());
+    unawaited(_reconcilePendingZaps());
   }
 
   /// App backgrounded / hidden: pause the geo-relay keep-alive so it doesn't
@@ -10436,6 +10437,7 @@ class NostrController {
       // Finalize any shop purchase that settled while the app was closed (the
       // PWA fires `reconcilePendingPurchases` on connect, relays.js:490).
       unawaited(_reconcileShopPurchases());
+      unawaited(_reconcilePendingZaps());
     }
   }
 
@@ -10517,6 +10519,68 @@ class NostrController {
   /// the claim's NIP-98 auth — a local key OR the active signer (NIP-46
   /// accounts sign through it like the PWA's generic `signEvent` dispatch).
   /// Best-effort.
+  /// Re-verifies persisted pending ZAP invoices and records any that settled
+  /// while the app was gone. A zap modal only lives as long as its process: the
+  /// user leaves for their wallet, the OS evicts us, and the identity vault
+  /// makes the return a cold boot, so the modal (and its invoice) are gone
+  /// before the payment confirms. Runs alongside the shop sweep.
+  Future<void> _reconcilePendingZaps() async {
+    final identity = _identity;
+    if (identity == null) return;
+    List<Map<String, dynamic>> entries;
+    try {
+      entries = _ref
+          .read(shopControllerProvider.notifier)
+          .pendingPurchasesOfKind('zap');
+    } catch (_) {
+      return;
+    }
+    if (entries.isEmpty) return;
+    final api = ApiClient();
+    try {
+      for (final entry in entries) {
+        final pr = entry['pr']?.toString() ?? '';
+        final messageId = entry['messageId']?.toString() ?? '';
+        final invoiceId = entry['invoiceId']?.toString() ?? '';
+        if (pr.isEmpty || messageId.isEmpty || invoiceId.isEmpty) continue;
+        bool paid;
+        try {
+          paid = await api.zapVerify(
+            pr: pr,
+            verifyUrl: entry['verify']?.toString(),
+            providerPubkey: entry['providerPubkey']?.toString(),
+          );
+        } catch (_) {
+          continue; // Leave it for the next foreground.
+        }
+        if (!paid) continue;
+        try {
+          _ref
+              .read(shopControllerProvider.notifier)
+              .removePendingPurchase(invoiceId);
+        } catch (_) {}
+        final amount = (entry['amount'] as num?)?.toInt() ?? 0;
+        if (amount <= 0) continue;
+        final recipient = entry['recipientPubkey']?.toString() ?? '';
+        _ref.read(appStateProvider.notifier).recordMessageZap(
+              messageId: messageId,
+              zapperPubkey: identity.pubkey,
+              amountSats: amount,
+              dedupKey: ZapLogic.dedupKey(bolt11: pr, eventId: ''),
+            );
+        if (recipient.isEmpty) continue;
+        unawaited(announceMessageZap(
+          messageId: messageId,
+          recipientPubkey: recipient,
+          bolt11: pr,
+          originalKind: entry['originalKind']?.toString(),
+        ));
+      }
+    } finally {
+      api.dispose();
+    }
+  }
+
   Future<void> _reconcileShopPurchases() async {
     final id = _identity;
     final signer = _signer;

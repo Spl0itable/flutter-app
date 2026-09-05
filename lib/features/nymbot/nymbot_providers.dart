@@ -679,6 +679,13 @@ class BotChatController extends StateNotifier<BotChatState> {
         continue;
       }
       if (!m.isOwn || m.kind != MessageKind.normal || m.isFileOffer) continue;
+      // Only a send made ON THIS DEVICE may buy a reply. `optimistic` marks a
+      // local composer echo (`sendLocal`); an own message that arrived over a
+      // relay or out of the archive is another device's send, already answered
+      // there. Answering it again bought a second reply to one question — on
+      // whatever tier THIS device happened to be set to, which is why the
+      // extras came back as standard routing next to a Pro answer.
+      if (!m.optimistic) continue;
       // Only LIVE sends trigger the bot — restored/backlogged history must
       // never re-bill (the PWA gates its reply flow on the live send path).
       if (m.isHistorical || nowMs - m.timestamp > 15000) continue;
@@ -1278,6 +1285,12 @@ class BotChatController extends StateNotifier<BotChatState> {
       _ref
           .read(botBuyRequestProvider.notifier)
           .request(e.pro ? CreditTier.pro : CreditTier.standard);
+    } on NymbotStillGenerating catch (e) {
+      _setBotTyping(false);
+      _markBotPMReceipts('read');
+      // Not an error: the worker refused to generate a second answer to a
+      // message it is already answering. A neutral line, never a red bubble.
+      _system(e.message);
     } on NymbotException catch (e) {
       _setBotTyping(false);
       // A response DID come back — the PWA advances read receipts before its
