@@ -186,7 +186,7 @@ class _ZapModalState extends ConsumerState<ZapModal> {
       // (zaps.js checkZapPayment → _serverVerifyZapPaid, 180 × 1s). The proxy
       // server-side fetches the LUD-21 verify URL (or validates a NIP-57
       // receipt), so the client only reads `data.paid`.
-      if (invoice.verify != null) _startVerifyPolling(invoice);
+      _startVerifyPolling(invoice);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -197,8 +197,11 @@ class _ZapModalState extends ConsumerState<ZapModal> {
   }
 
   void _startVerifyPolling(LnInvoice invoice) {
+    final lud21 = invoice.verify != null;
+    final step = Duration(seconds: lud21 ? 1 : 3);
+    final maxChecks = lud21 ? 180 : 60;
     var checks = 0;
-    _verifyTimer = Timer.periodic(const Duration(seconds: 1), (t) async {
+    _verifyTimer = Timer.periodic(step, (t) async {
       checks++;
       final paid = await _api.zapVerify(
         pr: invoice.pr,
@@ -209,8 +212,9 @@ class _ZapModalState extends ConsumerState<ZapModal> {
       if (paid) {
         t.cancel();
         _markPaid(invoice);
-      } else if (checks >= 180) {
+      } else if (checks >= maxChecks) {
         t.cancel();
+        if (!lud21) return;
         setState(() {
           _phase = _Phase.error;
           _statusText = tr('Payment timeout - please check your wallet');
