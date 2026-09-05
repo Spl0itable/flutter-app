@@ -2254,7 +2254,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
             prev.picture != p.picture ||
             prev.name != p.name ||
             prev.username != p.username ||
-            prev.displayName != p.displayName) {
+            prev.displayName != p.displayName ||
+            prev.about != p.about ||
+            prev.banner != p.banner ||
+            prev.nip05 != p.nip05 ||
+            prev.lud16 != p.lud16 ||
+            prev.lud06 != p.lud06) {
           existing.profile = p;
           if (resolvedName != null) {
             existing.nym = getNymFromPubkey(resolvedName, e.pubkey);
