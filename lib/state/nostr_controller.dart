@@ -242,7 +242,13 @@ class NostrController {
 
   /// Minimum gap between typing-start broadcasts (PWA `_typingSendInterval`,
   /// app.js:741), C03-D4.
-  static const int _typingSendIntervalMs = 3000;
+  static const int _typingSendIntervalMs = 12000;
+  static const int _typingStartDebounceMs = 1500;
+  static const int _typingTtlSec = 15;
+  static const int _typingStopDelayMs = 4000;
+  final Map<String, Timer> _typingStartTimers = {};
+  final Map<String, Timer> _typingStopTimers = {};
+  final Set<String> _typingStartedFor = <String>{};
 
   /// Reaction toggle rate-limit tracker: `messageId:emoji` → timestamps within
   /// the 30s window + a cooldown-until ms (reactions.js
@@ -3546,6 +3552,7 @@ class NostrController {
             members: members,
             mods: mods);
         _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
         return;
       }
       appState.upsertGroup(Group(
@@ -3569,6 +3576,7 @@ class NostrController {
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
       _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
       // Group invite notification (groups.js:851-871 `Group invite: <name>`).
       if (_notificationsEnabled &&
           !_ref.read(appStateProvider).blockedUsers.contains(senderPubkey)) {
@@ -3825,6 +3833,7 @@ class NostrController {
     // group entry; apply any stashed blob now that the group exists.
     if (type == GroupControlType.addMember) {
       _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
     }
   }
 
@@ -4006,7 +4015,8 @@ class NostrController {
       // = 5s (pms.js:924 / nostr-core.js:1547), C03-D5.
       final age = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
           ((rumor['created_at'] as num?)?.toInt() ?? 0);
-      if (age > 5) return;
+      final ttl = info.ttlSec > 0 ? (info.ttlSec > 30 ? 30 : info.ttlSec) : 5;
+      if (age > ttl) return;
       final storageKey = info.groupId != null
           ? GroupLogic.groupStorageKey(info.groupId!)
           : PmLogic.pmStorageKey(info.pubkey!);
@@ -6984,6 +6994,27 @@ class NostrController {
     );
   }
 
+  final Map<String, int> _ephAnnounceMs = {};
+
+  Future<void> announceGroupEphemeralKey(String groupId) async {
+    final identity = _identity;
+    final groups = _groups;
+    final group = _ref.read(appStateProvider.notifier).groupById(groupId);
+    if (identity == null || groups == null || group == null) return;
+    if (group.members.where((pk) => pk != identity.pubkey).isEmpty) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if ((_ephAnnounceMs[groupId] ?? 0) > nowMs - kGroupResyncCooldownSec * 1000) {
+      return;
+    }
+    _ephAnnounceMs[groupId] = nowMs;
+    await groups.sendKeyResyncRequest(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _afterSelfKeyRotation();
+  }
+
   Future<bool> unbanFromGroup(String groupId, String pubkey) async {
     final identity = _identity;
     final groups = _groups;
@@ -8038,6 +8069,40 @@ class NostrController {
   }
 
   /// Signals typing in the current PM/group view (throttled ~3/s — C03-D4).
+  void _armTypingStop(String key, ChatView view) {
+    _typingStopTimers.remove(key)?.cancel();
+    _typingStopTimers[key] = Timer(
+        const Duration(milliseconds: _typingStopDelayMs), () {
+      _typingStopTimers.remove(key);
+      _typingStartTimers.remove(key)?.cancel();
+      if (!_typingStartedFor.remove(key)) return;
+      unawaited(_sendTypingStop(view));
+    });
+  }
+
+  Future<void> _sendTypingStop(ChatView view) async {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+    if (view.kind == ViewKind.pm) {
+      if (anonSuppressSendTo(view.id)) return;
+      await service.publishTyping(status: 'stop', recipients: [view.id]);
+      return;
+    }
+    if (view.kind != ViewKind.group) return;
+    final group = _ref.read(appStateProvider.notifier).groupById(view.id);
+    if (group == null) return;
+    final ek = _groups!.keysFor(group.id);
+    final others = group.members.where((p) => p != identity.pubkey).toList();
+    if (others.isEmpty) return;
+    await service.publishTyping(
+      status: 'stop',
+      recipients: others,
+      groupId: group.id,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+    );
+  }
+
   Future<void> sendTypingStart() async {
     final service = _service;
     final identity = _identity;
@@ -8057,10 +8122,21 @@ class NostrController {
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    // PWA `_typingSendInterval = 3000` (app.js:741) — re-broadcast typing-start
-    // at most once per 3s, not 1s (C03-D4).
-    if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
-    _typingThrottle[key] = now;
+    _armTypingStop(key, view);
+    if (_typingStartedFor.contains(key)) {
+      if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
+      _typingThrottle[key] = now;
+    } else {
+      if (_typingStartTimers.containsKey(key)) return;
+      _typingStartTimers[key] = Timer(
+          const Duration(milliseconds: _typingStartDebounceMs), () {
+        _typingStartTimers.remove(key);
+        _typingStartedFor.add(key);
+        _typingThrottle[key] = DateTime.now().millisecondsSinceEpoch;
+        unawaited(sendTypingStart());
+      });
+      return;
+    }
 
     if (view.kind == ViewKind.channel) {
       // Public channel typing (kind 24420). The channel wire tag is `g` for a
@@ -8081,17 +8157,18 @@ class NostrController {
 
     if (view.kind == ViewKind.pm) {
       if (anonSuppressSendTo(view.id)) return;
-      await service.publishTyping(status: 'start', recipients: [view.id]);
+      await service.publishTyping(
+          status: 'start', recipients: [view.id], ttlSec: _typingTtlSec);
     } else {
       final group = _ref.read(appStateProvider.notifier).groupById(view.id);
       if (group == null) return;
       final ek = _groups!.keysFor(group.id);
       final others = group.members.where((p) => p != identity.pubkey).toList();
-      if (others.length > kGroupTypingMaxMembers) return;
       await service.publishTyping(
         status: 'start',
         recipients: others,
         groupId: group.id,
+        ttlSec: _typingTtlSec,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
       );
     }

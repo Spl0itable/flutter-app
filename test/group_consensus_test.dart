@@ -509,4 +509,49 @@ void main() {
       expect(PmLogic.parseReceipt(rumor), isNull);
     });
   });
+
+  group('typing carries a ttl so it need not re-broadcast every 3s', () {
+    test('a start with a ttl parses it', () {
+      final info = PmLogic.parseTyping({
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['typing', 'start'],
+          ['ttl', '15'],
+          ['g', 'g1'],
+        ],
+        'content': '',
+      });
+      expect(info, isNotNull);
+      expect(info!.isStart, isTrue);
+      expect(info.ttlSec, 15);
+      expect(info.groupId, 'g1');
+    });
+
+    test('a start without one reports no ttl, so the receiver keeps its default',
+        () {
+      final info = PmLogic.parseTyping({
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['typing', 'start'],
+        ],
+        'content': '',
+      });
+      expect(info!.ttlSec, 0);
+    });
+
+    test('a stop still parses', () {
+      final info = PmLogic.parseTyping({
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['typing', 'stop'],
+          ['g', 'g1'],
+        ],
+        'content': '',
+      });
+      expect(info!.isStart, isFalse);
+    });
+  });
 }

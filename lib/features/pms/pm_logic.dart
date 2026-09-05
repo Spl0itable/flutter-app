@@ -187,16 +187,19 @@ class PmLogic {
   static TypingInfo? parseTyping(Map<String, dynamic> rumor) {
     String? status;
     String? groupId;
+    var ttl = 0;
     for (final t in _tags(rumor)) {
       if (t.length < 2) continue;
       if (t[0] == 'typing') status = t[1];
       if (t[0] == 'g') groupId = t[1];
+      if (t[0] == 'ttl') ttl = int.tryParse(t[1]) ?? 0;
     }
     if (status == null) return null;
     return TypingInfo(
       status: status,
       groupId: groupId,
       pubkey: rumor['pubkey'] as String?,
+      ttlSec: ttl > 0 ? ttl : 0,
     );
   }
 
@@ -266,12 +269,15 @@ class ReceiptInfo {
 
 /// A parsed typing indicator from a kind-69420 rumor.
 class TypingInfo {
-  TypingInfo({required this.status, this.groupId, this.pubkey});
+  TypingInfo({required this.status, this.groupId, this.pubkey, this.ttlSec = 0});
 
   /// 'start' | 'stop'.
   final String status;
   final String? groupId;
   final String? pubkey;
+
+  /// How long the sender says the indicator stays valid; 0 when not stated.
+  final int ttlSec;
 
   bool get isStart => status == 'start';
 }
