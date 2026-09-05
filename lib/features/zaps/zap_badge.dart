@@ -259,8 +259,7 @@ class _ZapBadgeState extends ConsumerState<ZapBadge>
     // shown to the user right now, so it should name the sender the way the
     // rest of the UI does.
     final liveNym = ref.read(appStateProvider).users[message.pubkey]?.nym;
-    final baseNym = stripPubkeySuffix(
-        (liveNym != null && liveNym.isNotEmpty) ? liveNym : message.author);
+    final baseNym = pickDisplayNym(liveNym, message.author);
     final notifier = ref.read(appStateProvider.notifier);
     notifier.addSystemMessage(
         tr('Checking if @{nym} can receive zaps...', {'nym': baseNym}));

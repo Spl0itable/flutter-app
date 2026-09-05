@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../models/message.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
@@ -99,7 +100,7 @@ class _ThreadViewState extends ConsumerState<ThreadView> {
         final root =
             threadRootMessage(app, view.storageKey, widget.thread.rootId);
         final peerNym = app.users[view.id]?.nym ?? '';
-        if (peerNym.isNotEmpty) return '@$peerNym';
+        if (!isPlaceholderNym(peerNym)) return '@$peerNym';
         return root != null ? '@${root.author}' : tr('Private message');
     }
   }

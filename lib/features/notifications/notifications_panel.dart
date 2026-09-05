@@ -20,6 +20,7 @@ import 'package:permission_handler/permission_handler.dart' show openAppSettings
 import '../../core/constants/storage_keys.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/nym_utils.dart';
 import '../../services/notification_service.dart';
 import '../../services/platform/background_connectivity.dart';
 import '../../state/app_state.dart';
@@ -853,7 +854,7 @@ class _Author extends ConsumerWidget {
     final liveNym = pubkey.isEmpty
         ? ''
         : (ref.watch(usersProvider.select((u) => u[pubkey]?.nym)) ?? '');
-    final shownNym = liveNym.isNotEmpty ? liveNym : entry.title;
+    final shownNym = pickDisplayNym(liveNym, entry.title);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [

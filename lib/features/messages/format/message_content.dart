@@ -349,13 +349,11 @@ class MessageContent extends ConsumerWidget {
       BuildContext context, WidgetRef ref, String pubkey, String nym) {
     if (pubkey.isEmpty) return;
     final app = ref.read(appStateProvider);
-    final known = app.users[pubkey]?.nym ?? '';
-    final display = known.isNotEmpty ? known : nym;
     ContextMenuPanel.show(
       context,
       target: CtxTarget(
         pubkey: pubkey,
-        nym: stripPubkeySuffix(display),
+        nym: pickDisplayNym(app.users[pubkey]?.nym, nym),
         isSelf: pubkey == app.selfPubkey,
       ),
     );

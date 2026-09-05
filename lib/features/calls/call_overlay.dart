@@ -52,9 +52,10 @@ void showCallUserMenu(BuildContext context, String pubkey, {String? nym}) {
   // `usersProvider` entry (the call chat-from line carries no nym), else fall
   // back to the pubkey (`_nymForPubkey`, calls.js).
   final container = ProviderScope.containerOf(context);
-  final resolved = (nym != null && nym.isNotEmpty)
-      ? nym
-      : (container.read(usersProvider)[pubkey]?.nym ?? pubkey);
+  final live = container.read(usersProvider)[pubkey]?.nym;
+  final resolved = !isPlaceholderNym(live)
+      ? live!
+      : ((nym != null && nym.isNotEmpty) ? nym : (live ?? pubkey));
   ContextMenuPanel.show(
     context,
     target: CtxTarget(
@@ -1371,7 +1372,7 @@ class _Receipt extends ConsumerWidget {
         for (final e in msg.readers.entries)
           ReactorEntry(
             pubkey: e.key,
-            nym: stripPubkeySuffix(e.value),
+            nym: pickDisplayNym(users[e.key]?.nym, e.value),
             suffix: getPubkeySuffix(e.key),
             isYou: e.key == selfPk,
             imageUrl: users[e.key]?.profile?.picture,
