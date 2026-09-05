@@ -4046,6 +4046,33 @@ class NostrController {
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
     final action =
         tags.any((t) => t.length > 1 && t[0] == 'action' && t[1] == 'remove');
+    final batchTag = _tagValue(tags, 'batch');
+    if (batchTag != null && batchTag.isNotEmpty) {
+      List<dynamic>? extra;
+      try {
+        final decoded = jsonDecode(batchTag);
+        if (decoded is List) extra = decoded;
+      } catch (_) {}
+      if (extra != null) {
+        final hexRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+        for (final raw in extra.take(64)) {
+          if (raw is! Map) continue;
+          final e = raw['e'];
+          final c = raw['c'];
+          if (e is! String || !hexRe.hasMatch(e)) continue;
+          if (c is! String || c.isEmpty) continue;
+          final rest = Map<String, dynamic>.from(rumor);
+          rest['content'] = c;
+          rest['tags'] = [
+            for (final t in tags)
+              if (t.isNotEmpty && t[0] != 'e' && t[0] != 'action' && t[0] != 'batch') t,
+            ['e', e],
+            if (raw['a'] == 'remove') ['action', 'remove'],
+          ];
+          _onPrivateReaction(rest, appState);
+        }
+      }
+    }
     // The reacted message's author (`p` tag); reaction targets us when this is
     // our pubkey. Group reactions also carry the group id (`g`) for routing.
     final targetAuthor = _tagValue(tags, 'p') ?? '';
@@ -8241,17 +8268,21 @@ class NostrController {
   /// author's advertised ephemeral key. Scope-gated to the `group` context and
   /// deduped once per message; never receipts our own message.
   Future<void> sendGroupReadReceipt(
-      String messageId, String authorPubkey, String groupId) async {
+      dynamic messageId, String authorPubkey, String groupId) async {
     if (!_indicatorScopeAllows(
         _ref.read(settingsProvider).readReceiptsScope, 'group')) {
       return;
     }
-    if (messageId.isEmpty || authorPubkey.isEmpty) return;
+    final wanted = messageId is List<String>
+        ? messageId
+        : (messageId is String && messageId.isNotEmpty ? [messageId] : const <String>[]);
+    if (wanted.isEmpty || authorPubkey.isEmpty) return;
     final identity = _identity;
     final service = _service;
     if (identity == null || service == null) return;
     if (authorPubkey == identity.pubkey) return;
-    if (!_sentGroupReadReceipts.add(messageId)) return;
+    final ids = [for (final id in wanted) if (_sentGroupReadReceipts.add(id)) id];
+    if (ids.isEmpty) return;
     if (_sentGroupReadReceipts.length > 2000) {
       final keep = _sentGroupReadReceipts
           .toList()
@@ -8262,7 +8293,7 @@ class NostrController {
     }
     final ek = _groups?.keysFor(groupId);
     await service.publishReceipt(
-      messageId: messageId,
+      messageIds: ids,
       receiptType: 'read',
       recipientPubkey: authorPubkey,
       encryptToPubkey: ek?.encryptionPubkeyFor(authorPubkey, identity.pubkey),
@@ -8282,12 +8313,16 @@ class NostrController {
         .read(appStateProvider)
         .messages[GroupLogic.groupStorageKey(groupId)];
     if (messages == null || messages.isEmpty) return;
+    final byAuthor = <String, List<String>>{};
     for (final m in messages) {
       if (m.isOwn || m.isHistorical) continue;
       final id = m.nymMessageId;
       if (id == null || id.isEmpty) continue;
-      unawaited(sendGroupReadReceipt(id, m.pubkey, groupId));
+      (byAuthor[m.pubkey] ??= <String>[]).add(id);
     }
+    byAuthor.forEach((author, ids) {
+      unawaited(sendGroupReadReceipt(ids, author, groupId));
+    });
   }
 
   /// Routes an inbound public channel typing indicator (kind 24420): a peer is
@@ -8464,6 +8499,68 @@ class NostrController {
     return true;
   }
 
+  final Map<String, List<Map<String, String>>> _groupReactionQueue = {};
+  final Map<String, Timer> _groupReactionTimers = {};
+
+  void queueGroupReaction(
+      String groupId, String messageId, String emoji, bool remove) {
+    final q = _groupReactionQueue[groupId] ??= <Map<String, String>>[];
+    q.removeWhere((e) => e['e'] == messageId && e['c'] == emoji);
+    q.add({'e': messageId, 'c': emoji, 'a': remove ? 'remove' : 'add'});
+    if (q.length > 64) q.removeAt(0);
+    if (_groupReactionTimers.containsKey(groupId)) return;
+    _groupReactionTimers[groupId] = Timer(
+        const Duration(milliseconds: kGroupReactionBatchMs), () {
+      _groupReactionTimers.remove(groupId);
+      unawaited(flushGroupReactions(groupId));
+    });
+  }
+
+  void flushPendingGroupReactions() {
+    for (final groupId in _groupReactionQueue.keys.toList()) {
+      _groupReactionTimers.remove(groupId)?.cancel();
+      unawaited(flushGroupReactions(groupId));
+    }
+  }
+
+  Future<bool> flushGroupReactions(String groupId) async {
+    final q = _groupReactionQueue[groupId];
+    if (q == null || q.isEmpty) return false;
+    _groupReactionQueue[groupId] = <Map<String, String>>[];
+    final service = _service;
+    final identity = _identity;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (service == null || identity == null || group == null) return false;
+    final ek = _groups!.keysFor(group.id);
+    final primary = q.last;
+    final rest = q.sublist(0, q.length - 1);
+    final emojiNotifier = _ref.read(liveCustomEmojiProvider.notifier);
+    final emojiTags = <List<String>>[
+      for (final it in q) ...emojiNotifier.emojiTagsForContent(it['c']!)
+    ];
+    final rumor = UnsignedEvent(
+      pubkey: identity.pubkey,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: EventKind.reaction,
+      tags: [
+        ['g', group.id],
+        ['e', primary['e']!],
+        ['k', '14'],
+        if (primary['a'] == 'remove') ['action', 'remove'],
+        ...emojiTags,
+        if (rest.isNotEmpty) ['batch', jsonEncode(rest)],
+      ],
+      content: primary['c']!,
+    );
+    return service.publishGiftWrappedRumor(
+      rumor: rumor,
+      recipients: group.members,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+      onWrap: _archiveSentWrap,
+    );
+  }
+
   Future<bool> _sendPrivateReaction(
       String messageId, String emoji, String target, bool remove) async {
     final service = _service;
@@ -8483,29 +8580,8 @@ class NostrController {
     if (view.kind == ViewKind.group) {
       final group = appState.groupById(view.id);
       if (group == null) return false;
-      final ek = _groups!.keysFor(group.id);
-      final rumor = UnsignedEvent(
-        pubkey: identity.pubkey,
-        createdAt: nowSec,
-        kind: EventKind.reaction,
-        tags: [
-          ['g', group.id],
-          ['e', messageId],
-          ['k', '14'],
-          if (remove) ['action', 'remove'],
-          ...emojiTags,
-        ],
-        content: emoji,
-      );
-      return service.publishGiftWrappedRumor(
-        rumor: rumor,
-        recipients: group.members,
-        encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
-        // Durable content: archive/deposit the sent wraps like the PWA
-        // (reactions ride `_depositPMEvent`, pms.js:467) so the reaction
-        // BACKFILLS for offline members and on relaunch.
-        onWrap: _archiveSentWrap,
-      );
+      queueGroupReaction(group.id, messageId, emoji, remove);
+      return true;
     }
 
     // 1:1 PM reaction: gift-wrap to [self, peer] with ['p',target],['k','1059'].

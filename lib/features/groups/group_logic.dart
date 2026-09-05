@@ -23,6 +23,8 @@ const int kGroupRosterRepairCooldownMs = 300000;
 
 const int kGroupTypingMaxMembers = 50;
 
+const int kGroupReactionBatchMs = 1500;
+
 /// Key-resync heartbeat: after being offline this long, our stored view of
 /// other members' rotating ephemeral keys may have expired off relays, so we
 /// proactively re-exchange current keys (PWA `GROUP_RESYNC_OFFLINE_GAP_SEC`).

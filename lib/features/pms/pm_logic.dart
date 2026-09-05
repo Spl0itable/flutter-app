@@ -167,16 +167,17 @@ class PmLogic {
   /// than a 1:1 checkmark. Group vs PM is decided by the matched own message's
   /// `isGroup` flag on receive, so no wire `g` tag is required (matching the PWA).
   static ReceiptInfo? parseReceipt(Map<String, dynamic> rumor) {
-    String? messageId;
+    final messageIds = <String>[];
     String? type;
     for (final t in _tags(rumor)) {
       if (t.length < 2) continue;
-      if (t[0] == 'x') messageId = t[1];
+      if (t[0] == 'x') messageIds.add(t[1]);
       if (t[0] == 'receipt') type = t[1];
     }
-    if (messageId == null || type == null) return null;
+    if (messageIds.isEmpty || type == null) return null;
     return ReceiptInfo(
-      messageId: messageId,
+      messageId: messageIds.first,
+      messageIds: messageIds,
       receiptType: type,
       readerPubkey: rumor['pubkey'] as String?,
     );
@@ -247,11 +248,13 @@ class ReceiptInfo {
   ReceiptInfo({
     required this.messageId,
     required this.receiptType,
+    List<String>? messageIds,
     this.readerPubkey,
-  });
+  }) : messageIds = messageIds ?? [messageId];
 
-  /// The `['x', …]` nymMessageId of the original message.
   final String messageId;
+
+  final List<String> messageIds;
 
   /// 'delivered' | 'read'.
   final String receiptType;

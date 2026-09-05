@@ -3422,6 +3422,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// records the reader's avatar (groups show a reader row, not ticks — PWA
   /// `pms.js:948-958`).
   void applyReceipt(ReceiptInfo receipt) {
+    if (receipt.messageIds.length > 1) {
+      for (final id in receipt.messageIds) {
+        applyReceipt(ReceiptInfo(
+          messageId: id,
+          receiptType: receipt.receiptType,
+          readerPubkey: receipt.readerPubkey,
+        ));
+      }
+      return;
+    }
     final target = receipt.messageId.toLowerCase();
     final next = PmLogic.deliveryFromReceipt(receipt.receiptType);
     // Delivery/read receipts reference our own message by its nymMessageId — an

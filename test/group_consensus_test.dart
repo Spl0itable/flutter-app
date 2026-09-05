@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:nym_bar/features/groups/group_logic.dart';
+import 'package:nym_bar/features/pms/pm_logic.dart';
 import 'package:nym_bar/models/group.dart';
 import 'package:nym_bar/state/app_state.dart';
 
@@ -455,6 +456,57 @@ void main() {
       expect(shell.members.length, 5);
       expect(shell.createdBy, owner);
       expect(GroupLogic.applyRoster(shell, tags, plain, asker), isFalse);
+    });
+  });
+
+  group('batched signals', () {
+    test('a receipt carrying several ids parses them all', () {
+      final rumor = {
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['p', _pk(0)],
+          ['x', 'aa'],
+          ['x', 'bb'],
+          ['x', 'cc'],
+          ['receipt', 'read'],
+        ],
+        'content': '',
+      };
+      final info = PmLogic.parseReceipt(rumor);
+      expect(info, isNotNull);
+      expect(info!.messageIds, ['aa', 'bb', 'cc']);
+      expect(info.receiptType, 'read');
+      expect(info.messageId, 'aa');
+    });
+
+    test('a single-id receipt still parses as one', () {
+      final rumor = {
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['p', _pk(0)],
+          ['x', 'aa'],
+          ['receipt', 'delivered'],
+        ],
+        'content': '',
+      };
+      final info = PmLogic.parseReceipt(rumor);
+      expect(info!.messageIds, ['aa']);
+      expect(info.messageId, 'aa');
+    });
+
+    test('a receipt with no ids is not a receipt', () {
+      final rumor = {
+        'pubkey': _pk(1),
+        'created_at': 1700000000,
+        'tags': [
+          ['p', _pk(0)],
+          ['receipt', 'read'],
+        ],
+        'content': '',
+      };
+      expect(PmLogic.parseReceipt(rumor), isNull);
     });
   });
 }
