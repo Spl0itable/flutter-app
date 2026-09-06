@@ -302,7 +302,7 @@ const List<CommandSpec> kCommandSpecs = [
   CommandSpec(
     id: 'ban',
     name: '/ban',
-    desc: 'Ban member (owner/mod)',
+    desc: 'Ban member (owner/admin/mod)',
     category: CommandCategory.groups,
     context: CommandContext.groupOnly,
     takesArgs: true,
@@ -310,7 +310,7 @@ const List<CommandSpec> kCommandSpecs = [
   CommandSpec(
     id: 'unban',
     name: '/unban',
-    desc: 'Unban member (owner)',
+    desc: 'Unban member (owner/admin/mod)',
     category: CommandCategory.groups,
     context: CommandContext.groupOnly,
     takesArgs: true,
@@ -318,7 +318,23 @@ const List<CommandSpec> kCommandSpecs = [
   CommandSpec(
     id: 'addmod',
     name: '/addmod',
-    desc: 'Promote to moderator (owner)',
+    desc: 'Promote to moderator (owner/admin)',
+    category: CommandCategory.groups,
+    context: CommandContext.groupOnly,
+    takesArgs: true,
+  ),
+  CommandSpec(
+    id: 'addadmin',
+    name: '/addadmin',
+    desc: 'Promote to admin (owner)',
+    category: CommandCategory.groups,
+    context: CommandContext.groupOnly,
+    takesArgs: true,
+  ),
+  CommandSpec(
+    id: 'removeadmin',
+    name: '/removeadmin',
+    desc: 'Remove admin (owner)',
     category: CommandCategory.groups,
     context: CommandContext.groupOnly,
     takesArgs: true,
@@ -326,7 +342,7 @@ const List<CommandSpec> kCommandSpecs = [
   CommandSpec(
     id: 'removemod',
     name: '/removemod',
-    desc: 'Remove moderator (owner)',
+    desc: 'Remove moderator (owner/admin)',
     category: CommandCategory.groups,
     context: CommandContext.groupOnly,
     takesArgs: true,

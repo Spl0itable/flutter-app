@@ -2178,11 +2178,14 @@ class NostrService {
   /// Publishes a gift-wrapped delivery/read receipt (kind 69420) for
   /// [messageId] to [recipientPubkey]. (docs/specs/03 §10)
   Future<bool> publishReceipt({
-    required String messageId,
+    String? messageId,
+    List<String>? messageIds,
     required String receiptType, // 'delivered' | 'read'
     required String recipientPubkey,
     String? encryptToPubkey,
   }) async {
+    final ids = messageIds ?? (messageId == null ? const <String>[] : [messageId]);
+    if (ids.isEmpty) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final rumor = UnsignedEvent(
       pubkey: identity.pubkey,
@@ -2190,7 +2193,7 @@ class NostrService {
       kind: EventKind.nymReceiptRumor,
       tags: [
         ['p', recipientPubkey],
-        ['x', messageId],
+        for (final id in ids) ['x', id],
         ['receipt', receiptType],
       ],
       content: '',
@@ -2206,12 +2209,14 @@ class NostrService {
     required String status, // 'start' | 'stop'
     required List<String> recipients,
     String? groupId,
+    int ttlSec = 0,
     String Function(String memberPubkey)? encryptTo,
   }) async {
     if (recipients.isEmpty) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final tags = <List<String>>[
       ['typing', status],
+      if (status == 'start' && ttlSec > 0) ['ttl', '$ttlSec'],
       if (groupId != null) ['g', groupId],
     ];
     var any = false;

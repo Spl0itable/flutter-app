@@ -242,7 +242,13 @@ class NostrController {
 
   /// Minimum gap between typing-start broadcasts (PWA `_typingSendInterval`,
   /// app.js:741), C03-D4.
-  static const int _typingSendIntervalMs = 3000;
+  static const int _typingSendIntervalMs = 12000;
+  static const int _typingStartDebounceMs = 1500;
+  static const int _typingTtlSec = 15;
+  static const int _typingStopDelayMs = 4000;
+  final Map<String, Timer> _typingStartTimers = {};
+  final Map<String, Timer> _typingStopTimers = {};
+  final Set<String> _typingStartedFor = <String>{};
 
   /// Reaction toggle rate-limit tracker: `messageId:emoji` → timestamps within
   /// the 30s window + a cooldown-until ms (reactions.js
@@ -3270,7 +3276,12 @@ class NostrController {
               if (t.length > 1 && t[0] == 'p') t[1],
           ],
           timestampMs: m.createdAt * 1000,
+          senderPubkey: senderPubkey,
         );
+        final advertised = _tagValue(tags, 'rh');
+        if (advertised != null && advertised.isNotEmpty) {
+          unawaited(_maybeRepairRoster(groupId, advertised, senderPubkey));
+        }
         // `meta_ts` piggyback (groups.js:1293-1296): the owner's recent
         // metadata change rides regular messages for a window
         // (`_attachGroupMetaTags`), so members who missed the control event
@@ -3515,6 +3526,16 @@ class NostrController {
           .where((t) => t.length > 1 && t[0] == 'mod')
           .map((t) => t[1])
           .toList();
+      final admins = tags
+          .where((t) => t.length > 1 && t[0] == 'admin')
+          .map((t) => t[1])
+          .toList();
+      final genesisOwner = _tagValue(tags, 'gowner');
+      final genesisNonce = _tagValue(tags, 'gnonce');
+      final genesis =
+          GroupLogic.verifyGenesis(groupId, genesisOwner, genesisNonce);
+      if (genesis == false) return;
+      if (genesis == true && senderPubkey != genesisOwner) return;
       // A bare shell (learned via a group MESSAGE before this invite, planted by
       // `mergeGroupFromMessage` with no owner/avatar) already exists: BACKFILL
       // its owner + appearance from the invite bootstrap instead of dropping them
@@ -3531,6 +3552,7 @@ class NostrController {
             members: members,
             mods: mods);
         _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
         return;
       }
       appState.upsertGroup(Group(
@@ -3538,7 +3560,10 @@ class NostrController {
         name: name,
         members: members,
         mods: mods,
+        admins: admins,
         createdBy: owner,
+        genesisOwner: genesis == true ? genesisOwner : null,
+        genesisNonce: genesis == true ? genesisNonce : null,
         avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
         banner: (banner != null && banner.isNotEmpty) ? banner : null,
         description: (description != null && description.isNotEmpty)
@@ -3551,6 +3576,7 @@ class NostrController {
         lastMessageTime: DateTime.now().millisecondsSinceEpoch,
       ));
       _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
       // Group invite notification (groups.js:851-871 `Group invite: <name>`).
       if (_notificationsEnabled &&
           !_ref.read(appStateProvider).blockedUsers.contains(senderPubkey)) {
@@ -3612,6 +3638,44 @@ class NostrController {
     // :2583, which sends `invite_epoch`) lands in the void — the whole invite-link
     // join never completes (F04-H2). This must run BEFORE the generic
     // `applyGroupControl` (join-request has no `applyControlEvent` case → ignored).
+    if (type == GroupControlType.rosterReq) {
+      final group = appState.groupById(groupId);
+      final identity = _identity;
+      final groups = _groups;
+      if (group == null || identity == null || groups == null) return;
+      if (senderPubkey == identity.pubkey) return;
+      if (!GroupLogic.canModerate(group, identity.pubkey)) return;
+      if (!group.members.contains(senderPubkey)) return;
+      final key = '$groupId:$senderPubkey';
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if ((_rosterReplyTs[key] ?? 0) > nowMs - kGroupRosterRepairCooldownMs) {
+        return;
+      }
+      _rosterReplyTs[key] = nowMs;
+      final replyTags = GroupLogic.buildRosterReplyTags(group, senderPubkey);
+      unawaited(groups.sendControl(
+        group: group,
+        selfPubkey: identity.pubkey,
+        type: GroupControlType.roster,
+        extraTags: replyTags
+            .where((t) => t[0] != 'g' && t[0] != 'subject' && t[0] != 'type')
+            .toList(),
+        recipients: [senderPubkey],
+      ));
+      return;
+    }
+
+    if (type == GroupControlType.roster) {
+      final group = appState.groupById(groupId);
+      final identity = _identity;
+      if (group == null || identity == null) return;
+      if (senderPubkey == identity.pubkey) return;
+      if (GroupLogic.applyRoster(group, tags, senderPubkey, identity.pubkey)) {
+        appState.notifyGroupsChanged();
+      }
+      return;
+    }
+
     if (type == GroupControlType.joinRequest) {
       final group = appState.groupById(groupId);
       if (group == null) return;
@@ -3625,7 +3689,21 @@ class NostrController {
       if (reqEpoch != group.inviteEpoch) return;
       if (group.members.contains(senderPubkey)) return;
       if (group.banned.contains(senderPubkey)) return;
-      unawaited(addGroupMembers(groupId, [senderPubkey]));
+      final rank = GroupLogic.joinAdmitRank(group, identity.pubkey, senderPubkey);
+      if (rank <= 0) {
+        unawaited(addGroupMembers(groupId, [senderPubkey]));
+        return;
+      }
+      unawaited(Future<void>.delayed(
+          Duration(milliseconds: (rank > 6 ? 6 : rank) * kGroupAdmitBackoffMs),
+          () {
+        final now = appState.groupById(groupId);
+        if (now == null) return;
+        if (now.members.contains(senderPubkey)) return;
+        if (now.banned.contains(senderPubkey)) return;
+        if (!GroupLogic.canAddMembers(now, identity.pubkey)) return;
+        unawaited(addGroupMembers(groupId, [senderPubkey]));
+      }));
       return;
     }
 
@@ -3661,8 +3739,25 @@ class NostrController {
             .where((t) => t.length > 1 && t[0] == 'mod')
             .map((t) => t[1])
             .toList();
-        if (appState.groupById(groupId) == null) {
-          if (claimedOwner != null && claimedOwner == senderPubkey) {
+        final admins = tags
+            .where((t) => t.length > 1 && t[0] == 'admin')
+            .map((t) => t[1])
+            .toList();
+        final genesisOwner = _tagValue(tags, 'gowner');
+        final genesisNonce = _tagValue(tags, 'gnonce');
+        final genesis =
+            GroupLogic.verifyGenesis(groupId, genesisOwner, genesisNonce);
+        if (genesis == false) return;
+        final existing = appState.groupById(groupId);
+        if (existing?.genesisOwner != null &&
+            genesis == true &&
+            genesisOwner != existing!.genesisOwner) {
+          return;
+        }
+        if (existing == null) {
+          if (claimedOwner != null &&
+              claimedOwner == senderPubkey &&
+              (genesis != true || claimedOwner == genesisOwner)) {
             final allowInv = _tagValue(tags, 'allow_invites');
             final inviteEnabledTag = _tagValue(tags, 'invite_enabled');
             final inviteEpochTag = _tagValue(tags, 'invite_epoch');
@@ -3671,7 +3766,10 @@ class NostrController {
               name: name,
               members: members,
               mods: mods,
+              admins: admins,
               createdBy: claimedOwner,
+              genesisOwner: genesis == true ? genesisOwner : null,
+              genesisNonce: genesis == true ? genesisNonce : null,
               avatar: (avatar != null && avatar.isNotEmpty) ? avatar : null,
               banner: (banner != null && banner.isNotEmpty) ? banner : null,
               description: (description != null && description.isNotEmpty)
@@ -3735,6 +3833,7 @@ class NostrController {
     // group entry; apply any stashed blob now that the group exists.
     if (type == GroupControlType.addMember) {
       _processPendingGroupHistory(groupId);
+      unawaited(announceGroupEphemeralKey(groupId));
     }
   }
 
@@ -3916,7 +4015,8 @@ class NostrController {
       // = 5s (pms.js:924 / nostr-core.js:1547), C03-D5.
       final age = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
           ((rumor['created_at'] as num?)?.toInt() ?? 0);
-      if (age > 5) return;
+      final ttl = info.ttlSec > 0 ? (info.ttlSec > 30 ? 30 : info.ttlSec) : 5;
+      if (age > ttl) return;
       final storageKey = info.groupId != null
           ? GroupLogic.groupStorageKey(info.groupId!)
           : PmLogic.pmStorageKey(info.pubkey!);
@@ -3956,6 +4056,33 @@ class NostrController {
     final ts = (rumor['created_at'] as num?)?.toInt() ?? 0;
     final action =
         tags.any((t) => t.length > 1 && t[0] == 'action' && t[1] == 'remove');
+    final batchTag = _tagValue(tags, 'batch');
+    if (batchTag != null && batchTag.isNotEmpty) {
+      List<dynamic>? extra;
+      try {
+        final decoded = jsonDecode(batchTag);
+        if (decoded is List) extra = decoded;
+      } catch (_) {}
+      if (extra != null) {
+        final hexRe = RegExp(r'^[0-9a-f]{64}$', caseSensitive: false);
+        for (final raw in extra.take(64)) {
+          if (raw is! Map) continue;
+          final e = raw['e'];
+          final c = raw['c'];
+          if (e is! String || !hexRe.hasMatch(e)) continue;
+          if (c is! String || c.isEmpty) continue;
+          final rest = Map<String, dynamic>.from(rumor);
+          rest['content'] = c;
+          rest['tags'] = [
+            for (final t in tags)
+              if (t.isNotEmpty && t[0] != 'e' && t[0] != 'action' && t[0] != 'batch') t,
+            ['e', e],
+            if (raw['a'] == 'remove') ['action', 'remove'],
+          ];
+          _onPrivateReaction(rest, appState);
+        }
+      }
+    }
     // The reacted message's author (`p` tag); reaction targets us when this is
     // our pubkey. Group reactions also carry the group id (`g`) for routing.
     final targetAuthor = _tagValue(tags, 'p') ?? '';
@@ -6786,6 +6913,14 @@ class NostrController {
       _sendModRoleControl(groupId, targetPubkey, GroupControlType.transferOwner,
           ['owner', targetPubkey]);
 
+  Future<bool> promoteAdmin(String groupId, String targetPubkey) =>
+      _sendModRoleControl(groupId, targetPubkey, GroupControlType.promoteAdmin,
+          ['admin', targetPubkey]);
+
+  Future<bool> revokeAdmin(String groupId, String targetPubkey) =>
+      _sendModRoleControl(groupId, targetPubkey, GroupControlType.revokeAdmin,
+          ['admin', targetPubkey]);
+
   Future<bool> _sendModRoleControl(
     String groupId,
     String targetPubkey,
@@ -6797,8 +6932,15 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     final group = appState.groupById(groupId);
     if (identity == null || groups == null || group == null) return false;
-    // Promote/revoke/transfer are owner-only (group_logic §4.1).
-    if (!GroupLogic.isOwner(group, identity.pubkey)) return false;
+    final spec = groupRoleEvents[type];
+    if (spec != null) {
+      if (!GroupLogic.roleEventAuthorized(
+          group, spec, identity.pubkey, targetPubkey)) {
+        return false;
+      }
+    } else if (!GroupLogic.isOwner(group, identity.pubkey)) {
+      return false; // transfer stays owner-only
+    }
     final extraTags = [tag];
     final ok = await groups.sendControl(
       group: group,
@@ -6816,6 +6958,93 @@ class NostrController {
         eventId: GroupLogic.generateGroupId(),
       );
     }
+    return ok;
+  }
+
+  /// Owner/mod lift of a ban (groups.js `unbanFromGroup`). The banned list is
+  /// per-member state, so the control goes to every member plus the unbanned
+  /// user: a member that keeps the ban filters the re-added user back out of
+  /// its roster and never wraps to them again.
+  final Map<String, int> _rosterReplyTs = {};
+  final Map<String, int> _rosterRepairTs = {};
+
+  Future<void> _maybeRepairRoster(
+      String groupId, String advertised, String senderPubkey) async {
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    final identity = _identity;
+    final groups = _groups;
+    if (group == null || identity == null || groups == null) return;
+    if (GroupLogic.rosterHash(groupId, group.members) == advertised) return;
+    if (!GroupLogic.isBareShell(group, identity.pubkey) &&
+        !group.members.contains(senderPubkey)) {
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if ((_rosterRepairTs[groupId] ?? 0) > nowMs - kGroupRosterRepairCooldownMs) {
+      return;
+    }
+    _rosterRepairTs[groupId] = nowMs;
+    await groups.sendControl(
+      group: group,
+      selfPubkey: identity.pubkey,
+      type: GroupControlType.rosterReq,
+      extraTags: const [],
+      recipients: [senderPubkey],
+    );
+  }
+
+  final Map<String, int> _ephAnnounceMs = {};
+
+  Future<void> announceGroupEphemeralKey(String groupId) async {
+    final identity = _identity;
+    final groups = _groups;
+    final group = _ref.read(appStateProvider.notifier).groupById(groupId);
+    if (identity == null || groups == null || group == null) return;
+    if (group.members.where((pk) => pk != identity.pubkey).isEmpty) return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if ((_ephAnnounceMs[groupId] ?? 0) > nowMs - kGroupResyncCooldownSec * 1000) {
+      return;
+    }
+    _ephAnnounceMs[groupId] = nowMs;
+    await groups.sendKeyResyncRequest(
+      group: group,
+      selfPubkey: identity.pubkey,
+      settings: _msgSettings,
+    );
+    _afterSelfKeyRotation();
+  }
+
+  Future<bool> unbanFromGroup(String groupId, String pubkey) async {
+    final identity = _identity;
+    final groups = _groups;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (identity == null || groups == null || group == null) return false;
+    if (!GroupLogic.canModerate(group, identity.pubkey)) return false;
+    if (!group.banned.contains(pubkey)) return false;
+    final extraTags = [
+      ['unban', pubkey]
+    ];
+    final recipients = <String>{...group.members, pubkey}
+        .where((pk) => pk != identity.pubkey)
+        .toList();
+    final ok = recipients.isEmpty ||
+        await groups.sendControl(
+          group: group,
+          selfPubkey: identity.pubkey,
+          type: GroupControlType.unban,
+          extraTags: extraTags,
+          recipients: recipients,
+        );
+    appState.applyGroupControl(
+      groupId: groupId,
+      type: GroupControlType.unban,
+      tags: extraTags,
+      senderPubkey: identity.pubkey,
+      ts: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      eventId: GroupLogic.generateGroupId(),
+    );
     return ok;
   }
 
@@ -7840,6 +8069,40 @@ class NostrController {
   }
 
   /// Signals typing in the current PM/group view (throttled ~3/s — C03-D4).
+  void _armTypingStop(String key, ChatView view) {
+    _typingStopTimers.remove(key)?.cancel();
+    _typingStopTimers[key] = Timer(
+        const Duration(milliseconds: _typingStopDelayMs), () {
+      _typingStopTimers.remove(key);
+      _typingStartTimers.remove(key)?.cancel();
+      if (!_typingStartedFor.remove(key)) return;
+      unawaited(_sendTypingStop(view));
+    });
+  }
+
+  Future<void> _sendTypingStop(ChatView view) async {
+    final service = _service;
+    final identity = _identity;
+    if (service == null || identity == null) return;
+    if (view.kind == ViewKind.pm) {
+      if (anonSuppressSendTo(view.id)) return;
+      await service.publishTyping(status: 'stop', recipients: [view.id]);
+      return;
+    }
+    if (view.kind != ViewKind.group) return;
+    final group = _ref.read(appStateProvider.notifier).groupById(view.id);
+    if (group == null) return;
+    final ek = _groups!.keysFor(group.id);
+    final others = group.members.where((p) => p != identity.pubkey).toList();
+    if (others.isEmpty) return;
+    await service.publishTyping(
+      status: 'stop',
+      recipients: others,
+      groupId: group.id,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+    );
+  }
+
   Future<void> sendTypingStart() async {
     final service = _service;
     final identity = _identity;
@@ -7859,10 +8122,21 @@ class NostrController {
 
     final key = view.storageKey;
     final now = DateTime.now().millisecondsSinceEpoch;
-    // PWA `_typingSendInterval = 3000` (app.js:741) — re-broadcast typing-start
-    // at most once per 3s, not 1s (C03-D4).
-    if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
-    _typingThrottle[key] = now;
+    _armTypingStop(key, view);
+    if (_typingStartedFor.contains(key)) {
+      if (now - (_typingThrottle[key] ?? 0) < _typingSendIntervalMs) return;
+      _typingThrottle[key] = now;
+    } else {
+      if (_typingStartTimers.containsKey(key)) return;
+      _typingStartTimers[key] = Timer(
+          const Duration(milliseconds: _typingStartDebounceMs), () {
+        _typingStartTimers.remove(key);
+        _typingStartedFor.add(key);
+        _typingThrottle[key] = DateTime.now().millisecondsSinceEpoch;
+        unawaited(sendTypingStart());
+      });
+      return;
+    }
 
     if (view.kind == ViewKind.channel) {
       // Public channel typing (kind 24420). The channel wire tag is `g` for a
@@ -7883,7 +8157,8 @@ class NostrController {
 
     if (view.kind == ViewKind.pm) {
       if (anonSuppressSendTo(view.id)) return;
-      await service.publishTyping(status: 'start', recipients: [view.id]);
+      await service.publishTyping(
+          status: 'start', recipients: [view.id], ttlSec: _typingTtlSec);
     } else {
       final group = _ref.read(appStateProvider.notifier).groupById(view.id);
       if (group == null) return;
@@ -7893,6 +8168,7 @@ class NostrController {
         status: 'start',
         recipients: others,
         groupId: group.id,
+        ttlSec: _typingTtlSec,
         encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
       );
     }
@@ -8069,17 +8345,21 @@ class NostrController {
   /// author's advertised ephemeral key. Scope-gated to the `group` context and
   /// deduped once per message; never receipts our own message.
   Future<void> sendGroupReadReceipt(
-      String messageId, String authorPubkey, String groupId) async {
+      dynamic messageId, String authorPubkey, String groupId) async {
     if (!_indicatorScopeAllows(
         _ref.read(settingsProvider).readReceiptsScope, 'group')) {
       return;
     }
-    if (messageId.isEmpty || authorPubkey.isEmpty) return;
+    final wanted = messageId is List<String>
+        ? messageId
+        : (messageId is String && messageId.isNotEmpty ? [messageId] : const <String>[]);
+    if (wanted.isEmpty || authorPubkey.isEmpty) return;
     final identity = _identity;
     final service = _service;
     if (identity == null || service == null) return;
     if (authorPubkey == identity.pubkey) return;
-    if (!_sentGroupReadReceipts.add(messageId)) return;
+    final ids = [for (final id in wanted) if (_sentGroupReadReceipts.add(id)) id];
+    if (ids.isEmpty) return;
     if (_sentGroupReadReceipts.length > 2000) {
       final keep = _sentGroupReadReceipts
           .toList()
@@ -8090,7 +8370,7 @@ class NostrController {
     }
     final ek = _groups?.keysFor(groupId);
     await service.publishReceipt(
-      messageId: messageId,
+      messageIds: ids,
       receiptType: 'read',
       recipientPubkey: authorPubkey,
       encryptToPubkey: ek?.encryptionPubkeyFor(authorPubkey, identity.pubkey),
@@ -8110,12 +8390,16 @@ class NostrController {
         .read(appStateProvider)
         .messages[GroupLogic.groupStorageKey(groupId)];
     if (messages == null || messages.isEmpty) return;
+    final byAuthor = <String, List<String>>{};
     for (final m in messages) {
       if (m.isOwn || m.isHistorical) continue;
       final id = m.nymMessageId;
       if (id == null || id.isEmpty) continue;
-      unawaited(sendGroupReadReceipt(id, m.pubkey, groupId));
+      (byAuthor[m.pubkey] ??= <String>[]).add(id);
     }
+    byAuthor.forEach((author, ids) {
+      unawaited(sendGroupReadReceipt(ids, author, groupId));
+    });
   }
 
   /// Routes an inbound public channel typing indicator (kind 24420): a peer is
@@ -8292,6 +8576,74 @@ class NostrController {
     return true;
   }
 
+  final Map<String, List<Map<String, String>>> _groupReactionQueue = {};
+  final Map<String, Timer> _groupReactionTimers = {};
+
+  void queueGroupReaction(
+      String groupId, String messageId, String emoji, bool remove) {
+    final q = _groupReactionQueue[groupId] ??= <Map<String, String>>[];
+    q.removeWhere((e) => e['e'] == messageId && e['c'] == emoji);
+    q.add({'e': messageId, 'c': emoji, 'a': remove ? 'remove' : 'add'});
+    if (q.length > 64) q.removeAt(0);
+    if (_groupReactionTimers.containsKey(groupId)) return;
+    _groupReactionTimers[groupId] = Timer(
+        const Duration(milliseconds: kGroupReactionBatchMs), () {
+      _groupReactionTimers.remove(groupId);
+      unawaited(flushGroupReactions(groupId));
+    });
+  }
+
+  void flushPendingGroupReactions() {
+    for (final groupId in _groupReactionQueue.keys.toList()) {
+      _groupReactionTimers.remove(groupId)?.cancel();
+      unawaited(flushGroupReactions(groupId));
+    }
+  }
+
+  void flushPendingDeposits() {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    unawaited(sync.flushDeposits());
+  }
+
+  Future<bool> flushGroupReactions(String groupId) async {
+    final q = _groupReactionQueue[groupId];
+    if (q == null || q.isEmpty) return false;
+    _groupReactionQueue[groupId] = <Map<String, String>>[];
+    final service = _service;
+    final identity = _identity;
+    final appState = _ref.read(appStateProvider.notifier);
+    final group = appState.groupById(groupId);
+    if (service == null || identity == null || group == null) return false;
+    final ek = _groups!.keysFor(group.id);
+    final primary = q.last;
+    final rest = q.sublist(0, q.length - 1);
+    final emojiNotifier = _ref.read(liveCustomEmojiProvider.notifier);
+    final emojiTags = <List<String>>[
+      for (final it in q) ...emojiNotifier.emojiTagsForContent(it['c']!)
+    ];
+    final rumor = UnsignedEvent(
+      pubkey: identity.pubkey,
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      kind: EventKind.reaction,
+      tags: [
+        ['g', group.id],
+        ['e', primary['e']!],
+        ['k', '14'],
+        if (primary['a'] == 'remove') ['action', 'remove'],
+        ...emojiTags,
+        if (rest.isNotEmpty) ['batch', jsonEncode(rest)],
+      ],
+      content: primary['c']!,
+    );
+    return service.publishGiftWrappedRumor(
+      rumor: rumor,
+      recipients: group.members,
+      encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
+      onWrap: _archiveSentWrap,
+    );
+  }
+
   Future<bool> _sendPrivateReaction(
       String messageId, String emoji, String target, bool remove) async {
     final service = _service;
@@ -8311,29 +8663,8 @@ class NostrController {
     if (view.kind == ViewKind.group) {
       final group = appState.groupById(view.id);
       if (group == null) return false;
-      final ek = _groups!.keysFor(group.id);
-      final rumor = UnsignedEvent(
-        pubkey: identity.pubkey,
-        createdAt: nowSec,
-        kind: EventKind.reaction,
-        tags: [
-          ['g', group.id],
-          ['e', messageId],
-          ['k', '14'],
-          if (remove) ['action', 'remove'],
-          ...emojiTags,
-        ],
-        content: emoji,
-      );
-      return service.publishGiftWrappedRumor(
-        rumor: rumor,
-        recipients: group.members,
-        encryptTo: (pk) => ek.encryptionPubkeyFor(pk, identity.pubkey),
-        // Durable content: archive/deposit the sent wraps like the PWA
-        // (reactions ride `_depositPMEvent`, pms.js:467) so the reaction
-        // BACKFILLS for offline members and on relaunch.
-        onWrap: _archiveSentWrap,
-      );
+      queueGroupReaction(group.id, messageId, emoji, remove);
+      return true;
     }
 
     // 1:1 PM reaction: gift-wrap to [self, peer] with ['p',target],['k','1059'].
@@ -12235,7 +12566,7 @@ class NostrController {
     if (!_ref.read(settingsProvider).cachePMs) return;
     final raw = wrap.toJson();
     unawaited(sync.pmPut([raw]));
-    unawaited(sync.pmDeposit([raw]));
+    sync.enqueueDeposit(raw);
   }
 
   /// The pubkey a gift wrap is addressed to (its single `p` tag), or null.
@@ -12272,7 +12603,7 @@ class NostrController {
     // else (recipient p-tag != us) → deposit into theirs. The same wrap is never
     // both (its single p-tag is either us or them).
     unawaited(sync.pmPut([raw]));
-    unawaited(sync.pmDeposit([raw]));
+    sync.enqueueDeposit(raw);
   }
 
   /// Caps a channel message list to the runtime limit (1000) before saving.
