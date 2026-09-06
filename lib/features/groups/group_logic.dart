@@ -34,8 +34,6 @@ const int kGroupAdmitBackoffMs = 4000;
 
 const int kGroupRosterRepairCooldownMs = 300000;
 
-const int kGroupTypingMaxMembers = 50;
-
 const int kGroupReactionBatchMs = 1500;
 
 /// Key-resync heartbeat: after being offline this long, our stored view of
