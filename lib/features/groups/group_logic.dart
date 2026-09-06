@@ -15,7 +15,20 @@ const int kEphemeralPrevKeysMax = 30;
 
 /// Membership cap: every group message costs one gift wrap per member, so
 /// membership is bounded to keep per-message fan-out (encrypt + publish work)
-const int kMaxGroupMembers = 500;
+const int kMaxGroupMembers = 100;
+
+const int kPmDepositQueueMax =
+    kMaxGroupMembers * 3 > 600 ? kMaxGroupMembers * 3 : 600;
+
+const int kPmDepositFlushMs = 4000;
+
+const int kPmDepositFlushJitterMs = 1500;
+
+const int kPmDepositBacklogMs = 600;
+
+const int kPmDepositBatchMin = 40;
+
+const int kPmDepositBatchMax = 100;
 
 const int kGroupAdmitBackoffMs = 4000;
 

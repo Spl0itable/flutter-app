@@ -10,6 +10,9 @@ import '../../core/constants/storage_keys.dart';
 import '../../core/crypto/keys.dart' as keys;
 import '../../core/crypto/nym_sync_builder.dart';
 import '../../models/settings.dart';
+import '../../features/groups/group_logic.dart'
+    show kPmDepositQueueMax, kPmDepositFlushMs, kPmDepositFlushJitterMs,
+        kPmDepositBacklogMs, kPmDepositBatchMin, kPmDepositBatchMax;
 import '../../core/crypto/pq.dart' as pq;
 import '../../features/identity/pq_registry.dart' show pqSelfCandidates;
 import '../../features/identity/pq_root.dart';
@@ -1899,6 +1902,11 @@ class StorageSync {
   /// (`_pmArchivedIds`, pms.js:1415). Capped like the PWA (6000 → trim to 4000).
   final Set<String> _archivedIds = {};
   final Set<String> _depositedIds = {};
+  final List<Map<String, dynamic>> _depositQueue = [];
+  final Random _depositRandom = Random();
+  Timer? _depositTimer;
+  int depositDropped = 0;
+  int depositFailed = 0;
 
   /// Uploads gift wraps addressed to us into our own D1 inbox (`pm-put`) so a
   /// new device can restore them. No-op for ephemeral identities. [wraps] are
@@ -1958,6 +1966,62 @@ class StorageSync {
       return batch.length;
     } catch (_) {
       return 0;
+    }
+  }
+
+  void enqueueDeposit(Map<String, dynamic> wrap) {
+    if (!_durable) return;
+    final id = wrap['id'];
+    if (id is! String || id.isEmpty) return;
+    final recipient = _recipientOf(wrap);
+    if (recipient == null || recipient == _pubkey) return;
+    if (_depositedIds.contains(id)) return;
+    _depositedIds.add(id);
+    _trim(_depositedIds);
+    _depositQueue.add(wrap);
+    while (_depositQueue.length > kPmDepositQueueMax) {
+      _depositQueue.removeAt(_depositRandom.nextInt(_depositQueue.length));
+      depositDropped++;
+    }
+    _depositTimer ??= Timer(_depositDelay(false), () => _flushDeposits());
+  }
+
+  Duration _depositDelay(bool backlog) => Duration(
+      milliseconds: (backlog ? kPmDepositBacklogMs : kPmDepositFlushMs) +
+          _depositRandom.nextInt(kPmDepositFlushJitterMs + 1));
+
+  int _depositBatchSize() =>
+      kPmDepositBatchMin +
+      _depositRandom.nextInt(kPmDepositBatchMax - kPmDepositBatchMin + 1);
+
+  Future<void> _flushDeposits({bool rearm = true}) async {
+    _depositTimer = null;
+    if (_depositQueue.isEmpty) return;
+    _depositQueue.shuffle(_depositRandom);
+    final size = _depositBatchSize();
+    final n = size < _depositQueue.length ? size : _depositQueue.length;
+    final batch = _depositQueue.sublist(0, n);
+    _depositQueue.removeRange(0, n);
+    try {
+      await _api.storageAction({
+        'action': 'pm-deposit',
+        'pubkey': _pubkey,
+        'events': batch,
+        'auth': await _auth('pm-deposit'),
+      });
+    } catch (_) {
+      depositFailed++;
+    }
+    if (rearm && _depositQueue.isNotEmpty) {
+      _depositTimer ??= Timer(_depositDelay(true), () => _flushDeposits());
+    }
+  }
+
+  Future<void> flushDeposits() async {
+    _depositTimer?.cancel();
+    _depositTimer = null;
+    while (_depositQueue.isNotEmpty) {
+      await _flushDeposits(rearm: false);
     }
   }
 

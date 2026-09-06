@@ -188,6 +188,9 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     try {
       ref.read(nostrControllerProvider).flushPendingGroupReactions();
     } catch (_) {}
+    try {
+      ref.read(nostrControllerProvider).flushPendingDeposits();
+    } catch (_) {}
     var keepAlive = false;
     try {
       keepAlive = ref.read(settingsProvider).backgroundConnectivity;

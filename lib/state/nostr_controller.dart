@@ -8600,6 +8600,12 @@ class NostrController {
     }
   }
 
+  void flushPendingDeposits() {
+    final sync = _storageSync;
+    if (sync == null || !sync.durableIdentity) return;
+    unawaited(sync.flushDeposits());
+  }
+
   Future<bool> flushGroupReactions(String groupId) async {
     final q = _groupReactionQueue[groupId];
     if (q == null || q.isEmpty) return false;
@@ -12560,7 +12566,7 @@ class NostrController {
     if (!_ref.read(settingsProvider).cachePMs) return;
     final raw = wrap.toJson();
     unawaited(sync.pmPut([raw]));
-    unawaited(sync.pmDeposit([raw]));
+    sync.enqueueDeposit(raw);
   }
 
   /// The pubkey a gift wrap is addressed to (its single `p` tag), or null.
@@ -12597,7 +12603,7 @@ class NostrController {
     // else (recipient p-tag != us) → deposit into theirs. The same wrap is never
     // both (its single p-tag is either us or them).
     unawaited(sync.pmPut([raw]));
-    unawaited(sync.pmDeposit([raw]));
+    sync.enqueueDeposit(raw);
   }
 
   /// Caps a channel message list to the runtime limit (1000) before saving.
