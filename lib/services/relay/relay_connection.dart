@@ -50,7 +50,8 @@ typedef WebSocketChannelFactory = WebSocketChannel Function(Uri url);
 ///
 /// Routes through [IOWebSocketChannel] so we can attach a
 /// `User-Agent: ApiConfig.userAgent` header — the backend `isNymchatClient`
-/// gate (`_shared.js`: `/NymchatApp\//i`) recognizes the native client by it
+/// gate (`functions/api/_client.js`: `/Nym(?:chat|bot)App\//i`) recognizes the
+/// native client by it
 /// (e.g. the app-relay `nymchat_proxy` perk, relay-pool.js:1124). The
 /// headers-less `WebSocketChannel.connect` would send a default Dart UA.
 ///

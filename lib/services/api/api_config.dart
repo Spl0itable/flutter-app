@@ -4,7 +4,14 @@
 /// which only resolves when served over http(s). A native Flutter app has no
 /// page origin, so per spec §4.2 (Flutter note) it targets a FIXED host and
 /// always sends a `User-Agent` that satisfies the backend `isNymchatClient`
-/// gate (`_shared.js`: `/NymchatApp\//i` OR `/\bNYMApp\b/`).
+/// gate (`functions/api/_client.js`: `/Nym(?:chat|bot)App\//i` OR
+/// `/\bNYMApp\b/`).
+///
+/// That gate moved out of `_shared.js` and widened when the standalone Nymbot
+/// service was given access to the same worker — one key is one account across
+/// both products. Widened, not changed: `NymchatApp/<ver>` is matched by the
+/// same alternation, and nym-staging's `npm run test:client-origin` asserts
+/// that every request the old gate accepted still gets through.
 class ApiConfig {
   ApiConfig._();
 
@@ -25,8 +32,9 @@ class ApiConfig {
 
   /// User-Agent that passes the backend `isNymchatClient` UA gate.
   ///
-  /// `_shared.js:isNymchatClient` matches `/NymchatApp\//i`. We send
-  /// `NymchatApp/<ver>`.
+  /// `_client.js:isNymchatClient` matches `/Nym(?:chat|bot)App\//i`. We send
+  /// `NymchatApp/<ver>`; the standalone Nymbot app sends `NymbotApp/<ver>` to
+  /// the same worker.
   static const String userAgent = 'NymchatApp/$appVersion';
 
   /// `wss://<host>/api/relay-pool` — the multiplexed relay-pool socket
