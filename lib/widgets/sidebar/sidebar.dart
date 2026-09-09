@@ -18,7 +18,6 @@ import '../../features/i18n/localization_service.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/identity/nick_edit_modal.dart';
 import '../../features/identity/panic_overlay.dart';
-import '../../features/identity/panic_wipe.dart';
 import '../../features/onboarding/tutorial_overlay.dart';
 import '../../features/pms/new_pm_modal.dart';
 import '../../features/relays/relay_stats_modal.dart';
@@ -916,23 +915,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
     );
   }
 
-  void _triggerPanic(BuildContext context) {
-    PanicOverlay.show(
-      context,
-      wipe: PanicWipe.production(),
-      onComplete: () {
-        // The disk stores are wiped (PanicWipe). Now reset the RUNNING session:
-        // drop the in-memory identity/keys/vault, reset AppState to the empty
-        // logged-out shell, and drive the app back to first-run setup — the
-        // in-memory half of the PWA's `panicWipe` (panic.js nulls
-        // privkey/pubkey/_vaultMem then reloads to a pristine first run). The
-        // boot-epoch bump inside `resetAfterPanic` remounts the BootGate (now
-        // setup-needed) and its `popUntil(first)` also tears down this overlay,
-        // so no manual pop is required.
-        unawaited(ref.read(nostrControllerProvider).resetAfterPanic());
-      },
-    );
-  }
+  // The disk stores go with PanicWipe; resetAfterPanic drops the running
+  // session and its boot-epoch bump remounts the gate at first run, whose
+  // popUntil(first) also tears the overlay down.
+  void _triggerPanic(BuildContext context) => startPanicWipe(context, ref);
 }
 
 /// Wraps the identity header to implement the panic gesture: a tap fires

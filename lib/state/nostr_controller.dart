@@ -5263,7 +5263,11 @@ class NostrController {
   /// and treating that absence as legacy marked the opening message of every
   /// conversation legacy until a second one arrived. Unknown is not legacy.
   bool? pqSealRootVerdict(String peerPubkey) {
-    if (_pqRoot == null) return false; // our own half settles it
+    // Our own half settles it — but only once §6 has decided whether this
+    // account HAS a root. Before that, "no root" is a load that has not
+    // finished, and answering false stamps the boot burst legacy for good.
+    if (!_pqRootSettled) return null;
+    if (_pqRoot == null) return false;
     final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     if (!_pqRegistry.isKnownNymchatClient(peerPubkey, nowSec: nowSec)) {
       return null;
@@ -5277,10 +5281,48 @@ class NostrController {
     if (nymMessageId == null) return;
     if (pqSealRootVerdict(peerPubkey) != null) return;
     unawaited(ensurePqAnnouncement(peerPubkey).then((_) {
-      if (pqSealRootVerdict(peerPubkey) != true) return;
-      _ref.read(appStateProvider.notifier).markMessagePqRoot(nymMessageId);
+      final verdict = pqSealRootVerdict(peerPubkey);
+      if (verdict == true) {
+        _ref.read(appStateProvider.notifier).markMessagePqRoot(nymMessageId);
+        return;
+      }
+      // Still unknown: our own root has not settled. Every message of the boot
+      // burst is waiting on the same thing, so wait for it rather than leaving
+      // them all legacy.
+      if (verdict == null) _pqWhenRootSettles(peerPubkey, nymMessageId);
     }));
   }
+
+  /// Re-asks once §6 has decided where our key comes from. Polls, because
+  /// settling happens inside the settings load rather than through an event.
+  void _pqWhenRootSettles(String peerPubkey, String nymMessageId) {
+    if (_pqRootWaiters.length >= 500) return;
+    _pqRootWaiters.add((peerPubkey, nymMessageId));
+    if (_pqRootWaitTimer != null) return;
+    var tries = 0;
+    void tick(Timer _) {
+      if (!_pqRootSettled) {
+        if (++tries <= 60) return;
+        _pqRootWaitTimer?.cancel();
+        _pqRootWaitTimer = null;
+        _pqRootWaiters.clear();
+        return;
+      }
+      _pqRootWaitTimer?.cancel();
+      _pqRootWaitTimer = null;
+      final waiting = List.of(_pqRootWaiters);
+      _pqRootWaiters.clear();
+      final notifier = _ref.read(appStateProvider.notifier);
+      for (final (peer, id) in waiting) {
+        if (pqSealRootVerdict(peer) == true) notifier.markMessagePqRoot(id);
+      }
+    }
+
+    _pqRootWaitTimer = Timer.periodic(const Duration(seconds: 1), tick);
+  }
+
+  final List<(String, String)> _pqRootWaiters = [];
+  Timer? _pqRootWaitTimer;
 
   /// Whose post-quantum announcements we watch: our conversation partners,
   /// group members and ourselves. Unlike the vouch list — a broadcast web of
@@ -5314,6 +5356,9 @@ class NostrController {
         _pqDevices = ann.devices;
         _refreshPqSealPolicy();
       }
+      // And how a freshly linked device learns which epoch the account is on: the
+      // code it was given does not say.
+      unawaited(_adoptAnnouncedPqEpoch());
     }
     _schedulePersistPqKeys();
   }
@@ -5378,6 +5423,61 @@ class NostrController {
 
   int _pqEpoch = 0;
 
+  /// How far back to look for the epoch our own announcement names.
+  static const int _pqEpochScan = 12;
+
+  /// Adopts the epoch our own announcement names, so a restored device does not
+  /// sit at 0 while the account advertises another key.
+  Future<bool> _adoptAnnouncedPqEpoch() async {
+    final self = _identity?.pubkey;
+    if (self == null) return false;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final announced =
+        _pqRegistry.keyFor(self, nowSec: nowSec, enabled: true);
+    if (announced == null) return false;
+
+    final root = _pqRoot;
+    final privkey = _identity?.privkey;
+    Uint8List? derive(int epoch) {
+      try {
+        if (root != null) return pq.pqKeypairFromRoot(root, epoch).publicKey;
+        if (privkey != null) {
+          return pq.pqKeypairFromPrivkey(privkey, epoch).publicKey;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    bool same(Uint8List a, Uint8List b) {
+      if (a.length != b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (a[i] != b[i]) return false;
+      }
+      return true;
+    }
+
+    final here = derive(_pqEpoch);
+    if (here != null && same(here, announced)) return false;
+
+    final order = <int>[];
+    final claimed = _pqRegistry.epochFor(self);
+    if (claimed != null && claimed >= 0) order.add(claimed);
+    for (var e = 0; e <= _pqEpochScan; e++) {
+      order.add(e);
+    }
+    final tried = <int>{_pqEpoch};
+    for (final epoch in order) {
+      if (!tried.add(epoch)) continue;
+      final keys = derive(epoch);
+      if (keys == null || !same(keys, announced)) continue;
+      _pqEpoch = epoch;
+      await _ref.read(keyValueStoreProvider).setString(
+          StorageKeys.pqEpoch, '$epoch');
+      return true;
+    }
+    return false;
+  }
+
   /// Loads the persisted post-quantum settings. On first boot of a
   /// post-quantum-capable build the default comes from [PqPolicy.initialMode]:
   /// a fresh install can turn it on safely because no older device can exist
@@ -5435,6 +5535,8 @@ class NostrController {
     // The announcement is replaceable, so a v1 republish would clobber the v2
     // one and send every peer back to a key the other devices no longer use.
     if (_pqRootLocked) return;
+    // The epoch does not travel in the backup; catch up before publishing.
+    await _adoptAnnouncedPqEpoch();
     if (!force &&
         _pqLastPublishMs != 0 &&
         DateTime.now().millisecondsSinceEpoch - _pqLastPublishMs <
@@ -5532,6 +5634,18 @@ class NostrController {
   /// account has a root, so any key it could announce is nsec-derived by
   /// default rather than by decision.
   bool _pqRootSettled = false;
+
+  /// Asks the worker to delete this account's rows, on the way out of a wipe.
+  /// Signed while the key is still here.
+  Future<bool> purgeServerRecords() async {
+    final sync = _storageSync;
+    if (sync == null) return false;
+    try {
+      return await sync.purgeAccount();
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// The root as its `nympq1…` code, shown beside the nsec.
   String? get pqRootCode {
@@ -13500,6 +13614,9 @@ class NostrController {
     _giftWrapInbound.clear();
     _settingsSyncTimer?.cancel();
     _profileBackfillTimer?.cancel();
+    _pqRootWaitTimer?.cancel();
+    _pqRootWaitTimer = null;
+    _pqRootWaiters.clear();
     clearShopReceiptWait();
     if (_p2pSub != null) {
       _service?.pool.closeSubscription(_p2pSub!);

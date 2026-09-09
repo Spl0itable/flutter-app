@@ -1465,6 +1465,26 @@ class StorageSync {
     }
   }
 
+  /// Deletes this account's rows on the server, on the way out of a wipe.
+  /// Signed while the key is still here; the worker verifies the signature, so
+  /// nobody can purge a pubkey they do not hold.
+  Future<bool> purgeAccount() async {
+    try {
+      if (_pubkey.isEmpty) return false;
+      final auth = await _auth('account-purge');
+      if (auth == null) return false;
+      final res = await _api.storageAction(<String, dynamic>{
+        'action': 'account-purge',
+        'app': 'nymchat',
+        'pubkey': _pubkey,
+        'auth': auth,
+      });
+      return res['ok'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Loads encrypted settings categories from D1 and decodes them into a merged
   /// payload + the newest `updatedAt` (ms) across the applied core sections.
   ///
