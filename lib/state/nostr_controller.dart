@@ -5314,8 +5314,8 @@ class NostrController {
         _pqDevices = ann.devices;
         _refreshPqSealPolicy();
       }
-      // And how a freshly linked device learns which epoch the account is on:
-      // the code it was given does not say.
+      // And how a freshly linked device learns which epoch the account is on: the
+      // code it was given does not say.
       unawaited(_adoptAnnouncedPqEpoch());
     }
     _schedulePersistPqKeys();
@@ -5384,8 +5384,8 @@ class NostrController {
   /// How far back to look for the epoch our own announcement names.
   static const int _pqEpochScan = 12;
 
-  /// Adopts the epoch our own announcement names, so a restored device does
-  /// not sit at 0 while the account advertises another key.
+  /// Adopts the epoch our own announcement names, so a restored device does not
+  /// sit at 0 while the account advertises another key.
   Future<bool> _adoptAnnouncedPqEpoch() async {
     final self = _identity?.pubkey;
     if (self == null) return false;
