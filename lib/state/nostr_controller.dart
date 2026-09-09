@@ -5314,6 +5314,9 @@ class NostrController {
         _pqDevices = ann.devices;
         _refreshPqSealPolicy();
       }
+      // And how a freshly linked device learns which epoch the account is on:
+      // the code it was given does not say.
+      unawaited(_adoptAnnouncedPqEpoch());
     }
     _schedulePersistPqKeys();
   }
