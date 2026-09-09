@@ -5378,6 +5378,61 @@ class NostrController {
 
   int _pqEpoch = 0;
 
+  /// How far back to look for the epoch our own announcement names.
+  static const int _pqEpochScan = 12;
+
+  /// Adopts the epoch our own announcement names, so a restored device does
+  /// not sit at 0 while the account advertises another key.
+  Future<bool> _adoptAnnouncedPqEpoch() async {
+    final self = _identity?.pubkey;
+    if (self == null) return false;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final announced =
+        _pqRegistry.keyFor(self, nowSec: nowSec, enabled: true);
+    if (announced == null) return false;
+
+    final root = _pqRoot;
+    final privkey = _identity?.privkey;
+    Uint8List? derive(int epoch) {
+      try {
+        if (root != null) return pq.pqKeypairFromRoot(root, epoch).publicKey;
+        if (privkey != null) {
+          return pq.pqKeypairFromPrivkey(privkey, epoch).publicKey;
+        }
+      } catch (_) {}
+      return null;
+    }
+
+    bool same(Uint8List a, Uint8List b) {
+      if (a.length != b.length) return false;
+      for (var i = 0; i < a.length; i++) {
+        if (a[i] != b[i]) return false;
+      }
+      return true;
+    }
+
+    final here = derive(_pqEpoch);
+    if (here != null && same(here, announced)) return false;
+
+    final order = <int>[];
+    final claimed = _pqRegistry.epochFor(self);
+    if (claimed != null && claimed >= 0) order.add(claimed);
+    for (var e = 0; e <= _pqEpochScan; e++) {
+      order.add(e);
+    }
+    final tried = <int>{_pqEpoch};
+    for (final epoch in order) {
+      if (!tried.add(epoch)) continue;
+      final keys = derive(epoch);
+      if (keys == null || !same(keys, announced)) continue;
+      _pqEpoch = epoch;
+      await _ref.read(keyValueStoreProvider).setString(
+          StorageKeys.pqEpoch, '$epoch');
+      return true;
+    }
+    return false;
+  }
+
   /// Loads the persisted post-quantum settings. On first boot of a
   /// post-quantum-capable build the default comes from [PqPolicy.initialMode]:
   /// a fresh install can turn it on safely because no older device can exist
@@ -5435,6 +5490,8 @@ class NostrController {
     // The announcement is replaceable, so a v1 republish would clobber the v2
     // one and send every peer back to a key the other devices no longer use.
     if (_pqRootLocked) return;
+    // The epoch does not travel in the backup; catch up before publishing.
+    await _adoptAnnouncedPqEpoch();
     if (!force &&
         _pqLastPublishMs != 0 &&
         DateTime.now().millisecondsSinceEpoch - _pqLastPublishMs <
