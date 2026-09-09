@@ -20,6 +20,7 @@ import '../../core/theme/nym_theme.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../models/channel.dart';
 import '../../models/settings.dart';
+import '../identity/panic_overlay.dart';
 import '../notifications/notifications_service.dart';
 import '../../services/location/geolocation.dart';
 import '../../services/platform/background_connectivity.dart';
@@ -2814,7 +2815,42 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
       ),
+      _GroupSpec(
+        text: tr('Wipe This Device Everything, permanently: your key, your '
+            'settings, your message history and your post-quantum recovery '
+            'code, on this device and on our servers.'),
+        child: FormGroup(
+          hint: tr('Everything, permanently: your key, your settings, your '
+              'message history and your post-quantum recovery code, on this '
+              'device and on our servers. The same emergency wipe as holding '
+              'your Nym for two seconds. Credits on your key are not touched. '
+              'This cannot be undone.'),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: NymOutlineButton(
+              label: tr('Wipe This Device'),
+              danger: true,
+              onPressed: _wipeThisDevice,
+            ),
+          ),
+        ),
+      ),
     ];
+  }
+
+  /// The settings-modal twin of the press-and-hold panic gesture: the same
+  /// wipe, reached deliberately rather than by accident.
+  Future<void> _wipeThisDevice() async {
+    final ok = await showAppConfirm(
+      context,
+      tr('Wipe this device? Your key, your settings, your message history and '
+          'your post-quantum recovery code go — here and on our servers. '
+          'Credits on your key are not touched. This cannot be undone.'),
+      okLabel: tr('Wipe'),
+      danger: true,
+    );
+    if (!ok || !mounted) return;
+    startPanicWipe(context, ref);
   }
 
   /// The list container chrome shared by the moderation lists and the

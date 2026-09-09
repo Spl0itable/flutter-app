@@ -5593,6 +5593,18 @@ class NostrController {
   /// default rather than by decision.
   bool _pqRootSettled = false;
 
+  /// Asks the worker to delete this account's rows, on the way out of a wipe.
+  /// Signed while the key is still here.
+  Future<bool> purgeServerRecords() async {
+    final sync = _storageSync;
+    if (sync == null) return false;
+    try {
+      return await sync.purgeAccount();
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// The root as its `nympq1…` code, shown beside the nsec.
   String? get pqRootCode {
     final root = _pqRoot;
