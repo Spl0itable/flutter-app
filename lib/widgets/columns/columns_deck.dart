@@ -2037,7 +2037,10 @@ class _DeckColumnState extends ConsumerState<_DeckColumn> {
           // light mode. Transparent only under the columns wallpaper.
           Expanded(
             child: threadOpen
-                ? ThreadView(key: ValueKey(activeThread), thread: activeThread)
+                ? ThreadView(
+                    key: ValueKey(activeThread),
+                    thread: activeThread,
+                    showTyping: false)
                 : ColoredBox(
               color: transparent
                   ? Colors.transparent

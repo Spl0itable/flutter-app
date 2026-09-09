@@ -66,8 +66,13 @@ ChatView? _viewForStorageKey(String key) {
 /// thread root to sends while [activeThreadProvider] is set). The chat
 /// header's back/forward buttons step in and out of it.
 class ThreadView extends ConsumerStatefulWidget {
-  const ThreadView({super.key, required this.thread});
+  const ThreadView({super.key, required this.thread, this.showTyping = true});
   final ActiveThread thread;
+
+  /// False inside a columns deck, where the column already hosts a typing row
+  /// under the thread — and hosts it keyed to ITS conversation, not whichever
+  /// one happens to be active.
+  final bool showTyping;
 
   @override
   ConsumerState<ThreadView> createState() => _ThreadViewState();
@@ -236,7 +241,7 @@ class _ThreadViewState extends ConsumerState<ThreadView> {
               ],
             ),
           ),
-          const TypingIndicatorRow(),
+          if (widget.showTyping) const TypingIndicatorRow(),
         ],
       ),
     );
