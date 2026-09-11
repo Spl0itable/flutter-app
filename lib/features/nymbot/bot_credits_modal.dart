@@ -491,13 +491,16 @@ class _BotCreditsModalState extends ConsumerState<BotCreditsModal> {
   Widget _pricingNote(NymColors c) {
     final lines = _tier == CreditTier.pro
         ? [
-            tr('Pro replies start at 1–2 Pro credits and scale with reply length '
-                '(each model\'s range is in ?model).'),
+            tr('Pro replies are metered on the tokens they use, charged in '
+                'thousandths of a credit — the per-million-token rates are in ?model.'),
+            tr('Repeated context is billed at the cached rate, a tenth of the fresh one.'),
             tr('Bulk bonus: +10% at 5K sats, +15% at 10K, +20% at 50K.'),
           ]
         : [
-            tr('1 credit per general chat, creative writing, or translation reply.'),
-            tr('2 credits per coding or reasoning/math reply (larger models).'),
+            tr('Replies are metered on the tokens they use, charged in thousandths '
+                'of a credit — a short question costs a fraction of one.'),
+            tr('Coding and reasoning/math cost more per token, because those routes '
+                'use larger models.'),
             tr('Bulk bonus: +10% at 500 sats, +15% at 1K, +20% at 5K.'),
           ];
     return Padding(

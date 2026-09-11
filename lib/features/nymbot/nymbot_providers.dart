@@ -1236,32 +1236,34 @@ class BotChatController extends StateNotifier<BotChatState> {
         _publishDmEvent(selfEvent.cast<String, dynamic>());
       }
 
-      final balance = (data['balance'] as num?)?.toInt();
+      final balance = (data['balanceCredits'] as num?)?.toDouble()
+          ?? (data['balance'] as num?)?.toDouble();
       if (balance != null) {
         final isPro = data['pro'] == true;
         _applyLedgerBalance(balance, pro: isPro);
         // Cost notices for heavy replies (pms.js:2499-2512).
-        final cost = (data['cost'] as num?)?.toInt() ?? 0;
+        final cost = (data['costCredits'] as num?)?.toDouble()
+            ?? (data['cost'] as num?)?.toDouble() ?? 0;
         if (data['git'] == true && cost > 0) {
           final calls = (data['modelCalls'] as num?)?.toInt() ?? 0;
-          _system('Repo task used $cost Pro credit${cost == 1 ? '' : 's'}'
+          _system('Repo task used ${creditFigure(cost)} Pro credit${cost == 1 ? '' : 's'}'
               '${calls > 1 ? ' ($calls model calls)' : ''}. '
-              'Pro balance: $balance.');
+              'Pro balance: ${creditFigure(balance)}.');
         } else if (isPro && cost > 0) {
           final sel = state.proModel;
           if (sel != null && cost > sel.baseCredits) {
-            _system('Long reply used $cost Pro credits (scales with length). '
-                'Pro balance: $balance.');
+            _system('Long reply used ${creditFigure(cost)} Pro credits. '
+                'Pro balance: ${creditFigure(balance)}.');
           }
         } else if (!isPro && cost > 1) {
-          _system('${data['taskType'] ?? 'Heavy'} reply used $cost credits. '
-              'Balance: $balance.');
+          _system('${data['taskType'] ?? 'Heavy'} reply used ${creditFigure(cost)} credits. '
+              'Balance: ${creditFigure(balance)}.');
         }
         if (data['lowBalance'] == true) {
           _system(isPro
-              ? 'Nymbot Pro credits running low: $balance left. '
+              ? 'Nymbot Pro credits running low: ${creditFigure(balance)} left. '
                   'Type ?buy and switch to Pro to top up.'
-              : 'Nymbot credits running low: $balance '
+              : 'Nymbot credits running low: ${creditFigure(balance)} '
                   'credit${balance == 1 ? '' : 's'} left. '
                   'Type ?buy to top up.');
         }
@@ -1276,10 +1278,10 @@ class BotChatController extends StateNotifier<BotChatState> {
       _system(custom
           ? e.message
           : (e.pro
-              ? "You're out of Nymbot Pro credits (${e.balance} left). "
+              ? "You're out of Nymbot Pro credits (${creditFigure(e.balance)} left). "
                   'Type ?buy and switch to Pro, or ?model off for standard '
                   'replies.'
-              : "You're out of Nymbot credits (${e.balance} left). "
+              : "You're out of Nymbot credits (${creditFigure(e.balance)} left). "
                   'Zap Nymbot or type ?buy to purchase more.'));
       _applyLedgerBalance(e.balance, pro: e.pro);
       _ref
@@ -1323,7 +1325,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     return null;
   }
 
-  void _applyLedgerBalance(int balance, {required bool pro}) {
+  void _applyLedgerBalance(double balance, {required bool pro}) {
     final b = state.balance;
     state = state.copyWith(
       balanceKnown: true,
