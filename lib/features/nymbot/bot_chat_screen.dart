@@ -3021,9 +3021,9 @@ class _AnonModalState extends ConsumerState<_AnonModal> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Anonymous: ${state.balance.balance} standard · '
-                '${state.balance.proBalance} Pro'
-                '${acct == null ? '' : ' · your nym: ${acct.balance} standard · ${acct.proBalance} Pro'}',
+                'Anonymous: ${creditFigure(state.balance.balance)} standard · '
+                '${creditFigure(state.balance.proBalance)} Pro'
+                '${acct == null ? '' : ' · your nym: ${creditFigure(acct.balance)} standard · ${creditFigure(acct.proBalance)} Pro'}',
                 style: TextStyle(color: c.textDim, fontSize: 11),
               ),
               const SizedBox(height: 14),

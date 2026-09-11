@@ -4,6 +4,7 @@
 // a user pinned before a version bump still resolves, and that every failure
 // path lands on the list compiled into the binary rather than an empty picker.
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nym_bar/features/i18n/i18n.dart';
 import 'package:nym_bar/features/nymbot/nymbot_models.dart';
 
 /// A worker `models` payload shaped like the real one.
@@ -261,13 +262,74 @@ void main() {
       expect(kProModelCatalogFallback.byKey('codex')!.key, 'gpt-5');
     });
 
-    test('price labels are unchanged by the catalog work', () {
+    test('a model with no published rate keeps the flat per-reply label', () {
       final fable = kProModelCatalogFallback.byKey('claude-fable')!;
       expect(fable.baseCredits, 2);
+      expect(fable.metered, isFalse);
       expect(fable.priceLabel,
           'from 2 Pro credits, up to 16 for max-length replies');
       final haiku = kProModelCatalogFallback.byKey('claude-haiku')!;
       expect(haiku.priceLabel, '1 Pro credit/reply');
+    });
+  });
+
+  group('what a reply is charged on', () {
+    ProModel priced(Map<String, dynamic> extra) =>
+        ProModel.fromJson({'key': 'm', 'label': 'M', 'credits': 1, ...extra});
+
+    test('a model the catalog prices quotes its per-token rates', () {
+      final m = priced({
+        'inUsdPerMTok': 7.875,
+        'outUsdPerMTok': 39.375,
+        'cacheReadUsdPerMTok': 0.788,
+      });
+      expect(m.metered, isTrue);
+      expect(m.priceLabel,
+          r'$7.875/M in, $39.375/M out, $0.788/M cached');
+    });
+
+    test('without a cached rate it says only what it knows', () {
+      final m = priced({'inUsdPerMTok': 2, 'outUsdPerMTok': 10});
+      expect(m.priceLabel, r'$2.0/M in, $10.0/M out');
+    });
+
+    test('half a rate pair is not metered, so the flat price stands', () {
+      expect(priced({'inUsdPerMTok': 2}).metered, isFalse);
+      expect(priced({'outUsdPerMTok': 10}).metered, isFalse);
+      expect(priced({'inUsdPerMTok': 2}).priceLabel, '1 Pro credit/reply');
+    });
+
+    test('the rates survive a round trip through storage', () {
+      final m = priced({'inUsdPerMTok': 5, 'outUsdPerMTok': 25});
+      final back = ProModel.fromJson(m.toJson());
+      expect(back.inUsdPerMTok, 5);
+      expect(back.outUsdPerMTok, 25);
+      expect(back.priceLabel, m.priceLabel);
+    });
+  });
+
+  group('a fraction of a credit', () {
+    test('is printed as one, and never as zero', () {
+      expect(creditFigure(12), '12');
+      expect(creditFigure(0), '0');
+      expect(creditFigure(null), '\u2026');
+      expect(creditFigure(0.394), '0.39');
+      expect(creditFigure(0.4), '0.4');
+      expect(creditFigure(4.46), '4.5');
+      expect(creditFigure(41.7), '42');
+      expect(creditFigure(0.004), '<0.01');
+    });
+
+    test('a balance reads the worker fractional field, else the whole one', () {
+      final metered = BotBalance.fromJson({
+        'balance': 12, 'balanceCredits': 11.6,
+        'proBalance': 3, 'proBalanceCredits': 2.4,
+      });
+      expect(metered.balance, 11.6);
+      expect(metered.proBalance, 2.4);
+      final older = BotBalance.fromJson({'balance': 12, 'proBalance': 3});
+      expect(older.balance, 12);
+      expect(older.proBalance, 3);
     });
   });
 }

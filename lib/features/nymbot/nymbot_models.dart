@@ -16,6 +16,9 @@ class ProModel {
     required this.label,
     required this.modelId,
     required this.baseCredits,
+    this.inUsdPerMTok,
+    this.outUsdPerMTok,
+    this.cacheReadUsdPerMTok,
     this.max,
     this.description = '',
     this.author = '',
@@ -39,6 +42,9 @@ class ProModel {
       // payloads may omit it.
       modelId: (j['model'] ?? j['modelId'] ?? '').toString(),
       baseCredits: asInt(j['credits']) ?? asInt(j['baseCredits']) ?? 1,
+      inUsdPerMTok: (j['inUsdPerMTok'] as num?)?.toDouble(),
+      outUsdPerMTok: (j['outUsdPerMTok'] as num?)?.toDouble(),
+      cacheReadUsdPerMTok: (j['cacheReadUsdPerMTok'] as num?)?.toDouble(),
       max: asInt(j['max']),
       description: (j['description'] ?? '').toString(),
       author: (j['author'] ?? '').toString(),
@@ -58,6 +64,9 @@ class ProModel {
         'label': label,
         'model': modelId,
         'credits': baseCredits,
+        if (inUsdPerMTok != null) 'inUsdPerMTok': inUsdPerMTok,
+        if (outUsdPerMTok != null) 'outUsdPerMTok': outUsdPerMTok,
+        if (cacheReadUsdPerMTok != null) 'cacheReadUsdPerMTok': cacheReadUsdPerMTok,
         if (max != null) 'max': max,
         if (description.isNotEmpty) 'description': description,
         if (author.isNotEmpty) 'author': author,
@@ -87,6 +96,12 @@ class ProModel {
 
   /// Base Pro credits charged per model call (before length scaling).
   final int baseCredits;
+
+  final double? inUsdPerMTok;
+  final double? outUsdPerMTok;
+  final double? cacheReadUsdPerMTok;
+
+  bool get metered => (inUsdPerMTok ?? 0) > 0 && (outUsdPerMTok ?? 0) > 0;
 
   /// Max Pro credits a single (max-length) reply can scale to (PWA
   /// `_botProModels[].max`, pms.js:2085-2091). Null/<= [baseCredits] means the
@@ -123,9 +138,16 @@ class ProModel {
   /// charging its conservative default. Shown as a caveat rather than hidden.
   final bool priced;
 
-  /// The PWA's `_botProPriceLabel` (pms.js:2096-2098): `"<n> Pro credit(s)/reply"`
-  /// for flat models, else `"from <base>, up to <max> for max-length replies"`.
+  /// What the reply will actually be charged on. Mirrors the PWA's
+  /// `_botProPriceLabel`: the per-million-token rates where the catalog has
+  /// them, and the old flat per-reply price where it does not.
   String get priceLabel {
+    if (metered) {
+      final cached = (cacheReadUsdPerMTok ?? 0) > 0
+          ? ', \$$cacheReadUsdPerMTok/M cached'
+          : '';
+      return '\$$inUsdPerMTok/M in, \$$outUsdPerMTok/M out$cached';
+    }
     final base = '$baseCredits Pro credit${baseCredits == 1 ? '' : 's'}';
     final m = max;
     return (m != null && m > baseCredits)
@@ -627,10 +649,10 @@ class BotReply {
   final int? outputTokens;
 
   /// Credits charged for this reply.
-  final int? cost;
+  final double? cost;
 
   /// Remaining balance after the reply (tier depends on [pro]).
-  final int? balance;
+  final double? balance;
 
   /// True when answered by a pinned Pro model.
   final bool pro;
@@ -664,18 +686,18 @@ class BotBalance {
     required this.proTotalUsed,
   });
 
-  final int balance; // standard credits available
+  final double balance; // standard credits available, fractions included
   final int totalPurchased;
   final int totalUsed;
-  final int proBalance; // Pro credits available
+  final double proBalance; // Pro credits available, fractions included
   final int proTotalPurchased;
   final int proTotalUsed;
 
   factory BotBalance.fromJson(Map<String, dynamic> j) => BotBalance(
-        balance: _int(j['balance']),
+        balance: _credits(j['balanceCredits'] ?? j['balance']),
         totalPurchased: _int(j['totalPurchased']),
         totalUsed: _int(j['totalUsed']),
-        proBalance: _int(j['proBalance']),
+        proBalance: _credits(j['proBalanceCredits'] ?? j['proBalance']),
         proTotalPurchased: _int(j['proTotalPurchased']),
         proTotalUsed: _int(j['proTotalUsed']),
       );
@@ -877,6 +899,12 @@ class GitConfig {
   static const Object _sentinel = Object();
 }
 
+double _credits(Object? v) {
+  if (v is num) return v.toDouble();
+  if (v is String) return double.tryParse(v) ?? 0;
+  return 0;
+}
+
 int _int(Object? v) {
   if (v is int) return v;
   if (v is num) return v.toInt();
@@ -895,8 +923,8 @@ BotReply splitReasoning(
   String? taskType,
   int? modelCalls,
   int? outputTokens,
-  int? cost,
-  int? balance,
+  double? cost,
+  double? balance,
   bool pro = false,
   String? proModel,
   bool git = false,

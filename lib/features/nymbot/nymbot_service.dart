@@ -250,7 +250,8 @@ class NymbotService {
     if (json['noCredits'] == true) {
       throw NymbotInsufficientCredits(
         pro: json['pro'] == true,
-        balance: _asInt(json['balance']),
+        balance: (json['balanceCredits'] as num?)?.toDouble()
+            ?? _asInt(json['balance']).toDouble(),
         required: _asInt(json['required']),
         message: json['error']?.toString() ?? 'Insufficient credits',
       );
@@ -750,7 +751,7 @@ class NymbotInsufficientCredits implements Exception {
 
   /// True when the shortfall is on the Pro credit ledger.
   final bool pro;
-  final int balance;
+  final double balance;
   final int required;
   final String message;
 
