@@ -45,6 +45,7 @@ import '../translate/translate_languages.dart';
 import '../translate/translate_service.dart';
 import 'bot_credits_modal.dart';
 import 'nymbot_models.dart';
+import 'brand_tile.dart';
 import 'nymbot_providers.dart';
 
 /// The private 1:1 Nymbot chat screen.
@@ -2744,7 +2745,9 @@ class _ProModelPickerSheetState extends State<ProModelPickerSheet> {
         shown++;
         final tags = _tagLine(m);
         rows.add(ListTile(
-          leading: Icon(Icons.bolt, color: c.primary),
+          leading: m.authorSlug.isEmpty
+              ? Icon(Icons.bolt, color: c.primary)
+              : BrandTile(slug: m.authorSlug, size: 24),
           title: Text(m.label, style: TextStyle(color: c.text)),
           subtitle: Column(
             crossAxisAlignment: CrossAxisAlignment.start,

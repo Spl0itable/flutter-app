@@ -5,6 +5,8 @@
 // path lands on the list compiled into the binary rather than an empty picker.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/features/i18n/i18n.dart';
+import 'package:nym_bar/features/nymbot/brand_marks.dart';
+import 'package:nym_bar/features/nymbot/brand_tile.dart';
 import 'package:nym_bar/features/nymbot/nymbot_models.dart';
 
 /// A worker `models` payload shaped like the real one.
@@ -305,6 +307,44 @@ void main() {
       expect(back.inUsdPerMTok, 5);
       expect(back.outUsdPerMTok, 25);
       expect(back.priceLabel, m.priceLabel);
+    });
+  });
+
+  group('the maker of a model is drawn', () {
+    test('a known maker has its own mark, from the shared table', () {
+      expect(BrandMarks.of('anthropic'), isNotNull);
+      expect(BrandMarks.of('openai'), isNotNull);
+      expect(BrandMarks.of('cloudflare'), isNotNull,
+          reason: 'most of the catalog is Cloudflare-hosted');
+      expect(BrandMarks.marks.length, greaterThan(20));
+    });
+
+    test('the slugs Cloudflare ships resolve to the maker that made the model', () {
+      expect(BrandMarks.of('meta-llama'), same(BrandMarks.of('meta')));
+      expect(BrandMarks.of('deepseek-ai'), same(BrandMarks.of('deepseek')));
+      expect(BrandMarks.of('mistral'), same(BrandMarks.of('mistralai')));
+      expect(BrandMarks.of('llava-hf'), same(BrandMarks.of('huggingface')));
+    });
+
+    test('a maker with no mark still gets a tile, told apart by colour', () {
+      expect(BrandMarks.of('pruna'), isNull);
+      expect(BrandMarks.initials('pruna'), 'PR');
+      expect(BrandMarks.initials('black-forest-labs'), 'BF',
+          reason: 'one letter per word reads better than the first two');
+      expect(BrandMarks.tintFor('pruna'), isNot(BrandMarks.tintFor('krea')));
+    });
+
+    test('every mark parses to the geometry it declares', () {
+      for (final entry in BrandMarks.marks.entries) {
+        final paths = entry.value.paths.map(SvgPath.parse).toList();
+        expect(paths.length, entry.value.paths.length, reason: entry.key);
+        var bounds = paths.first.getBounds();
+        for (final path in paths.skip(1)) {
+          bounds = bounds.expandToInclude(path.getBounds());
+        }
+        expect(bounds.width, greaterThan(0), reason: entry.key);
+        expect(bounds.height, greaterThan(0), reason: entry.key);
+      }
     });
   });
 
