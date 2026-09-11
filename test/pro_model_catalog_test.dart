@@ -355,8 +355,9 @@ void main() {
       expect(creditFigure(null), '\u2026');
       expect(creditFigure(0.394), '0.39');
       expect(creditFigure(0.4), '0.4');
-      expect(creditFigure(4.46), '4.5');
-      expect(creditFigure(41.7), '42');
+      expect(creditFigure(4.46), '4.46');
+      expect(creditFigure(49.55), '49.55',
+          reason: 'a large balance has to show a sub-credit spend');
       expect(creditFigure(0.004), '<0.01');
     });
 
