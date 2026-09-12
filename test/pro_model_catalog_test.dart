@@ -87,6 +87,8 @@ Map<String, dynamic> _payload() => {
         // replacedBy rides down to the client as an ordinary alias.
         'deepseek-v4-pro': 'deepseek-v4-pro-0813',
       },
+      'usdPerCredit': 0.01,
+      'minChargeCredits': 1,
     };
 
 void main() {
@@ -307,6 +309,79 @@ void main() {
       expect(back.inUsdPerMTok, 5);
       expect(back.outUsdPerMTok, 25);
       expect(back.priceLabel, m.priceLabel);
+    });
+  });
+
+  // Rates alone answer "how is this billed" but not "what will this cost me",
+  // which is the question a credit balance actually raises. Every surface
+  // quotes the same nominal turn so the four of them cannot disagree.
+  group('what a turn costs', () {
+    ProModel priced(Map<String, dynamic> extra) =>
+        ProModel.fromJson({'key': 'm', 'label': 'M', 'credits': 1, ...extra});
+
+    test('the worker\'s pricing scalars are parsed, not dropped', () {
+      final cat = ProModelCatalog.fromJson(_payload());
+      expect(cat.usdPerCredit, 0.01);
+      expect(cat.minChargeCredits, 1);
+    });
+
+    test('and survive the round trip through storage', () {
+      final cat = ProModelCatalog.fromJson(_payload());
+      final back = ProModelCatalog.fromJson(cat.toJson());
+      expect(back.usdPerCredit, cat.usdPerCredit);
+      expect(back.minChargeCredits, cat.minChargeCredits);
+    });
+
+    test('a payload without them degrades to no estimate rather than a wrong one',
+        () {
+      final cat = ProModelCatalog.fromJson({'models': []});
+      expect(cat.usdPerCredit, 0);
+      final m = priced({'inUsdPerMTok': 15.75, 'outUsdPerMTok': 78.75});
+      expect(m.turnCredits(cat.usdPerCredit, cat.minChargeCredits), isNull);
+      expect(m.turnLabel(cat.usdPerCredit, cat.minChargeCredits),
+          '1 Pro credit/reply');
+    });
+
+    test('the estimate is the nominal turn at the published rates', () {
+      final m = priced({'inUsdPerMTok': 15.75, 'outUsdPerMTok': 78.75});
+      // 3000 * 15.75 + 700 * 78.75 = 102,375 millionths of a dollar, and a
+      // credit is a cent.
+      expect(m.turnCredits(0.01, 1), closeTo(10.2375, 1e-9));
+      expect(m.turnLabel(0.01, 1), '~10.24 credits a turn');
+    });
+
+    test('a cheap model quotes the minimum charge, not less than it', () {
+      final m = priced({'inUsdPerMTok': 0.3, 'outUsdPerMTok': 1.2});
+      expect(m.turnCredits(0.01, 1), 1);
+      expect(m.turnLabel(0.01, 1), '~1 credit a turn');
+    });
+
+    test('the rates are a line of their own, so neither has to be shortened',
+        () {
+      final m = priced({
+        'inUsdPerMTok': 15.75,
+        'outUsdPerMTok': 78.75,
+        'cacheReadUsdPerMTok': 0.39375,
+      });
+      expect(m.ratesLabel(),
+          r'$15.75/M in, $78.75/M out, $0.39375/M cached');
+      expect(m.priceLine(0.01, 1),
+          r'~10.24 credits a turn · $15.75/M in, $78.75/M out, $0.39375/M cached');
+    });
+
+    test('a model with no published rate has no rates line at all', () {
+      final m = priced({});
+      expect(m.ratesLabel(), isNull);
+      expect(m.priceLine(0.01, 1), '1 Pro credit/reply');
+    });
+
+    test('the built-in fallback quotes flat prices, since it carries no rates',
+        () {
+      final cat = kProModelCatalogFallback;
+      expect(cat.usdPerCredit, 0);
+      final haiku = cat.byKey('claude-haiku')!;
+      expect(haiku.priceLine(cat.usdPerCredit, cat.minChargeCredits),
+          '1 Pro credit/reply');
     });
   });
 

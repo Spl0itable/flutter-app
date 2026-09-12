@@ -2744,6 +2744,7 @@ class _ProModelPickerSheetState extends State<ProModelPickerSheet> {
       for (final m in models) {
         shown++;
         final tags = _tagLine(m);
+        final rates = m.ratesLabel();
         rows.add(ListTile(
           leading: m.authorSlug.isEmpty
               ? Icon(Icons.bolt, color: c.primary)
@@ -2759,15 +2760,16 @@ class _ProModelPickerSheetState extends State<ProModelPickerSheet> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                         color: c.text.withValues(alpha: 0.75), fontSize: 11)),
-              // The human price-range phrase, not the id (PWA `?model` list).
-              Text(
-                  tags.isEmpty
-                      ? m.priceLabel
-                      : '${m.priceLabel} — $tags',
-                  style: TextStyle(color: c.textDim, fontSize: 11)),
+              Text(m.turnLabel(_catalog.usdPerCredit, _catalog.minChargeCredits),
+                  style: TextStyle(color: c.lightning, fontSize: 11)),
+              if (rates != null || tags.isNotEmpty)
+                Text(
+                    [if (rates != null) rates, if (tags.isNotEmpty) tags]
+                        .join(' — '),
+                    style: TextStyle(color: c.textDim, fontSize: 11)),
             ],
           ),
-          isThreeLine: m.description.isNotEmpty,
+          isThreeLine: true,
           trailing:
               current?.key == m.key ? Icon(Icons.check, color: c.primary) : null,
           onTap: () => widget.onSelected(m),

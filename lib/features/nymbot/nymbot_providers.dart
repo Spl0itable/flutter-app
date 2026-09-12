@@ -1459,11 +1459,11 @@ class BotChatController extends StateNotifier<BotChatState> {
             ]
           : [
               for (final m in all)
-                '• `${m.key}`${current?.key == m.key ? ' ✓' : ''} — ${m.label}, ${m.priceLabel}',
+                '• `${m.key}`${current?.key == m.key ? ' ✓' : ''} — ${m.label}, ${_price(m)}',
             ];
       _displayBotInfoMessage([
         if (current != null)
-          'Nymbot Pro model: **${current.label}** (${current.priceLabel}).'
+          'Nymbot Pro model: **${current.label}** (${_price(current)}).'
         else
           'Nymbot Pro is off — replies use standard multi-model routing and standard credits.',
         ...lines,
@@ -1487,7 +1487,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
     setModelDirect(picked);
     _system('Nymbot Pro model set to ${picked.label} — every reply now uses '
-        'it (${picked.priceLabel}). Type ?model off to switch back.');
+        'it (${_price(picked)}). Type ?model off to switch back.');
   }
 
   // --- ?clear (pms.js `_clearBotPMHistory`, :1894-1917) -----------------------
@@ -1551,6 +1551,11 @@ class BotChatController extends StateNotifier<BotChatState> {
     return cat.isEmpty ? kProModelCatalogFallback : cat;
   }
 
+  String _price(ProModel m) {
+    final cat = _catalog;
+    return m.priceLine(cat.usdPerCredit, cat.minChargeCredits);
+  }
+
   void _displayBotPmHelp() {
     final proModel = state.proModel;
     final git = state.git;
@@ -1559,7 +1564,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     final allModels = _catalog.models;
     final modelLines = [
       for (final m in allModels.take(8))
-        '  `${m.key}` — ${m.label}, ${m.priceLabel}',
+        '  `${m.key}` — ${m.label}, ${_price(m)}',
       if (allModels.length > 8)
         '  …and ${allModels.length - 8} more — type `?model` or tap the model button.',
     ];
@@ -1956,7 +1961,7 @@ class BotChatController extends StateNotifier<BotChatState> {
           '`?git repo owner/name [branch]` · `?git branch [name]` · '
           '`?git writes on|off` · `?git off` · `?git disconnect`',
       'Pricing: repo tasks run as an agent with up to 6 model calls per '
-          'message${proModel != null ? ' (${proModel.label}: ${proModel.priceLabel} per call)' : ''} '
+          'message${proModel != null ? ' (${proModel.label}: ${_price(proModel)} per call)' : ''} '
           "— the worst case is reserved from your balance, but you're only "
           'charged for the calls and reply length actually used.',
       'Privacy: the token stays on this device (cleared by Panic Mode), is '

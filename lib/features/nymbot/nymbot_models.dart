@@ -4,6 +4,11 @@
 /// client contract in `docs/specs/04-features.md` §11.2-11.5.
 library;
 
+import '../i18n/i18n.dart' show creditFigure;
+
+const int kNominalTurnIn = 3000;
+const int kNominalTurnOut = 700;
+
 /// The Pro frontier models selectable with `?model <name>`.
 ///
 /// Exact list + ids verified against `functions/api/bot.js` `BOT_PRO_MODELS`
@@ -138,15 +143,20 @@ class ProModel {
   /// charging its conservative default. Shown as a caveat rather than hidden.
   final bool priced;
 
-  /// What the reply will actually be charged on. Mirrors the PWA's
-  /// `_botProPriceLabel`: the per-million-token rates where the catalog has
-  /// them, and the old flat per-reply price where it does not.
-  String get priceLabel {
-    if (metered) {
-      final cached = (cacheReadUsdPerMTok ?? 0) > 0
-          ? ', \$$cacheReadUsdPerMTok/M cached'
-          : '';
-      return '\$$inUsdPerMTok/M in, \$$outUsdPerMTok/M out$cached';
+  double? turnCredits(double usdPerCredit, double minChargeCredits) {
+    if (!metered || usdPerCredit <= 0) return null;
+    final spend = (kNominalTurnIn * inUsdPerMTok! +
+            kNominalTurnOut * outUsdPerMTok!) /
+        1e6 /
+        usdPerCredit;
+    return spend < minChargeCredits ? minChargeCredits : spend;
+  }
+
+  String turnLabel(double usdPerCredit, double minChargeCredits) {
+    final turn = turnCredits(usdPerCredit, minChargeCredits);
+    if (turn != null) {
+      final n = creditFigure(turn);
+      return '~$n credit${n == '1' ? '' : 's'} a turn';
     }
     final base = '$baseCredits Pro credit${baseCredits == 1 ? '' : 's'}';
     final m = max;
@@ -154,6 +164,22 @@ class ProModel {
         ? 'from $base, up to $m for max-length replies'
         : '$base/reply';
   }
+
+  String? ratesLabel() {
+    if (!metered) return null;
+    final cached = (cacheReadUsdPerMTok ?? 0) > 0
+        ? ', \$$cacheReadUsdPerMTok/M cached'
+        : '';
+    return '\$$inUsdPerMTok/M in, \$$outUsdPerMTok/M out$cached';
+  }
+
+  String priceLine(double usdPerCredit, double minChargeCredits) {
+    final rates = ratesLabel();
+    final turn = turnLabel(usdPerCredit, minChargeCredits);
+    return rates == null ? turn : '$turn · $rates';
+  }
+
+  String get priceLabel => ratesLabel() ?? turnLabel(0.0, 0.0);
 }
 
 /// The built-in Pro models, in README order (line 172): Claude Fable 5, Claude
@@ -336,6 +362,8 @@ class ProModelCatalog {
     this.aliases = const {},
     this.source = 'builtin',
     this.fetchedAt = 0,
+    this.usdPerCredit = 0.0,
+    this.minChargeCredits = 0.0,
   });
 
   factory ProModelCatalog.fromJson(Map<String, dynamic> j) {
@@ -363,6 +391,8 @@ class ProModelCatalog {
       fetchedAt: (j['fetchedAt'] is num)
           ? (j['fetchedAt'] as num).toInt()
           : DateTime.now().millisecondsSinceEpoch,
+      usdPerCredit: (j['usdPerCredit'] as num?)?.toDouble() ?? 0,
+      minChargeCredits: (j['minChargeCredits'] as num?)?.toDouble() ?? 0,
     );
   }
 
@@ -372,6 +402,8 @@ class ProModelCatalog {
         'aliases': aliases,
         'source': source,
         'fetchedAt': fetchedAt,
+        'usdPerCredit': usdPerCredit,
+        'minChargeCredits': minChargeCredits,
       };
 
   final List<ProModel> models;
@@ -385,6 +417,9 @@ class ProModelCatalog {
   /// back to its own table.
   final String source;
   final int fetchedAt;
+
+  final double usdPerCredit;
+  final double minChargeCredits;
 
   bool get isEmpty => models.isEmpty;
 
