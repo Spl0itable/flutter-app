@@ -56,7 +56,7 @@ class GhostModeButton extends ConsumerWidget {
           tr('Ghost Mode hides who you are on the Bluetooth mesh.\n\n'
               'Your device stops advertising your nym and your Nostr identity. '
               'It presents a throwaway name and key instead, and replaces them '
-              'every few minutes, so nearby devices cannot recognise you or '
+              'every few minutes, so nearby devices cannot recognize you or '
               'follow you between places.\n\n'
               'You can still send and receive messages. Anyone you talk to '
               'while it is on sees an anonymous identity, not your usual one, '
