@@ -6504,7 +6504,7 @@ class NostrController {
         challenge();
         return;
       }
-      _emitSystemMessage(tr('Nickname change cancelled.'));
+      _emitSystemMessage(tr('Nickname change canceled.'));
       return;
     }
     await saveProfile(name: next);

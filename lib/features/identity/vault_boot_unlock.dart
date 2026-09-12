@@ -87,7 +87,7 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
         // path) we gate on local_auth and derive from a per-device secret. This
         // is a platform-equivalence choice, not a 1:1 port of the PRF scheme.
         final ok = await _biometricAuth();
-        if (!ok) throw StateError(tr('Biometric unlock was cancelled.'));
+        if (!ok) throw StateError(tr('Biometric unlock was canceled.'));
         password = await _deviceBiometricSecret();
       } else {
         password = _pw.text;

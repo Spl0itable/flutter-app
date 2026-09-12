@@ -9,6 +9,31 @@ import '../i18n/i18n.dart' show creditFigure;
 const int kNominalTurnIn = 3000;
 const int kNominalTurnOut = 700;
 
+class BulkBonus {
+  const BulkBonus({required this.bonus, required this.standardSats, required this.proSats});
+
+  factory BulkBonus.fromJson(Map<String, dynamic> j) => BulkBonus(
+        bonus: (j['bonus'] as num?)?.toDouble() ?? 0,
+        standardSats: (j['standardSats'] as num?)?.toInt() ?? 0,
+        proSats: (j['proSats'] as num?)?.toInt() ?? 0,
+      );
+
+  final double bonus;
+  final int standardSats;
+  final int proSats;
+
+  int satsFor(bool pro) => pro ? proSats : standardSats;
+
+  Map<String, dynamic> toJson() =>
+      {'bonus': bonus, 'standardSats': standardSats, 'proSats': proSats};
+}
+
+const List<BulkBonus> kBulkBonusFallback = [
+  BulkBonus(bonus: 0.10, standardSats: 500, proSats: 5000),
+  BulkBonus(bonus: 0.15, standardSats: 1000, proSats: 10000),
+  BulkBonus(bonus: 0.20, standardSats: 5000, proSats: 50000),
+];
+
 /// The Pro frontier models selectable with `?model <name>`.
 ///
 /// Exact list + ids verified against `functions/api/bot.js` `BOT_PRO_MODELS`
@@ -364,6 +389,7 @@ class ProModelCatalog {
     this.fetchedAt = 0,
     this.usdPerCredit = 0.0,
     this.minChargeCredits = 0.0,
+    this.bulkBonus = kBulkBonusFallback,
   });
 
   factory ProModelCatalog.fromJson(Map<String, dynamic> j) {
@@ -393,6 +419,15 @@ class ProModelCatalog {
           : DateTime.now().millisecondsSinceEpoch,
       usdPerCredit: (j['usdPerCredit'] as num?)?.toDouble() ?? 0,
       minChargeCredits: (j['minChargeCredits'] as num?)?.toDouble() ?? 0,
+      bulkBonus: () {
+        final raw = j['bulkBonus'];
+        if (raw is! List) return kBulkBonusFallback;
+        final rows = [
+          for (final r in raw)
+            if (r is Map) BulkBonus.fromJson(r.cast<String, dynamic>()),
+        ]..removeWhere((b) => b.bonus <= 0 || b.standardSats <= 0);
+        return rows.isEmpty ? kBulkBonusFallback : rows;
+      }(),
     );
   }
 
@@ -404,6 +439,7 @@ class ProModelCatalog {
         'fetchedAt': fetchedAt,
         'usdPerCredit': usdPerCredit,
         'minChargeCredits': minChargeCredits,
+        'bulkBonus': [for (final b in bulkBonus) b.toJson()],
       };
 
   final List<ProModel> models;
@@ -420,6 +456,35 @@ class ProModelCatalog {
 
   final double usdPerCredit;
   final double minChargeCredits;
+
+  final List<BulkBonus> bulkBonus;
+
+  double bulkMultiplier(int sats, bool pro) {
+    var best = 0.0;
+    for (final row in bulkBonus) {
+      final at = row.satsFor(pro);
+      if (at > 0 && sats >= at && row.bonus > best) best = row.bonus;
+    }
+    return 1 + best;
+  }
+
+  int creditsForSats(int sats, bool pro) {
+    if (sats <= 0) return 0;
+    final each = pro ? 100 : 10;
+    return (sats / each * bulkMultiplier(sats, pro)).floor();
+  }
+
+  String bulkBonusLine(bool pro) {
+    final rows = bulkBonus.toList()
+      ..sort((a, b) => a.satsFor(pro).compareTo(b.satsFor(pro)));
+    if (rows.isEmpty) return '';
+    final parts = rows.map((r) {
+      final at = r.satsFor(pro);
+      final n = at >= 1000 ? '${at ~/ 1000}K' : '$at';
+      return '+${(r.bonus * 100).round()}% at $n';
+    }).join(', ');
+    return 'Bulk bonus: $parts sats.';
+  }
 
   bool get isEmpty => models.isEmpty;
 

@@ -568,7 +568,7 @@ class _ComposerState extends ConsumerState<Composer> {
     if (!mounted) return;
     final result = await DevNsecModal.open(context);
     if (result == null) {
-      _onSystemMessage(tr('Nickname change cancelled.'));
+      _onSystemMessage(tr('Nickname change canceled.'));
       return;
     }
     try {
@@ -576,7 +576,7 @@ class _ComposerState extends ConsumerState<Composer> {
     } catch (_) {
       // The modal pre-verified the nsec, so a failure here is a login-flow
       // error; surface the abort line rather than crashing the composer.
-      if (mounted) _onSystemMessage(tr('Nickname change cancelled.'));
+      if (mounted) _onSystemMessage(tr('Nickname change canceled.'));
       return;
     }
     if (!mounted) return;
