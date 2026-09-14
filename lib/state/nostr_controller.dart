@@ -41,6 +41,7 @@ import '../features/notifications/background_catch_up.dart';
 import '../features/notifications/notification_routing.dart';
 import '../features/notifications/self_reference.dart';
 import '../features/notifications/notifications_service.dart';
+import '../services/attest/attest_service.dart';
 import '../services/notification_service.dart' show NotificationService;
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
@@ -471,6 +472,7 @@ class NostrController {
       // The inbound PoW exclusion threshold. Unlike the spam flags this one DOES
       // have settings-modal UI, so it is refreshed on save too (_flushSettingsSync).
       appPowFilterBits = pow.normalizePowDifficulty(settings.powDifficulty);
+      appVerifiedFilter = settings.appVerifiedFilter;
 
       // The active pubkey scopes the per-identity image-blur read
       // (`nym_image_blur_<pubkey>` first, then the global key —
@@ -776,7 +778,27 @@ class NostrController {
       _pqAnnounceTimer = null;
       if (_service == null || _identity == null) return;
       unawaited(publishPqAnnouncement());
+      unawaited(_ensureAttestBadge());
     });
+  }
+
+  AttestService? _attest;
+
+  /// Enrolls (or renews) this install's attestation badge, then hands it to
+  /// the service so outgoing channel messages carry it, and publishes the
+  /// authority key the ingest path verifies other people's badges against.
+  ///
+  /// Best-effort and silent: a device that cannot attest — an older OS, no
+  /// Play Services, a jailbreak — simply goes unbadged. It keeps sending; it
+  /// is only invisible to peers who turned the filter on.
+  Future<void> _ensureAttestBadge() async {
+    final service = _service;
+    final signer = service?.signer;
+    if (service == null || signer == null) return;
+    final attest = _attest ??= AttestService(kv: _ref.read(keyValueStoreProvider));
+    await attest.ensureBadge(signer);
+    service.attestBadge = attest.badge;
+    appAttestAuthority = attest.authorityPubkey;
   }
 
   /// Last `_backfillFromD1OnReconnect` run (ms) — the PWA's 30s throttle so a
@@ -12380,6 +12402,8 @@ class NostrController {
       // Keep the inbound PoW filter in step with the saved setting.
       appPowFilterBits = pow.normalizePowDifficulty(
           _ref.read(settingsProvider.notifier).powDifficulty);
+      appVerifiedFilter =
+          _ref.read(settingsProvider.notifier).appVerifiedFilter;
       // The default landing channel is KV-only (not a typed Settings field), so
       // thread it in explicitly so it rides the `channels` section like the PWA
       // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.

@@ -136,6 +136,9 @@ class StorageKeys {
   /// if the user kept English), so onboarding shows it at most once per device.
   static const uiLanguageChosen = 'nym_ui_language_chosen';
   static const powDifficulty = 'nym_pow_difficulty';
+  static const appVerifiedFilter = 'nym_app_verified_filter';
+  static const attestBadge = 'nym_attest_badge';
+  static const attestAuthority = 'nym_attest_authority';
   static const hideNonPinned = 'nym_hide_non_pinned';
   static const imageBlur = 'nym_image_blur';
   static String imageBlurFor(String pubkey) => 'nym_image_blur_$pubkey';

@@ -7,6 +7,7 @@ import '../core/theme/nym_colors.dart';
 import '../core/theme/nym_theme.dart';
 import '../models/settings.dart';
 import '../services/storage/key_value_store.dart';
+import '../services/attest/attest_badge.dart';
 import 'app_state.dart' show appThreadsEnabled;
 
 /// Provides the opened [KeyValueStore]. Overridden in `main()` with the
@@ -218,6 +219,15 @@ class SettingsController extends StateNotifier<Settings> {
 
   int get powDifficulty =>
       _kv.getInt(StorageKeys.powDifficulty, defaultValue: 0);
+
+  /// Inbound verified-app filter: 'off', 'verified' or 'any'. See
+  /// [appVerifiedFilter] in app_state.dart for what each accepts.
+  void setAppVerifiedFilter(String mode) {
+    _kv.setString(StorageKeys.appVerifiedFilter, normalizeAppVerifiedFilter(mode));
+  }
+
+  String get appVerifiedFilter =>
+      normalizeAppVerifiedFilter(_kv.getString(StorageKeys.appVerifiedFilter));
 
   /// Heuristic content spam filter master switch (PWA `spamFilterEnabled`,
   /// app.js:559 — default **true**). Device-local (the PWA never syncs it and

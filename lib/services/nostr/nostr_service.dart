@@ -393,6 +393,12 @@ class NostrService {
   /// Mutable for the same hardcore-rotation reason as [identity].
   EventSigner? signer;
 
+  /// The attestation badge to carry on outgoing channel messages, set by
+  /// [AttestService] once this install has enrolled. Null until then, and on a
+  /// device that cannot attest it stays null — the message still sends, it
+  /// just goes unbadged.
+  String? attestBadge;
+
   /// Surgically swap the signing identity in place — hardcore keypair mode
   /// (messages.js:2392-2404 → `generateKeypair()`, which only swaps `privkey`/
   /// `pubkey`; it does NOT reconnect relays or re-subscribe). The live [pool]
@@ -1580,10 +1586,16 @@ class NostrService {
     final nowMs =
         hasStamp ? createdAtSec * 1000 : DateTime.now().millisecondsSinceEpoch;
 
+    // The attestation badge binds to the key that signs the event, so a
+    // pseudonymous send (its own ephemeral key) carries none — and must not,
+    // or it would link the throwaway identity back to the durable one.
+    final badge = signerOverride == null ? attestBadge : null;
+
     final tags = <List<String>>[
       ['n', nym],
       ['ms', '$nowMs'],
       [isGeo ? 'g' : 'd', isGeo ? geohash : channelKey],
+      if (badge != null && badge.isNotEmpty) ['nymattest', badge],
       if (threadRoot != null && threadRoot.isNotEmpty)
         ['e', threadRoot, '', 'root'],
       // NIP-30: declare any custom emoji used in the message so other clients

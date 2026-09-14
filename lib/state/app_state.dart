@@ -34,6 +34,8 @@ import '../models/nostr_event.dart';
 import '../models/pm_conversation.dart';
 import '../models/poll.dart';
 import '../models/user.dart';
+import '../services/attest/attest_badge.dart';
+import '../services/attest/attest_service.dart';
 import '../services/nostr/event_mapper.dart';
 import 'settings_provider.dart';
 
@@ -129,6 +131,35 @@ bool appThreadsEnabled = true;
 /// Seeded from settings at boot alongside the spam-filter flags, and refreshed
 /// when the setting is saved.
 int appPowFilterBits = 0;
+
+/// Inbound verified-app filter: 'off', 'verified' (platform-attested senders
+/// only) or 'any' (also the web tier, which is origin-verified rather than
+/// platform-attested).
+///
+/// Like [appPowFilterBits] this only drops inbound public-channel messages; it
+/// never changes what we send. Seeded at boot and refreshed when the setting
+/// is saved.
+String appVerifiedFilter = 'off';
+
+/// Badges seen this session, and the authority key they are checked against.
+/// Set by the controller once the attestation service knows its authority.
+AttestRegistry appAttestRegistry = AttestRegistry();
+String appAttestAuthority = '';
+
+/// Whether [pubkey] clears the current [appVerifiedFilter]. Our own messages,
+/// friends and Nymbot always pass: the filter is aimed at strangers.
+bool passesVerifiedFilter(String pubkey, {
+  required String selfPubkey,
+  required Set<String> friends,
+}) {
+  if (appVerifiedFilter == 'off') return true;
+  if (pubkey == selfPubkey) return true;
+  if (kVerifiedBotPubkeys.contains(pubkey)) return true;
+  if (friends.contains(pubkey)) return true;
+  final tier = appAttestRegistry.tierOf(pubkey);
+  if (appVerifiedFilter == 'verified') return tier == AttestTier.attested;
+  return tier != null;
+}
 
 /// Identifies what the chat pane is currently showing. Mirrors the PWA's
 /// mutually-exclusive `currentChannel` / `currentPM` / `currentGroup` +
@@ -1944,6 +1975,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _ingestChannelMessage(NostrEvent e, {bool historical = false}) {
     if (e.id.isNotEmpty && !_seenIds.add(e.id)) return;
+    appAttestRegistry.ingest(e, appAttestAuthority);
+    if (!passesVerifiedFilter(e.pubkey,
+        selfPubkey: state.selfPubkey, friends: state.friends)) {
+      return;
+    }
     // NIP-13 exclusion filter (the PWA's `enablePow && !validatePow(...)` gate,
     // nostr-core.js). Public channel messages only — this runs on the channel
     // ingest path, so gift-wrapped PMs/groups, reactions and profiles never

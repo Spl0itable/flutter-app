@@ -210,6 +210,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   // (keypair app.js:3873-3877, PoW app.js:3616/save, blur app.js:3729-3754).
   late String _draftKeypair; // 'persistent' | 'random' | 'hardcore'
   late int _draftPow;
+  late String _draftVerified;
   late String _draftBlur; // 'true' | 'friends' | 'false'
 
   @override
@@ -243,6 +244,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // Lift a value stored from the retired 8/12 options onto the offered set,
     // so the dropdown does not open with nothing selected.
     _draftPow = normalizePowDifficulty(ctrl0.powDifficulty);
+    _draftVerified = ctrl0.appVerifiedFilter;
     // Blur seeds from the per-pubkey key first, then the global key, default
     // blur — `loadImageBlurSettings` precedence (settings.js:1139-1156; the
     // PWA's modal shows the resolved value, and the Save-time `setBlurImages`
@@ -784,6 +786,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
     }
     ctrl.setPowDifficulty(_draftPow);
+    ctrl.setAppVerifiedFilter(_draftVerified);
     ctrl.setBlurImages(_draftBlur,
         pubkey: ref.read(appStateProvider).selfPubkey);
 
@@ -1530,6 +1533,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 20, label: tr('20 bits — also hides Nymchat messages')),
       (value: 24, label: tr('24 bits — also hides Nymchat messages')),
     ];
+    final verifiedItems = <({String value, String label})>[
+      (value: 'off', label: tr('Disabled')),
+      (value: 'verified', label: tr('Nymchat iOS & Android apps only')),
+      (value: 'any', label: tr('Any verified Nymchat client (includes web)')),
+    ];
     final acceptItems = <({String value, String label})>[
       (value: 'enabled', label: tr('Enabled')),
       (value: 'friends', label: tr('Friends only')),
@@ -1659,6 +1667,35 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             items: powItems,
             // Save-gated (PWA reads #powDifficultySelect in saveSettings).
             onChanged: (v) => setState(() => _draftPow = v),
+          ),
+        ),
+      ),
+      _GroupSpec(
+        text: tr(
+            'Verified Nymchat Users Only {options} Filters incoming channel '
+            'messages to senders who proved they are running Nymchat. The iOS '
+            'and Android apps prove it with Apple App Attest and Google Play '
+            'Integrity, which Apple and Google sign and a script cannot '
+            'produce — that is the "apps only" setting. The web app cannot '
+            'attest itself, so it is verified only by origin; "any verified '
+            'client" accepts that weaker proof as well. Your own messages, '
+            'friends and Nymbot are always shown.',
+            {'options': _optText(verifiedItems)}),
+        child: FormGroup(
+          label: tr('Verified Nymchat Users Only'),
+          hint: tr(
+              'Filters incoming channel messages to senders who proved they '
+              'are running Nymchat. The iOS and Android apps prove it with '
+              'Apple App Attest and Google Play Integrity, which Apple and '
+              'Google sign and a script cannot produce — that is the "apps '
+              'only" setting. The web app cannot attest itself, so it is '
+              'verified only by origin; "any verified client" accepts that '
+              'weaker proof as well. Your own messages, friends and Nymbot '
+              'are always shown.'),
+          child: FormSelect<String>(
+            value: _draftVerified,
+            items: verifiedItems,
+            onChanged: (v) => setState(() => _draftVerified = v),
           ),
         ),
       ),
