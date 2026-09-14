@@ -1136,6 +1136,10 @@ class RelayPoolProxy implements PoolTransport {
     }
     switch (msg) {
       case PoolEvent(:final subId, :final event, :final sourceRelay):
+        if (RelayConfig.isAppRelayOnly(event.kind, event.tagValue('d')) &&
+            sourceRelay != RelayConfig.appRelay) {
+          return;
+        }
         // Cross-shard dedup: the first shard to deliver an id wins.
         if (!_deduper.add(event.id)) return;
         // Normalize a split-child sub id back to its parent (see [_parentSubId]).

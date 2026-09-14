@@ -1,3 +1,5 @@
+import 'event_kinds.dart';
+
 /// Relay configuration ported from the PWA (docs/specs/01 §4).
 class RelayConfig {
   RelayConfig._();
@@ -26,6 +28,13 @@ class RelayConfig {
     'wss://relay.fountain.fm',
     'wss://nostr.mom',
   ];
+
+  static const String appRelayOnlyChannel = 'nymchat';
+
+  static bool isAppRelayOnly(int kind, String? channelTag) =>
+      kind == EventKind.namedChannel &&
+      channelTag != null &&
+      channelTag.toLowerCase() == appRelayOnlyChannel;
 
   /// Relays we only publish to (never REQ from).
   static const Set<String> writeOnlyRelays = {'wss://sendit.nosflare.com'};
