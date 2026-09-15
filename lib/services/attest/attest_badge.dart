@@ -7,8 +7,9 @@ import 'package:crypto/crypto.dart' as crypto;
 import '../../core/crypto/native_schnorr.dart';
 
 /// Clamps a stored verified-app filter onto the options the UI offers.
+/// The older three-way values both map onto the single enabled state.
 String normalizeAppVerifiedFilter(String? raw) =>
-    (raw == 'verified' || raw == 'any') ? raw! : 'off';
+    (raw == 'on' || raw == 'verified' || raw == 'any') ? 'on' : 'off';
 
 /// Tier a badge asserts about the client that holds it.
 ///

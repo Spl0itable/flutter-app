@@ -34,7 +34,6 @@ import '../models/nostr_event.dart';
 import '../models/pm_conversation.dart';
 import '../models/poll.dart';
 import '../models/user.dart';
-import '../services/attest/attest_badge.dart';
 import '../services/filter/filter_packs.dart';
 import '../services/attest/attest_service.dart';
 import '../services/nostr/event_mapper.dart';
@@ -157,9 +156,7 @@ bool passesVerifiedFilter(String pubkey, {
   if (pubkey == selfPubkey) return true;
   if (kVerifiedBotPubkeys.contains(pubkey)) return true;
   if (friends.contains(pubkey)) return true;
-  final tier = appAttestRegistry.tierOf(pubkey);
-  if (appVerifiedFilter == 'verified') return tier == AttestTier.attested;
-  return tier != null;
+  return appAttestRegistry.tierOf(pubkey) != null;
 }
 
 /// Identifies what the chat pane is currently showing. Mirrors the PWA's

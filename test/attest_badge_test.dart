@@ -342,16 +342,20 @@ void main() {
   });
 
   group('filter normalization', () {
-    test('keeps the offered options', () {
-      expect(normalizeAppVerifiedFilter('verified'), 'verified');
-      expect(normalizeAppVerifiedFilter('any'), 'any');
+    test('the setting is on or off', () {
+      expect(normalizeAppVerifiedFilter('on'), 'on');
+      expect(normalizeAppVerifiedFilter('off'), 'off');
+    });
+
+    test('both old three-way values become on', () {
+      expect(normalizeAppVerifiedFilter('verified'), 'on');
+      expect(normalizeAppVerifiedFilter('any'), 'on');
     });
 
     test('anything else is off', () {
-      expect(normalizeAppVerifiedFilter('off'), 'off');
       expect(normalizeAppVerifiedFilter(null), 'off');
       expect(normalizeAppVerifiedFilter(''), 'off');
-      expect(normalizeAppVerifiedFilter('Verified'), 'off');
+      expect(normalizeAppVerifiedFilter('On'), 'off');
       expect(normalizeAppVerifiedFilter('yes'), 'off');
     });
   });

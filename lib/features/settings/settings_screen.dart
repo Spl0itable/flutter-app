@@ -1540,8 +1540,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ];
     final verifiedItems = <({String value, String label})>[
       (value: 'off', label: tr('Disabled')),
-      (value: 'verified', label: tr('Nymchat iOS & Android apps only')),
-      (value: 'any', label: tr('Any verified Nymchat client (includes web)')),
+      (value: 'on', label: tr('Enabled')),
     ];
     final acceptItems = <({String value, String label})>[
       (value: 'enabled', label: tr('Enabled')),
@@ -1678,25 +1677,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _GroupSpec(
         text: tr(
             'Verified Nymchat Users Only {options} Filters incoming channel '
-            'messages to senders who proved they are running Nymchat. The iOS '
-            'and Android apps prove it with Apple App Attest and Google Play '
-            'Integrity, which Apple and Google sign and a script cannot '
-            'produce — that is the "apps only" setting. The web app cannot '
-            'attest itself, so it is verified only by origin; "any verified '
-            'client" accepts that weaker proof as well. Your own messages, '
-            'friends and Nymbot are always shown.',
+            'messages to senders who proved they are running Nymchat, on the '
+            'web app or the phone apps. Scripted senders cannot prove it and '
+            'are dropped. Your own messages, friends and Nymbot are always '
+            'shown.',
             {'options': _optText(verifiedItems)}),
         child: FormGroup(
           label: tr('Verified Nymchat Users Only'),
           hint: tr(
               'Filters incoming channel messages to senders who proved they '
-              'are running Nymchat. The iOS and Android apps prove it with '
-              'Apple App Attest and Google Play Integrity, which Apple and '
-              'Google sign and a script cannot produce — that is the "apps '
-              'only" setting. The web app cannot attest itself, so it is '
-              'verified only by origin; "any verified client" accepts that '
-              'weaker proof as well. Your own messages, friends and Nymbot '
-              'are always shown.'),
+              'are running Nymchat, on the web app or the phone apps. '
+              'Scripted senders cannot prove it and are dropped. Your own '
+              'messages, friends and Nymbot are always shown.'),
           child: FormSelect<String>(
             value: _draftVerified,
             items: verifiedItems,
