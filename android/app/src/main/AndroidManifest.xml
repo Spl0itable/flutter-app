@@ -148,11 +148,12 @@
             android:stopWithTask="true"
             android:foregroundServiceType="dataSync|connectedDevice"/>
         <!-- Play Integrity: the Google Cloud project number verdicts are issued
-             under. Set it to the project linked to this app in Play Console;
-             left at 0 the app simply cannot attest, and enrolls nothing. -->
+             under. A string resource, not a literal: the number overflows the
+             32-bit int aapt would otherwise parse it as, and PlayIntegrity.kt
+             reads it back with toLongOrNull(). -->
         <meta-data
             android:name="com.nym.bar.PLAY_INTEGRITY_PROJECT_NUMBER"
-            android:value="0" />
+            android:value="@string/play_integrity_project_number" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
