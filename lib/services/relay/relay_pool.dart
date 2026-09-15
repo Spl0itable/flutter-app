@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 
 import '../../core/constants/relays.dart';
+import '../../features/messages/spam_filter.dart';
 import '../../models/nostr_event.dart';
 import 'relay_connection.dart';
 import 'relay_message.dart';
@@ -540,6 +541,10 @@ class RelayPool implements PoolTransport {
   void _onRelayMessage(String relayUrl, RelayMessage msg) {
     switch (msg) {
       case EventMessage(:final subId, :final event):
+        // Dropped before verification: the glub.chat client tags
+        // every event it sends, so this costs one tag scan and
+        // saves a signature check on every one of them.
+        if (SpamFilter.isGlubClient(event.tags)) return;
         if (RelayConfig.isAppRelayOnly(
                 event.kind, event.tagValue('g'), event.tagValue('d')) &&
             relayUrl != RelayConfig.appRelay) {

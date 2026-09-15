@@ -1985,6 +1985,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _ingestChannelMessage(NostrEvent e, {bool historical = false}) {
     if (e.id.isNotEmpty && !_seenIds.add(e.id)) return;
+    // Also caught in the relay transports and in the pool worker; repeated
+    // here because this is the one point every path crosses — live relay,
+    // proxy, mesh replay and archive restore alike.
+    if (SpamFilter.isGlubClient(e.tags)) return;
     appAttestRegistry.ingest(e, appAttestAuthority);
     if (!passesVerifiedFilter(e.pubkey,
         selfPubkey: state.selfPubkey, friends: state.friends)) {
@@ -2029,6 +2033,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
     final m = EventMapper.channelMessage(e, selfPubkey: state.selfPubkey);
     if (m == null) return;
+    // On the render model rather than the event: the event is signed, and the
+    // archive and the event panel should keep what was actually published.
+    m.content = SpamFilter.stripMaliciousDomains(m.content);
     // Already outside the 24-hour window; ask for the sweep rather than
     // waiting out its interval.
     if (m.createdAt < channelWindowFloorSec()) onAgedChannelMessage?.call();
