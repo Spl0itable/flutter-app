@@ -27,6 +27,9 @@ void main() {
       'eQphQil_X6WBaQP83i8_NHopf5xliGn7ttAIpwkUl1f7ucCfUA';
   const originBadge = '1.origin.g0j.Sls4xb8tqWvnF2NR7gTPPjun-ePmQn7lqIsnWEmw'
       'AQ8A-ZW7VieV1jxtooRsNC0E6S7URRufjVrvU3EQR9A5LA';
+  const challengedBadge =
+      '1.challenged.g0j.2ywoAkV-f8ss6mM-tDWlkkzDIklDP9VeT4-bal8exjQOSuTz'
+      'zaojQrbeWkYVAQewUSU8G1arQMJye2fyITU6dQ';
 
   // Both goldens expire on day 20755; every case pins `now` inside that term so
   // the suite does not start failing on a calendar date.
@@ -144,16 +147,20 @@ void main() {
     });
 
     test('returns null when there is no badge', () {
-      expect(AttestBadge.badgeFromTags([
-        ['n', 'someone'],
-        ['d', 'nymchat'],
-      ]), isNull);
+      expect(
+          AttestBadge.badgeFromTags([
+            ['n', 'someone'],
+            ['d', 'nymchat'],
+          ]),
+          isNull);
     });
 
     test('ignores a value-less tag', () {
-      expect(AttestBadge.badgeFromTags([
-        ['nymattest'],
-      ]), isNull);
+      expect(
+          AttestBadge.badgeFromTags([
+            ['nymattest'],
+          ]),
+          isNull);
     });
   });
 
@@ -173,7 +180,8 @@ void main() {
 
     test('records the tier a badge proves', () {
       final reg = AttestRegistry();
-      expect(reg.ingest(event(bob, originBadge), authority, now: inTerm), AttestTier.origin);
+      expect(reg.ingest(event(bob, originBadge), authority, now: inTerm),
+          AttestTier.origin);
       expect(reg.tierOf(bob), AttestTier.origin);
     });
 
@@ -187,7 +195,8 @@ void main() {
     test('records nothing for a badge that does not verify', () {
       final reg = AttestRegistry();
       // Bob's badge on Alice's event — the lifted-tag case.
-      expect(reg.ingest(event(alice, originBadge), authority, now: inTerm), isNull);
+      expect(reg.ingest(event(alice, originBadge), authority, now: inTerm),
+          isNull);
       expect(reg.tierOf(alice), isNull);
     });
 
@@ -205,6 +214,65 @@ void main() {
       expect(reg.tierOf(bob), AttestTier.origin);
       reg.clear();
       expect(reg.tierOf(bob), isNull);
+    });
+  });
+
+  group('the challenged tier', () {
+    // Three tiers that must stay distinct. Folding a web client's build proof
+    // into `attested` would tell someone who chose the strictest setting that
+    // they had excluded scripted senders when they had not.
+    test('a challenged badge verifies and keeps its own tier', () {
+      final result = verify(challengedBadge, bob);
+      expect(result, isNotNull);
+      expect(result!.tier, AttestTier.challenged);
+    });
+
+    test('the tier is inside the signed digest, so relabelling is a forgery',
+        () {
+      expect(
+          verify(
+              challengedBadge.replaceFirst('.challenged.', '.attested.'), bob),
+          isNull);
+      expect(verify(originBadge.replaceFirst('.origin.', '.challenged.'), bob),
+          isNull);
+    });
+
+    test('an invented tier is refused outright', () {
+      expect(
+          verify(
+              challengedBadge.replaceFirst('.challenged.', '.trusted.'), bob),
+          isNull);
+    });
+
+    test('it does not verify for another key', () {
+      expect(verify(challengedBadge, alice), isNull);
+    });
+
+    test('attested outranks challenged outranks origin', () {
+      // The registry keeps the strongest tier seen and reads that order off
+      // the enum's declaration order, so this is load-bearing.
+      expect(AttestTier.attested.index, lessThan(AttestTier.challenged.index));
+      expect(AttestTier.challenged.index, lessThan(AttestTier.origin.index));
+    });
+
+    test('a challenged sender does not decay to origin', () {
+      NostrEvent ev(String badge) => NostrEvent(
+            id: '0' * 64,
+            pubkey: bob,
+            createdAt: 0,
+            kind: 23333,
+            tags: [
+              ['d', 'nymchat'],
+              ['nymattest', badge],
+            ],
+            content: '',
+            sig: '0' * 128,
+          );
+      final reg = AttestRegistry();
+      reg.ingest(ev(challengedBadge), authority, now: inTerm);
+      expect(reg.tierOf(bob), AttestTier.challenged);
+      reg.ingest(ev(originBadge), authority, now: inTerm);
+      expect(reg.tierOf(bob), AttestTier.challenged);
     });
   });
 

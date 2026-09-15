@@ -17,7 +17,14 @@ String normalizeAppVerifiedFilter(String? raw) =>
 /// state. [origin] is the web app, which cannot attest itself and is verified
 /// only by request origin. The distinction is kept all the way to the UI
 /// because calling both "verified" would overstate the second.
-enum AttestTier { attested, origin }
+/// What a badge proves, strongest first.
+///
+/// [attested] is hardware-backed — Apple App Attest or Play Integrity — and no
+/// third party can mint one. [challenged] is a browser that solved a
+/// domain-bound challenge for its own enrollment: a real cost, but a
+/// transferable one, so it is named apart rather than folded into [attested].
+/// [origin] is a browser and nothing more.
+enum AttestTier { attested, challenged, origin }
 
 /// A badge issued by the attestation authority: a BIP340 signature over
 /// (pubkey, expiry-day, tier), carried in a `nymattest` tag on channel
@@ -87,6 +94,8 @@ class AttestBadge {
     switch (parts[1]) {
       case 'attested':
         tier = AttestTier.attested;
+      case 'challenged':
+        tier = AttestTier.challenged;
       case 'origin':
         tier = AttestTier.origin;
       default:
@@ -95,8 +104,7 @@ class AttestBadge {
 
     final expiryDay = int.tryParse(parts[2], radix: 36);
     if (expiryDay == null || expiryDay <= 0) return null;
-    final today =
-        ((now ?? DateTime.now()).millisecondsSinceEpoch) ~/ _msPerDay;
+    final today = ((now ?? DateTime.now()).millisecondsSinceEpoch) ~/ _msPerDay;
     if (today > expiryDay) return null;
 
     final sig = _base64Url(parts[3]);

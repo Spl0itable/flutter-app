@@ -35,6 +35,20 @@ class AttestService {
         _channel = channel ?? const MethodChannel(channelName),
         _host = host ?? ApiConfig.apiHost;
 
+  /// The tier the server named, defaulting to the weakest reading. An
+  /// unknown name is a server newer than this build, and treating it as
+  /// `attested` on a guess is the one wrong answer.
+  static AttestTier _tierFromName(String? name) {
+    switch (name) {
+      case 'attested':
+        return AttestTier.attested;
+      case 'challenged':
+        return AttestTier.challenged;
+      default:
+        return AttestTier.origin;
+    }
+  }
+
   /// Native side: `ios/Runner/AppAttestPlugin.swift` and
   /// `android/app/src/main/kotlin/.../PlayIntegrityPlugin.kt`.
   static const String channelName = 'app.nymchat/attest';
@@ -92,8 +106,7 @@ class AttestService {
       final expiresAt = (rec['expiresAt'] as num?)?.toInt() ?? 0;
       if (expiresAt <= DateTime.now().millisecondsSinceEpoch) return false;
       _badge = rec['badge'] as String?;
-      _tier =
-          rec['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
+      _tier = _tierFromName(rec['tier'] as String?);
       return _badge != null;
     } catch (_) {
       return false;
@@ -176,8 +189,7 @@ class AttestService {
       }
 
       _badge = badge;
-      _tier =
-          res?['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
+      _tier = _tierFromName(res?['tier'] as String?);
       _kv.setString(
         StorageKeys.attestBadge,
         jsonEncode({
@@ -291,7 +303,12 @@ class AttestRegistry {
     }
     if (tier == null) return null;
 
-    if (_tiers[event.pubkey] != AttestTier.attested) {
+    // Keep the strongest tier ever seen for a key rather than the most recent.
+    // AttestTier is declared strongest first, so a lower index wins: the same
+    // person on a phone and on the web is still that person, and a challenged
+    // sender must not decay to origin either.
+    final prev = _tiers[event.pubkey];
+    if (prev == null || tier.index < prev.index) {
       _tiers[event.pubkey] = tier;
     }
     if (_tiers.length > _maxTiers) {
