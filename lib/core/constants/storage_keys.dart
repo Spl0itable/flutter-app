@@ -137,6 +137,7 @@ class StorageKeys {
   static const uiLanguageChosen = 'nym_ui_language_chosen';
   static const powDifficulty = 'nym_pow_difficulty';
   static const appVerifiedFilter = 'nym_app_verified_filter';
+  static const filterPacks = 'nym_filter_packs';
   static const attestBadge = 'nym_attest_badge';
   static const attestAuthority = 'nym_attest_authority';
   static const hideNonPinned = 'nym_hide_non_pinned';

@@ -126,6 +126,11 @@ flutter:
     - assets/images/
     - assets/text/
     - assets/data/
+    # Filter packs, the same JSON the PWA serves from /data/filter-packs.
+    # Bundled rather than fetched so a phone filters while offline. Flutter
+    # does not recurse into asset subdirectories, so this line is required
+    # even though assets/data/ is already listed.
+    - assets/data/filter-packs/
     # Pre-translated interface packs, one per language. Bundled rather than
     # fetched so a language switch is instant and works with no network — see
     # assets/i18n/README.md. Flutter loads an asset only when it is asked for,

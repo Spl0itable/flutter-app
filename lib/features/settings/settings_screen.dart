@@ -40,6 +40,7 @@ import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
+import '../../services/filter/filter_packs.dart';
 import 'settings_helpers.dart';
 import 'settings_widgets.dart';
 
@@ -211,6 +212,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late String _draftKeypair; // 'persistent' | 'random' | 'hardcore'
   late int _draftPow;
   late String _draftVerified;
+  late Set<String> _draftFilterPacks;
   late String _draftBlur; // 'true' | 'friends' | 'false'
 
   @override
@@ -245,6 +247,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     // so the dropdown does not open with nothing selected.
     _draftPow = normalizePowDifficulty(ctrl0.powDifficulty);
     _draftVerified = ctrl0.appVerifiedFilter;
+    _draftFilterPacks = ctrl0.filterPacks.toSet();
     // Blur seeds from the per-pubkey key first, then the global key, default
     // blur — `loadImageBlurSettings` precedence (settings.js:1139-1156; the
     // PWA's modal shows the resolved value, and the Save-time `setBlurImages`
@@ -787,6 +790,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     ctrl.setPowDifficulty(_draftPow);
     ctrl.setAppVerifiedFilter(_draftVerified);
+    ctrl.setFilterPacks(_draftFilterPacks.toList());
+    unawaited(FilterPacks.setActive(_draftFilterPacks));
     ctrl.setBlurImages(_draftBlur,
         pubkey: ref.read(appStateProvider).selfPubkey);
 
@@ -2032,7 +2037,134 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ),
         ),
       ),
+      _GroupSpec(
+        text: tr('Filter Packs {packs} Ready-made keyword lists, applied like '
+            'your own blocked keywords: a matching message is hidden, and so is '
+            'one from a matching nym. They survive the usual evasions — '
+            'l33tspeak, homoglyphs, zero-width characters, sp a c e d letters, '
+            'f.u.l.l stops. Your friends and your own messages are never '
+            'filtered.', {
+          'packs': _filterPackSpecs.map((p) => '${p.label} ${p.desc}').join(' ')
+        }),
+        child: FormGroup(
+          label: tr('Filter Packs'),
+          hint: tr('Ready-made keyword lists, applied like your own blocked '
+              'keywords: a matching message is hidden, and so is one from a '
+              'matching nym. They survive the usual evasions — l33tspeak, '
+              'homoglyphs, zero-width characters, sp a c e d letters, f.u.l.l '
+              'stops. Your friends and your own messages are never filtered.'),
+          child: _filterPackList(),
+        ),
+      ),
     ];
+  }
+
+  /// The four packs, each a checkbox above its own description. The
+  /// description is not a tooltip because what a pack does — and what it
+  /// deliberately does NOT catch — is the whole basis for choosing it.
+  static const List<({String id, String label, String desc})> _filterPackSpecs = [
+    (
+      id: 'profanity',
+      label: 'Profanity',
+      desc: 'Swearing and slurs, in 28 languages. Matched as whole words, so '
+          'Scunthorpe, classic, cocktail and analysis are not caught.'
+    ),
+    (
+      id: 'scams',
+      label: 'Scams & spam',
+      desc: 'Seed-phrase requests, non-Bitcoin chain addresses, doubling '
+          'offers, Telegram handoffs, lookalike links. Recognises shapes, so '
+          'it works in every language.'
+    ),
+    (
+      id: 'crypto',
+      label: 'Crypto shilling',
+      desc: 'Price hype, launch promotion and altcoin tickers — not crypto '
+          'talk. Bitcoin, sats, zaps, nodes and wallets are explicitly allowed.'
+    ),
+    (
+      id: 'politics',
+      label: 'Politics',
+      desc: 'Party labels, political figures and charged coinages. Ordinary '
+          'words like state, party, vote, left and right are allowed.'
+    ),
+  ];
+
+  Widget _filterPackList() {
+    final c = context.nym;
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: c.isLight ? c.bg : Colors.white.withValues(alpha: 0.03),
+        borderRadius: NymRadius.rsm,
+        border: Border.all(color: c.glassBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      padding: const EdgeInsets.all(6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < _filterPackSpecs.length; i++)
+            _filterPackRow(_filterPackSpecs[i], first: i == 0),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterPackRow(({String id, String label, String desc}) pack,
+      {required bool first}) {
+    final c = context.nym;
+    final on = _draftFilterPacks.contains(pack.id);
+    return InkWell(
+      borderRadius: NymRadius.rxs,
+      onTap: () => setState(() {
+        if (on) {
+          _draftFilterPacks.remove(pack.id);
+        } else {
+          _draftFilterPacks.add(pack.id);
+        }
+      }),
+      child: Container(
+        decoration: first
+            ? null
+            : BoxDecoration(
+                border: Border(top: BorderSide(color: c.glassBorder))),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 24,
+              height: 24,
+              child: Checkbox(
+                value: on,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onChanged: (v) => setState(() {
+                  if (v == true) {
+                    _draftFilterPacks.add(pack.id);
+                  } else {
+                    _draftFilterPacks.remove(pack.id);
+                  }
+                }),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(tr(pack.label), style: TextStyle(fontSize: 13, color: c.text)),
+                  const SizedBox(height: 2),
+                  Text(tr(pack.desc),
+                      style: TextStyle(fontSize: 11, height: 1.4, color: c.textDim)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// The rich `name` + dim `#suffix` span for a moderation-list row

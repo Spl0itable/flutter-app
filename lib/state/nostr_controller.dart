@@ -42,6 +42,7 @@ import '../features/notifications/notification_routing.dart';
 import '../features/notifications/self_reference.dart';
 import '../features/notifications/notifications_service.dart';
 import '../services/attest/attest_service.dart';
+import '../services/filter/filter_packs.dart';
 import '../services/notification_service.dart' show NotificationService;
 import '../features/shop/shop_controller.dart';
 import '../features/nymbot/bot_commands.dart';
@@ -473,6 +474,7 @@ class NostrController {
       // have settings-modal UI, so it is refreshed on save too (_flushSettingsSync).
       appPowFilterBits = pow.normalizePowDifficulty(settings.powDifficulty);
       appVerifiedFilter = settings.appVerifiedFilter;
+      unawaited(FilterPacks.setActive(settings.filterPacks));
 
       // The active pubkey scopes the per-identity image-blur read
       // (`nym_image_blur_<pubkey>` first, then the global key —
@@ -12404,6 +12406,8 @@ class NostrController {
           _ref.read(settingsProvider.notifier).powDifficulty);
       appVerifiedFilter =
           _ref.read(settingsProvider.notifier).appVerifiedFilter;
+      unawaited(FilterPacks.setActive(
+          _ref.read(settingsProvider.notifier).filterPacks));
       // The default landing channel is KV-only (not a typed Settings field), so
       // thread it in explicitly so it rides the `channels` section like the PWA
       // (`pinnedLandingChannel`, settings.js:21,116). SETTINGS-SYNC seam.

@@ -35,6 +35,7 @@ import '../models/pm_conversation.dart';
 import '../models/poll.dart';
 import '../models/user.dart';
 import '../services/attest/attest_badge.dart';
+import '../services/filter/filter_packs.dart';
 import '../services/attest/attest_service.dart';
 import '../services/nostr/event_mapper.dart';
 import 'settings_provider.dart';
@@ -412,19 +413,28 @@ class AppState {
   /// True when [text] OR [nickname] contains any blocked keyword,
   /// case-insensitive. Mirrors messages.js `hasBlockedKeyword(text, nickname)`:
   /// the nickname is reduced to its base nym (suffix/flair stripped) first.
-  bool hasBlockedKeyword(String text, [String? nickname]) {
-    if (blockedKeywords.isEmpty) return false;
+  bool hasBlockedKeyword(String text, [String? nickname, String? pubkey]) {
     final lowerText = text.toLowerCase();
-    final lowerNick = (nickname != null && nickname.isNotEmpty)
-        ? stripPubkeySuffix(nickname).toLowerCase()
+    final nick = (nickname != null && nickname.isNotEmpty)
+        ? stripPubkeySuffix(nickname)
         : '';
+    final lowerNick = nick.toLowerCase();
     for (final keyword in blockedKeywords) {
       if (lowerText.contains(keyword) ||
           (lowerNick.isNotEmpty && lowerNick.contains(keyword))) {
         return true;
       }
     }
-    return false;
+    // Filter packs join the user's own keywords here so every caller that
+    // already asks "is this filtered?" picks them up, rather than ten call
+    // sites each having to remember a second question.
+    if (FilterPacks.active.isEmpty) return false;
+    if (pubkey != null && pubkey.isNotEmpty) {
+      if (pubkey == selfPubkey) return false;
+      if (friends.contains(pubkey)) return false;
+      if (kVerifiedBotPubkeys.contains(pubkey)) return false;
+    }
+    return FilterPacks.matches(text, nym: nick.isEmpty ? null : nick);
   }
 
   /// True when the kind-30078 spam gate (`nym-vouch` web-of-trust) hides a
@@ -484,7 +494,7 @@ class AppState {
     // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
     // own-message `return`, messages.js:640-641).
-    if (hasBlockedKeyword(m.content, m.author)) return true;
+    if (hasBlockedKeyword(m.content, m.author, m.pubkey)) return true;
     // A Bluetooth-mesh message comes from a physically-nearby, deliberately
     // paired peer — NOT the open Nostr relay network the heuristic spam filter
     // and web-of-trust gate were built to police. Applying them here hid every

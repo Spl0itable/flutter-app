@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart' show Brightness;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +10,7 @@ import '../core/theme/nym_theme.dart';
 import '../models/settings.dart';
 import '../services/storage/key_value_store.dart';
 import '../services/attest/attest_badge.dart';
+import '../services/filter/filter_packs.dart';
 import 'app_state.dart' show appThreadsEnabled;
 
 /// Provides the opened [KeyValueStore]. Overridden in `main()` with the
@@ -228,6 +231,25 @@ class SettingsController extends StateNotifier<Settings> {
 
   String get appVerifiedFilter =>
       normalizeAppVerifiedFilter(_kv.getString(StorageKeys.appVerifiedFilter));
+
+  /// Opt-in filter packs, by id. Stored as JSON so the list round-trips
+  /// through the same settings blob the PWA writes.
+  void setFilterPacks(List<String> ids) {
+    _kv.setString(StorageKeys.filterPacks,
+        jsonEncode(ids.where(kFilterPackIds.contains).toList()));
+  }
+
+  List<String> get filterPacks {
+    final raw = _kv.getString(StorageKeys.filterPacks);
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      final list = jsonDecode(raw);
+      if (list is! List) return const [];
+      return list.map((e) => e.toString()).where(kFilterPackIds.contains).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
 
   /// Heuristic content spam filter master switch (PWA `spamFilterEnabled`,
   /// app.js:559 — default **true**). Device-local (the PWA never syncs it and
