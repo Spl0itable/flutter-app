@@ -451,7 +451,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// `#suffix` tail (`_getMentionPattern`, :12-22), HTML stripped and doubled
   /// suffixes deduped first, quoted `>` lines dropped — though a quote-reply
   /// addressed to us (`> @me[#sfx]:`, `_getQuoteToMePattern`) still counts.
-  /// The bare `contains` missed real mentions (e.g. an iOS-auto-capitalised
+  /// The bare `contains` missed real mentions (e.g. an iOS-auto-capitalized
   /// "@Nym" against the lowercase self nym), leaving the highlight off.
   ///
   /// Self and PM/group rows never highlight — the PWA class chain is an
@@ -1852,7 +1852,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       // Ghost-solid flatten (see [ghostSolid] above): the satoshi/supporter/
       // gold `#2a2a2a !important` group rule (themes:1781-1785, 0,6,1) beats
       // the non-important self `#444444` (:1690), so ONLY an unstyled or
-      // fire/ice/rainbow self bubble keeps the self grey.
+      // fire/ice/rainbow self bubble keeps the self gray.
       final flattenedToOther = _cosmetics.styleId == 'style-satoshi' ||
           _cosmetics.supporter ||
           auras.any((a) => a.id == 'cosmetic-aura-gold');
@@ -2231,7 +2231,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     final shadows = <BoxShadow>[];
     for (final a in auras) {
       // Inset ring (approximated as a tight 0-blur spread inside the box via a
-      // border below) + the outer glow at the bubble's colour + blur (light
+      // border below) + the outer glow at the bubble's color + blur (light
       // gold: 10px rgba(180,140,0,.15), themes:929-932 — not the IRC .12/12px).
       final blur = a.glowBlurFor(bubble: true);
       final glowColor = a.glowColorFor(bubble: true);
@@ -2497,7 +2497,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     if (!wasReacted && _selfReactedLocally(r.emoji)) {
       HapticFeedback.mediumImpact();
       // Anchor at the reaction badge for this emoji once the optimistic add
-      // has laid it out (post-frame), falling back to the message centre —
+      // has laid it out (post-frame), falling back to the message center —
       // `_burstOnBadge(messageId, emoji, messageEl)`, reactions.js:977.
       ReactionBurst.playAtBadge(context, message.id, r.emoji,
           fallbackCenter: _globalCenterOfContext(context));
@@ -2587,7 +2587,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
       emojis: quickReactEmojis(recents),
       onReact: (emoji) => _quickReact(context, emoji),
       onMore: () => widget.onReactionPicker?.call(message),
-      // The PWA long-press surface also carries the labelled quick actions
+      // The PWA long-press surface also carries the labeled quick actions
       // (Slap/Hug/Zap/Quote/Copy/Translate/Edit/Delete) below the emoji pill.
       contextItems: buildQuickContextItems(
         context,
@@ -2623,7 +2623,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
     // Buzz + burst with the optimistic local add, BEFORE any signing/publish
     // (`nymHapticTap` + `_burstOnBadge`, reactions.js:955-977). Anchored at
     // the emoji's reaction badge once the optimistic add lays it out
-    // (post-frame), message-centre fallback — like the badge-tap toggle path.
+    // (post-frame), message-center fallback — like the badge-tap toggle path.
     if (!already && _selfReactedLocally(emoji)) {
       HapticFeedback.mediumImpact();
       ReactionBurst.playAtBadge(context, message.id, emoji,
@@ -2817,7 +2817,7 @@ class _MessageRowState extends ConsumerState<MessageRow> {
   /// Renders the message body through the rich formatter pipeline, tinted by the
   /// author's active message style ([deco]) when present.
   ///
-  /// The style's glyph colour is threaded via [MessageContent.baseColor]; a
+  /// The style's glyph color is threaded via [MessageContent.baseColor]; a
   /// gradient style (aurora) clips the text with a `ShaderMask`. The per-glyph
   /// `text-shadow` glow can't be pushed through `MessageContent`, so the glow is
   /// rendered as the bubble/row halo instead (see TODO(verify) in the report).
@@ -3719,7 +3719,7 @@ class _MsgHoverButtons extends StatelessWidget {
       _HoverActionButton(svg: NymIcons.addReaction, onTap: onReact),
       // `.msg-hover-buttons { gap: 4px }`.
       SizedBox(width: vertical ? 0 : 4, height: vertical ? 4 : 0),
-      // `.thread-msg-btn` — static, same chrome as its neighbours.
+      // `.thread-msg-btn` — static, same chrome as its neighbors.
       if (onThread != null) ...[
         _HoverActionButton(
           svg: NymIcons.thread,
@@ -4159,7 +4159,7 @@ class _TimestampTextState extends State<_TimestampText> {
 }
 
 /// The in-message P2P file-offer card (`.file-offer`, `messages.js:851-917`,
-/// `styles-features.css:2087-2290`). Header = category-coloured doc icon + name
+/// `styles-features.css:2087-2290`). Header = category-colored doc icon + name
 /// + meta (`size • type • Torrent?`); status block flips between
 /// seeding/unseeded (own) and Download / inline-progress / "No longer available"
 /// (peer). Driven live by [P2PService] (a [ChangeNotifier]) keyed by offerId.
@@ -4203,14 +4203,14 @@ class _FileOfferCardState extends State<FileOfferCard> {
   P2PService get service => widget.service;
 
   /// True once this mounted card has rendered the offer in a SEEDED state —
-  /// the analogue of the PWA card whose actions div already exists when the
+  /// the analog of the PWA card whose actions div already exists when the
   /// unseeded status arrives (`updateFileOfferUI` mutates the button in place
   /// rather than swapping to the dot row).
   bool _sawSeeded = false;
 
-  /// Category → icon stroke colour (`.file-offer-icon.audio/video/archive/…`).
+  /// Category → icon stroke color (`.file-offer-icon.audio/video/archive/…`).
   /// The PWA uses ONE generic file glyph and only re-tints the stroke per
-  /// category (default → `--primary`), so this returns the colour alone.
+  /// category (default → `--primary`), so this returns the color alone.
   static Color _category(NymColors c, FileOffer o) {
     final ext =
         o.name.contains('.') ? o.name.split('.').last.toLowerCase() : '';

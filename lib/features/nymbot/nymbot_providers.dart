@@ -1448,7 +1448,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       final all = _catalog.models;
       final groups = _catalog.grouped();
       // The live catalog runs to dozens of models — too many for a chat
-      // bubble — so summarise per provider and send the rest to the picker.
+      // bubble — so summarize per provider and send the rest to the picker.
       final lines = groups.length > 1
           ? [
               for (final g in groups)
@@ -2109,7 +2109,7 @@ List<Message> mergeBotThreadWithInfo(List<Message> store, List<Message> info) {
   return [for (final e in merged) e.m];
 }
 
-/// Convenience: the catalogue of public `?` commands (for help/autocomplete UI).
+/// Convenience: the catalog of public `?` commands (for help/autocomplete UI).
 final botCommandsProvider = Provider<List<BotCommand>>((_) => kBotCommands);
 
 /// The live Pro model catalog, cached on disk and refreshed in the background.

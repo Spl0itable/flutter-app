@@ -66,7 +66,7 @@ class NymbotService {
   /// request seam (see [_apiSocketRequest]). Identity switches need no special
   /// handling here: the socket lives on the controller's per-identity
   /// [ApiClient], which is disposed and rebuilt with the new identity's auth —
-  /// the native analogue of the PWA's page reload dropping `_apiSock`.
+  /// the native analog of the PWA's page reload dropping `_apiSock`.
   void setApiSocketRequest(
     Future<({int status, Map<String, dynamic> data})?> Function(
       String action,

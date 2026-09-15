@@ -166,6 +166,7 @@ class Nip98Auth {
     required EventSigner signer,
     bool sensitive = false,
     int? createdAt,
+    List<List<String>> extraTags = const [],
   }) async {
     final pubkey = signer.pubkey;
     final now = createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -186,6 +187,7 @@ class Nip98Auth {
       ['method', 'POST'],
       if (url.isNotEmpty) ['u', url],
       if (action.isNotEmpty) ['action', action],
+      ...extraTags,
     ];
     final unsigned = UnsignedEvent(
       pubkey: pubkey,

@@ -131,7 +131,7 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     unawaited(_startOnboardingWhenHydrated());
   }
 
-  /// Delay timers (PWA's `setTimeout`s), cancelled on dispose so a torn-down
+  /// Delay timers (PWA's `setTimeout`s), canceled on dispose so a torn-down
   /// shell never leaves them pending.
   Timer? _tutorialDelay;
   Timer? _pqNoticeDelay;

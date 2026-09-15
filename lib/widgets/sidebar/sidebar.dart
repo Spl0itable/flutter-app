@@ -797,7 +797,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final c = context.nym;
     // Live connected-relay count (PWA `poolConnectedRelays.length`, used by
     // `updateConnectionStatus`). Read-only here — drives the status-indicator
-    // label + dot colour below the nym box.
+    // label + dot color below the nym box.
     final connectedRelays = ref.watch(
       appStateProvider.select((s) => s.connectedRelays),
     );
@@ -990,7 +990,7 @@ class _PanicHoldDetectorState extends State<_PanicHoldDetector> {
   void _up(PointerUpEvent _) {
     final held = _timer != null;
     _cancel();
-    // A movement-cancelled press must not fall through to the tap action
+    // A movement-canceled press must not fall through to the tap action
     // either (the PWA's click handler only fires when the pointer stayed put).
     if (!_fired && held) widget.onTap();
     _fired = false;
@@ -1082,10 +1082,10 @@ class _NymValueText extends StatelessWidget {
 /// `.status-indicator` (index.html:434-437, styles-shell.css:105-119): the
 /// connection-status row that sits in `.sidebar-header` directly below
 /// `.nym-display` (a sibling of it, NOT nested inside). inline-flex, gap 5,
-/// 11px `--text-dim`, centred by the header's `text-align:center`; tapping
+/// 11px `--text-dim`, centerd by the header's `text-align:center`; tapping
 /// opens the Network Stats modal (`data-action="openRelayStats"`).
 ///
-/// `.status-dot` is a plain 8px circle whose colour `updateConnectionStatus`
+/// `.status-dot` is a plain 8px circle whose color `updateConnectionStatus`
 /// (relays.js:3886) sets inline from the live pool count:
 /// `--primary` Connected / `--warning` Connecting / `--danger` Disconnected.
 /// In the default proxy/pool mode the label is `Connected (N relays)` when any
@@ -1118,7 +1118,7 @@ class _ConnectionStatusIndicator extends StatelessWidget {
           key: TutorialTargets.keyFor(TutorialTarget.statusIndicator),
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // `.status-dot`: plain 8px circle, colour set per connection state.
+            // `.status-dot`: plain 8px circle, color set per connection state.
             Container(
               width: 8,
               height: 8,
