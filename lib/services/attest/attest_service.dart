@@ -154,17 +154,27 @@ class AttestService {
   Future<void> _enroll(EventSigner signer) async {
     try {
       final pubkey = signer.pubkey;
-      final challenge = await _challenge(pubkey);
-      if (challenge == null) throw StateError('no challenge');
+      final issued = await _challenge(pubkey);
+      if (issued == null) throw StateError('no challenge');
+      final challenge = issued['challenge'] as String;
 
       final proof = await _platformProof(challenge);
       if (proof == null) throw StateError('no platform proof');
+
+      // Mined unconditionally rather than only when the server turns out to
+      // need it. A build Play did not distribute — the Zapstore APK — cannot
+      // be Play-recognized, and the server falls that back to the same work
+      // the web app pays. Deciding here would mean detecting the install
+      // source or enrolling twice; this costs a few seconds in an isolate,
+      // once per badge term, with nothing waiting on it.
+      final powBits = (issued['powBits'] as num?)?.toInt() ?? 0;
 
       final auth = await Nip98Auth.buildSigned(
         action: 'attest-enroll',
         url: _url(),
         signer: signer,
         sensitive: true,
+        powBits: powBits,
         extraTags: [
           ['challenge', challenge]
         ],
@@ -205,12 +215,12 @@ class AttestService {
     }
   }
 
-  Future<String?> _challenge(String pubkey) async {
+  Future<Map<String, dynamic>?> _challenge(String pubkey) async {
     final res = await _post(<String, dynamic>{
       'action': 'challenge',
       'pubkey': pubkey,
     });
-    return res?['challenge'] as String?;
+    return (res?['challenge'] as String?) == null ? null : res;
   }
 
   /// Asks the native side for a platform proof over [challenge]. Returns the
