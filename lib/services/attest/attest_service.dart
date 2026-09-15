@@ -39,11 +39,14 @@ class AttestService {
   /// `android/app/src/main/kotlin/.../PlayIntegrityPlugin.kt`.
   static const String channelName = 'app.nymchat/attest';
 
-  /// Public key of the server's `ATTEST_AUTHORITY_SECRET`. Pinning it here is
-  /// what stops a badge signed by anyone else from being accepted; when it is
-  /// empty the service falls back to the key the API reports on first
-  /// enrollment and remembers that, which is weaker (trust on first use).
-  static const String pinnedAuthority = '';
+  /// Public key of the server's `ATTEST_AUTHORITY_SECRET`, as
+  /// npub1rfymj0vm6dtjvuujj27556phcj2va0qxuarmhphnx29pgy8ugq8s3l03yh.
+  /// Pinning it here is what stops a badge signed by anyone else from being
+  /// accepted; when it is empty the service falls back to the key the API
+  /// reports on first enrollment and remembers that, which is weaker (trust on
+  /// first use).
+  static const String pinnedAuthority =
+      '1a49b93d9bd35726739292bd4a6837c494cebc06e747bb86f3328a1410fc400f';
 
   /// Renew with this much of the term left, so a device that spends a while
   /// offline still renews before peers stop trusting it.
@@ -72,10 +75,11 @@ class AttestService {
   }
 
   /// Tag list for [NostrService.publishChannelMessage].
-  List<List<String>> tagsForEvent() =>
-      _badge == null ? const [] : [
-        [AttestBadge.tagName, _badge!]
-      ];
+  List<List<String>> tagsForEvent() => _badge == null
+      ? const []
+      : [
+          [AttestBadge.tagName, _badge!]
+        ];
 
   /// Loads a stored badge for [pubkey] into memory. Returns true when one is
   /// live; the caller still runs [ensureBadge] to renew a near-expired one.
@@ -88,7 +92,8 @@ class AttestService {
       final expiresAt = (rec['expiresAt'] as num?)?.toInt() ?? 0;
       if (expiresAt <= DateTime.now().millisecondsSinceEpoch) return false;
       _badge = rec['badge'] as String?;
-      _tier = rec['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
+      _tier =
+          rec['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
       return _badge != null;
     } catch (_) {
       return false;
@@ -171,7 +176,8 @@ class AttestService {
       }
 
       _badge = badge;
-      _tier = res?['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
+      _tier =
+          res?['tier'] == 'attested' ? AttestTier.attested : AttestTier.origin;
       _kv.setString(
         StorageKeys.attestBadge,
         jsonEncode({
@@ -261,7 +267,8 @@ class AttestRegistry {
 
   /// Verifies the badge on [event] (if any) and records what it proves.
   /// [now] is injectable so expiry is testable against a fixed badge.
-  AttestTier? ingest(NostrEvent event, String authorityPubkey, {DateTime? now}) {
+  AttestTier? ingest(NostrEvent event, String authorityPubkey,
+      {DateTime? now}) {
     if (authorityPubkey.length != 64) return null;
     final badge = AttestBadge.badgeFromTags(event.tags);
     if (badge == null) return null;
@@ -288,7 +295,8 @@ class AttestRegistry {
       _tiers[event.pubkey] = tier;
     }
     if (_tiers.length > _maxTiers) {
-      final keep = _tiers.entries.skip(_tiers.length - (_maxTiers ~/ 2)).toList();
+      final keep =
+          _tiers.entries.skip(_tiers.length - (_maxTiers ~/ 2)).toList();
       _tiers
         ..clear()
         ..addEntries(keep);
