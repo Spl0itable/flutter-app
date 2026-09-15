@@ -1136,7 +1136,8 @@ class RelayPoolProxy implements PoolTransport {
     }
     switch (msg) {
       case PoolEvent(:final subId, :final event, :final sourceRelay):
-        if (RelayConfig.isAppRelayOnly(event.kind, event.tagValue('d')) &&
+        if (RelayConfig.isAppRelayOnly(
+                event.kind, event.tagValue('g'), event.tagValue('d')) &&
             sourceRelay != RelayConfig.appRelay) {
           return;
         }

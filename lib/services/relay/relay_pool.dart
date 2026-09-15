@@ -540,7 +540,8 @@ class RelayPool implements PoolTransport {
   void _onRelayMessage(String relayUrl, RelayMessage msg) {
     switch (msg) {
       case EventMessage(:final subId, :final event):
-        if (RelayConfig.isAppRelayOnly(event.kind, event.tagValue('d')) &&
+        if (RelayConfig.isAppRelayOnly(
+                event.kind, event.tagValue('g'), event.tagValue('d')) &&
             relayUrl != RelayConfig.appRelay) {
           return;
         }

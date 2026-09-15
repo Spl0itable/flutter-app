@@ -9,6 +9,7 @@
 // instead of quietly splitting the network in two.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nym_bar/core/constants/relays.dart';
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/attest/attest_badge.dart';
 import 'package:nym_bar/services/attest/attest_service.dart';
@@ -204,6 +205,71 @@ void main() {
       expect(reg.tierOf(bob), AttestTier.origin);
       reg.clear();
       expect(reg.tierOf(bob), isNull);
+    });
+  });
+
+  group('app-relay-only channel gate', () {
+    // Mirrors the worker's `isForeignAppChannelEvent` and the PWA's
+    // `_isAppRelayOnlyEvent`. All three decide independently, and a kind one
+    // gates while another does not is a kind that slips into the channel on
+    // that client — so the case list here matches theirs exactly.
+    bool gate(int kind, {String? g, String? d}) =>
+        RelayConfig.isAppRelayOnly(kind, g, d);
+
+    test('a channel message is app-relay-only', () {
+      expect(gate(23333, d: 'nymchat'), isTrue);
+    });
+
+    test('so are the things that hang off it', () {
+      // Each of these puts a nym and a payload in front of the channel.
+      expect(gate(7, d: 'nymchat'), isTrue, reason: 'reaction');
+      expect(gate(30078, d: 'nymchat'), isTrue, reason: 'poll');
+      expect(gate(24420, d: 'nymchat'), isTrue, reason: 'typing');
+      expect(gate(24421, d: 'nymchat'), isTrue, reason: 'read receipt');
+    });
+
+    test('the hangers-on are read off either channel tag', () {
+      expect(gate(7, g: 'nymchat'), isTrue);
+      expect(gate(24420, g: 'nymchat'), isTrue);
+    });
+
+    test('a named-channel message reads only its d tag', () {
+      // A `g` tag on a 23333 is not the channel and must neither trip the gate
+      // nor let a message dodge it.
+      expect(gate(23333, g: 'nymchat', d: 'bitcoin'), isFalse);
+      expect(gate(23333, g: 'bitcoin', d: 'nymchat'), isTrue);
+    });
+
+    test('other channels are free', () {
+      expect(gate(23333, d: 'bitcoin'), isFalse);
+      expect(gate(7, d: 'bitcoin'), isFalse);
+      expect(gate(20000, g: 'u4pruy'), isFalse);
+      expect(gate(24420, d: 'bitcoin'), isFalse);
+    });
+
+    test('the channel name is matched case-insensitively', () {
+      expect(gate(23333, d: 'NymChat'), isTrue);
+      expect(gate(7, d: 'NYMCHAT'), isTrue);
+    });
+
+    test('the match is exact, so the nymchat- prefixes are untouched', () {
+      // Settings wraps, sync blobs and the vouch/PQ lists all carry d tags
+      // that START with the channel name; gating them would break settings
+      // sync and the web of trust.
+      expect(gate(30078, d: 'nymchat-settings-privacy'), isFalse);
+      expect(gate(30078, d: 'nym-vouches'), isFalse);
+      expect(gate(30078, d: 'nym-pq'), isFalse);
+    });
+
+    test('kinds outside the channel surface are free', () {
+      expect(gate(1059, d: 'nymchat'), isFalse, reason: 'gift wrap');
+      expect(gate(0, d: 'nymchat'), isFalse, reason: 'profile');
+      expect(gate(5, d: 'nymchat'), isFalse, reason: 'deletion');
+    });
+
+    test('an event with no channel tag is free', () {
+      expect(gate(23333), isFalse);
+      expect(gate(7), isFalse);
     });
   });
 
