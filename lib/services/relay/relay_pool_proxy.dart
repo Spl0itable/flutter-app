@@ -1125,6 +1125,13 @@ class RelayPoolProxy implements PoolTransport {
     return i > 0 ? subId.substring(0, i) : subId;
   }
 
+
+  /// See [PoolTransport.geoOriginAllows].
+  bool Function(NostrEvent event, String? relayUrl)? _geoOriginAllows;
+  @override
+  set geoOriginAllows(bool Function(NostrEvent event, String? relayUrl)? fn) =>
+      _geoOriginAllows = fn;
+
   void _onShardMessage(_ShardSocket sock, PoolMessage msg) {
     // Reaching here means a parseable pool frame arrived, so the proxy endpoint
     // is reachable. Latch it so a later mid-session disconnect is NOT treated as
@@ -1146,6 +1153,9 @@ class RelayPoolProxy implements PoolTransport {
             sourceRelay != RelayConfig.appRelay) {
           return;
         }
+        // Ahead of the cross-shard dedup below, for the same reason.
+        final geoGate = _geoOriginAllows;
+        if (geoGate != null && !geoGate(event, sourceRelay)) return;
         // Cross-shard dedup: the first shard to deliver an id wins.
         if (!_deduper.add(event.id)) return;
         // Normalize a split-child sub id back to its parent (see [_parentSubId]).

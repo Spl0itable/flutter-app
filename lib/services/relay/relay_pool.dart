@@ -102,6 +102,15 @@ abstract interface class PoolTransport {
   /// per-relay ws state in the PWA's `startGeoRelayKeepAlive`, relays.js:152/161).
   Set<String> get connectedRelayUrls;
 
+  /// Decides whether a geohash channel event may be admitted from the relay
+  /// that delivered it. Owned by NostrService, which holds the geo directory;
+  /// the transports only know which socket a frame came in on.
+  ///
+  /// Null admits everything, which is also what the implementation does for
+  /// anything it cannot judge — the failure that matters here is hiding a
+  /// channel, not letting one message through.
+  set geoOriginAllows(bool Function(NostrEvent event, String? relayUrl)? fn);
+
   /// Live relay-traffic counters (bytes in/out, events, throughput history,
   /// per-relay events + latency) for the Network Stats modal. Aggregated across
   /// every relay/shard socket. Mirrors the PWA's `nym.relayStats`.
@@ -538,6 +547,13 @@ class RelayPool implements PoolTransport {
   Future<int> publishGeo(NostrEvent event, List<String> closestRelayUrls) =>
       publish(event);
 
+
+  /// See [PoolTransport.geoOriginAllows].
+  bool Function(NostrEvent event, String? relayUrl)? _geoOriginAllows;
+  @override
+  set geoOriginAllows(bool Function(NostrEvent event, String? relayUrl)? fn) =>
+      _geoOriginAllows = fn;
+
   void _onRelayMessage(String relayUrl, RelayMessage msg) {
     switch (msg) {
       case EventMessage(:final subId, :final event):
@@ -550,6 +566,10 @@ class RelayPool implements PoolTransport {
             relayUrl != RelayConfig.appRelay) {
           return;
         }
+        // Before verification and before dedup: a copy off the wrong relay
+        // must not claim the event id and suppress the neighbourhood's own.
+        final geoGate = _geoOriginAllows;
+        if (geoGate != null && !geoGate(event, relayUrl)) return;
         final sub = _subscriptions[subId];
         if (sub != null) {
           // Fire and forget; verification is async.

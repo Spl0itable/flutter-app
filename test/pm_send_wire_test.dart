@@ -398,6 +398,9 @@ String _hex(List<int> b) =>
 
 /// A PoolTransport that records instead of publishing.
 class _RecordingTransport implements PoolTransport {
+  @override
+  set geoOriginAllows(bool Function(NostrEvent event, String? relayUrl)? fn) {}
+
   final List<NostrEvent> plainCalls = [];
   final List<NostrEvent> dmCalls = [];
 
