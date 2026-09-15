@@ -64,7 +64,7 @@ WebSocketChannel defaultRelayChannelFactory(Uri url) =>
     );
 
 /// A single relay WebSocket connection with auto-reconnect, subscription
-/// re-sending, and publish acknowledgement tracking.
+/// re-sending, and publish acknowledgment tracking.
 ///
 /// Transport only: it knows nothing about app state. Inbound frames are parsed
 /// into [RelayMessage]s and exposed via [messages]; status changes via

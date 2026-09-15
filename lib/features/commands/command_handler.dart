@@ -123,7 +123,7 @@ class CommandHooks {
   /// (`showDevNsecModal('nick')` → `applyDeveloperIdentity` on success,
   /// commands.js:614-626). The hook owns the whole outcome: verify → switch
   /// the running session to the developer identity + the "Identity verified…"
-  /// line, cancel → the PWA's 'Nickname change cancelled.' line. Unset
+  /// line, cancel → the PWA's 'Nickname change canceled.' line. Unset
   /// (headless/tests) → the engine's reserved gate aborts with the same
   /// cancellation message.
   final void Function()? openDevNsecChallenge;

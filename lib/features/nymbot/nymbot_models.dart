@@ -84,7 +84,7 @@ class ProModel {
       tools: j['tools'] == true,
       context: asInt(j['context']),
       hosting: (j['hosting'] ?? '').toString(),
-      // Absent means "assume priced" so an older worker doesn't grey the list.
+      // Absent means "assume priced" so an older worker doesn't gray the list.
       priced: j['priced'] != false,
     );
   }

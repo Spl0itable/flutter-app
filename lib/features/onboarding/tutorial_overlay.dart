@@ -63,7 +63,7 @@ class TutorialTargets {
 
   /// The live [BuildContext] of [target]'s widget (null when not mounted). Used
   /// to scroll the target into view via [Scrollable.ensureVisible], the native
-  /// analogue of the PWA `positionStep`'s `target.scrollIntoView` (app.js:224).
+  /// analog of the PWA `positionStep`'s `target.scrollIntoView` (app.js:224).
   static BuildContext? contextOf(TutorialTarget target) =>
       _keys[target]?.currentContext;
 }
@@ -370,7 +370,7 @@ class _TutorialOverlayState extends State<TutorialOverlay> {
     _remeasure();
   }
 
-  /// Scrolls the step's target into view — the native analogue of the PWA
+  /// Scrolls the step's target into view — the native analog of the PWA
   /// `positionStep`'s `scrollIntoView` (app.js:216-227). Without this, a
   /// sidebar-anchored step lower down the scroll list (Private Messages, Active
   /// Nyms) never scrolls into view and its spotlight lands off-screen.
@@ -926,7 +926,7 @@ class _TutorialCardLayoutDelegate extends SingleChildLayoutDelegate {
 }
 
 /// Fills the screen with [dim], punching a rounded-rect [hole] clear so the
-/// highlighted element shows through — the Flutter analogue of the PWA's
+/// highlighted element shows through — the Flutter analog of the PWA's
 /// `box-shadow: 0 0 0 9999px rgba(0,0,0,0.5)` spread on `.tutorial-highlight`.
 class _SpotlightPainter extends CustomPainter {
   const _SpotlightPainter({

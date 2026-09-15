@@ -535,7 +535,7 @@ class AppState {
   /// whereas [isMessageFiltered] (the list-visibility filter) drops them. Using
   /// [isMessageFiltered] for unread therefore UNDER-counts vs the PWA whenever a
   /// keyword or the heuristic filter is configured. (The `created_at > lastRead`
-  /// term has no native analogue yet — there is no per-channel `channelLastRead`
+  /// term has no native analog yet — there is no per-channel `channelLastRead`
   /// read-state — so the incremental model approximates it via the open-view
   /// reset; see C02-5/C02-6.)
   bool countsTowardUnread(Message m) {
@@ -1271,7 +1271,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Clears the session's processed-event dedup sets — the in-memory
-  /// `processedPMEventIds` / `deletedEventIds` analogues the PWA wipes inside
+  /// `processedPMEventIds` / `deletedEventIds` analogs the PWA wipes inside
   /// `clearLocalStorageCache` (app.js:4021-4022) — so relay backlog / archive
   /// restore can repopulate the just-cleared cache instead of being dropped
   /// as already-seen duplicates. Called by [NostrController.clearCache] after
@@ -1596,7 +1596,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// own outgoing message they ack was indexed — the async cache/D1 restore
   /// race. Keyed by lowercased `nymMessageId` → the highest-ranked
   /// [DeliveryStatus] seen. Replayed the instant the own message lands
-  /// ([_indexMessage]), the PM/group analogue of [_channelMessageReaders].
+  /// ([_indexMessage]), the PM/group analog of [_channelMessageReaders].
   /// Receipts are LIVE-ONLY (never archived), so without this a receipt that
   /// wins the race against the restore is lost forever and the ✓✓ never advances
   /// — the "receipts don't work, especially when backfilled" report.
@@ -1708,7 +1708,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           ingestEvent(e);
         } catch (_) {
           // Skip a malformed event; never abort the batch (per-event catch
-          // mirrors the archive replay loops' existing behaviour).
+          // mirrors the archive replay loops' existing behavior).
         }
       }
     });
@@ -1960,7 +1960,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// re-served from the archive can carry a `created_at`/`ms` of ≈now (so it
   /// still reads "now"), yet it is backlog and must NOT be flood-dimmed or
   /// snap-in animated, exactly as the PWA's restore path flags it. Only the
-  /// channel-message path honours it; other kinds ignore it.
+  /// channel-message path honors it; other kinds ignore it.
   void ingestEvent(NostrEvent e, {bool historical = false}) {
     switch (e.kind) {
       case EventKind.geoChannel:
@@ -2046,7 +2046,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final list = state.messages.putIfAbsent(key, () => <Message>[]);
 
     // Reconcile an OUTSTANDING optimistic self-echo with this real relay echo
-    // BEFORE appending — the channel analogue of the PM dual-wrap merge above
+    // BEFORE appending — the channel analog of the PM dual-wrap merge above
     // (and of [replaceOptimistic]). Channel sends carry no shared nymMessageId,
     // so the ONLY thing that stops the `_optim_*` placeholder ([sendLocal]) and
     // the real-id echo from both rendering is the real id being registered in
@@ -4061,7 +4061,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       state.blockedKeywords.addAll(blockedKeywords.map((k) => k.toLowerCase()));
     }
     // Channel keys are stored lowercased everywhere else (`togglePin` and
-    // friends go through the same normalisation), so fold them here too rather
+    // friends go through the same normalization), so fold them here too rather
     // than trusting whatever case an older build wrote.
     if (pinnedChannels != null) {
       state.pinnedChannels.addAll(pinnedChannels.map((k) => k.toLowerCase()));
@@ -4608,7 +4608,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       _syncPmConversationNym(pubkey);
     }
     // Cached SELF profile → restore the header nym immediately, the native
-    // analogue of the PWA applying the cached login profile name before
+    // analog of the PWA applying the cached login profile name before
     // relays connect (`nym_nostr_login_profile`, app.js:4514-4522). Without
     // this the boot identity's ephemeral/derived nick stays in `selfNym`
     // until a live kind-0 lands — which `_ingestProfile`'s no-op guard may
@@ -4929,7 +4929,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // sent to relays regardless; these only govern the LOCAL view. A file-offer
     // echo carries no user-typed body, so it is exempt. The message stays in the
     // data model either way (render-time hiding via [isMessageFiltered], the
-    // native analogue of the PWA's `displayMessage` early-return).
+    // native analog of the PWA's `displayMessage` early-return).
     if (fileOffer == null) {
       final keywordHit = state.hasBlockedKeyword(trimmed, author);
       if (keywordHit || state.blockedUsers.contains(pubkey)) {
@@ -4999,7 +4999,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Channel messages have no shared `nymMessageId`, so without this the
   /// `_optim_*` echo and the relay-echoed real-id event would both render — the
   /// double-send the user reported. PM/group sends already dedupe via
-  /// [_seenNymMessageIds]; this is the channel analogue.
+  /// [_seenNymMessageIds]; this is the channel analog.
   void replaceOptimistic(
     String optimisticId,
     String realId, {

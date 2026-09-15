@@ -2,7 +2,7 @@
 //
 // Every other test around this checks the send PLAN — an object describing
 // what should happen. That is how "Bitchat users receive nothing" survived
-// three rounds of fixes: a plan test asserted the broken behaviour, and the
+// three rounds of fixes: a plan test asserted the broken behavior, and the
 // plan is not what users notice. This drives the REAL `publishPM` against a
 // recording transport and looks at the events, then opens the Bitchat copy the
 // way a Bitchat client would.

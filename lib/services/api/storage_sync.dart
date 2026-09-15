@@ -630,7 +630,7 @@ class StorageSync {
       }, 'nymchat-sync-ping');
     } catch (_) {
       // Best-effort: a failed ping just means the other device waits for its
-      // next D1 read, which is the behaviour we had before.
+      // next D1 read, which is the behavior we had before.
     }
   }
 
@@ -666,7 +666,7 @@ class StorageSync {
   // The old bound allowed 30,769 and history shards were budgeted at 30,000, so
   // they fell squarely in the rejected zone and silently never synced.
   //
-  // Modelling the padding exactly puts the real cliff at 28,672 bytes, with
+  // Modeling the padding exactly puts the real cliff at 28,672 bytes, with
   // ~10KB of headroom below it (28,672 wraps to 55,034), so the bound tolerates
   // the overhead estimates being a little off.
   static const int _rumorOverhead = 256;
@@ -2677,7 +2677,7 @@ class StorageSync {
   }
 
   /// Reads the identity's root secret, once per instance. Null means the
-  /// nsec-derived candidates are the whole list, i.e. v1 behaviour.
+  /// nsec-derived candidates are the whole list, i.e. v1 behavior.
   Future<Uint8List?> Function()? _pqRootProvider;
   Future<Uint8List?>? _pqRootFuture;
 

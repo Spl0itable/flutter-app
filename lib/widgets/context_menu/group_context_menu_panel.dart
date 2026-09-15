@@ -368,7 +368,7 @@ class _GroupContextMenuPanelState extends ConsumerState<GroupContextMenuPanel> {
     );
   }
 
-  /// The banner-avatar ring/disc colour (`.has-banner .group-ctx-icon`):
+  /// The banner-avatar ring/disc color (`.has-banner .group-ctx-icon`):
   /// `rgba(20,20,35,0.95)` dark; `rgba(255,255,255,0.95)` light.
   Color _bannerRing(NymColors c) =>
       c.isLight ? const Color(0xF2FFFFFF) : const Color(0xF2141423);

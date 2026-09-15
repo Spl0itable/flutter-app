@@ -382,7 +382,7 @@ class SpamFilter {
     return score;
   }
 
-  /// Counts non-overlapping matches of [re] in [s] — the Dart analogue of
+  /// Counts non-overlapping matches of [re] in [s] — the Dart analog of
   /// `(s.match(/re/g) || []).length`.
   static int _countMatches(String s, RegExp re) => re.allMatches(s).length;
 }

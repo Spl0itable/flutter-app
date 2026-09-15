@@ -358,7 +358,7 @@ class NostrController {
   ///
   /// [unlockedSecrets] carries the in-memory decrypted vault secrets when the
   /// identity vault is enabled (passed by the boot-unlock gate) so identity
-  /// restore never reads the encrypted blob at rest (native analogue of
+  /// restore never reads the encrypted blob at rest (native analog of
   /// `_vaultMem`).
   Future<void> init({Map<String, String>? unlockedSecrets}) async {
     if (_started) return;
@@ -1351,7 +1351,7 @@ class NostrController {
   }
 
   /// Switches the running session to a freshly-imported nsec account WITHOUT an
-  /// app restart — the native analogue of the PWA's `nostrLoginWithNsec` →
+  /// app restart — the native analog of the PWA's `nostrLoginWithNsec` →
   /// `applyNostrLogin` (app.js:5036-5074 / 5487-5612), whose key step is
   /// `resubscribeAllRelays()` so the new pubkey's gift-wraps/PMs/zaps flow in.
   ///
@@ -1390,7 +1390,7 @@ class NostrController {
   }
 
   /// Adopts a just-established NIP-46 remote-signer session at RUNTIME — the
-  /// native analogue of the PWA's `applyNostrLogin(pubkey, null, 'nip46')`
+  /// native analog of the PWA's `applyNostrLogin(pubkey, null, 'nip46')`
   /// (app.js:5324). The login modal already ran the `nostrconnect://`
   /// handshake on the shared [nip46ServiceProvider] (persisting the session and
   /// keeping the socket LIVE via `finishNostrConnect`), so this just re-boots
@@ -1805,7 +1805,7 @@ class NostrController {
 
       // Send a public read receipt (kind 24421) for a fresh, visible, non-own
       // channel message in the channel we currently have open — the native
-      // analogue of the PWA's `addMessageToUI` send (gated on `canBeSeen &&
+      // analog of the PWA's `addMessageToUI` send (gated on `canBeSeen &&
       // !isOwn && !isHistorical && geohash && id matches`). The open channel is
       // our visibility proxy (no scroll-position tracking on native).
       final self = _identity?.pubkey ?? '';
@@ -5585,7 +5585,7 @@ class NostrController {
     final signed = await service.publishPqAnnouncement(
       kemPublicKey: keys?.publicKey,
       // `pk` is the claim an older peer acts on, and only a login holding the
-      // nsec can honour it.
+      // nsec can honor it.
       legacyCapable: PqPolicy.legacyCapable(privkey: identity.privkey),
       epoch: _pqEpoch,
       devices: devices,
@@ -10564,7 +10564,7 @@ class NostrController {
     if (joined.isEmpty) return;
     await _backfillChannelArchivesFor(
       joined,
-      // Forced: the non-forced path honours `channelGet`'s 60s freshness
+      // Forced: the non-forced path honors `channelGet`'s 60s freshness
       // window, and a catch-up that lands shortly after the app was last open
       // would silently fetch nothing at all.
       force: true,
@@ -10974,7 +10974,7 @@ class NostrController {
   /// Cancels the pending shop-receipt wait (shop.js `_clearShopReceiptWait`),
   /// closing the REQ and the timer. [result] resolves an in-flight
   /// [listenForShopReceipt] future — the matched receipt event JSON, or the
-  /// default `false` (= not detected / cancelled).
+  /// default `false` (= not detected / canceled).
   void clearShopReceiptWait({Object result = false}) {
     _shopReceiptSub?.close();
     _shopReceiptSub = null;
@@ -11817,7 +11817,7 @@ class NostrController {
     // another device that never chose one — used to overwrite the choice each
     // launch, which is exactly what "the emoji keeps reverting" looked like.
     // The publish carries the moment of the pick (`swipeReactEmojiTs`), so an
-    // older value can be recognised and refused; when we refuse one we
+    // older value can be recognized and refused; when we refuse one we
     // re-publish ours so the stale blob is healed rather than re-fought on the
     // next launch.
     final swipeEmoji = p['swipeReactEmoji'];
@@ -13432,7 +13432,7 @@ class NostrController {
   /// storage keys (commands.js:52-113): exact stored-thread match first, then
   /// a case-insensitive bidirectional prefix match across stored threads and
   /// the sidebar registry; a name found nowhere is fetched from the D1
-  /// archive with a bounded wait (the native analogue of the PWA's targeted
+  /// archive with a bounded wait (the native analog of the PWA's targeted
   /// relay REQ + 2s wait — history here comes from D1) and included so the
   /// freshly-ingested messages count. Empty when the args reference nothing.
   Future<Set<String>> _resolveReferencedChannels(String args) async {

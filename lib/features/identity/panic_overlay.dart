@@ -29,8 +29,8 @@ void startPanicWipe(BuildContext context, WidgetRef ref) {
 /// Full-screen "Encrypting" scramble overlay shown during a panic wipe
 /// (`_panicShowOverlay`, docs/specs/04 §10.2 step 1):
 ///
-/// * "ENCRYPTING" title (uppercase, letter-spacing, primary colour)
-/// * a 40×8 hex/symbol grid re-randomised every ~60 ms (mono, primary, dim)
+/// * "ENCRYPTING" title (uppercase, letter-spacing, primary color)
+/// * a 40×8 hex/symbol grid re-randomized every ~60 ms (mono, primary, dim)
 /// * a status line that updates through the wipe stages
 /// * an indeterminate progress bar (`nm-panic-fill`)
 ///

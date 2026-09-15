@@ -152,7 +152,7 @@ class _PollCardState extends ConsumerState<PollCard> {
     final rowRing = goldAura?.insetColor;
     final glowBlur = goldAura?.glowBlurFor(bubble: false) ?? 0;
 
-    // The author nym colour: self → primary (`.message-author.self`), bitchat
+    // The author nym color: self → primary (`.message-author.self`), bitchat
     // theme → the deterministic per-user hue (`getUserColorClass`, users.js:
     // 11-18), else secondary. Genesis flair bolds the nym
     // (`.has-genesis-flair`).

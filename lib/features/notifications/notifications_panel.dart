@@ -620,7 +620,7 @@ class _NotificationRow extends ConsumerStatefulWidget {
 
   /// `Jun 23, 2:05 PM` — `toLocaleString({month, day, hour, minute})`.
   ///
-  /// The clock half honours the user's `timeFormat` setting, like every other
+  /// The clock half honors the user's `timeFormat` setting, like every other
   /// timestamp in the app ([formatTime]). It used to be hardcoded 24-hour, so
   /// the bell showed `14:05` even on the default 12-hour setting.
   String _formatTime(int ms, String timeFormat) {

@@ -838,7 +838,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   /// No-op on cancel.
   Future<void> _uploadCustomWallpaper(SettingsController ctrl) async {
     final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
-    if (picked == null) return; // user cancelled the picker
+    if (picked == null) return; // user canceled the picker
     if (mounted) setState(() => _wallpaperUploading = true);
     try {
       // Validate the minimum image size (users.js:831-850: reject anything
@@ -1759,7 +1759,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'setting. Bitchat users and other Nostr clients keep receiving '
               'standard NIP‑17 exactly as before.'),
           // Green only when it is genuinely on end to end. The send-only and
-          // unavailable states keep the ordinary colour, so the green means
+          // unavailable states keep the ordinary color, so the green means
           // one thing — the same rule the PWA's status line follows.
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -2040,19 +2040,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _GroupSpec(
         text: tr('Filter Packs {packs} Ready-made keyword lists, applied like '
             'your own blocked keywords: a matching message is hidden, and so is '
-            'one from a matching nym. They survive the usual evasions — '
-            'l33tspeak, homoglyphs, zero-width characters, sp a c e d letters, '
-            'f.u.l.l stops. Your friends and your own messages are never '
-            'filtered.', {
+            'one from a matching nym. Your friends and your own messages are '
+            'never filtered.', {
           'packs': _filterPackSpecs.map((p) => '${p.label} ${p.desc}').join(' ')
         }),
         child: FormGroup(
           label: tr('Filter Packs'),
           hint: tr('Ready-made keyword lists, applied like your own blocked '
               'keywords: a matching message is hidden, and so is one from a '
-              'matching nym. They survive the usual evasions — l33tspeak, '
-              'homoglyphs, zero-width characters, sp a c e d letters, f.u.l.l '
-              'stops. Your friends and your own messages are never filtered.'),
+              'matching nym. Your friends and your own messages are never '
+              'filtered.'),
           child: _filterPackList(),
         ),
       ),
@@ -2073,7 +2070,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       id: 'scams',
       label: 'Scams & spam',
       desc: 'Seed-phrase requests, non-Bitcoin chain addresses, doubling '
-          'offers, Telegram handoffs, lookalike links. Recognises shapes, so '
+          'offers, Telegram handoffs, lookalike links. Recognizes shapes, so '
           'it works in every language.'
     ),
     (

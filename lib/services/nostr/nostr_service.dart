@@ -1114,7 +1114,7 @@ class NostrService {
   }
 
   /// Cap on how long a one-shot announcement lookup waits before giving up and
-  /// letting the message go classical — which is the behaviour that was there
+  /// letting the message go classical — which is the behavior that was there
   /// before, not a new failure mode.
   static const Duration pqLookupTimeout = Duration(milliseconds: 2500);
 

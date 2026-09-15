@@ -3538,7 +3538,7 @@ class _BlurRevealState extends State<_BlurReveal> {
 ///     is exactly `:code:` for a known custom code becomes an image; a token
 ///     embedded in longer content stays literal.
 ///
-/// Text runs keep the caller's [style] verbatim (no colour-emoji fallback is
+/// Text runs keep the caller's [style] verbatim (no color-emoji fallback is
 /// forced onto them, which would wreck Latin metrics/glyphs the same way the old
 /// global theme fallback did); unicode emoji render via the platform font.
 class InlineEmojiText extends ConsumerWidget {

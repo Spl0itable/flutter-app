@@ -115,7 +115,7 @@ class StorageKeys {
   /// Unix seconds of the LAST local pick of [swipeReactEmoji]. Published
   /// alongside the emoji so a settings blob written before the pick (an older
   /// build's ❤️ default, or another device that never chose one) can be
-  /// recognised as stale and rejected instead of clobbering the choice.
+  /// recognized as stale and rejected instead of clobbering the choice.
   static const swipeReactEmojiTs = 'nym_swipe_react_emoji_ts';
   static const translateLanguage = 'nym_translate_language';
   static const translateFavorites = 'nym_translate_favorites';

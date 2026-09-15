@@ -19,7 +19,7 @@ import 'package:flutter/services.dart' show rootBundle;
 /// strings to `contains()`, while "Scunthorpe", "classic", "assassin" and
 /// "analysis" are NOT the words they contain. So the text is normalized once
 /// and then matched as WHOLE WORDS — the word boundary being the single most
-/// important defence against false positives.
+/// important defense against false positives.
 
 /// Precomposed Latin letters folded to their base. Dart has no
 /// `String.normalize()`, so this table is GENERATED from Node's Unicode data
@@ -139,7 +139,7 @@ final RegExp _invisible = RegExp(
 /// reader writes by accident. Outside a word they stay separators.
 final RegExp _midwordStrip =
     RegExp(r"(?<=[\p{L}\p{N}])[.\-_*'’`~^+]+(?=[\p{L}\p{N}])", unicode: true);
-/// @ and $ convert beside a LETTER ("$hit", "a$$hole"); a digit neighbour is
+/// @ and $ convert beside a LETTER ("$hit", "a$$hole"); a digit neighbor is
 /// left alone so "$20" stays a price.
 final RegExp _atDollar = RegExp(r'(?<=\p{L})[@$]|[@$](?=\p{L})', unicode: true);
 /// ! and | only BETWEEN two letters ("b!tch"). Converting a trailing one turns

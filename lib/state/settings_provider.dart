@@ -48,7 +48,7 @@ class SettingsController extends StateNotifier<Settings> {
   void notifySyncedChange() => _syncedChanged();
 
   /// Reloads settings from the (now-wiped) store back to first-run defaults —
-  /// the panic path's analogue of the PWA's page reload re-reading empty
+  /// the panic path's analog of the PWA's page reload re-reading empty
   /// localStorage. Called by [NostrController.resetAfterPanic] after the KV
   /// store has been cleared, so theme/layout/etc. return to defaults without a
   /// process restart.
@@ -498,7 +498,7 @@ class SettingsController extends StateNotifier<Settings> {
   /// [StorageKeys.swipeReactEmojiTs] with "now", which is what makes the pick
   /// defensible: the stamp rides the cross-device publish, so a settings blob
   /// written BEFORE this moment (an older build's ❤️ default, or a device that
-  /// never picked one) is recognised as stale on the way back in and rejected
+  /// never picked one) is recognized as stale on the way back in and rejected
   /// instead of silently reverting the choice on the next launch.
   ///
   /// [remoteTs] carries the stamp of an INBOUND pick being applied from another
