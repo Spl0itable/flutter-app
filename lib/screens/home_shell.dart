@@ -211,7 +211,7 @@ class HomeShellState extends ConsumerState<HomeShell>
   /// CLOSES an open drawer.
   void _edgePointerMove(PointerMoveEvent e) {
     if (e.pointer != _edgeSwipePointer) return;
-    // Right edge, travelling left: step back INTO the thread just left.
+    // Right edge, traveling left: step back INTO the thread just left.
     if (_edgeSwipeFromRight) {
       if (_edgeSwipeStartX - e.position.dx > _sidebarSwipeThreshold) {
         _edgeSwipePointer = null;

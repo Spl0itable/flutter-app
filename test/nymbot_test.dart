@@ -93,7 +93,7 @@ void main() {
   group('command catalogue', () {
     // Every command the worker (`functions/api/bot.js`) actually dispatches.
     // Note: `?roll` is in the README but has NO worker handler, so it is
-    // intentionally absent from the catalogue. `?changelog` is a real worker
+    // intentionally absent from the catalog. `?changelog` is a real worker
     // command (aliases release(s)/version(s)) and must be present.
     const readmeCommands = [
       // AI & Knowledge

@@ -3290,7 +3290,7 @@ class _GitConnectModalState extends State<_GitConnectModal> {
 }
 
 // =============================================================================
-// Fallback theme colours (used only when NymColors isn't registered, e.g. in a
+// Fallback theme colors (used only when NymColors isn't registered, e.g. in a
 // bare widget test). The real app supplies NymColors via the theme extension.
 // =============================================================================
 

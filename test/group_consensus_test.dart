@@ -3,7 +3,7 @@
 //   1. a ban is not undone by a member who missed it advertising a stale
 //      roster on its next ordinary message;
 //   2. only the group owner's `subject` tag renames the group;
-//   3. an unban is authorised for owners AND moderators, and a moderator may
+//   3. an unban is authorized for owners AND moderators, and a moderator may
 //      add members even when "allow members to add others" is off.
 //
 // Mirrors scripts/test-group-consensus.mjs in the PWA.

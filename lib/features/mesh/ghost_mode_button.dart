@@ -92,7 +92,7 @@ class _GhostPainter extends CustomPainter {
   final Color badge;
 
   /// Painted as a ring behind the badge so it stays readable when the badge and
-  /// the ghost body land on similar colours (green check on a green ghost).
+  /// the ghost body land on similar colors (green check on a green ghost).
   final Color surface;
   final bool checked;
 
@@ -100,7 +100,7 @@ class _GhostPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final w = size.width, h = size.height;
     // Off reads as an empty outline, on as a solid shape — legible at 24px
-    // without relying on the badge colour alone.
+    // without relying on the badge color alone.
     final stroke = w * 0.09;
     final p = Paint()
       ..color = body

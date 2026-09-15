@@ -212,7 +212,7 @@ class _ComposerState extends ConsumerState<Composer> {
   ///
   /// Blossom is content-addressed and several servers return a bare
   /// `https://host/<sha256>` with no file extension, which the media regex
-  /// cannot recognise. We know these are media because we just uploaded them,
+  /// cannot recognize. We know these are media because we just uploaded them,
   /// so they are matched by identity — see [composerMediaMatches]. Videos are
   /// included even though [_localMediaPreviews] has no bytes for them, since
   /// the strip still needs to know they are attachments.
@@ -274,7 +274,7 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Measures the message-input box so the autocomplete dropdown spans the
   /// INPUT width (`.autocomplete-dropdown{left:0;right:0}` = `.input-wrapper`),
-  /// not the overlay-theatre / screen width (04-F1). Attached to the input's
+  /// not the overlay-theater / screen width (04-F1). Attached to the input's
   /// [CompositedTransformTarget]; [_anchorWidth] reads this box.
   final GlobalKey _inputKey = GlobalKey();
 
@@ -325,7 +325,7 @@ class _ComposerState extends ConsumerState<Composer> {
   AutocompleteView? _acView;
   List<PaletteRow> _paletteRows = const [];
   // The public `?` Nymbot command palette rows (showBotCommandPalette). Same
-  // `#commandPalette` surface as `/`, populated from the real bot catalogue.
+  // `#commandPalette` surface as `/`, populated from the real bot catalog.
   List<BotPaletteCommand> _botRows = const [];
   int _selectedIndex = 0;
 
@@ -1932,7 +1932,7 @@ class _ComposerState extends ConsumerState<Composer> {
 
   /// Width of the message-input box (the `.input-wrapper`, = `.autocomplete-
   /// dropdown` left:0/right:0 span), measured via the [_inputKey] leader rather
-  /// than the overlay-theatre `context` (which is full-screen) — 04-F1.
+  /// than the overlay-theater `context` (which is full-screen) — 04-F1.
   double _anchorWidth(BuildContext context) {
     final box = _inputKey.currentContext?.findRenderObject() as RenderBox?;
     return box?.size.width ?? MediaQuery.sizeOf(context).width;
@@ -3430,7 +3430,7 @@ class _TranslateInputButtonState extends State<_TranslateInputButton>
   void initState() {
     super.initState();
     // Created eagerly (not lazily) so a never-translated button still has a
-    // controller to dispose — a lazy `late` field would otherwise initialise a
+    // controller to dispose — a lazy `late` field would otherwise initialize a
     // ticker against a deactivated State during dispose().
     _pulse = AnimationController(
       vsync: this,

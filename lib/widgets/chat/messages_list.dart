@@ -86,7 +86,7 @@ class MessageListScroller {
     controller.scrollTo(
       index: index,
       // Leading-edge fraction of the viewport — ~0.4 lands the message a little
-      // above center, the closest analogue to `scrollIntoView({block:'center'})`.
+      // above center, the closest analog to `scrollIntoView({block:'center'})`.
       alignment: 0.4,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeInOut,
@@ -784,7 +784,7 @@ class _CachedUnitWidget {
 
 /// `.scroll-to-bottom-btn` (`styles-chat.css:9-43`): a 40×40 round glass FAB
 /// with a primary down-chevron, hover glow + scale 1.1 (`:34-39`). A single-view
-/// analogue of the columns deck's `_ScrollBottomButton`, but 40px (vs 36) and —
+/// analog of the columns deck's `_ScrollBottomButton`, but 40px (vs 36) and —
 /// unlike the columns copy — it carries the light-mode style
 /// (`styles-themes-responsive.css:607-615`): rest fill white@0.85 / border
 /// primary@0.2 / shadow `0 2px 12px black@0.15`. Dark hover: primary@0.15 fill,

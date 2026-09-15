@@ -147,6 +147,12 @@
             android:exported="false"
             android:stopWithTask="true"
             android:foregroundServiceType="dataSync|connectedDevice"/>
+        <!-- Play Integrity: the Google Cloud project number verdicts are issued
+             under. Set it to the project linked to this app in Play Console;
+             left at 0 the app simply cannot attest, and enrolls nothing. -->
+        <meta-data
+            android:name="com.nym.bar.PLAY_INTEGRITY_PROJECT_NUMBER"
+            android:value="0" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
