@@ -1,28 +1,10 @@
-/// Repeated-payload campaign control, keyed on the CONTENT of a message
-/// rather than its sender.
 ///
-/// What the geohash channels actually see: a fixed set of paragraphs, each
-/// posted by its own persona key, every copy carrying a fresh nonce ("... hobby
-/// ghdr5c1332n3"), the odd word swapped between copies, the whole set cycling
-/// round every minute or so. The token bucket this replaces missed it three
-/// ways: the nonce changed the hash for anything under 160 characters, the
-/// two-second refill had long since topped the bucket up by the time a
-/// paragraph came round again, and even a hit only dropped that one copy and
-/// did nothing about the key. This keys on a nonce-blind fingerprint, folds
-/// near-identical text into one cluster, counts copies over a fifteen-minute
-/// window of event time (so an archive replay of the wall counts the same as
-/// watching it live), and asks for an auto-mute of any key that keeps posting
-/// a payload the cluster has already shown to be a campaign.
 ///
-/// Mirrors `checkCampaign` in the PWA's js/modules/messages.js, constants
-/// included; keep the two in step.
 class CampaignVerdict {
   const CampaignVerdict({required this.flood, required this.mute});
 
-  /// The payload is over its allowance for the window: drop this copy.
   final bool flood;
 
-  /// The sender has now shown it is part of the campaign: mute it.
   final bool mute;
 
   static const CampaignVerdict none =
@@ -41,27 +23,17 @@ class CrossContentFlood {
     this.maxHits = 64,
   });
 
-  /// Copies of one payload are counted inside this window.
   final Duration window;
 
-  /// Copies of one payload that pass per window before the rest are held.
   final int allowance;
 
-  /// One sender posting the same payload this many times in the window is
-  /// muted outright, whoever else has posted it.
   final int senderRepeat;
 
   /// Below this, a payload is exempt. "gm", an emoji and a short greeting are
-  /// supposed to arrive from everyone at once, and no campaign fits in 24
-  /// characters once its nonce is gone.
   final int minLength;
 
-  /// Near-duplicate matching needs this many word bigrams on both sides;
-  /// anything shorter has to match exactly.
   final int minShingles;
 
-  /// Jaccard similarity over word bigrams above which two texts are the same
-  /// payload. A fifty-word paragraph with three words swapped scores ~0.75.
   final double similarity;
 
   final int maxClusters;
@@ -79,9 +51,6 @@ class CrossContentFlood {
     _byShingle.clear();
   }
 
-  /// One arriving channel message. [createdAtMs] is the event's own time, so a
-  /// backfilled wall of copies counts by when it was posted; [now] is the
-  /// arrival clock. A copy is inside the window if it is close on either.
   CampaignVerdict check(String? content, String pubkey,
       {int createdAtMs = 0, DateTime? now}) {
     final tokens = campaignTokens(content);
@@ -122,7 +91,6 @@ class CrossContentFlood {
     return CampaignVerdict(flood: flood, mute: mute);
   }
 
-  /// Convenience for the flood verdict alone.
   bool isFlooding(String? content, {String pubkey = '', DateTime? now}) =>
       check(content, pubkey, now: now).flood;
 
@@ -197,12 +165,6 @@ class CrossContentFlood {
   static final RegExp _trail = RegExp(r'[^\p{L}\p{N}]+$', unicode: true);
   static final RegExp _digit = RegExp(r'\p{N}', unicode: true);
 
-  /// The words the fingerprint is built from. Nonces, counters and tracking
-  /// ids all carry digits, and no two copies of a campaign differ in a word
-  /// without one, so every token with a digit goes — except a URL, which is
-  /// kept whole (minus its query string) because a link-only message has
-  /// nothing else to fingerprint. Mentions go too: a per-victim @name is the
-  /// other way one payload is dressed up as many.
   static List<String> campaignTokens(String? content) {
     if (content == null) return const [];
     final out = <String>[];
@@ -220,13 +182,10 @@ class CrossContentFlood {
     return out;
   }
 
-  /// FNV-1a 32-bit over UTF-16 code units, the PWA's `_hashContent`.
   static int fnv1a32(String s) {
     var h = 0x811c9dc5;
     for (var i = 0; i < s.length; i++) {
       h ^= s.codeUnitAt(i);
-      // Split the multiply so it never leaves the 53-bit range that the web
-      // build's ints share with JS doubles.
       h = ((h & 0xffff) * 0x01000193 + (((h >> 16) * 0x01000193) << 16)) &
           0xffffffff;
     }
@@ -249,7 +208,4 @@ class _Hit {
   final int created;
 }
 
-/// Process-wide, like the PWA's single cluster index on the app object: the
-/// point is that it spans senders and channels, so it cannot be
-/// per-conversation.
 CrossContentFlood crossContentFlood = CrossContentFlood();

@@ -8,8 +8,6 @@ void main() {
     final t0 = DateTime.fromMillisecondsSinceEpoch(1000000);
     setUp(() => f = CrossContentFlood());
 
-    // The shape of the real thing: one persona key per paragraph, a nonce on
-    // every copy, a word swapped now and then, the set cycling every minute.
     String para(Object n, String w) =>
         'yep the same long paragraph about the $w thing that keeps coming '
         'round the channel every minute with a fresh nonce on the end ghdr5c${n}n15';
@@ -47,8 +45,6 @@ void main() {
     });
 
     test('an interleaved rotation is held from the fourth cycle on', () {
-      // Twenty paragraphs, one copy every three seconds: each paragraph only
-      // comes round once a minute, so the old 2 s refill never saw it.
       var held = 0;
       final muted = <String>{};
       for (var cycle = 0; cycle < 5; cycle++) {
@@ -65,8 +61,6 @@ void main() {
     });
 
     test('a backfilled wall counts by event time', () {
-      // Arrival is all "now"; the event times carry the spacing. Historical
-      // replay is not exempt.
       final now = DateTime.fromMillisecondsSinceEpoch(9000000);
       final r = [
         for (var i = 0; i < 4; i++)
@@ -180,7 +174,6 @@ void main() {
     });
 
     test('fnv1a32 matches the PWA reference vectors', () {
-      // Known FNV-1a 32-bit values.
       expect(CrossContentFlood.fnv1a32(''), 0x811c9dc5);
       expect(CrossContentFlood.fnv1a32('a'), 0xe40c292c);
       expect(CrossContentFlood.fnv1a32('foobar'), 0xbf9cf968);

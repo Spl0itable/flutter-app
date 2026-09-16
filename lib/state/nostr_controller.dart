@@ -5046,8 +5046,6 @@ class NostrController {
       if (gotIt) return Future<void>.value();
       return service.fetchPqAnnouncement(
         pubkey,
-        // Lets the lookup stop the moment the key lands, and keep listening past
-        // the EOSE quorum until then.
         found: () =>
             _pqRegistry.keyFor(
               pubkey,
@@ -7910,8 +7908,6 @@ class NostrController {
   /// surfaces "Unblocked …". users.js `unblockByPubkey`.
   bool unblockUser(String pubkey) {
     final appState = _ref.read(appStateProvider.notifier);
-    // An explicit unblock is the user's way back from a campaign auto-mute
-    // too, so it lifts one whether or not a manual block was ever set.
     if (appState.clearAutoMute(pubkey)) {
       _persistAutoMuted();
     }
@@ -9347,10 +9343,6 @@ class NostrController {
     return <String>{};
   }
 
-  /// Restores the campaign control's auto-mutes and persists new ones as they
-  /// happen (the PWA keeps `autoMutedPubkeys` in the cache meta store via
-  /// `_persistDedupSets`). A reload must not hand the campaign a clean slate:
-  /// the backfill it would replay is the same wall that earned the mute.
   void _wireAutoMute(AppStateNotifier appState) {
     appState.hydrateAutoMuted(_readAutoMuted());
     appState.onAutoMuted = (pubkey, _) {

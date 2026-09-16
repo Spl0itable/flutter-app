@@ -381,13 +381,8 @@ class AppState {
   /// (toggleBlockUserByPubkey / hideMessagesFromBlockedUser).
   final Set<String> blockedUsers;
 
-  /// Pubkeys the campaign control muted on its own, pubkey → expiry (ms since
-  /// epoch). Separate from [blockedUsers] on purpose: these expire, are never
-  /// synced to the mute list, and never touch friends or verified bots. The
-  /// PWA's `autoMutedPubkeys` (messages.js `autoMute`).
   final Map<String, int> autoMutedUsers;
 
-  /// True while [pubkey] is inside an unexpired auto-mute.
   bool isAutoMuted(String pubkey) {
     final until = autoMutedUsers[pubkey];
     if (until == null) return false;
@@ -506,8 +501,6 @@ class AppState {
     // to content filtering — they carry no sender and must always show.
     if (m.isSystemRow) return false;
     if (blockedUsers.contains(m.pubkey)) return true;
-    // An auto-mute hides what the key already posted, the way a manual block
-    // does (the PWA routes both through `hideMessagesFromBlockedUser`).
     if (!m.isOwn && isAutoMuted(m.pubkey)) return true;
     // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
@@ -1778,8 +1771,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// window. Set by [NostrController]; null in tests.
   void Function()? onAgedChannelMessage;
 
-  /// Fired when the campaign control mutes a key (new mutes only, not
-  /// extensions): the controller persists the list and tells the user.
   void Function(String pubkey, int untilMs)? onAutoMuted;
 
   Set<String> pruneChannelHistoryWindow() {
@@ -2030,15 +2021,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         validatedPowBits(e.tags, e.id) < appPowFilterBits) {
       return;
     }
-    // A key the campaign control muted. Above the historical handling on
-    // purpose: a muted key's backlog is the same wall of copies that earned
-    // the mute (PWA nostr-core.js, the `isAutoMuted` gate).
     if (e.pubkey != state.selfPubkey && state.isAutoMuted(e.pubkey)) return;
-    // Repeated-payload campaign control (PWA `checkCampaign`). Keyed on a
-    // nonce-blind fingerprint of the payload, not the sender, so rotating
-    // keys does not rotate the limit; copies are counted over fifteen
-    // minutes of EVENT time, so a backfilled wall of copies counts as much as
-    // a live one — which is why historical replay is NOT exempt here.
     if (e.pubkey != state.selfPubkey &&
         !state.friends.contains(e.pubkey) &&
         !kVerifiedBotPubkeys.contains(e.pubkey)) {
@@ -4056,14 +4039,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return removed;
   }
 
-  /// How long a campaign auto-mute lasts (PWA `AUTO_MUTE_MS`): long enough to
-  /// outlive the campaign's cycle many times over, short enough that a false
-  /// positive heals itself.
   static const Duration autoMuteDuration = Duration(hours: 24);
 
-  /// Mutes [pubkey] for [autoMuteDuration] on the campaign control's say-so
-  /// (PWA `autoMute`). Never the user's own key, a friend or a verified bot.
-  /// Returns true for a new mute, false for an extension or an exemption.
   bool autoMuteUser(String pubkey, {DateTime? now}) {
     if (pubkey.isEmpty || pubkey == state.selfPubkey) return false;
     if (state.friends.contains(pubkey) ||
@@ -4075,22 +4052,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final until = t + autoMuteDuration.inMilliseconds;
     state.autoMutedUsers[pubkey] = until;
     if (!fresh) return false;
-    // Existing rows from the key drop out of every view through
-    // `isMessageFiltered`, the same way a manual block hides them.
     _scheduleEmit();
     onAutoMuted?.call(pubkey, until);
     return true;
   }
 
-  /// Lifts an auto-mute (a manual unblock of the same key clears it too, so
-  /// the user always has a way back).
   bool clearAutoMute(String pubkey) {
     final removed = state.autoMutedUsers.remove(pubkey) != null;
     if (removed) _scheduleEmit();
     return removed;
   }
 
-  /// Restores persisted auto-mutes, dropping any that have expired.
   void hydrateAutoMuted(Map<String, int> entries, {DateTime? now}) {
     final t = (now ?? DateTime.now()).millisecondsSinceEpoch;
     entries.forEach((pk, until) {

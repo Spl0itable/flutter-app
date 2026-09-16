@@ -22,8 +22,6 @@ void main() {
   const self = 'self_pk';
   int nowSec() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-  // One persona, one paragraph, a fresh nonce on every copy: the shape the
-  // geohash channels actually see.
   String para(int n) =>
       'yep the same long paragraph that keeps coming round the channel every '
       'minute with a fresh nonce on the end and nothing else changed ghdr5c${n}n15';
@@ -50,13 +48,10 @@ void main() {
         n.ingestEvent(_geo('e$i', para(694 + i),
             pubkey: 'aubrey', createdAtSec: t - 120 + i * 30));
       }
-      // Two copies landed; the third earned the mute and was dropped with it.
       expect(n.state.messages['#dr5r']!.length, 2);
       expect(muted, ['aubrey']);
       expect(n.state.isAutoMuted('aubrey'), isTrue);
-      // What the key already posted drops out of the view, like a block.
       expect(visible(n), 0);
-      // The fourth never lands, and neither does anything else from the key.
       n.ingestEvent(_geo('e3', para(697), pubkey: 'aubrey', createdAtSec: t));
       n.ingestEvent(_geo('e4', 'something new entirely',
           pubkey: 'aubrey', createdAtSec: t));
