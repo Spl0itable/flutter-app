@@ -1,5 +1,3 @@
-///
-///
 class CampaignVerdict {
   const CampaignVerdict({required this.flood, required this.mute});
 
@@ -29,7 +27,6 @@ class CrossContentFlood {
 
   final int senderRepeat;
 
-  /// Below this, a payload is exempt. "gm", an emoji and a short greeting are
   final int minLength;
 
   final int minShingles;
