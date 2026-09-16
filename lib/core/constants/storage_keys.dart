@@ -166,6 +166,7 @@ class StorageKeys {
 
   // Social / blocks
   static const blocked = 'nym_blocked';
+  static const autoMuted = 'nym_auto_muted';
   static const friends = 'nym_friends';
   static const blockedKeywords = 'nym_blocked_keywords';
 

@@ -150,7 +150,8 @@ String appAttestAuthority = '';
 
 /// Whether [pubkey] clears the current [appVerifiedFilter]. Our own messages,
 /// friends and Nymbot always pass: the filter is aimed at strangers.
-bool passesVerifiedFilter(String pubkey, {
+bool passesVerifiedFilter(
+  String pubkey, {
   required String selfPubkey,
   required Set<String> friends,
 }) {
@@ -286,6 +287,7 @@ class AppState {
     Map<String, List<int>>? geohashD1Activity,
     Set<String>? friends,
     Set<String>? blockedUsers,
+    Map<String, int>? autoMutedUsers,
     Set<String>? blockedKeywords,
     Set<String>? nymchatPubkeys,
     Set<String>? nymchatVouches,
@@ -300,6 +302,7 @@ class AppState {
         geohashD1Activity = geohashD1Activity ?? <String, List<int>>{},
         friends = friends ?? <String>{},
         blockedUsers = blockedUsers ?? <String>{},
+        autoMutedUsers = autoMutedUsers ?? <String, int>{},
         blockedKeywords = blockedKeywords ?? <String>{},
         nymchatPubkeys = nymchatPubkeys ?? <String>{},
         nymchatVouches = nymchatVouches ?? <String>{},
@@ -377,6 +380,14 @@ class AppState {
   /// Blocked-user pubkeys (`nym_blocked`). users.js `this.blockedUsers`
   /// (toggleBlockUserByPubkey / hideMessagesFromBlockedUser).
   final Set<String> blockedUsers;
+
+  final Map<String, int> autoMutedUsers;
+
+  bool isAutoMuted(String pubkey) {
+    final until = autoMutedUsers[pubkey];
+    if (until == null) return false;
+    return DateTime.now().millisecondsSinceEpoch < until;
+  }
 
   /// Blocked keywords, all lowercased (`nym_blocked_keywords`). users.js
   /// `this.blockedKeywords` (hasBlockedKeyword — matches content OR author nym).
@@ -490,6 +501,7 @@ class AppState {
     // to content filtering — they carry no sender and must always show.
     if (m.isSystemRow) return false;
     if (blockedUsers.contains(m.pubkey)) return true;
+    if (!m.isOwn && isAutoMuted(m.pubkey)) return true;
     // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
     // own-message `return`, messages.js:640-641).
@@ -541,6 +553,7 @@ class AppState {
     if (m.isSystemRow) return false;
     if (m.isOwn) return false;
     if (blockedUsers.contains(m.pubkey)) return false;
+    if (isAutoMuted(m.pubkey)) return false;
     if (nymVouchSpamGateEnabled &&
         isSpamGated(m,
             verifiedDeveloper: kVerifiedDeveloperPubkey,
@@ -580,6 +593,7 @@ class AppState {
         geohashD1Activity: geohashD1Activity,
         friends: friends,
         blockedUsers: blockedUsers,
+        autoMutedUsers: autoMutedUsers,
         blockedKeywords: blockedKeywords,
         nymchatPubkeys: nymchatPubkeys,
         nymchatVouches: nymchatVouches,
@@ -1334,8 +1348,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// key can never find a new home.
   final String _sessionNonce = () {
     final r = Random.secure();
-    return List.generate(4, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0'))
-        .join();
+    return List.generate(
+        4, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
   }();
 
   int _nextLocalSeq() => _localSeq++;
@@ -1757,6 +1771,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// window. Set by [NostrController]; null in tests.
   void Function()? onAgedChannelMessage;
 
+  void Function(String pubkey, int untilMs)? onAutoMuted;
+
   Set<String> pruneChannelHistoryWindow() {
     final floor = channelWindowFloorSec();
     final dropped = <String>{};
@@ -2005,15 +2021,16 @@ class AppStateNotifier extends StateNotifier<AppState> {
         validatedPowBits(e.tags, e.id) < appPowFilterBits) {
       return;
     }
-    // Keyed on the payload, not the sender, so rotating keys does not rotate
-    // the limit. Historical replay is exempt: an archive backfill legitimately
-    // delivers the same text many times over.
-    if (!historical &&
-        e.pubkey != state.selfPubkey &&
+    if (e.pubkey != state.selfPubkey && state.isAutoMuted(e.pubkey)) return;
+    if (e.pubkey != state.selfPubkey &&
         !state.friends.contains(e.pubkey) &&
-        !kVerifiedBotPubkeys.contains(e.pubkey) &&
-        crossContentFlood.isFlooding(e.content)) {
-      return;
+        !kVerifiedBotPubkeys.contains(e.pubkey)) {
+      final verdict = crossContentFlood.check(e.content, e.pubkey,
+          createdAtMs: e.createdAt * 1000);
+      if (verdict.mute) {
+        autoMuteUser(e.pubkey);
+      }
+      if (verdict.flood || verdict.mute) return;
     }
     // An incoming edit (the published/echoed edit event carries
     // `['edit', originalId]`, buildChannelEditTags) rewrites the original in
@@ -2496,12 +2513,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // The dedup keys embed the message id, so re-file them too or a later
     // add/remove for the same (emoji, reactor) would compare against nothing
     // and could re-apply out of order.
-    final stale = _reactionLastAction.keys
-        .where((k) => k.startsWith('$oldId:'))
-        .toList();
+    final stale =
+        _reactionLastAction.keys.where((k) => k.startsWith('$oldId:')).toList();
     for (final k in stale) {
       final ts = _reactionLastAction.remove(k);
-      if (ts != null) _reactionLastAction['$newId:${k.substring(oldId.length + 1)}'] = ts;
+      if (ts != null)
+        _reactionLastAction['$newId:${k.substring(oldId.length + 1)}'] = ts;
     }
     _recomputeReactionTally(oldId);
     _recomputeReactionTally(newId);
@@ -4022,6 +4039,37 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return removed;
   }
 
+  static const Duration autoMuteDuration = Duration(hours: 24);
+
+  bool autoMuteUser(String pubkey, {DateTime? now}) {
+    if (pubkey.isEmpty || pubkey == state.selfPubkey) return false;
+    if (state.friends.contains(pubkey) ||
+        kVerifiedBotPubkeys.contains(pubkey)) {
+      return false;
+    }
+    final t = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final fresh = !state.isAutoMuted(pubkey);
+    final until = t + autoMuteDuration.inMilliseconds;
+    state.autoMutedUsers[pubkey] = until;
+    if (!fresh) return false;
+    _scheduleEmit();
+    onAutoMuted?.call(pubkey, until);
+    return true;
+  }
+
+  bool clearAutoMute(String pubkey) {
+    final removed = state.autoMutedUsers.remove(pubkey) != null;
+    if (removed) _scheduleEmit();
+    return removed;
+  }
+
+  void hydrateAutoMuted(Map<String, int> entries, {DateTime? now}) {
+    final t = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    entries.forEach((pk, until) {
+      if (pk.isNotEmpty && until > t) state.autoMutedUsers[pk] = until;
+    });
+  }
+
   /// Idempotent blocked-user remover (settings "Blocked" list × button). Alias
   /// of [unblockUser] under the shared API contract name.
   void removeBlockedUser(String pubkey) => unblockUser(pubkey);
@@ -5118,8 +5166,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void markOwnMessagePq(String nymMessageId,
       {bool? pqEncrypted, bool? pqRoot, ({int pq, int total})? coverage}) {
     for (final list in state.messages.values) {
-      final idx = list.indexWhere(
-          (m) => m.isOwn && m.nymMessageId == nymMessageId);
+      final idx =
+          list.indexWhere((m) => m.isOwn && m.nymMessageId == nymMessageId);
       if (idx < 0) continue;
       if (pqEncrypted != null) list[idx].pqEncrypted = pqEncrypted;
       if (pqRoot != null) list[idx].pqRoot = pqRoot;
@@ -5279,8 +5327,7 @@ List<Message> visibleMessagesFor(AppState s, String storageKey) {
         if (m.threadRoot == null) threadKeyForMessage(m),
     }..remove('');
     visible = visible
-        .where((m) =>
-            m.threadRoot == null || !rootIds.contains(m.threadRoot))
+        .where((m) => m.threadRoot == null || !rootIds.contains(m.threadRoot))
         .toList();
   }
   visible.sort(compareMessages);
