@@ -32,6 +32,8 @@ import '../models/group.dart';
 import '../models/message.dart';
 import '../models/nostr_event.dart';
 import '../models/pm_conversation.dart';
+import '../core/crypto/pow.dart' show validatedPowBits;
+import '../features/messages/cross_content_flood.dart';
 import '../models/poll.dart';
 import '../models/user.dart';
 import '../services/filter/filter_packs.dart';
@@ -2000,7 +2002,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // remove the bot's replies the moment a user turns the filter on.
     if (appPowFilterBits > 0 &&
         !kVerifiedBotPubkeys.contains(e.pubkey) &&
-        powBitsForId(e.id) < appPowFilterBits) {
+        validatedPowBits(e.tags, e.id) < appPowFilterBits) {
+      return;
+    }
+    // Keyed on the payload, not the sender, so rotating keys does not rotate
+    // the limit. Historical replay is exempt: an archive backfill legitimately
+    // delivers the same text many times over.
+    if (!historical &&
+        e.pubkey != state.selfPubkey &&
+        !state.friends.contains(e.pubkey) &&
+        !kVerifiedBotPubkeys.contains(e.pubkey) &&
+        crossContentFlood.isFlooding(e.content)) {
       return;
     }
     // An incoming edit (the published/echoed edit event carries

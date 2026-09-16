@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/constants/relays.dart';
 import '../../features/messages/spam_filter.dart';
+import '../nostr/event_provenance.dart';
 import '../../models/nostr_event.dart';
 import '../api/api_config.dart';
 import 'relay_connection.dart'
@@ -1156,6 +1157,9 @@ class RelayPoolProxy implements PoolTransport {
         // Ahead of the cross-shard dedup below, for the same reason.
         final geoGate = _geoOriginAllows;
         if (geoGate != null && !geoGate(event, sourceRelay)) return;
+        // Before the dedup below, because the copies it discards are the
+        // relay list.
+        eventProvenance.record(event, sourceRelay);
         // Cross-shard dedup: the first shard to deliver an id wins.
         if (!_deduper.add(event.id)) return;
         // Normalize a split-child sub id back to its parent (see [_parentSubId]).

@@ -227,6 +227,31 @@ class NostrController {
   /// Shared [ApiClient] for the storage-sync paths (one instance, reused).
   ApiClient? _api;
 
+  /// The signed event behind a message id, from the D1 archive.
+  ///
+  /// The session only holds raw events for what it received while running, so
+  /// a message rendered from local storage on a later launch has none — but the
+  /// archive still does. Returns null for anything never archived: a message
+  /// carried over the mesh, or a channel the archive does not keep.
+  Future<NostrEvent?> archivedEvent(String eventId) async {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
+    try {
+      final api = _api ??= ApiClient();
+      final res = await api.storageAction(<String, dynamic>{
+        'action': 'event-get',
+        'ids': <String>[eventId],
+      });
+      final list = res['events'];
+      if (list is! List || list.isEmpty) return null;
+      final first = list.first;
+      if (first is! Map) return null;
+      final ev = NostrEvent.fromJson(Map<String, dynamic>.from(first));
+      return ev.id == eventId ? ev : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Debounce for the encrypted settings publish (settings.js
   /// `_debouncedNostrSettingsSave`, 5s).
   Timer? _settingsSyncTimer;

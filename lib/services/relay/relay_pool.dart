@@ -3,6 +3,7 @@ import 'dart:math';
 
 import '../../core/constants/relays.dart';
 import '../../features/messages/spam_filter.dart';
+import '../nostr/event_provenance.dart';
 import '../../models/nostr_event.dart';
 import 'relay_connection.dart';
 import 'relay_message.dart';
@@ -570,6 +571,9 @@ class RelayPool implements PoolTransport {
         // must not claim the event id and suppress the neighbourhood's own.
         final geoGate = _geoOriginAllows;
         if (geoGate != null && !geoGate(event, relayUrl)) return;
+        // Before the dedup below, because the copies it discards are the
+        // relay list.
+        eventProvenance.record(event, relayUrl);
         final sub = _subscriptions[subId];
         if (sub != null) {
           // Fire and forget; verification is async.
