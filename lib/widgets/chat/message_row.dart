@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../core/constants/relays.dart';
 import '../../core/crypto/bech32_codec.dart' show encodeNevent;
+import 'event_details_sheet.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/utils/nym_utils.dart';
@@ -1394,6 +1395,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
                   // Public channel messages only: PM/group rows are
                   // gift-wrapped and carry no mined work.
                   powApplies: !message.isPM && !message.isGroup,
+                  detailNym: message.author,
+                  detailChannel: message.geohash ?? message.channel,
+                  detailCreatedAt: message.dateTime,
                 ),
                 // `.crypto-lock-irc`: the verification lock sits inside
                 // `.message-time` after the clock (PM/group only).
@@ -1907,6 +1911,9 @@ class _MessageRowState extends ConsumerState<MessageRow> {
           powTarget: message.powTarget,
           copyPubkey: message.pubkey,
           powApplies: !message.isPM && !message.isGroup,
+          detailNym: message.author,
+          detailChannel: message.geohash ?? message.channel,
+          detailCreatedAt: message.dateTime,
           label: formatRelativeTime(message.dateTime),
           fullTimestamp: formatFullTimestamp(
               message.dateTime, settings.timeFormat, settings.dateFormat),
@@ -3855,6 +3862,39 @@ class _CopyRefButtonState extends State<_CopyRefButton> {
   }
 }
 
+/// Full width beneath the two copy buttons, matching the PWA: a different kind
+/// of action from copying a reference, and squeezed into their row all three
+/// labels shrink to fit.
+class _DetailsButton extends StatelessWidget {
+  const _DetailsButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.nym;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: NymRadius.rsm,
+      child: Container(
+        width: double.infinity,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.06),
+          border: Border.all(color: c.glassBorder),
+          borderRadius: NymRadius.rsm,
+        ),
+        child: Text(
+          tr('Show all event details'),
+          softWrap: false,
+          style: TextStyle(color: c.text, fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
 /// The tappable message timestamp (`.clickable-timestamp`, messages.js:936-938).
 /// Hover tints it `--primary` over 120ms (`.clickable-timestamp:hover`,
 /// styles-chat.css:596-604) and shows the glass full-timestamp tooltip
@@ -3875,6 +3915,9 @@ class _TimestampText extends StatefulWidget {
     this.powTarget,
     this.powApplies = false,
     this.copyPubkey = '',
+    this.detailNym,
+    this.detailChannel,
+    this.detailCreatedAt,
   });
 
   final String label;
@@ -3895,6 +3938,12 @@ class _TimestampText extends StatefulWidget {
   /// are gift-wrapped and never mined, so the section is omitted for them
   /// rather than reported as "none", which would read as a fault.
   final bool powApplies;
+
+  /// What the rendered message knows, for the details panel to fall back on
+  /// when neither the session nor the archive holds the signed event.
+  final String? detailNym;
+  final String? detailChannel;
+  final DateTime? detailCreatedAt;
 
   @override
   State<_TimestampText> createState() => _TimestampTextState();
@@ -3992,6 +4041,23 @@ class _TimestampTextState extends State<_TimestampText> {
             ],
             _CopyRefButton(label: tr('Copy event ID'), value: id),
           ],
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: _DetailsButton(
+          onTap: () {
+            _closePopup();
+            showEventDetails(
+              context,
+              eventId: id,
+              pubkey: widget.copyPubkey,
+              nym: widget.detailNym,
+              channel: widget.detailChannel,
+              createdAt: widget.detailCreatedAt,
+              powTarget: widget.powTarget,
+            );
+          },
         ),
       ),
     ];
