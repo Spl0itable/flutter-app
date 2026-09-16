@@ -166,6 +166,10 @@ class StorageKeys {
 
   // Social / blocks
   static const blocked = 'nym_blocked';
+  // Campaign-control auto-mutes, a JSON object of pubkey → expiry ms. Device
+  // local and never part of the settings sync (the PWA keeps its copy in the
+  // cache meta store for the same reason).
+  static const autoMuted = 'nym_auto_muted';
   static const friends = 'nym_friends';
   static const blockedKeywords = 'nym_blocked_keywords';
 
