@@ -9345,12 +9345,7 @@ class NostrController {
 
   void _wireAutoMute(AppStateNotifier appState) {
     appState.hydrateAutoMuted(_readAutoMuted());
-    appState.onAutoMuted = (pubkey, _) {
-      _persistAutoMuted();
-      _emitSystemMessage(tr(
-          'Auto-muted {nym} for 24h: kept posting the same message',
-          {'nym': _nymDisplayFor(pubkey)}));
-    };
+    appState.onAutoMuted = (_, __) => _persistAutoMuted();
   }
 
   Map<String, int> _readAutoMuted() {

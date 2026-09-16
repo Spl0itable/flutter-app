@@ -84,7 +84,6 @@ const List<String> kAppStringsCatalog = <String>[
   'Audio call',
   'Auto',
   'Auto matches your system preference',
-  'Auto-muted {nym} for 24h: kept posting the same message',
   'Auto-routed',
   'Auto-scroll Messages',
   'Auto-scroll Messages Enabled Disabled',
