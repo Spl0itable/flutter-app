@@ -559,6 +559,13 @@ class NostrController {
 
       final service = NostrService(identity: identity, signer: signer);
       _service = service;
+      final attest =
+          _attest ??= AttestService(kv: _ref.read(keyValueStoreProvider));
+      final selfPubkey = signer?.pubkey;
+      if (selfPubkey != null && attest.restore(selfPubkey)) {
+        service.attestBadge = attest.badge;
+      }
+      unawaited(_ensureAttestBadge());
       _groups = GroupManager(service);
       // Restore persisted group conversations + ephemeral secret keys BEFORE
       // any network I/O (the PWA loads `nym_groups_<pubkey>` /
@@ -812,6 +819,19 @@ class NostrController {
   }
 
   AttestService? _attest;
+
+  AttestService? get attest => _attest;
+
+  Future<void> _awaitAttestBadge() async {
+    final service = _service;
+    final attest = _attest;
+    if (service == null || attest == null) return;
+    if (service.attestBadge != null) return;
+    final pending = attest.inFlight;
+    if (pending == null) return;
+    await pending.timeout(const Duration(seconds: 8), onTimeout: () {});
+    service.attestBadge = attest.badge;
+  }
 
   /// Enrolls (or renews) this install's attestation badge, then hands it to
   /// the service so outgoing channel messages carry it, and publishes the
@@ -6209,6 +6229,7 @@ class NostrController {
       final isGeo = state.channels
           .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
       try {
+        await _awaitAttestBadge();
         final signed = await service.publishChannelMessage(
           channelKey: view.id,
           content: trimmed,

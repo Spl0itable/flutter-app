@@ -24,6 +24,9 @@ void main() {
         .setMockMethodCallHandler(channel, (call) async => answer);
   }
 
+  var platformAnswer = <String, dynamic>{};
+  var platformStatus = 200;
+
   MockClient fakeApi() => MockClient((req) async {
         if (req.method == 'GET' && req.url.path == '/build-manifest.json') {
           if (!manifestUp) return http.Response('gone', 404);
@@ -47,6 +50,9 @@ void main() {
                 'buildProbe': ['/a.js', '/b.js'],
               }),
               200);
+        }
+        if (body['platform'] != 'web' && platformStatus != 200) {
+          return http.Response(jsonEncode(platformAnswer), platformStatus);
         }
         return http.Response(
             jsonEncode({
@@ -74,6 +80,8 @@ void main() {
   setUp(() {
     posts = [];
     manifestUp = true;
+    platformStatus = 200;
+    platformAnswer = {};
   });
 
   tearDown(() => nativeAnswers(null));
@@ -129,6 +137,39 @@ void main() {
       expect(authTags(enroll).any((t) => t[0] == 'nonce'), isTrue);
     });
 
+    test('a platform proof the server refuses falls back to the web tier',
+        () async {
+      nativeAnswers({'keyId': 'kid', 'attestation': 'att'});
+      platformStatus = 403;
+      platformAnswer = {
+        'error': 'Attestation failed',
+        'reason': 'environment-mismatch'
+      };
+      final svc = await fresh('ios');
+      await svc.ensureBadge(signer);
+      final enrolls = posts.where((b) => b['action'] == 'enroll').toList();
+      expect(enrolls.map((b) => b['platform']), ['ios', 'web']);
+      expect(posts.where((b) => b['action'] == 'challenge').length, 2,
+          reason: 'the fallback enrolls under a fresh challenge');
+      expect(authTags(enrolls[1]).any((t) => t[0] == 'nonce'), isTrue);
+      expect(svc.tier, AttestTier.challenged);
+      expect(svc.lastPlatformRefusal,
+          'Attestation failed (environment-mismatch)');
+      expect(svc.lastError, isNull);
+    });
+
+    test('a device cap is reported and not retried as web', () async {
+      nativeAnswers({'keyId': 'kid', 'attestation': 'att'});
+      platformStatus = 429;
+      platformAnswer = {'error': 'Device enrollment cap'};
+      final svc = await fresh('ios');
+      await svc.ensureBadge(signer);
+      expect(posts.where((b) => b['action'] == 'enroll').length, 1);
+      expect(svc.badge, isNull);
+      expect(svc.lastError, 'Device enrollment cap');
+      expect(svc.lastAttemptAt, isNotNull);
+    });
+
     test('no proof and no manifest means no enrollment call', () async {
       nativeAnswers(null);
       manifestUp = false;
@@ -136,6 +177,7 @@ void main() {
       await svc.ensureBadge(signer);
       expect(posts.where((b) => b['action'] == 'enroll'), isEmpty);
       expect(svc.badge, isNull);
+      expect(svc.lastError, 'no proof');
     });
   });
 }

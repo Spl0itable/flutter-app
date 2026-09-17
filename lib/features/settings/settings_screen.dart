@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+
+import '../../services/attest/attest_badge.dart';
 import 'package:flutter/services.dart';
 import '../../widgets/common/keyboard_inset_dialog.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -577,6 +579,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   // --- Chrome ---------------------------------------------------------------
+
+  String _attestReadout() {
+    final attest = ref.read(nostrControllerProvider).attest;
+    final tier = attest?.tier;
+    final lines = <String>[
+      switch (tier) {
+        AttestTier.attested => tr('Badge: attested (hardware proof)'),
+        AttestTier.challenged => tr('Badge: challenged (proof of work)'),
+        AttestTier.origin => tr('Badge: origin'),
+        null => tr('Badge: none'),
+      },
+    ];
+    final refused = attest?.lastPlatformRefusal;
+    if (refused != null) {
+      lines.add(tr('Platform proof refused: {reason}', {'reason': refused}));
+    }
+    final err = attest?.lastError;
+    if (err != null) {
+      lines.add(tr('Last enrollment failed: {reason}', {'reason': err}));
+    } else if (attest?.lastAttemptAt == null && tier == null) {
+      lines.add(tr('Enrollment has not run yet'));
+    }
+    return lines.join('\n');
+  }
 
   Widget _header(NymColors c) {
     // `.modal-header`: a full-width title with a 1px glass bottom rule
@@ -1693,6 +1719,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             value: _draftVerified,
             items: verifiedItems,
             onChanged: (v) => setState(() => _draftVerified = v),
+          ),
+        ),
+      ),
+      _GroupSpec(
+        text: tr('This Device {status} What this install proved to the '
+            'attestation service. Other people running the filter above see '
+            'your messages only when a badge is here.',
+            {'status': _attestReadout()}),
+        child: FormGroup(
+          label: tr('This Device'),
+          hint: tr('What this install proved to the attestation service. '
+              'Other people running the filter above see your messages only '
+              'when a badge is here.'),
+          child: Text(
+            _attestReadout(),
+            style: TextStyle(color: context.nym.textDim, fontSize: 12),
           ),
         ),
       ),
