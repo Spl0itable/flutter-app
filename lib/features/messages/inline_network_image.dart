@@ -213,7 +213,7 @@ class InlineNetworkImage extends StatefulWidget {
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
   };
 
-  static const Map<String, String> apiImageFetchHeaders = {
+  static final Map<String, String> apiImageFetchHeaders = {
     'User-Agent': ApiConfig.userAgent,
     'Accept':
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
