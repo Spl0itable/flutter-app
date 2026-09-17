@@ -107,6 +107,18 @@ void main() {
       expect(svc.tier, AttestTier.attested);
     });
 
+    test('an Android install without Play Integrity falls back the same way',
+        () async {
+      nativeAnswers(null);
+      final svc = await fresh('android');
+      await svc.ensureBadge(signer);
+      final enroll = posts.singleWhere((b) => b['action'] == 'enroll');
+      expect(enroll['platform'], 'web');
+      expect(enroll['build'], {'/a.js': 'sha256-A', '/b.js': 'sha256-B'});
+      expect(authTags(enroll).any((t) => t[0] == 'nonce'), isTrue);
+      expect(svc.tier, AttestTier.challenged);
+    });
+
     test('a Play Integrity token still carries the work', () async {
       nativeAnswers({'token': 'tok'});
       final svc = await fresh('android');
