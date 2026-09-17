@@ -706,7 +706,6 @@ void main() {
       ]) {
         expect(isRelayWideRejection(r), isFalse, reason: r);
       }
-      // A kind-flavored reason is per-kind even when it carries a ban word.
       expect(isUnsupportedKindRejection('blocked: kind 20000 not accepted'),
           isTrue);
     });
@@ -726,7 +725,7 @@ void main() {
       proxy.connectAll();
       proxy.updateGeoRelays(
           const ['wss://geo.example.com', 'wss://geo2.example.com']);
-      final geoSock = fakes.last; // app-0, critical-0, then geo-0
+      final geoSock = fakes.last;
       bool sharded(String url) =>
           proxy.shards.any((s) => s.relays.contains(url));
       expect(sharded('wss://geo.example.com'), isTrue);
@@ -744,24 +743,25 @@ void main() {
       expect(proxy.permanentBlacklist, contains('wss://geo.example.com'));
       expect(sharded('wss://geo.example.com'), isFalse);
       expect(sharded('wss://geo2.example.com'), isTrue);
-      // The geo shard was told its new relay set so the worker drops the
-      // upstream.
       final relaysFrames =
           geoSock.sent.where((m) => m.startsWith('["RELAYS"')).toList();
       expect(relaysFrames.length, relaysFramesBefore + 1);
       expect(relaysFrames.last, contains('wss://geo2.example.com'));
       expect(relaysFrames.last, isNot(contains('"wss://geo.example.com"')));
 
-      // CLOSED and NOTICE carry the same verdict.
       fakes.first.inject(jsonEncode(
           ['NOTICE', 'paid: subscription required', 'wss://geo2.example.com']));
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(proxy.permanentBlacklist, contains('wss://geo2.example.com'));
 
-      // A per-event reason, and a kind-flavored one, are not bans.
       proxy.updateGeoRelays(const ['wss://geo3.example.com']);
-      fakes.first.inject(jsonEncode(
-          ['OK', 'evt2', false, 'invalid: event too old', 'wss://geo3.example.com']));
+      fakes.first.inject(jsonEncode([
+        'OK',
+        'evt2',
+        false,
+        'invalid: event too old',
+        'wss://geo3.example.com'
+      ]));
       fakes.first.inject(jsonEncode([
         'CLOSED',
         'sub1',
@@ -769,9 +769,9 @@ void main() {
         'wss://geo3.example.com',
       ]));
       await Future<void>.delayed(const Duration(milliseconds: 10));
-      expect(proxy.permanentBlacklist, isNot(contains('wss://geo3.example.com')));
+      expect(
+          proxy.permanentBlacklist, isNot(contains('wss://geo3.example.com')));
 
-      // The app relay and the curated defaults are never banned.
       fakes.first.inject(jsonEncode(
           ['OK', 'evt3', false, 'blocked: pubkey', RelayConfig.appRelay]));
       fakes.first.inject(jsonEncode([
@@ -809,11 +809,9 @@ void main() {
       expect(pool.bannedRelays, contains('wss://a.example'));
       expect(pool.relayUrls, isNot(contains('wss://a.example')));
 
-      // A banned relay is not re-added by a geo update.
       pool.updateGeoRelays(const ['wss://a.example']);
       expect(pool.relayUrls, isNot(contains('wss://a.example')));
 
-      // A kind-flavored reason on the other relay is not a ban.
       fakes['wss://b.example']!.inject(
           jsonEncode(['OK', 'x', false, 'blocked: kind 20000 not accepted']));
       await Future<void>.delayed(const Duration(milliseconds: 10));

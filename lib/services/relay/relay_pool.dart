@@ -364,12 +364,8 @@ class RelayPool implements PoolTransport {
     _msgSubs[url] = conn.messages.listen((msg) => _onRelayMessage(url, msg));
   }
 
-  /// Relays dropped for the session after a relay-wide rejection (see
-  /// [isRelayWideRejection]); never re-added by [addRelay] / [updateGeoRelays].
   final Set<String> _bannedRelays = {};
 
-  /// The relays this pool has dropped for the session. Exposed for
-  /// inspection / tests.
   Set<String> get bannedRelays => Set.unmodifiable(_bannedRelays);
 
   /// Add a relay to the pool. If the pool is already connected, the new relay
@@ -559,7 +555,6 @@ class RelayPool implements PoolTransport {
   Future<int> publishGeo(NostrEvent event, List<String> closestRelayUrls) =>
       publish(event);
 
-
   /// See [PoolTransport.geoOriginAllows].
   bool Function(NostrEvent event, String? relayUrl)? _geoOriginAllows;
   @override
@@ -598,19 +593,13 @@ class RelayPool implements PoolTransport {
         _subscriptions[subId]?.onEose(relayUrl);
         _dropIfRelayWideRejection(relayUrl, reason);
       case OkMessage(:final message):
-        // The ACK itself is handled per-connection via publish() futures;
-        // only a relay-wide refusal matters here.
+        // Handled per-connection via publish() futures.
         _dropIfRelayWideRejection(relayUrl, message);
       case NoticeMessage(:final message):
         _dropIfRelayWideRejection(relayUrl, message);
     }
   }
 
-  /// Drop [relayUrl] for the session when [reason] says the relay will not
-  /// serve this client at all (auth, allow-list, payment, ban). Mirrors the
-  /// PWA's direct-mode `_permanentlyBlacklistRelay` (relays.js) and the proxy
-  /// transport's ban: the app relay and the curated defaults are never dropped,
-  /// and a kind-flavored reason is per-kind, not a ban.
   void _dropIfRelayWideRejection(String relayUrl, String reason) {
     if (isUnsupportedKindRejection(reason)) return;
     if (!isRelayWideRejection(reason)) return;
