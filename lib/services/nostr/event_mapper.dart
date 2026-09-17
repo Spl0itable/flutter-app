@@ -177,7 +177,7 @@ class EventMapper {
       // tag at all — which is how the timestamp popup tells "no proof-of-work"
       // (another client) from "mined to N bits". The work actually proven is
       // recomputed from the id via [powBitsForId], never trusted from the tag.
-      powTarget: _powTarget(e),
+      powTarget: powTargetOf(e),
     );
   }
 
@@ -206,7 +206,7 @@ class EventMapper {
   /// The difficulty a NIP-13 `nonce` tag commits to, or null when the event
   /// carries no nonce tag. A tag with an unparseable/absent target still means
   /// "mined", so it maps to 0 rather than null.
-  static int? _powTarget(NostrEvent e) {
+  static int? powTargetOf(NostrEvent e) {
     for (final t in e.tags) {
       if (t.isNotEmpty && t[0] == 'nonce') {
         if (t.length < 3) return 0;

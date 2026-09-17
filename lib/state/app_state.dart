@@ -5114,6 +5114,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     String realId, {
     int? realCreatedAt,
     int? realMs,
+    int? powTarget,
   }) {
     if (realId.isEmpty) return;
     // Register the real id first so even a relay echo that races ahead of this
@@ -5154,6 +5155,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
         m.timestamp = realCreatedAt * 1000;
       }
       if (realMs != null && realMs > 0) m.ms = realMs;
+      if (powTarget != null) m.powTarget = powTarget;
       m.optimistic = false;
       _indexMessage(key, m);
       // Carry over a reaction that landed while this row still wore its
