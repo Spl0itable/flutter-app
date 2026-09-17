@@ -213,18 +213,12 @@ class InlineNetworkImage extends StatefulWidget {
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
   };
 
-  /// Headers for an image fetch that lands on our own API host. The media
-  /// proxy sits behind the same edge rules as every other `/api` route, and
-  /// those rules recognise the app by its `NymchatApp/` user agent, not by a
-  /// browser one.
   static const Map<String, String> apiImageFetchHeaders = {
     'User-Agent': ApiConfig.userAgent,
     'Accept':
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
   };
 
-  /// The headers an image fetch of [url] should carry: the app's own identity
-  /// on our host, a browser's everywhere else.
   static Map<String, String> imageHeadersFor(String url) {
     final host = Uri.tryParse(url)?.host.toLowerCase();
     return host == ApiConfig.apiHost ? apiImageFetchHeaders : imageFetchHeaders;
