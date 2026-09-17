@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../widgets/nym_icons.dart';
 import '../messages/format/message_content.dart';
+import '../../widgets/anchored_popup.dart';
 
 /// The six default quick-react emojis (calls.js `_messageQuickReactDefaults`,
 /// line 1491: `['👍', '❤️', '😂', '🔥', '👎', '😮']`). The PWA pads the user's
@@ -438,7 +439,12 @@ class _QuickReactOverlayState extends State<_QuickReactOverlay>
         // clamped fully on-screen (PWA `showQuickReactPopup`: centered on clientX,
         // top ≈ pressY − 55, never off the top/bottom/sides).
         CustomSingleChildLayout(
-          delegate: _PressAnchorLayout(anchor: r),
+          delegate: PointPopupLayout(
+            anchor: r.center,
+            insets: popupInsetsOf(context),
+            offset: const Offset(0, -55),
+            centerX: true,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -503,38 +509,6 @@ class _SpotlightPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_SpotlightPainter old) => old.hole != hole;
-}
-
-/// Positions the quick-react pill + context menu centered on the press point and
-/// clamped so the whole stack stays fully on-screen (mirrors the PWA's
-/// `clientX − w/2` / `pressY − 55` placement with 10px screen margins, but also
-/// guards the bottom edge so a tall menu near the foot of the list isn't cut off).
-class _PressAnchorLayout extends SingleChildLayoutDelegate {
-  _PressAnchorLayout({required this.anchor});
-
-  final Rect anchor;
-
-  @override
-  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
-    // Loose height (the Column sizes to content; never force-clip it), capped
-    // width so it can't exceed the viewport.
-    return BoxConstraints(
-      maxWidth: math.max(0, constraints.maxWidth - 20),
-      maxHeight: constraints.maxHeight,
-    );
-  }
-
-  @override
-  Offset getPositionForChild(Size size, Size childSize) {
-    double left = anchor.center.dx - childSize.width / 2;
-    left = left.clamp(10.0, math.max(10.0, size.width - childSize.width - 10));
-    double top = anchor.center.dy - 55;
-    top = top.clamp(10.0, math.max(10.0, size.height - childSize.height - 10));
-    return Offset(left, top);
-  }
-
-  @override
-  bool shouldRelayout(_PressAnchorLayout old) => old.anchor != anchor;
 }
 
 /// Wraps [child] with the PWA's enter transition: a scale + vertical translate

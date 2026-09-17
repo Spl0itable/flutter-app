@@ -3947,7 +3947,9 @@ class _PqDiagnosticsState extends ConsumerState<_PqDiagnostics> {
     final text = _text;
     return Theme(
       data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
+      child: Material(
+        type: MaterialType.transparency,
+        child: ExpansionTile(
         tilePadding: EdgeInsets.zero,
         childrenPadding: EdgeInsets.zero,
         title: Text(tr('Post-quantum diagnostics'),
@@ -3982,6 +3984,7 @@ class _PqDiagnosticsState extends ConsumerState<_PqDiagnostics> {
             ),
           ),
         ],
+      ),
       ),
     );
   }

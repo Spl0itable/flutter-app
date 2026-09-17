@@ -2212,7 +2212,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // message stamp an older timestamp over a channel's real newest-activity
     // time, so busy channels sank in the sidebar sort after a backfill. Take the
     // max (mirrors the hydrate paths).
-    if (m.timestamp > (state.channelLastActivity[key] ?? 0)) {
+    final hidden = state.isMessageFiltered(m);
+    if (!hidden && m.timestamp > (state.channelLastActivity[key] ?? 0)) {
       state.channelLastActivity[key] = m.timestamp;
     }
 
@@ -2223,7 +2224,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // `addChannel`'s entry/key shape (registry key is the bare lowercase value).
     final isGeo = (m.geohash ?? '').isNotEmpty;
     final regKey = (isGeo ? m.geohash! : (m.channel ?? '')).toLowerCase();
-    if (regKey.isNotEmpty &&
+    if (!hidden &&
+        regKey.isNotEmpty &&
         !state.blockedChannels.contains(regKey) &&
         !state.hiddenChannels.contains(regKey) &&
         !state.channels.any((c) => c.key == regKey)) {
@@ -2983,12 +2985,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
       if (memberKey.isNotEmpty) u.channels.add(memberKey);
     }
 
-    if (m.timestamp > (state.channelLastActivity[channelKey] ?? 0)) {
+    final hidden = state.isMessageFiltered(m);
+    if (!hidden && m.timestamp > (state.channelLastActivity[channelKey] ?? 0)) {
       state.channelLastActivity[channelKey] = m.timestamp;
     }
 
     final regKey = (m.channel ?? '').toLowerCase();
-    if (regKey.isNotEmpty && !state.channels.any((c) => c.key == regKey)) {
+    if (!hidden &&
+        regKey.isNotEmpty &&
+        !state.channels.any((c) => c.key == regKey)) {
       state.channels.add(ChannelEntry(channel: m.channel!));
     }
 
@@ -4028,8 +4033,45 @@ class AppStateNotifier extends StateNotifier<AppState> {
   bool blockUser(String pubkey) {
     if (pubkey.isEmpty) return false;
     final added = state.blockedUsers.add(pubkey);
-    if (added) _scheduleEmit();
+    if (added) {
+      _dropSenderInfluence(pubkey);
+      _scheduleEmit();
+    }
     return added;
+  }
+
+  void _dropSenderInfluence(String pubkey) {
+    state.messages.forEach((key, list) {
+      var counted = 0;
+      var senderNewest = 0;
+      var visibleNewest = 0;
+      final unreadKey = key.startsWith('pm-') ? key.substring(3) : key;
+      for (final m in list) {
+        if (m.pubkey == pubkey && !m.isOwn && !m.isSystemRow) {
+          if (m.timestamp > senderNewest) senderNewest = m.timestamp;
+          if (_isUnreadByWatermark(unreadKey, m)) counted++;
+        } else if (m.timestamp > visibleNewest && !state.isMessageFiltered(m)) {
+          visibleNewest = m.timestamp;
+        }
+      }
+      if (senderNewest == 0) return;
+      final unread = state.unreadCounts[unreadKey];
+      if (unread != null && counted > 0) {
+        if (unread > counted) {
+          state.unreadCounts[unreadKey] = unread - counted;
+        } else {
+          state.unreadCounts.remove(unreadKey);
+        }
+      }
+      final activity = state.channelLastActivity[key];
+      if (activity != null && activity <= senderNewest) {
+        if (visibleNewest > 0) {
+          state.channelLastActivity[key] = visibleNewest;
+        } else {
+          state.channelLastActivity.remove(key);
+        }
+      }
+    });
   }
 
   /// Unblocks [pubkey] (users.js `unblockByPubkey`).
@@ -4052,6 +4094,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final until = t + autoMuteDuration.inMilliseconds;
     state.autoMutedUsers[pubkey] = until;
     if (!fresh) return false;
+    _dropSenderInfluence(pubkey);
     _scheduleEmit();
     onAutoMuted?.call(pubkey, until);
     return true;
@@ -4623,7 +4666,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
       list.add(m);
       _indexMessage(key, m);
       added = true;
-      if (m.timestamp > lastTs) lastTs = m.timestamp;
+      if (m.timestamp > lastTs && !state.isMessageFiltered(m)) {
+        lastTs = m.timestamp;
+      }
     }
     if (added) list.sort(compareMessages);
     // Bound a hydrated public channel to the same retention cap as live ingest,
