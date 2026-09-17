@@ -266,6 +266,13 @@ sealed class PoolMessage {
           arr.length > 2 ? (arr[2]?.toString() ?? '') : '',
           arr.length > 3 ? arr[3]?.toString() : null,
         );
+      case 'NOTICE':
+        // ["NOTICE", reason, relayUrl?] — proxy-attributed like OK / CLOSED
+        // (relays.js NOTICE handler).
+        return PoolNotice(
+          arr.length > 1 ? (arr[1]?.toString() ?? '') : '',
+          arr.length > 2 ? arr[2]?.toString() : null,
+        );
       case 'POOL:PING':
         // ["POOL:PING", ts] — keepalive; ts ignored, just bumps liveness.
         return const PoolPing();
@@ -297,7 +304,7 @@ sealed class PoolMessage {
             arr.length > 2 ? arr[2]?.toString() ?? 'banned' : 'banned';
         return PoolRelayBan(url, reason);
       default:
-        // POOL:SHARDS / NOTICE / AUTH — unhandled by transport.
+        // POOL:SHARDS / AUTH — unhandled by transport.
         return null;
     }
   }
@@ -328,6 +335,15 @@ class PoolEose extends PoolMessage {
 class PoolClosed extends PoolMessage {
   const PoolClosed(this.subId, [this.reason = '', this.relayUrl]);
   final String subId;
+  final String reason;
+
+  /// The proxy's per-relay attribution (`wss://…`), when present.
+  final String? relayUrl;
+}
+
+/// `["NOTICE", reason, relayUrl?]` — a relay notice, proxy-attributed.
+class PoolNotice extends PoolMessage {
+  const PoolNotice(this.reason, [this.relayUrl]);
   final String reason;
 
   /// The proxy's per-relay attribution (`wss://…`), when present.
@@ -906,7 +922,14 @@ class RelayPoolProxy implements PoolTransport {
     _geoRelayUrls
       ..clear()
       ..addAll(next);
-    if (_sockets.isEmpty) return; // connectAll() will shard with these urls.
+    _reconcileShards();
+  }
+
+  /// Rebuild the shard layout from the current relay sets + blacklist and
+  /// reconcile the live sockets to it (steps 2–4 of [updateGeoRelays]). No-op
+  /// before [connectAll], which shards from the same inputs itself.
+  void _reconcileShards() {
+    if (_sockets.isEmpty) return;
 
     final layout = shardRelaysByRole(
       _allRelays,
@@ -1000,10 +1023,25 @@ class RelayPoolProxy implements PoolTransport {
   /// True when a rejection [reason] indicates the relay doesn't support the
   /// event/filter kind (`_isUnsupportedKind`, relays.js:4012-4017).
   static bool _isUnsupportedKind(String reason) =>
-      RegExp(r'kinds?\s*not\s*supported', caseSensitive: false)
-          .hasMatch(reason) ||
-      RegExp(r'\bNIP[\s\-_:]*\d+\b', caseSensitive: false).hasMatch(reason) ||
-      RegExp(r'\bkinds?[\s\-_:]*\d+\b', caseSensitive: false).hasMatch(reason);
+      isUnsupportedKindRejection(reason);
+
+  /// Drop [url] from every shard for the rest of the session because a relay
+  /// answered with a relay-wide rejection (see [isRelayWideRejection]). Mirrors
+  /// the PWA's `_permanentlyBlacklistRelay` (relays.js) and the worker's
+  /// `markPermanentlySkipped`: the app relay and the curated default / DM
+  /// relays are never banned, since one over-eager rejection must not exclude
+  /// them for the whole session. Each affected shard is re-sent its RELAYS
+  /// frame so the worker closes the upstream.
+  void _banRelay(String? url, String reason) {
+    if (url == null || !url.startsWith('wss://')) return;
+    if (url == RelayConfig.appRelay) return;
+    if (RelayConfig.defaultRelays.contains(url) || _dmRelays.contains(url)) {
+      return;
+    }
+    if (!_permanentBlacklist.add(url)) return;
+    debugPrint('[RelayPoolProxy] dropping $url for the session: $reason');
+    _reconcileShards();
+  }
 
   /// Pulls the explicit kind number out of a rejection [reason] when present
   /// (`_extractUnsupportedKind`, relays.js:2351-2358).
@@ -1196,6 +1234,8 @@ class RelayPoolProxy implements PoolTransport {
           final id = _parentSubId(subId);
           if (_isUnsupportedKind(reason)) {
             _recordUnsupportedKindRejection(relayUrl, id, reason);
+          } else if (isRelayWideRejection(reason)) {
+            _banRelay(relayUrl, reason);
           }
           _stampShardLatency(id, sock.shard.id);
           _subscriptions[id]?.onEose(sock.shard.id);
@@ -1207,6 +1247,16 @@ class RelayPoolProxy implements PoolTransport {
         // accepted flag) so the worker skips that relay for the kind.
         if (_isUnsupportedKind(message)) {
           _recordEventKindRejection(relayUrl, id);
+        } else if (isRelayWideRejection(message)) {
+          // The relay refused us, not the event: it is done for the session.
+          // The worker bans on the same reasons in proxy mode, so this mostly
+          // matters where the two lists differ; the direct pool does the same.
+          _banRelay(relayUrl, message);
+        }
+        break;
+      case PoolNotice(:final reason, :final relayUrl):
+        if (!_isUnsupportedKind(reason) && isRelayWideRejection(reason)) {
+          _banRelay(relayUrl, reason);
         }
         break;
       case PoolStatus(:final latency):
