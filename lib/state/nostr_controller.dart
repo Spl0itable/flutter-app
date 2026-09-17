@@ -58,6 +58,7 @@ import '../features/zaps/zap_logic.dart';
 import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
 import '../services/relay/relay_message.dart';
+import '../services/nostr/event_provenance.dart';
 import '../services/relay/relay_pool.dart';
 import '../services/relay/relay_pool_proxy.dart';
 import '../services/relay/relay_stats.dart';
@@ -233,6 +234,25 @@ class NostrController {
   /// a message rendered from local storage on a later launch has none — but the
   /// archive still does. Returns null for anything never archived: a message
   /// carried over the mesh, or a channel the archive does not keep.
+  Future<NostrEvent?> relayEvent(String eventId) async {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
+    final service = _service;
+    if (service == null) return null;
+    Subscription? sub;
+    try {
+      sub = service.pool.subscribe([
+        NostrFilter(ids: [eventId], limit: 1)
+      ]);
+      return await sub.events
+          .firstWhere((e) => e.id == eventId)
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {
+      return null;
+    } finally {
+      if (sub != null) unawaited(sub.close());
+    }
+  }
+
   Future<NostrEvent?> archivedEvent(String eventId) async {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
     try {
@@ -559,6 +579,13 @@ class NostrController {
 
       final service = NostrService(identity: identity, signer: signer);
       _service = service;
+      final attest =
+          _attest ??= AttestService(kv: _ref.read(keyValueStoreProvider));
+      final selfPubkey = signer?.pubkey;
+      if (selfPubkey != null && attest.restore(selfPubkey)) {
+        service.attestBadge = attest.badge;
+      }
+      unawaited(_ensureAttestBadge());
       _groups = GroupManager(service);
       // Restore persisted group conversations + ephemeral secret keys BEFORE
       // any network I/O (the PWA loads `nym_groups_<pubkey>` /
@@ -812,6 +839,19 @@ class NostrController {
   }
 
   AttestService? _attest;
+
+  AttestService? get attest => _attest;
+
+  Future<void> _awaitAttestBadge() async {
+    final service = _service;
+    final attest = _attest;
+    if (service == null || attest == null) return;
+    if (service.attestBadge != null) return;
+    final pending = attest.inFlight;
+    if (pending == null) return;
+    await pending.timeout(const Duration(seconds: 8), onTimeout: () {});
+    service.attestBadge = attest.badge;
+  }
 
   /// Enrolls (or renews) this install's attestation badge, then hands it to
   /// the service so outgoing channel messages carry it, and publishes the
@@ -6209,6 +6249,7 @@ class NostrController {
       final isGeo = state.channels
           .any((c) => c.key == view.id.toLowerCase() && c.isGeohash);
       try {
+        await _awaitAttestBadge();
         final signed = await service.publishChannelMessage(
           channelKey: view.id,
           content: trimmed,
@@ -10852,6 +10893,7 @@ class NostrController {
         for (final raw in events) {
           try {
             final ev = NostrEvent.fromJson(raw);
+            eventProvenance.recordLocal(ev, 'NYMCHAT ARCHIVE');
             // Backlog restore: mark historical by provenance so an archived event
             // that reads as ≈now isn't flood-dimmed or snap-in animated.
             appState.ingestEvent(ev, historical: true);
