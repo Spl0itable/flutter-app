@@ -24,6 +24,7 @@ import '../../models/nostr_event.dart';
 import '../api/api_client.dart';
 import '../api/api_config.dart';
 import '../relay/relay_message.dart';
+import 'event_provenance.dart';
 import '../relay/relay_pool.dart';
 import '../relay/relay_pool_proxy.dart';
 import '../relay/relay_stats.dart';
@@ -1627,6 +1628,7 @@ class NostrService {
       difficulty,
     );
     final signed = await sig.sign(mined);
+    eventProvenance.recordLocal(signed, 'THIS CLIENT');
     if (buildOnly) return signed;
 
     // Geohash channel messages (kind 20000 with a `g` tag) route through

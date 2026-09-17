@@ -58,6 +58,7 @@ import '../features/zaps/zap_logic.dart';
 import '../services/api/api_client.dart';
 import '../services/api/storage_sync.dart';
 import '../services/relay/relay_message.dart';
+import '../services/nostr/event_provenance.dart';
 import '../services/relay/relay_pool.dart';
 import '../services/relay/relay_pool_proxy.dart';
 import '../services/relay/relay_stats.dart';
@@ -233,6 +234,25 @@ class NostrController {
   /// a message rendered from local storage on a later launch has none — but the
   /// archive still does. Returns null for anything never archived: a message
   /// carried over the mesh, or a channel the archive does not keep.
+  Future<NostrEvent?> relayEvent(String eventId) async {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
+    final service = _service;
+    if (service == null) return null;
+    Subscription? sub;
+    try {
+      sub = service.pool.subscribe([
+        NostrFilter(ids: [eventId], limit: 1)
+      ]);
+      return await sub.events
+          .firstWhere((e) => e.id == eventId)
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {
+      return null;
+    } finally {
+      if (sub != null) unawaited(sub.close());
+    }
+  }
+
   Future<NostrEvent?> archivedEvent(String eventId) async {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
     try {
@@ -10873,6 +10893,7 @@ class NostrController {
         for (final raw in events) {
           try {
             final ev = NostrEvent.fromJson(raw);
+            eventProvenance.recordLocal(ev, 'NYMCHAT ARCHIVE');
             // Backlog restore: mark historical by provenance so an archived event
             // that reads as ≈now isn't flood-dimmed or snap-in animated.
             appState.ingestEvent(ev, historical: true);
