@@ -30,10 +30,12 @@ class AttestService {
     http.Client? client,
     MethodChannel? channel,
     String? host,
+    String? platform,
   })  : _kv = kv,
         _client = client ?? http.Client(),
         _channel = channel ?? const MethodChannel(channelName),
-        _host = host ?? ApiConfig.apiHost;
+        _host = host ?? ApiConfig.apiHost,
+        _platform = platform ?? Platform.operatingSystem;
 
   /// The tier the server named, defaulting to the weakest reading. An
   /// unknown name is a server newer than this build, and treating it as
@@ -71,6 +73,7 @@ class AttestService {
   final http.Client _client;
   final MethodChannel _channel;
   final String _host;
+  final String _platform;
 
   Future<void>? _inFlight;
   DateTime? _nextTry;
@@ -158,16 +161,13 @@ class AttestService {
       if (issued == null) throw StateError('no challenge');
       final challenge = issued['challenge'] as String;
 
-      final proof = await _platformProof(challenge);
-      if (proof == null) throw StateError('no platform proof');
+      final platformProof = await _platformProof(challenge);
+      final proof = platformProof ?? await _webProof(issued);
+      if (proof == null) throw StateError('no proof');
 
-      // Mined unconditionally rather than only when the server turns out to
-      // need it. A build Play did not distribute — the Zapstore APK — cannot
-      // be Play-recognized, and the server falls that back to the same work
-      // the web app pays. Deciding here would mean detecting the install
-      // source or enrolling twice; this costs a few seconds in an isolate,
-      // once per badge term, with nothing waiting on it.
-      final powBits = (issued['powBits'] as num?)?.toInt() ?? 0;
+      final needsWork = platformProof == null || proof['platform'] == 'android';
+      final powBits =
+          needsWork ? ((issued['powBits'] as num?)?.toInt() ?? 0) : 0;
 
       final auth = await Nip98Auth.buildSigned(
         action: 'attest-enroll',
@@ -234,13 +234,13 @@ class AttestService {
         <String, dynamic>{'challenge': challenge},
       );
       if (result == null) return null;
-      if (Platform.isIOS) {
+      if (_platform == 'ios') {
         final keyId = result['keyId'] as String?;
         final attestation = result['attestation'] as String?;
         if (keyId == null || attestation == null) return null;
         return {'platform': 'ios', 'keyId': keyId, 'attestation': attestation};
       }
-      if (Platform.isAndroid) {
+      if (_platform == 'android') {
         final token = result['token'] as String?;
         if (token == null) return null;
         return {'platform': 'android', 'token': token};
@@ -249,6 +249,35 @@ class AttestService {
     } on PlatformException {
       return null;
     } on MissingPluginException {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _webProof(Map<String, dynamic> issued) async {
+    final probe = issued['buildProbe'];
+    if (probe is! List || probe.isEmpty) return null;
+    final files = await _buildManifestFiles();
+    if (files == null) return null;
+    final build = <String, String>{};
+    for (final path in probe) {
+      final hash = path is String ? files[path] : null;
+      if (hash is! String) return null;
+      build[path as String] = hash;
+    }
+    return {'platform': 'web', 'build': build};
+  }
+
+  Future<Map<String, dynamic>?> _buildManifestFiles() async {
+    try {
+      final resp = await _client.get(
+        Uri.parse('https://$_host/build-manifest.json'),
+        headers: ApiConfig.defaultHeaders,
+      );
+      if (resp.statusCode != 200) return null;
+      final decoded = jsonDecode(resp.body);
+      final files = decoded is Map ? decoded['files'] : null;
+      return files is Map ? Map<String, dynamic>.from(files) : null;
+    } catch (_) {
       return null;
     }
   }

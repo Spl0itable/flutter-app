@@ -4534,6 +4534,7 @@ class NostrController {
           signed.id,
           realCreatedAt: signed.createdAt,
           realMs: int.tryParse(signed.tagValue('ms') ?? ''),
+          powTarget: EventMapper.powTargetOf(signed),
         );
       }
     } catch (_) {
@@ -4791,6 +4792,7 @@ class NostrController {
                     entry.localId,
                     replayed.id,
                     realCreatedAt: replayed.createdAt,
+                    powTarget: EventMapper.powTargetOf(replayed),
                   );
               return true;
             }
@@ -4814,6 +4816,7 @@ class NostrController {
                 entry.localId,
                 signed.id,
                 realCreatedAt: signed.createdAt,
+                powTarget: EventMapper.powTargetOf(signed),
               );
           return true;
         case MeshOutboxKind.pm:
@@ -6229,6 +6232,7 @@ class NostrController {
             signed.id,
             realCreatedAt: signed.createdAt,
             realMs: int.tryParse(signed.tagValue('ms') ?? ''),
+            powTarget: EventMapper.powTargetOf(signed),
           );
         }
         // Hardcore keypair mode: rotate to a brand-new keypair + nym after every
@@ -13109,6 +13113,7 @@ class NostrController {
             signed.id,
             realCreatedAt: signed.createdAt,
             realMs: nowMs,
+            powTarget: EventMapper.powTargetOf(signed),
           );
     }
   }
