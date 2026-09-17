@@ -1,3 +1,5 @@
+import 'dart:io';
+
 /// Centralized backend API host + headers for the native app.
 ///
 /// The PWA derives its API host from `window.location.host` (`_getApiHost`),
@@ -35,7 +37,13 @@ class ApiConfig {
   /// `_client.js:isNymchatClient` matches `/Nym(?:chat|bot)App\//i`. We send
   /// `NymchatApp/<ver>`; the standalone Nymbot app sends `NymbotApp/<ver>` to
   /// the same worker.
-  static const String userAgent = 'NymchatApp/$appVersion';
+  static const String appUserAgent = 'NymchatApp/$appVersion';
+
+  static final String dartUserAgent = HttpClient().userAgent ?? 'Dart (dart:io)';
+
+  static final String userAgent = '$dartUserAgent, $appUserAgent';
+
+  static HttpClient socketClient() => HttpClient()..userAgent = null;
 
   /// `wss://<host>/api/relay-pool` — the multiplexed relay-pool socket
   /// (`_getRelayPoolUrl`, spec §4.2).

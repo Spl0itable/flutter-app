@@ -29,6 +29,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:http/http.dart' as http;
 
+import '../../services/api/api_config.dart';
+
 import 'pausable_animated_image.dart';
 
 /// True when [url] looks like an SVG (by extension, ignoring any query string),
@@ -211,6 +213,17 @@ class InlineNetworkImage extends StatefulWidget {
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
   };
 
+  static final Map<String, String> apiImageFetchHeaders = {
+    'User-Agent': ApiConfig.userAgent,
+    'Accept':
+        'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+  };
+
+  static Map<String, String> imageHeadersFor(String url) {
+    final host = Uri.tryParse(url)?.host.toLowerCase();
+    return host == ApiConfig.apiHost ? apiImageFetchHeaders : imageFetchHeaders;
+  }
+
   /// Drops [url] from every cache tier — the in-memory decode cache, the
   /// framework [ImageCache], and the on-disk `flutter_cache_manager` store — so
   /// the next request re-fetches it. Called when a user changes their avatar so
@@ -228,7 +241,7 @@ class InlineNetworkImage extends StatefulWidget {
     Uint8List bytes;
     try {
       final resp = await http
-          .get(Uri.parse(url), headers: imageFetchHeaders)
+          .get(Uri.parse(url), headers: imageHeadersFor(url))
           .timeout(const Duration(seconds: 12));
       if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) {
         assert(() {
@@ -281,7 +294,7 @@ class InlineNetworkImage extends StatefulWidget {
     // compiled picture cached above IS the warm state.
     if (decoded == null || decoded.raster == null) return;
     final completer = Completer<void>();
-    final stream = CachedNetworkImageProvider(url, headers: imageFetchHeaders)
+    final stream = CachedNetworkImageProvider(url, headers: imageHeadersFor(url))
         .resolve(ImageConfiguration.empty);
     late final ImageStreamListener listener;
     void done() {
@@ -505,7 +518,7 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
       return PausableAnimatedImage(
         image: CachedNetworkImageProvider(
           url,
-          headers: InlineNetworkImage.imageFetchHeaders,
+          headers: InlineNetworkImage.imageHeadersFor(url),
           maxWidth: cacheWidth,
         ),
         visibilityKey: ValueKey('anim-net:$url'),
@@ -518,7 +531,7 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
     }
     return CachedNetworkImage(
       imageUrl: url,
-      httpHeaders: InlineNetworkImage.imageFetchHeaders,
+      httpHeaders: InlineNetworkImage.imageHeadersFor(url),
       width: widget.width,
       height: widget.height,
       fit: widget.fit,

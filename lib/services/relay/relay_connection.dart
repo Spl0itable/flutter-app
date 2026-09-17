@@ -61,6 +61,7 @@ WebSocketChannel defaultRelayChannelFactory(Uri url) =>
     IOWebSocketChannel.connect(
       url,
       headers: {'User-Agent': ApiConfig.userAgent},
+      customClient: ApiConfig.socketClient(),
     );
 
 /// A single relay WebSocket connection with auto-reconnect, subscription

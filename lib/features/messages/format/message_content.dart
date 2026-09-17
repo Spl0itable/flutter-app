@@ -3387,7 +3387,8 @@ class _FullscreenImageViewerState extends State<_FullscreenImageViewer>
                       // that wants native pixels.
                       child: CachedNetworkImage(
                         imageUrl: proxiedMedia(widget.urls[_index]),
-                        httpHeaders: InlineNetworkImage.imageFetchHeaders,
+                        httpHeaders: InlineNetworkImage.imageHeadersFor(
+                            proxiedMedia(widget.urls[_index])),
                         fit: BoxFit.contain,
                         errorWidget: (_, __, ___) => const Icon(
                             Icons.broken_image,

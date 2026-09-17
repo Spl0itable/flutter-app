@@ -26,6 +26,7 @@ typedef ApiSocketFactory = WebSocketChannel Function(Uri url);
 WebSocketChannel defaultApiSocketFactory(Uri url) => IOWebSocketChannel.connect(
       url,
       headers: {'User-Agent': ApiConfig.userAgent},
+      customClient: ApiConfig.socketClient(),
     );
 
 /// Default Giphy API key (PWA `this.giphyApiKey`, app.js:679). Mirrors the
