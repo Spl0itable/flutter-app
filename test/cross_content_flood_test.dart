@@ -122,6 +122,54 @@ void main() {
       }
     });
 
+    test('a nonce-stamped short line from one key is muted at the fourth', () {
+      final r = [
+        for (var i = 0; i < 6; i++) at('message gh6gc8${3 + i}n1', 'wren', i)
+      ];
+      expect(r.take(3).any((v) => v.mute || v.flood), isFalse);
+      expect(r[3].mute, isTrue);
+      expect(r[3].flood, isTrue);
+      expect(r[5].mute, isTrue);
+    });
+
+    test('the same stamped line from different keys is not a campaign', () {
+      for (var i = 0; i < 6; i++) {
+        expect(at('message gh6gc8${3 + i}n1', 'p$i', i).flood, isFalse);
+      }
+    });
+
+    test('a short line repeated verbatim, or without a stamp, is left alone',
+        () {
+      for (var i = 0; i < 8; i++) {
+        expect(at('day 1', 'k', i).mute, isFalse);
+        expect(at('lol', 'k', i).mute, isFalse);
+        expect(at('gm gm gm', 'k', i).mute, isFalse);
+      }
+    });
+
+    test('a one-word template is not a stamped campaign', () {
+      for (var i = 0; i < 8; i++) {
+        expect(at('m${1000 + i}', 'k', i).mute, isFalse);
+        expect(at('msg@${1700000000 + i}', 'k', i).mute, isFalse);
+        expect(at('score ${i * 3}', 'k', i).mute, isFalse);
+      }
+    });
+
+    test('a stamped repeat outside the window does not count', () {
+      for (var i = 0; i < 3; i++) {
+        final t = t0.add(Duration(minutes: 4 * i));
+        f.check('message gh6gc8${i}n1', 'k',
+            createdAtMs: t.millisecondsSinceEpoch, now: t);
+      }
+      final later = t0.add(const Duration(minutes: 31));
+      expect(
+          f
+              .check('message gh6gc89n1', 'k',
+                  createdAtMs: later.millisecondsSinceEpoch, now: later)
+              .mute,
+          isFalse);
+    });
+
     test('empty and null are safe', () {
       expect(f.check(null, 'p', now: t0), CampaignVerdict.none);
       expect(f.check('', 'p', now: t0), CampaignVerdict.none);
