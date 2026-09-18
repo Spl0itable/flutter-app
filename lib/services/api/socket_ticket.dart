@@ -63,6 +63,15 @@ class SocketTickets {
     return url.replace(queryParameters: {...url.queryParameters, 't': ticket});
   }
 
+  static void touch() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_ticket != null && _expiresAt - now > refreshBefore.inMilliseconds) {
+      return;
+    }
+    if (_pending != null) return;
+    fetch().ignore();
+  }
+
   static Future<Uri> ticketed(Uri url) async {
     if (!appliesTo(url)) return url;
     return apply(url, await fetch());

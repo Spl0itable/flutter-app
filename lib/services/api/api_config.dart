@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'socket_ticket.dart';
+
 /// Centralized backend API host + headers for the native app.
 ///
 /// The PWA derives its API host from `window.location.host` (`_getApiHost`),
@@ -64,9 +66,14 @@ class ApiConfig {
 
   /// Default headers sent on every backend API request. The UA header is what
   /// satisfies the `isNymchatClient` gate.
-  static Map<String, String> get defaultHeaders => {
-        'User-Agent': userAgent,
-      };
+  static Map<String, String> get defaultHeaders {
+    SocketTickets.touch();
+    final ticket = SocketTickets.held;
+    return {
+      'User-Agent': userAgent,
+      if (ticket != null) 'X-Nym-Ticket': ticket,
+    };
+  }
 }
 
 class _PlainHttpOverrides extends HttpOverrides {}

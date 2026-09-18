@@ -83,6 +83,13 @@ void main() {
     expect(write.headers['X-Nym-Ticket'], 'tk-app');
   });
 
+  test('every plain request carries the held ticket', () async {
+    expect(ApiConfig.defaultHeaders.containsKey('X-Nym-Ticket'), isFalse);
+    await SocketTickets.fetch();
+    expect(ApiConfig.defaultHeaders['X-Nym-Ticket'], 'tk-1');
+    expect(ApiConfig.defaultHeaders['User-Agent'], ApiConfig.userAgent);
+  });
+
   test('a refused fetch opens the socket without a ticket', () async {
     status = 403;
     final u = await SocketTickets.ticketed(
