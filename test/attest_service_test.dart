@@ -51,13 +51,15 @@ void main() {
               }),
               200);
         }
-        if (body['platform'] != 'web' && platformStatus != 200) {
+        final hasProof =
+            body.containsKey('token') || body.containsKey('attestation');
+        if (hasProof && platformStatus != 200) {
           return http.Response(jsonEncode(platformAnswer), platformStatus);
         }
         return http.Response(
             jsonEncode({
               'badge': '1.challenged.x.y',
-              'tier': body['platform'] == 'web' ? 'challenged' : 'attested',
+              'tier': hasProof ? 'attested' : 'challenged',
               'expiresAt':
                   DateTime.now().millisecondsSinceEpoch + 45 * 86400000,
               'authority': AttestService.pinnedAuthority,
@@ -87,12 +89,15 @@ void main() {
   tearDown(() => nativeAnswers(null));
 
   group('enrollment', () {
-    test('a device that cannot attest falls back to the web tier', () async {
+    test('a device that cannot attest falls back to the build proof as itself',
+        () async {
       nativeAnswers(null);
       final svc = await fresh('ios');
       await svc.ensureBadge(signer);
       final enroll = posts.singleWhere((b) => b['action'] == 'enroll');
-      expect(enroll['platform'], 'web');
+      expect(enroll['platform'], 'ios',
+          reason: 'a phone without a platform proof is still a phone');
+      expect(enroll['refusal'], 'no-platform-proof');
       expect(enroll['build'], {'/a.js': 'sha256-A', '/b.js': 'sha256-B'});
       final nonce = authTags(enroll).firstWhere((t) => t[0] == 'nonce');
       expect(nonce[2], '8', reason: 'the fallback pays the work');
@@ -121,7 +126,8 @@ void main() {
       final svc = await fresh('android');
       await svc.ensureBadge(signer);
       final enroll = posts.singleWhere((b) => b['action'] == 'enroll');
-      expect(enroll['platform'], 'web');
+      expect(enroll['platform'], 'android');
+      expect(enroll['refusal'], 'no-platform-proof');
       expect(enroll['build'], {'/a.js': 'sha256-A', '/b.js': 'sha256-B'});
       expect(authTags(enroll).any((t) => t[0] == 'nonce'), isTrue);
       expect(svc.tier, AttestTier.challenged);
@@ -137,7 +143,7 @@ void main() {
       expect(authTags(enroll).any((t) => t[0] == 'nonce'), isTrue);
     });
 
-    test('a platform proof the server refuses falls back to the web tier',
+    test('a platform proof the server refuses falls back to the build proof',
         () async {
       nativeAnswers({'keyId': 'kid', 'attestation': 'att'});
       platformStatus = 403;
@@ -148,7 +154,10 @@ void main() {
       final svc = await fresh('ios');
       await svc.ensureBadge(signer);
       final enrolls = posts.where((b) => b['action'] == 'enroll').toList();
-      expect(enrolls.map((b) => b['platform']), ['ios', 'web']);
+      expect(enrolls.map((b) => b['platform']), ['ios', 'ios'],
+          reason: 'the fallback is still an iOS install');
+      expect(enrolls[1]['refusal'], 'Attestation failed (environment-mismatch)');
+      expect(enrolls[1].containsKey('attestation'), isFalse);
       expect(posts.where((b) => b['action'] == 'challenge').length, 2,
           reason: 'the fallback enrolls under a fresh challenge');
       expect(authTags(enrolls[1]).any((t) => t[0] == 'nonce'), isTrue);

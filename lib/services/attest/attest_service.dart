@@ -296,6 +296,11 @@ class AttestService {
     }
   }
 
+  /// The build-proof enrollment: the web app's only path, and the fallback
+  /// for a native install that could not produce a platform proof. It still
+  /// names the platform it runs on — a phone that failed Play Integrity is
+  /// an Android install, not a browser — and says why the platform proof
+  /// was not accepted, so the server can record the reason.
   Future<Map<String, dynamic>?> _webProof(Map<String, dynamic> issued) async {
     final probe = issued['buildProbe'];
     if (probe is! List || probe.isEmpty) return null;
@@ -307,7 +312,13 @@ class AttestService {
       if (hash is! String) return null;
       build[path as String] = hash;
     }
-    return {'platform': 'web', 'build': build};
+    final native = _platform == 'ios' || _platform == 'android';
+    return {
+      'platform': native ? _platform : 'web',
+      'build': build,
+      if (native)
+        'refusal': lastPlatformRefusal ?? 'no-platform-proof',
+    };
   }
 
   Future<Map<String, dynamic>?> _buildManifestFiles() async {
