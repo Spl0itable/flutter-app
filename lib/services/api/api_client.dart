@@ -13,7 +13,6 @@ import '../../models/nostr_event.dart';
 import '../nostr/event_signer.dart';
 import '../relay/relay_stats.dart';
 import 'api_config.dart';
-import 'socket_ticket.dart';
 
 /// Factory that opens a [WebSocketChannel] to the `/api` socket. Overridable in
 /// tests so no real socket is opened (mirrors `WebSocketChannelFactory` in
@@ -339,7 +338,7 @@ class ApiSocket {
     _connecting = completer;
     try {
       _resetChannel();
-      final ch = _factory(await SocketTickets.ticketed(_url));
+      final ch = _factory(_url);
       _channel = ch;
       var ready = false;
       Timer? timer;
@@ -885,15 +884,6 @@ class ApiClient {
         if (extra != null) ...extra,
       };
 
-  Future<Map<String, String>> _writeHeaders([Map<String, String>? extra]) async {
-    if (!SocketTickets.appliesTo(Uri.parse(_baseUrl))) return _headers(extra);
-    final ticket = await SocketTickets.fetch();
-    return _headers({
-      if (extra != null) ...extra,
-      if (ticket != null) 'X-Nym-Ticket': ticket,
-    });
-  }
-
   /// UTF-8 text of an HTTP response body. NEVER use `res.body` for wire text:
   /// package:http picks the charset from the Content-Type header and silently
   /// falls back to LATIN-1 when the header carries no `charset=` — and the nym
@@ -951,7 +941,7 @@ class ApiClient {
         jsonEncode({'text': text, 'source': source, 'target': target});
     final res = await _client.post(
       Uri.parse('$_baseUrl?action=translate'),
-      headers: await _writeHeaders({'Content-Type': 'application/json'}),
+      headers: _headers({'Content-Type': 'application/json'}),
       body: payload,
     );
     _trackApiData('translate',
@@ -1023,7 +1013,7 @@ class ApiClient {
 
   Future<UnfurlResult> _unfurlFetch(String url) async {
     final u = unfurlUrl(url);
-    final res = await _client.get(Uri.parse(u), headers: await _writeHeaders());
+    final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('unfurl', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('unfurl', res.statusCode, _utf8Body(res));
@@ -1043,7 +1033,7 @@ class ApiClient {
   }) async {
     final res = await _client.put(
       Uri.parse(blossomUploadUrl(server)),
-      headers: await _writeHeaders({
+      headers: _headers({
         'Authorization': authHeader,
         'Content-Type': contentType,
       }),
@@ -1071,7 +1061,7 @@ class ApiClient {
     final payload = jsonEncode({'url': sourceUrl});
     final res = await _client.put(
       Uri.parse(blossomMirrorUrl(server)),
-      headers: await _writeHeaders({
+      headers: _headers({
         'Authorization': authHeader,
         'Content-Type': 'application/json',
       }),
@@ -1102,16 +1092,14 @@ class ApiClient {
     String? body,
     String? contentType,
   }) async {
-    Future<http.Response> run(Uri uri, Map<String, String>? headers) async =>
+    Future<http.Response> run(Uri uri, Map<String, String>? headers) =>
         method == 'POST'
-            ? _client.post(uri,
-                headers: await _writeHeaders(headers ?? const {}), body: body)
+            ? _client.post(uri, headers: headers, body: body)
             : _client.get(uri, headers: headers);
     try {
       final res = await run(
         Uri.parse(jsonProxyUrl(targetUrl)),
-        await _writeHeaders(
-            {if (contentType != null) 'Content-Type': contentType}),
+        _headers({if (contentType != null) 'Content-Type': contentType}),
       );
       _trackApiData('json',
           sent: _bodyLen(body), recv: _bodyLen(res.bodyBytes));
@@ -1139,7 +1127,7 @@ class ApiClient {
   Future<({List<GeoRelay> upstream, List<GeoRelay> vetted})>
       geoRelayDirectories() async {
     final u = geoRelaysUrl();
-    final res = await _client.get(Uri.parse(u), headers: await _writeHeaders());
+    final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('geo-relays',
         sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     const empty = (upstream: <GeoRelay>[], vetted: <GeoRelay>[]);
@@ -1177,7 +1165,7 @@ class ApiClient {
     String lang = 'en',
   }) async {
     final u = geocodeUrl(lat, lng, zoom: zoom, lang: lang);
-    final res = await _client.get(Uri.parse(u), headers: await _writeHeaders());
+    final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('geocode', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('geocode', res.statusCode, _utf8Body(res));
@@ -1188,7 +1176,7 @@ class ApiClient {
   /// GET Giphy search -> raw Giphy JSON.
   Future<Map<String, dynamic>> giphySearch(String query) async {
     final u = giphySearchUrl(query);
-    final res = await _client.get(Uri.parse(u), headers: await _writeHeaders());
+    final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('giphy', res.statusCode, _utf8Body(res));
@@ -1199,7 +1187,7 @@ class ApiClient {
   /// GET Giphy trending -> raw Giphy JSON.
   Future<Map<String, dynamic>> giphyTrending() async {
     final u = giphyTrendingUrl();
-    final res = await _client.get(Uri.parse(u), headers: await _writeHeaders());
+    final res = await _client.get(Uri.parse(u), headers: _headers());
     _trackApiData('giphy', sent: _bodyLen(u), recv: _bodyLen(res.bodyBytes));
     if (res.statusCode != 200) {
       throw ApiException('giphy', res.statusCode, _utf8Body(res));
@@ -1232,7 +1220,7 @@ class ApiClient {
       });
       final res = await _client.post(
         Uri.parse(zapVerifyUrl()),
-        headers: await _writeHeaders({'Content-Type': 'application/json'}),
+        headers: _headers({'Content-Type': 'application/json'}),
         body: payload,
       );
       _trackApiData('zap-verify',
@@ -1262,7 +1250,7 @@ class ApiClient {
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
-      headers: await _writeHeaders({'Content-Type': 'application/json'}),
+      headers: _headers({'Content-Type': 'application/json'}),
       body: payload,
     );
     _trackApiData(action,
@@ -1299,7 +1287,7 @@ class ApiClient {
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(storageUrl),
-      headers: await _writeHeaders({'Content-Type': 'application/json'}),
+      headers: _headers({'Content-Type': 'application/json'}),
       body: payload,
     );
     _trackApiData(action,
@@ -1343,7 +1331,7 @@ class ApiClient {
     final payload = jsonEncode(body);
     final res = await _client.post(
       Uri.parse(botUrl),
-      headers: await _writeHeaders({'Content-Type': 'application/json'}),
+      headers: _headers({'Content-Type': 'application/json'}),
       body: payload,
     );
     _trackApiData(action,

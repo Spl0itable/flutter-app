@@ -9,7 +9,6 @@ import 'package:nym_bar/services/attest/attest_service.dart';
 import 'package:nym_bar/services/nostr/event_signer.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'ticket_stub.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -81,7 +80,6 @@ void main() {
           .toList();
 
   setUp(() {
-    stubTickets();
     posts = [];
     manifestUp = true;
     platformStatus = 200;
@@ -158,14 +156,15 @@ void main() {
       final enrolls = posts.where((b) => b['action'] == 'enroll').toList();
       expect(enrolls.map((b) => b['platform']), ['ios', 'ios'],
           reason: 'the fallback is still an iOS install');
-      expect(enrolls[1]['refusal'], 'Attestation failed (environment-mismatch)');
+      expect(
+          enrolls[1]['refusal'], 'Attestation failed (environment-mismatch)');
       expect(enrolls[1].containsKey('attestation'), isFalse);
       expect(posts.where((b) => b['action'] == 'challenge').length, 2,
           reason: 'the fallback enrolls under a fresh challenge');
       expect(authTags(enrolls[1]).any((t) => t[0] == 'nonce'), isTrue);
       expect(svc.tier, AttestTier.challenged);
-      expect(svc.lastPlatformRefusal,
-          'Attestation failed (environment-mismatch)');
+      expect(
+          svc.lastPlatformRefusal, 'Attestation failed (environment-mismatch)');
       expect(svc.lastError, isNull);
     });
 
