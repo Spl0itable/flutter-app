@@ -808,6 +808,18 @@ class PqPmPlan {
 /// With a [root], root-derived epochs come first (new writes use those), then
 /// the nsec-derived ones. The nsec-derived tail is PERMANENT, not a migration
 /// window — spec §4; dropping it is data loss.
+List<({Uint8List kemSk, Uint8List kemPk})> pqRootCandidates(
+  Uint8List root,
+  int epoch,
+) {
+  final out = <({Uint8List kemSk, Uint8List kemPk})>[];
+  for (var e = epoch; e >= 0 && e > epoch - 1 - pqPreviousEpochs; e--) {
+    final kp = pq.pqKeypairFromRoot(root, e);
+    out.add((kemSk: kp.secretKey, kemPk: kp.publicKey));
+  }
+  return out;
+}
+
 List<({Uint8List kemSk, Uint8List kemPk})> pqSelfCandidates(
   Uint8List privkey,
   int epoch, {

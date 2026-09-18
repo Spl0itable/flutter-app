@@ -1371,6 +1371,7 @@ class NostrController {
     _service = null;
     _groups = null;
     _storageSync = null;
+    _resetPqRootState();
     _zapArchive?.dispose();
     _zapArchive = null;
     _lastOnlineTimer?.cancel();
@@ -5772,6 +5773,8 @@ class NostrController {
   Future<Uint8List?> _loadPqRoot({Map<String, String>? unlockedSecrets}) async {
     final cached = _pqRoot;
     if (cached != null) return cached;
+    final pubkey = _identity?.pubkey;
+    if (pubkey == null) return null;
     String? raw = unlockedSecrets?[SecretKeys.pqRoot];
     if (raw == null || raw.isEmpty) {
       try {
@@ -5780,26 +5783,73 @@ class NostrController {
         return null;
       }
     }
-    if (raw == null || raw.isEmpty) return null;
-    final root = pqRootFromCode(raw);
-    if (root == null) return null;
+    final store = PqRootStore.parse(raw);
+    _pqRootStore = store;
+    _pqRootStoreUnreadable = store.unreadable;
+    final code = store.codeFor(pubkey);
+    if (code == null) return null;
+    final root = pqRootFromCode(code);
+    if (root == null) {
+      _pqRootStoreUnreadable = true;
+      return null;
+    }
     return _pqRoot = root;
   }
 
-  /// Persists the root through the vault, so it is encrypted at rest exactly
-  /// as the nsec is. False when the write failed; do not treat that as adopted.
-  Future<bool> _persistPqRoot(Uint8List root) async {
+  PqRootStore _pqRootStore = const PqRootStore();
+  bool _pqRootStoreUnreadable = false;
+
+  Uint8List? get _pqRootLegacy {
+    final code = _pqRootStore.legacy;
+    return code == null ? null : pqRootFromCode(code);
+  }
+
+  Future<bool> _writePqRootStore(PqRootStore store) async {
     try {
-      await _ref.read(identityVaultProvider).secretSet(
-            SecretKeys.pqRoot,
-            pqRootToCode(root),
-          );
-      _pqRoot = root;
-      _pqRootLocked = false;
+      final vault = _ref.read(identityVaultProvider);
+      final encoded = store.encode();
+      if (encoded == null) {
+        await SecureStore().remove(SecretKeys.pqRoot);
+      } else {
+        await vault.secretSet(SecretKeys.pqRoot, encoded);
+      }
+      _pqRootStore = store;
+      _pqRootStoreUnreadable = false;
       return true;
     } catch (_) {
       return false;
     }
+  }
+
+  void _resetPqRootState() {
+    _pqRootRetryTimer?.cancel();
+    _pqRootRetryTimer = null;
+    _pqRootRetryCount = 0;
+    _pqRoot = null;
+    _pqRootLocked = false;
+    _pqRootSettled = false;
+    _pqRootInFlight = false;
+    _pqRootStore = const PqRootStore();
+    _pqRootStoreUnreadable = false;
+    _pqLastPublishMs = 0;
+    _pqSelfSignedAnnouncement = null;
+    _pqDevices = const [];
+    _pqRootWaitTimer?.cancel();
+    _pqRootWaitTimer = null;
+    _pqRootWaiters.clear();
+  }
+
+  /// Persists the root through the vault, so it is encrypted at rest exactly
+  /// as the nsec is. False when the write failed; do not treat that as adopted.
+  Future<bool> _persistPqRoot(Uint8List root, {bool dropLegacy = false}) async {
+    final pubkey = _identity?.pubkey;
+    if (pubkey == null) return false;
+    final ok = await _writePqRootStore(
+        _pqRootStore.withCode(pubkey, pqRootToCode(root), dropLegacy: dropLegacy));
+    if (!ok) return false;
+    _pqRoot = root;
+    _pqRootLocked = false;
+    return true;
   }
 
   /// Generation and adoption (spec §6), once the boot settings read settled.
@@ -5833,18 +5883,37 @@ class NostrController {
     // pure, tested function rather than in this method's control flow.
     // A record we can parse tells us WHICH root it belongs to; one we could
     // only see the row of does not, and a row is still proof a root exists.
+    _pqRootRetryTimer?.cancel();
+    _pqRootRetryTimer = null;
     final record = sync.pqRootRecord;
-    final held = _pqRoot;
-    final matches = record == null || held == null || !record.isValid
-        ? held != null
-        : record.matches(held);
+    final recordReadable = record != null && record.isValid;
+    final rowPresent = sync.pqRootRowPresent;
+    var held = _pqRoot;
+    if (held == null && sync.pqRootLoadSucceeded) {
+      final legacy = _pqRootLegacy;
+      if (legacy != null) {
+        if (recordReadable && record.matches(legacy)) {
+          if (await _persistPqRoot(legacy, dropLegacy: true)) held = legacy;
+        } else if (!rowPresent) {
+          if (await _persistPqRoot(legacy, dropLegacy: true)) held = legacy;
+        }
+      }
+    }
+    final matches = recordReadable && held != null && record.matches(held);
+    if (held == null && !recordReadable && _pqRootStoreUnreadable) {
+      _pqRootSettled = true;
+      _pqRootLocked = true;
+      sync.pqRootLocked = true;
+      return;
+    }
 
     final action = pqRootDecide(
       throwawayKeypair: _ref
           .read(keyValueStoreProvider)
           .getBool(StorageKeys.randomKeypairPerSession, defaultValue: false),
       recordLoadSucceeded: sync.pqRootLoadSucceeded,
-      recordPresent: sync.pqRootRowPresent,
+      recordPresent: rowPresent,
+      recordReadable: recordReadable,
       holdRoot: held != null,
       recordMatchesHeldRoot: matches,
     );
@@ -5862,6 +5931,10 @@ class NostrController {
       case PqRootAction.ready:
         // The boot announcement went out without a key, because until now we
         // did not know whether one existed. Publish the real one.
+        _pushPqKeysToPeers();
+        if (sync.pqRootRowHybrid && held != null) {
+          await sync.pqRootRecordSet(PqRootRecord.forRoot(held));
+        }
         await publishPqAnnouncement(force: true);
         return;
 
@@ -5882,8 +5955,12 @@ class NostrController {
         // A root that does not open this account's record is not this
         // account's root: keeping it in play would announce a key no peer
         // could reach us on.
-        if (!matches) _pqRoot = null;
+        if (recordReadable && !matches) _pqRoot = null;
         _pqRootLocked = true;
+        if (!recordReadable && _signer is! LocalSigner) {
+          _pqRootSettled = false;
+          _schedulePqRootRetry(sync);
+        }
         return;
 
       case PqRootAction.generate:
@@ -5915,8 +5992,44 @@ class NostrController {
 
   /// Adopts a pasted `nympq1…` code (§5's manual path, and the way out of §7
   /// silence). Rejected when it does not reproduce our announced key.
+  static const List<Duration> _pqRootRetryDelays = [
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+    Duration(seconds: 120),
+  ];
+  Timer? _pqRootRetryTimer;
+  int _pqRootRetryCount = 0;
+
+  void _schedulePqRootRetry(StorageSync sync) {
+    if (_pqRootRetryTimer != null) return;
+    final n = _pqRootRetryCount;
+    if (n >= _pqRootRetryDelays.length) return;
+    _pqRootRetryCount = n + 1;
+    _pqRootRetryTimer = Timer(_pqRootRetryDelays[n], () async {
+      _pqRootRetryTimer = null;
+      if (_pqRootSettled || _storageSync != sync) return;
+      try {
+        await _mergeRemoteSettings(sync);
+      } catch (_) {}
+      await _ensurePqRoot();
+    });
+  }
+
+  bool get pqRootRowUnreadable => _storageSync?.pqRootRowUnreadable ?? false;
+
+  String pqRootLinkVerdict(String code) {
+    final root = pqRootFromCode(code.trim());
+    if (root == null) return 'invalid';
+    final record = _storageSync?.pqRootRecord;
+    if (record != null && record.isValid && !record.matches(root)) {
+      return 'mismatch';
+    }
+    return 'ok';
+  }
+
   Future<bool> linkPqRootFromCode(String code) async {
-    final root = pqRootFromCode(code);
+    final root = pqRootFromCode(code.trim());
     if (root == null) return false;
 
     // Against the RECORD's fingerprint, as the PWA does. The record is the
@@ -5946,13 +6059,39 @@ class NostrController {
     }
 
     if (!await _persistPqRoot(root)) return false;
+    _pqRootRetryTimer?.cancel();
+    _pqRootRetryTimer = null;
     _pqRootLocked = false;
     _pqRootSettled = true;
+    final sync = _storageSync;
+    if (sync != null && (record == null || !record.isValid) && sync.pqRootRowPresent) {
+      sync.pqRootLocked = false;
+      await sync.pqRootRecordSet(PqRootRecord.forRoot(root));
+    }
     _pushPqKeysToPeers();
     await publishPqAnnouncement(force: true);
     // The categories sealed to the root-derived key could not be opened until
     // now, so the session is running on whatever defaults it fell back to.
     // Re-read them, or the link appears to work and the settings stay stuck.
+    await _reloadSettingsAfterLink();
+    return true;
+  }
+
+  Future<bool> replacePqRootWithCode(String code) async {
+    final root = pqRootFromCode(code.trim());
+    if (root == null) return false;
+    final sync = _storageSync;
+    if (sync == null || _identity == null) return false;
+    if (!await _persistPqRoot(root)) return false;
+    _pqRootRetryTimer?.cancel();
+    _pqRootRetryTimer = null;
+    _pqRootLocked = false;
+    _pqRootSettled = true;
+    sync.pqRootLocked = false;
+    sync.clearSettingsHashes();
+    if (!await sync.pqRootRecordSet(PqRootRecord.forRoot(root))) return false;
+    _pushPqKeysToPeers();
+    await publishPqAnnouncement(force: true);
     await _reloadSettingsAfterLink();
     return true;
   }
@@ -10248,6 +10387,7 @@ class NostrController {
     // The root must reach the FIRST settings read of a launch, so it is pulled
     // rather than handed over — same reason _pqSelfKeyCandidates derives.
     sync.setPqRootProvider(_loadPqRoot);
+    sync.setPqEpochProvider(() => _pqEpoch);
 
     // Activate the WS-first storage transport (the PWA's persistent `/api`
     // socket). Reads in [StorageSync] now try `wss://<host>/api` FIRST and fall

@@ -89,6 +89,10 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   final TextEditingController _pqRootLink = TextEditingController();
   String? _pqRootLinkStatus;
   bool _pqRootLinking = false;
+  final TextEditingController _pqRootReplace = TextEditingController();
+  String? _pqRootReplaceStatus;
+  bool _pqRootReplacing = false;
+  bool _pqRootReplaceOpen = false;
   bool _saving = false;
 
   /// Per-surface upload caps, mirroring the PWA nick-edit avatar/banner guards
@@ -151,6 +155,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     _bio.dispose();
     _lightning.dispose();
     _pqRootLink.dispose();
+    _pqRootReplace.dispose();
     super.dispose();
   }
 
@@ -772,9 +777,122 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 color: c.textDim, fontFamily: 'monospace', fontSize: 11),
           ),
         ],
+        const SizedBox(height: 6),
+        _pqRootReplaceRow(c),
       ],
     );
   }
+
+  Widget _pqRootReplaceRow(NymColors c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          onTap: () =>
+              setState(() => _pqRootReplaceOpen = !_pqRootReplaceOpen),
+          child: Text(
+            tr('Replace with a different code'),
+            style: TextStyle(color: c.primary, fontSize: 11),
+          ),
+        ),
+        if (_pqRootReplaceOpen) ...[
+          const SizedBox(height: 4),
+          Text(
+            tr('If this device created a new code by mistake and you still '
+                'have your previous nympq1… code, paste it here to make it '
+                'this account\u2019s recovery code again, on this device and '
+                'in your synced account record.'),
+            style: TextStyle(color: c.textDim, fontSize: 11),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _pqRootReplace,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  style: TextStyle(
+                      color: c.inputText,
+                      fontFamily: 'monospace',
+                      fontSize: 12),
+                  decoration: InputDecoration(
+                    hintText: 'nympq1…',
+                    hintStyle: TextStyle(color: c.textDim, fontSize: 12),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
+                    enabledBorder: _inputBorder(c, c.glassBorder),
+                    focusedBorder: _inputBorder(c, c.primaryA(0.3)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: _pqRootReplacing ? null : _replacePqRoot,
+                child: Text(tr('Replace'),
+                    style: TextStyle(color: c.primary, fontSize: 12)),
+              ),
+            ],
+          ),
+          if (_pqRootReplaceStatus != null) ...[
+            const SizedBox(height: 4),
+            Text(_pqRootReplaceStatus!,
+                style: TextStyle(color: c.textDim, fontSize: 11)),
+          ],
+        ],
+      ],
+    );
+  }
+
+  Future<void> _replacePqRoot() async {
+    final code = _pqRootReplace.text.trim();
+    if (code.isEmpty) return;
+    final ctrl = ref.read(nostrControllerProvider);
+    final verdict = ctrl.pqRootLinkVerdict(code);
+    if (verdict == 'invalid') {
+      setState(() => _pqRootReplaceStatus =
+          tr('That is not a valid nympq1… code. Check it and try again.'));
+      return;
+    }
+    if (ctrl.pqRootCode == code) {
+      setState(() => _pqRootReplaceStatus =
+          tr('This device already uses that code.'));
+      return;
+    }
+    final confirmed = await _confirmPqRootReplace();
+    if (!confirmed || !mounted) return;
+    setState(() {
+      _pqRootReplacing = true;
+      _pqRootReplaceStatus = tr('Replacing…');
+    });
+    final ok = await ctrl.replacePqRootWithCode(code);
+    if (!mounted) return;
+    setState(() {
+      _pqRootReplacing = false;
+      _pqRootReplaceStatus = ok
+          ? tr('Replaced. This account now uses the code you pasted.')
+          : tr('The code could not be saved to your account right now. '
+              'Check your connection and try again.');
+      if (ok) {
+        _pqRootReplace.clear();
+        _pqRootReplaceOpen = false;
+      }
+    });
+  }
+
+  Future<bool> _confirmPqRootReplace() => showAppConfirm(
+        context,
+        tr('This replaces the recovery code this account uses with the one '
+            'you pasted, on this device and in your synced account record.'
+            '\n\nEvery other device on this account will then need the '
+            'pasted code. Messages sealed to the current code stay readable '
+            'only on devices that still hold it.\n\nReplace the recovery '
+            'code?'),
+        title: tr('Replace the recovery code?'),
+        okLabel: tr('Replace'),
+        danger: true,
+      );
 
   /// Short public fingerprint of the held root, or null without one.
   String? get _pqRootFingerprint {
@@ -792,10 +910,14 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
             style: TextStyle(color: c.text, fontSize: 12)),
         const SizedBox(height: 4),
         Text(
-          tr('This device has no recovery code yet. Paste the one from a '
-              'device that already has it — you will find it in this same '
-              'panel there — so both can read the same quantum-resistant '
-              'messages.'),
+          ref.read(nostrControllerProvider).pqRootRowUnreadable
+              ? tr('This account\u2019s recovery-code record could not be '
+                  'read on this device. Paste your nympq1… code to restore '
+                  'it for this account.')
+              : tr('This device has no recovery code yet. Paste the one from a '
+                  'device that already has it — you will find it in this same '
+                  'panel there — so both can read the same quantum-resistant '
+                  'messages.'),
           style: TextStyle(color: c.textDim, fontSize: 11),
         ),
         const SizedBox(height: 6),
@@ -839,9 +961,38 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
   Future<void> _linkPqRoot() async {
     final code = _pqRootLink.text.trim();
     if (code.isEmpty) return;
+    final ctrl = ref.read(nostrControllerProvider);
+    if (ctrl.pqRootLinkVerdict(code) == 'mismatch') {
+      setState(() => _pqRootLinkStatus = tr(
+          'That code does not match this account\u2019s current recovery code.'));
+      final replace = await showAppConfirm(
+        context,
+        tr('This code does not match the recovery code the account currently '
+            'uses.\n\nIf the current code was created by mistake, you can '
+            'replace it with this one. Every device on this account will then '
+            'need this code, and messages sealed to the current code will only '
+            'stay readable on devices that still hold it.\n\nReplace the '
+            'account\u2019s recovery code with the one you pasted?'),
+        title: tr('Replace the recovery code?'),
+        okLabel: tr('Replace'),
+        danger: true,
+      );
+      if (!replace || !mounted) return;
+      setState(() => _pqRootLinking = true);
+      final replaced = await ctrl.replacePqRootWithCode(code);
+      if (!mounted) return;
+      setState(() {
+        _pqRootLinking = false;
+        _pqRootLinkStatus = replaced
+            ? tr('Replaced. This account now uses the code you pasted.')
+            : tr('The code could not be saved to your account right now. '
+                'Check your connection and try again.');
+        if (replaced) _pqRootLink.clear();
+      });
+      return;
+    }
     setState(() => _pqRootLinking = true);
-    final ok =
-        await ref.read(nostrControllerProvider).linkPqRootFromCode(code);
+    final ok = await ctrl.linkPqRootFromCode(code);
     if (!mounted) return;
     setState(() {
       _pqRootLinking = false;
