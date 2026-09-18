@@ -9,6 +9,7 @@ import 'package:nym_bar/services/api/api_client.dart';
 import 'package:nym_bar/services/nostr/event_signer.dart';
 import 'package:nym_bar/services/relay/relay_stats.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'ticket_stub.dart';
 
 /// A stand-in NIP-46 remote signer: `isRemote` is true and `sign` round-trips
 /// asynchronously (counting calls), so a test can prove `buildSigned` signs auth
@@ -129,6 +130,7 @@ _FakeApiChannel _makeChannel(
 }
 
 void main() {
+  setUp(stubTickets);
   group('ApiClient WS-first storage transport', () {
     test('public read rides the socket (HTTP never called); parses ITEM/END',
         () async {

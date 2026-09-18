@@ -83,6 +83,45 @@ void main() {
     expect(write.headers['X-Nym-Ticket'], 'tk-app');
   });
 
+  test('every plain request carries the held ticket', () async {
+    expect(ApiConfig.defaultHeaders.containsKey('X-Nym-Ticket'), isFalse);
+    expect(posts, isEmpty);
+    await SocketTickets.fetch();
+    expect(ApiConfig.defaultHeaders['X-Nym-Ticket'], 'tk-1');
+    expect(ApiConfig.defaultHeaders['User-Agent'], ApiConfig.userAgent);
+    expect(posts.single.headers.containsKey('X-Nym-Ticket'), isFalse);
+  });
+
+  test('a GET to the API waits for the ticket', () async {
+    http.Request? seen;
+    final api = ApiClient(
+        client: MockClient((req) async {
+      seen = req;
+      return http.Response('{"relays":[]}', 200,
+          headers: {'Content-Type': 'application/json'});
+    }));
+    await api.geoRelayDirectories();
+    expect(seen!.headers['X-Nym-Ticket'], 'tk-1');
+    expect(posts.single.url.path, '/api/ticket');
+  });
+
+  test('a client pointed elsewhere never asks for one', () async {
+    final api = ApiClient(
+        client: MockClient((req) async => http.Response('{"relays":[]}', 200,
+            headers: {'Content-Type': 'application/json'})),
+        baseUrl: 'https://h/api/proxy');
+    await api.geoRelayDirectories();
+    expect(posts, isEmpty);
+  });
+
+  test('touch fetches once and never re-enters itself', () async {
+    SocketTickets.touch();
+    SocketTickets.touch();
+    await SocketTickets.fetch();
+    expect(posts.length, 1);
+    expect(SocketTickets.held, 'tk-1');
+  });
+
   test('a refused fetch opens the socket without a ticket', () async {
     status = 403;
     final u = await SocketTickets.ticketed(

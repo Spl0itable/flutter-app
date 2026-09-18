@@ -10,6 +10,7 @@ import '../../models/nostr_event.dart';
 import '../../services/storage/key_value_store.dart';
 import '../api/api_client.dart';
 import '../api/api_config.dart';
+import '../api/socket_ticket.dart';
 import '../nostr/event_signer.dart';
 import 'attest_badge.dart';
 
@@ -339,11 +340,13 @@ class AttestService {
   String _url() => 'https://$_host/api/attest';
 
   Future<_ApiReply> _post(Map<String, dynamic> body) async {
+    final ticket = await SocketTickets.fetch();
     final resp = await _client.post(
       Uri.parse(_url()),
       headers: {
         'Content-Type': 'application/json',
         ...ApiConfig.defaultHeaders,
+        if (ticket != null) 'X-Nym-Ticket': ticket,
       },
       body: jsonEncode(body),
     );

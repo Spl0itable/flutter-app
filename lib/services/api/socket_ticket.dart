@@ -30,7 +30,10 @@ class SocketTickets {
     }
     final pending = _pending;
     if (pending != null) return pending;
-    final run = _refresh().whenComplete(() => _pending = null);
+    late Future<String?> run;
+    run = Future(_refresh).whenComplete(() {
+      if (identical(_pending, run)) _pending = null;
+    });
     _pending = run;
     return run;
   }
@@ -41,7 +44,7 @@ class SocketTickets {
       final resp = await c
           .post(
             Uri.parse('https://${ApiConfig.apiHost}/api/ticket'),
-            headers: ApiConfig.defaultHeaders,
+            headers: {'User-Agent': ApiConfig.userAgent},
           )
           .timeout(timeout);
       if (resp.statusCode != 200) return held;
@@ -61,6 +64,15 @@ class SocketTickets {
   static Uri apply(Uri url, String? ticket) {
     if (ticket == null || ticket.isEmpty) return url;
     return url.replace(queryParameters: {...url.queryParameters, 't': ticket});
+  }
+
+  static void touch() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_ticket != null && _expiresAt - now > refreshBefore.inMilliseconds) {
+      return;
+    }
+    if (_pending != null) return;
+    fetch().ignore();
   }
 
   static Future<Uri> ticketed(Uri url) async {
