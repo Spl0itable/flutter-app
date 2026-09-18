@@ -46,8 +46,9 @@ class QuickContextItem {
   final QuickContextItemColor color;
 }
 
-/// Color variants for [QuickContextItem] (`.lightning` #f7931a, `.danger`).
-enum QuickContextItemColor { normal, lightning, danger }
+/// Color variants for [QuickContextItem] (`.lightning` #f7931a, `.report`
+/// `--warning`, `.danger`).
+enum QuickContextItemColor { normal, lightning, report, danger }
 
 /// The inline quick-context-menu (`.quick-context-menu`, styles-features.css
 /// :2778-2845): a vertical card (`min-width:200px`, radius 14, `rgba(20,20,35,
@@ -116,6 +117,10 @@ class _QuickContextRowState extends State<_QuickContextRow> {
       case QuickContextItemColor.lightning:
         fg = const Color(0xFFF7931A);
         iconColor = const Color(0xFFF7931A);
+        break;
+      case QuickContextItemColor.report:
+        fg = c.warning;
+        iconColor = c.warning;
         break;
       case QuickContextItemColor.danger:
         fg = c.danger;
