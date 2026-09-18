@@ -135,6 +135,7 @@ List<QuickContextItem> buildQuickContextItems(
     items.add(QuickContextItem(
       label: tr('Report'),
       svg: ctxActionSvg(CtxAction.report),
+      color: QuickContextItemColor.report,
       onTap: () => _report(context, ref, message, fullNym),
     ));
     items.add(QuickContextItem(
