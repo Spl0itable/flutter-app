@@ -276,6 +276,12 @@ class AttestService {
         <String, dynamic>{'challenge': challenge},
       );
       if (result == null) return null;
+      final reason = result['reason'];
+      if (reason is String && reason.isNotEmpty) {
+        lastPlatformRefusal =
+            _platform == 'android' ? 'play-integrity: $reason' : reason;
+        return null;
+      }
       if (_platform == 'ios') {
         final keyId = result['keyId'] as String?;
         final attestation = result['attestation'] as String?;

@@ -120,6 +120,27 @@ void main() {
       expect(svc.tier, AttestTier.attested);
     });
 
+    test('a Play Integrity failure is reported by name', () async {
+      nativeAnswers({'reason': 'PLAY_SERVICES_NOT_FOUND(-6)'});
+      final svc = await fresh('android');
+      await svc.ensureBadge(signer);
+      final enroll = posts.singleWhere((b) => b['action'] == 'enroll');
+      expect(enroll['platform'], 'android');
+      expect(enroll['refusal'], 'play-integrity: PLAY_SERVICES_NOT_FOUND(-6)');
+      expect(svc.lastPlatformRefusal,
+          'play-integrity: PLAY_SERVICES_NOT_FOUND(-6)');
+      expect(svc.tier, AttestTier.challenged);
+    });
+
+    test('an unsupported App Attest device says so', () async {
+      nativeAnswers({'reason': 'app-attest-unsupported'});
+      final svc = await fresh('ios');
+      await svc.ensureBadge(signer);
+      final enroll = posts.singleWhere((b) => b['action'] == 'enroll');
+      expect(enroll['refusal'], 'app-attest-unsupported');
+      expect(svc.tier, AttestTier.challenged);
+    });
+
     test('an Android install without Play Integrity falls back the same way',
         () async {
       nativeAnswers(null);
