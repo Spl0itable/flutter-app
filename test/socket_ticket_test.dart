@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:nym_bar/services/api/api_client.dart';
 import 'package:nym_bar/services/api/api_config.dart';
 import 'package:nym_bar/services/api/socket_ticket.dart';
 
@@ -54,6 +55,32 @@ void main() {
     final u = await SocketTickets.ticketed(Uri.parse('wss://h/api/relay-pool'));
     expect(u.toString(), 'wss://h/api/relay-pool');
     expect(posts, isEmpty);
+  });
+
+  test('a proxy write from the app carries the ticket header', () async {
+    final seen = <http.Request>[];
+    final mock = MockClient((req) async {
+      seen.add(req);
+      if (req.url.path == '/api/ticket') {
+        return http.Response(
+            jsonEncode({
+              'ticket': 'tk-app',
+              'expiresAt': DateTime.now().millisecondsSinceEpoch + 120000,
+            }),
+            200);
+      }
+      return http.Response(
+          jsonEncode({'translatedText': 'hola', 'detectedLanguage': 'en'}),
+          200);
+    });
+    SocketTickets.client = mock;
+    final api = ApiClient(
+      client: mock,
+      baseUrl: 'https://${ApiConfig.apiHost}/api/proxy',
+    );
+    await api.translate('hello', 'es');
+    final write = seen.lastWhere((r) => r.url.queryParameters['action'] == 'translate');
+    expect(write.headers['X-Nym-Ticket'], 'tk-app');
   });
 
   test('a refused fetch opens the socket without a ticket', () async {

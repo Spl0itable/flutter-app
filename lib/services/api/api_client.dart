@@ -885,6 +885,14 @@ class ApiClient {
         if (extra != null) ...extra,
       };
 
+  Future<Map<String, String>> _writeHeaders([Map<String, String>? extra]) async {
+    final ticket = await SocketTickets.fetch();
+    return _headers({
+      if (extra != null) ...extra,
+      if (ticket != null) 'X-Nym-Ticket': ticket,
+    });
+  }
+
   /// UTF-8 text of an HTTP response body. NEVER use `res.body` for wire text:
   /// package:http picks the charset from the Content-Type header and silently
   /// falls back to LATIN-1 when the header carries no `charset=` — and the nym
@@ -942,7 +950,7 @@ class ApiClient {
         jsonEncode({'text': text, 'source': source, 'target': target});
     final res = await _client.post(
       Uri.parse('$_baseUrl?action=translate'),
-      headers: _headers({'Content-Type': 'application/json'}),
+      headers: await _writeHeaders({'Content-Type': 'application/json'}),
       body: payload,
     );
     _trackApiData('translate',
@@ -1034,7 +1042,7 @@ class ApiClient {
   }) async {
     final res = await _client.put(
       Uri.parse(blossomUploadUrl(server)),
-      headers: _headers({
+      headers: await _writeHeaders({
         'Authorization': authHeader,
         'Content-Type': contentType,
       }),
@@ -1062,7 +1070,7 @@ class ApiClient {
     final payload = jsonEncode({'url': sourceUrl});
     final res = await _client.put(
       Uri.parse(blossomMirrorUrl(server)),
-      headers: _headers({
+      headers: await _writeHeaders({
         'Authorization': authHeader,
         'Content-Type': 'application/json',
       }),
@@ -1093,9 +1101,10 @@ class ApiClient {
     String? body,
     String? contentType,
   }) async {
-    Future<http.Response> run(Uri uri, Map<String, String>? headers) =>
+    Future<http.Response> run(Uri uri, Map<String, String>? headers) async =>
         method == 'POST'
-            ? _client.post(uri, headers: headers, body: body)
+            ? _client.post(uri,
+                headers: await _writeHeaders(headers ?? const {}), body: body)
             : _client.get(uri, headers: headers);
     try {
       final res = await run(
