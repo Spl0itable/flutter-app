@@ -9,6 +9,7 @@ import 'package:nym_bar/services/attest/attest_service.dart';
 import 'package:nym_bar/services/nostr/event_signer.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'ticket_stub.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -80,6 +81,7 @@ void main() {
           .toList();
 
   setUp(() {
+    stubTickets();
     posts = [];
     manifestUp = true;
     platformStatus = 200;

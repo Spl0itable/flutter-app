@@ -67,7 +67,6 @@ class ApiConfig {
   /// Default headers sent on every backend API request. The UA header is what
   /// satisfies the `isNymchatClient` gate.
   static Map<String, String> get defaultHeaders {
-    SocketTickets.touch();
     final ticket = SocketTickets.held;
     return {
       'User-Agent': userAgent,

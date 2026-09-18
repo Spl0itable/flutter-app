@@ -11,6 +11,7 @@ import 'package:nym_bar/core/crypto/keys.dart' as keys;
 import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/api/api_client.dart';
 import 'package:nym_bar/services/api/api_config.dart';
+import 'ticket_stub.dart';
 import 'package:nym_bar/services/nostr/event_signer.dart';
 import 'package:nym_bar/services/nostr/identity_service.dart';
 import 'package:nym_bar/services/nostr/nostr_service.dart';
@@ -38,6 +39,7 @@ NostrEvent _ev({
     );
 
 void main() {
+  setUp(stubTickets);
   // ---------------------------------------------------------------------------
   // 1. Proxy frame builders / parsers round-trip (§4.6).
   // ---------------------------------------------------------------------------
