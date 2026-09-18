@@ -13,6 +13,7 @@ import '../../models/nostr_event.dart';
 import '../nostr/event_signer.dart';
 import '../relay/relay_stats.dart';
 import 'api_config.dart';
+import 'socket_ticket.dart';
 
 /// Factory that opens a [WebSocketChannel] to the `/api` socket. Overridable in
 /// tests so no real socket is opened (mirrors `WebSocketChannelFactory` in
@@ -338,7 +339,7 @@ class ApiSocket {
     _connecting = completer;
     try {
       _resetChannel();
-      final ch = _factory(_url);
+      final ch = _factory(await SocketTickets.ticketed(_url));
       _channel = ch;
       var ready = false;
       Timer? timer;
