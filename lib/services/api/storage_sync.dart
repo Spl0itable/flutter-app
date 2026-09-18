@@ -14,7 +14,8 @@ import '../../features/groups/group_logic.dart'
     show kPmDepositQueueMax, kPmDepositFlushMs, kPmDepositFlushJitterMs,
         kPmDepositBacklogMs, kPmDepositBatchMin, kPmDepositBatchMax;
 import '../../core/crypto/pq.dart' as pq;
-import '../../features/identity/pq_registry.dart' show pqSelfCandidates;
+import '../../features/identity/pq_registry.dart'
+    show pqRootCandidates, pqSelfCandidates;
 import '../../features/identity/pq_root.dart';
 import '../nostr/event_signer.dart';
 import '../storage/key_value_store.dart';
@@ -1041,6 +1042,9 @@ class StorageSync {
   /// either the hashed column or the bare routing name.
   void _notePqRootColumns(Map<dynamic, dynamic> cats) {
     _pqRootLoadSucceeded = true;
+    _pqRootRowPresent = false;
+    _pqRootRowHybrid = false;
+    _lastInboundPqRoot = null;
     final hashed = d1Category(pqRootCategory);
     for (final k in cats.keys) {
       final name = k.toString();
@@ -1050,9 +1054,20 @@ class StorageSync {
       final blob = entry['blob'];
       if (blob is String && blob.isNotEmpty) {
         _pqRootRowPresent = true;
+        _pqRootRowHybrid = pq.isPqPayload(blob) || pq.isPq2Payload(blob);
         return;
       }
     }
+  }
+
+  bool _pqRootRowHybrid = false;
+
+  bool get pqRootRowHybrid => _pqRootRowHybrid;
+
+  bool get pqRootRowUnreadable {
+    if (!_pqRootRowPresent) return false;
+    final rec = pqRootRecord;
+    return rec == null || !rec.isValid;
   }
 
   /// Publishes the root record. Forced classical: sealing this row to a key
@@ -1066,6 +1081,7 @@ class StorageSync {
     if (ok) {
       _lastInboundPqRoot = record.toJson();
       _pqRootRowPresent = true;
+      _pqRootRowHybrid = false;
     }
     return ok;
   }
@@ -2665,15 +2681,26 @@ class StorageSync {
     final root = await _pqRoot();
     if (_pqSelfKeys.isNotEmpty) return _pqSelfKeys;
     final signer = _signer;
-    if (signer is! LocalSigner) return const [];
     final cached = _derivedPqSelfKeys;
     if (cached != null) return cached;
+    final epoch = _pqEpochProvider?.call() ?? 0;
     try {
+      if (signer is! LocalSigner) {
+        if (root == null) return const [];
+        return _derivedPqSelfKeys = pqRootCandidates(root, epoch);
+      }
       return _derivedPqSelfKeys =
-          pqSelfCandidates(signer.privkey, 0, root: root);
+          pqSelfCandidates(signer.privkey, epoch, root: root);
     } catch (_) {
       return const [];
     }
+  }
+
+  int Function()? _pqEpochProvider;
+
+  void setPqEpochProvider(int Function() provider) {
+    _pqEpochProvider = provider;
+    _derivedPqSelfKeys = null;
   }
 
   /// Reads the identity's root secret, once per instance. Null means the

@@ -227,10 +227,14 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
     // Either signal opens this: an upgrade that should save its code, or a
     // device that cannot read the account until it pastes one.
     final linkPending = ctrl.pqRootLinkPromptPending;
-    if (!ctrl.pqUpgradeNoticePending && !linkPending) return;
+    final backupPending = ctrl.pqRootBackupPending && ctrl.pqRootHeld;
+    if (!ctrl.pqUpgradeNoticePending && !linkPending && !backupPending) return;
     _pqNoticeShown = true;
     await ctrl.dismissPqUpgradeNotice();
     if (linkPending) await ctrl.dismissPqRootLinkPrompt();
+    if (backupPending && !ctrl.pqRootLinkNeeded) {
+      await ctrl.dismissPqRootBackupNotice();
+    }
     if (!mounted) return;
     final linkNeeded = ctrl.pqRootLinkNeeded;
     if (linkNeeded) {
