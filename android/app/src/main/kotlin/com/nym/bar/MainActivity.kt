@@ -79,9 +79,12 @@ class MainActivity : FlutterFragmentActivity() {
                     if (challenge.isNullOrEmpty()) {
                         result.success(null)
                     } else {
-                        PlayIntegrity.requestToken(applicationContext, challenge) { token ->
+                        PlayIntegrity.requestToken(applicationContext, challenge) { token, reason ->
                             runOnUiThread {
-                                result.success(if (token == null) null else mapOf("token" to token))
+                                result.success(
+                                    if (token != null) mapOf("token" to token)
+                                    else mapOf("reason" to (reason ?: "unknown"))
+                                )
                             }
                         }
                     }

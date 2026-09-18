@@ -10,7 +10,6 @@ import '../../models/nostr_event.dart';
 import '../../services/storage/key_value_store.dart';
 import '../api/api_client.dart';
 import '../api/api_config.dart';
-import '../api/socket_ticket.dart';
 import '../nostr/event_signer.dart';
 import 'attest_badge.dart';
 
@@ -167,8 +166,7 @@ class AttestService {
       var issued = await _challenge(pubkey);
       if (issued == null) throw StateError('no challenge');
 
-      final platformProof =
-          await _platformProof(issued['challenge'] as String);
+      final platformProof = await _platformProof(issued['challenge'] as String);
       Map<String, dynamic>? res;
       if (platformProof != null) {
         try {
@@ -278,6 +276,12 @@ class AttestService {
         <String, dynamic>{'challenge': challenge},
       );
       if (result == null) return null;
+      final reason = result['reason'];
+      if (reason is String && reason.isNotEmpty) {
+        lastPlatformRefusal =
+            _platform == 'android' ? 'play-integrity: $reason' : reason;
+        return null;
+      }
       if (_platform == 'ios') {
         final keyId = result['keyId'] as String?;
         final attestation = result['attestation'] as String?;
@@ -317,8 +321,7 @@ class AttestService {
     return {
       'platform': native ? _platform : 'web',
       'build': build,
-      if (native)
-        'refusal': lastPlatformRefusal ?? 'no-platform-proof',
+      if (native) 'refusal': lastPlatformRefusal ?? 'no-platform-proof',
     };
   }
 
@@ -340,13 +343,11 @@ class AttestService {
   String _url() => 'https://$_host/api/attest';
 
   Future<_ApiReply> _post(Map<String, dynamic> body) async {
-    final ticket = await SocketTickets.fetch();
     final resp = await _client.post(
       Uri.parse(_url()),
       headers: {
         'Content-Type': 'application/json',
         ...ApiConfig.defaultHeaders,
-        if (ticket != null) 'X-Nym-Ticket': ticket,
       },
       body: jsonEncode(body),
     );

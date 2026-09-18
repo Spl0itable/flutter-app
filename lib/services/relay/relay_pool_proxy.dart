@@ -10,7 +10,6 @@ import '../../features/messages/spam_filter.dart';
 import '../nostr/event_provenance.dart';
 import '../../models/nostr_event.dart';
 import '../api/api_config.dart';
-import '../api/socket_ticket.dart';
 import 'relay_connection.dart'
     show WebSocketChannelFactory, defaultRelayChannelFactory;
 import 'relay_message.dart';
@@ -412,28 +411,12 @@ class _ShardSocket {
 
   bool get isOpen => _open;
 
-  bool _opening = false;
-
   void connect() {
     _closedByUser = false;
-    if (_open || _opening) return;
-    final target = Uri.parse(url);
-    if (!SocketTickets.appliesTo(target)) {
-      _openWith(target);
-      return;
-    }
-    _opening = true;
-    SocketTickets.ticketed(target).then((ticketed) {
-      _opening = false;
-      if (_closedByUser || _open) return;
-      _openWith(ticketed);
-    });
-  }
-
-  void _openWith(Uri target) {
+    if (_open) return;
     _open = false;
     try {
-      final ch = channelFactory(target);
+      final ch = channelFactory(Uri.parse(url));
       _channel = ch;
       _sub = ch.stream.listen(
         _onData,

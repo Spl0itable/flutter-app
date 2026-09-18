@@ -11,7 +11,6 @@ import 'core/theme/nym_theme.dart';
 import 'features/identity/vault_settings_modal.dart' show identityVaultProvider;
 import 'features/identity/vault_boot_unlock.dart';
 import 'services/api/http_overrides.dart';
-import 'services/api/socket_ticket.dart';
 import 'services/platform/background_refresh.dart';
 import 'services/storage/key_value_store.dart';
 import 'state/app_state.dart';
@@ -21,7 +20,6 @@ import 'state/settings_provider.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = NymHttpOverrides();
-  SocketTickets.touch();
 
   // The web-of-trust spam gate is safe to enable now that channel sends carry
   // the NIP-13 PoW floor (so Nymchat-client messages self-attest) and the trust
