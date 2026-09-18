@@ -39,7 +39,11 @@ class ApiConfig {
   /// the same worker.
   static const String appUserAgent = 'NymchatApp/$appVersion';
 
-  static final String dartUserAgent = HttpClient().userAgent ?? 'Dart (dart:io)';
+  static final String dartUserAgent = HttpOverrides.runWithHttpOverrides(
+        () => HttpClient().userAgent,
+        _PlainHttpOverrides(),
+      ) ??
+      'Dart (dart:io)';
 
   static final String userAgent = '$dartUserAgent, $appUserAgent';
 
@@ -64,3 +68,5 @@ class ApiConfig {
         'User-Agent': userAgent,
       };
 }
+
+class _PlainHttpOverrides extends HttpOverrides {}
