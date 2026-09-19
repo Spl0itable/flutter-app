@@ -4313,6 +4313,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (deleted) onDeletedIdsChanged?.call();
   }
 
+  void retractMessage(String eventId) {
+    if (eventId.isEmpty) return;
+    _applyVerifiedDeletion(eventId);
+    onDeletedIdsChanged?.call();
+  }
+
   /// The stored author of the message with [id] (event id or PM/group
   /// `nymMessageId`), or null when we don't hold it
   /// (`_findMessageAuthor`, nostr-core.js:2019).

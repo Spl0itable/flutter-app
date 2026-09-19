@@ -293,6 +293,10 @@ sealed class PoolMessage {
           });
         }
         return PoolStatus(connected, latency);
+      case 'POOL:RETRACT':
+        final retractId = arr.length > 1 ? arr[1]?.toString() ?? '' : '';
+        if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(retractId)) return null;
+        return PoolRetract(retractId, arr.length > 2 ? arr[2]?.toString() : null);
       case 'POOL:RELAY_BAN':
         // ["POOL:RELAY_BAN", relayUrl, reason?] — the proxy permanently dropped
         // this relay (relays.js:2117 `_permanentlyBlacklistRelay`).
@@ -361,6 +365,12 @@ class PoolRelayBan extends PoolMessage {
   const PoolRelayBan(this.url, this.reason);
   final String url;
   final String reason;
+}
+
+class PoolRetract extends PoolMessage {
+  const PoolRetract(this.eventId, this.reason);
+  final String eventId;
+  final String? reason;
 }
 
 /// A single shard's WebSocket to `/api/relay-pool`, with per-shard reconnect
@@ -625,6 +635,8 @@ class RelayPoolProxy implements PoolTransport {
   /// background restore to promote a probe proxy that has come up. Like
   /// [onProxyUnreachable], settable so it stays off the [PoolTransport] interface.
   void Function()? onProxyConnected;
+
+  void Function(String eventId)? onEventRetracted;
 
   /// Consecutive pre-confirm shard-connect failures that trip
   /// [onProxyUnreachable] (PWA threshold: 2).
@@ -1299,6 +1311,9 @@ class RelayPoolProxy implements PoolTransport {
         // PWA's `_permanentlyBlacklistRelay` effect on the shard layout so any
         // future rebuild excludes it.
         _permanentBlacklist.add(url);
+        break;
+      case PoolRetract(:final eventId):
+        onEventRetracted?.call(eventId);
         break;
       case PoolPing():
         // Keepalive — no PONG; liveness is implicit (relays.js:2112).

@@ -616,6 +616,7 @@ class NostrController {
           onEvent: _enqueueLiveEvent,
           onConnectionChanged: _onConnectionChanged,
           onGiftWrap: _onGiftWrap,
+          onEventRetracted: _onEventRetracted,
         ),
         channelMode: !_ref.read(settingsProvider).groupChatPMOnlyMode,
         vouchAuthors: bootState.nymchatPubkeys,
@@ -783,6 +784,10 @@ class NostrController {
   /// `fetchNamedChannelActivityFromD1`) from the connect→subscribe chain
   /// (relays.js:2761) and on every reconnect. The discovery is throttled ~30s
   /// internally so a flapping connection can't hammer the worker.
+  void _onEventRetracted(String eventId) {
+    _ref.read(appStateProvider.notifier).retractMessage(eventId);
+  }
+
   void _onConnectionChanged(int count) {
     final wasOffline = _ref.read(appStateProvider).connectedRelays == 0;
     _ref.read(appStateProvider.notifier).setConnectedRelays(count);
