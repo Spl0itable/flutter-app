@@ -40,7 +40,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    nymVouchSpamGateEnabled = true;
+    nymVouchSpamGateEnabled = false;
     appSpamFilterEnabled = true;
     appSpamFilterAggressive = true;
   });
@@ -57,8 +57,13 @@ void main() {
     expect(c.read(appStateProvider).clientGatesActive, isFalse);
 
     n.setProxyMode(false);
+    expect(visibleMessagesFor(c.read(appStateProvider), '#nymchat').length, 1,
+        reason: 'the first-message hide is off in direct mode too');
+    nymVouchSpamGateEnabled = true;
     expect(visibleMessagesFor(c.read(appStateProvider), '#nymchat').length, 0,
-        reason: 'in direct mode the web-of-trust gate still hides an untrusted stranger');
+        reason: 'only the flag nothing sets would bring it back, and only off the proxy');
+    n.setProxyMode(true);
+    expect(visibleMessagesFor(c.read(appStateProvider), '#nymchat').length, 1);
     c.dispose();
   });
 

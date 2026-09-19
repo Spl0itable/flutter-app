@@ -91,17 +91,12 @@ const Set<String> kTrustRootPubkeys = {
 };
 
 /// Master switch for the web-of-trust SPAM GATE (the [AppState.isMessageFiltered]
-/// → [AppState.isSpamGated] visibility cut). HELD OFF until two prerequisites
-/// land, or it would hide legitimate messages:
-///   1. Flutter must mine the NIP-13 PoW floor on channel SENDS (it currently
-///      does not — `minePow` is never called), so Flutter-origin messages count
-///      as a Nymchat-client self-attestation the way every PWA message does;
-///      otherwise the gate hides them. (Off-thread PoW mining is part of the
-///      isolate-offload work.)
-///   2. The trust graph must persist + rebuild from D1, so a fresh session isn't
-///      gating off an almost-empty graph.
-/// The trust graph still OBSERVES / PUBLISHES / INGESTS vouches live regardless;
-/// only the message-hiding is gated behind this flag (default off).
+/// → [AppState.isSpamGated] visibility cut), which hid a stranger's messages
+/// until they had posted twice, carried the NIP-13 PoW floor or were vouched.
+/// Off everywhere now: the relay-pool spam engine reviews every message, and
+/// the gate hid first-time posters on any device whose trust graph was still
+/// empty. The trust graph still OBSERVES / PUBLISHES / INGESTS vouches; only
+/// the message-hiding sits behind this flag, which nothing turns on.
 bool nymVouchSpamGateEnabled = false;
 
 /// Live mirror of the heuristic CONTENT spam filter flags (PWA
