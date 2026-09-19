@@ -207,6 +207,7 @@ class NostrHandlers {
     this.onEvent,
     this.onConnectionChanged,
     this.onGiftWrap,
+    this.onEventRetracted,
   });
 
   /// Every verified inbound event (already signature-checked by the pool).
@@ -215,6 +216,8 @@ class NostrHandlers {
 
   /// A decrypted kind-1059 gift wrap addressed to us.
   final void Function(GiftWrapUnwrapped unwrapped)? onGiftWrap;
+
+  final void Function(String eventId)? onEventRetracted;
 }
 
 /// Owns the relay pool and wires it to the crypto + identity layers. Subscribes
@@ -527,6 +530,7 @@ class NostrService {
     _profileAuthors = List<String>.unmodifiable(profileAuthors);
     _pqAuthors = _sanitizeVouchAuthors(pqAuthors);
     _wireProxyFallback();
+    _wireRetract(_pool);
     _loadQuietList();
     pool.connectAll();
 
@@ -910,6 +914,12 @@ class NostrService {
     }
   }
 
+  void _wireRetract(PoolTransport p) {
+    if (p is RelayPoolProxy) {
+      p.onEventRetracted = (id) => _handlers?.onEventRetracted?.call(id);
+    }
+  }
+
   /// The proxy reported it can't reach its endpoint (2 consecutive pre-connect
   /// failures). Swap to a direct [RelayPool] and start the background restore.
   void _onProxyUnreachable() {
@@ -1075,6 +1085,7 @@ class NostrService {
       _pool = restored;
       restored.geoOriginAllows = geoOriginAllowsEvent;
       restored.onProxyUnreachable = _onProxyUnreachable; // future blips
+      _wireRetract(restored);
       for (final entry in live.values) {
         if (identical(entry.sub, _mainSub)) continue;
         restored.replaySubscription(entry.sub, entry.filters);

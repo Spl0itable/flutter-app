@@ -195,6 +195,31 @@ void main() {
     await proxy.disconnectAll();
   });
 
+  test('a POOL:RETRACT frame reaches the retraction callback', () async {
+    final retracted = <String>[];
+    final channels = <_FakeChannel>[];
+    final proxy = RelayPoolProxy(
+      relays: RelayConfig.defaultRelays,
+      dmRelays: RelayConfig.defaultRelays,
+      poolUrl: 'wss://h/api/relay-pool',
+      channelFactory: (_) {
+        final ch = _FakeChannel();
+        channels.add(ch);
+        return ch;
+      },
+    );
+    proxy.onEventRetracted = retracted.add;
+    proxy.connectAll();
+    final id = 'e' * 64;
+    channels.first.inject(jsonEncode(['POOL:RETRACT', id, 'spam']));
+    channels.first.inject(jsonEncode(['POOL:RETRACT', 'not-an-id']));
+    await Future<void>.delayed(Duration.zero);
+    expect(retracted, [id]);
+    expect(PoolMessage.parse(jsonEncode(['POOL:RETRACT', id])), isA<PoolRetract>());
+    expect(PoolMessage.parse(jsonEncode(['POOL:RETRACT', 'zz'])), isNull);
+    await proxy.disconnectAll();
+  });
+
   test('a shard that answers keeps a sibling shard from declaring the host down',
       () async {
     var unreachable = 0;
