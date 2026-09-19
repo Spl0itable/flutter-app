@@ -367,6 +367,10 @@ class NostrController {
   /// `nym.relayStats`). Null before boot → the modal renders the empty state.
   RelayStats? get relayStats => _service?.relayStats;
 
+  bool get isProxyMode => _service?.isProxyMode ?? true;
+
+  bool get isProxyFallbackActive => _service?.isFallbackActive ?? false;
+
   // --- Slash commands -------------------------------------------------------
 
   /// System-message sink (`displaySystemMessage`). The composer/chat UI
@@ -782,6 +786,10 @@ class NostrController {
   void _onConnectionChanged(int count) {
     final wasOffline = _ref.read(appStateProvider).connectedRelays == 0;
     _ref.read(appStateProvider.notifier).setConnectedRelays(count);
+    final svc = _service;
+    if (svc != null) {
+      _ref.read(appStateProvider.notifier).setProxyMode(svc.isProxyMode);
+    }
     if (count > 0 && wasOffline) {
       // Reconnect edge → re-run the FULL D1 backfill (PWA
       // `backfillFromD1OnReconnect`, relays.js:2761/2764): PMs, group history,
