@@ -2819,9 +2819,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
       return;
     }
+    if (botThreadForeign(m, list)) {
+      _holdBotThreadOrphan(m);
+      return;
+    }
     m.seq = _nextIngestSeq();
 
     _insertMessageSorted(key, list, m);
+    _adoptBotThreadOrphans(key, list, m);
 
     // Maintain the conversation meta entry. The PWA's `addPMConversation`
     // prefers the users-map nym over the message author on EVERY message
@@ -4671,6 +4676,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
     if (added) list.sort(compareMessages);
+    if (added && key.startsWith('pm-')) pruneForeignBotThreads(key);
     // Bound a hydrated public channel to the same retention cap as live ingest,
     // so a large cached history can't reintroduce the unbounded list.
     if (isChannelKey) _capChannelHistory(list);
@@ -4682,6 +4688,68 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
     }
     return added;
+  }
+
+  final Map<String, List<Message>> _botThreadOrphans = <String, List<Message>>{};
+
+  bool holdForeignBotThread(Message m) {
+    final peer = m.conversationPubkey;
+    if (peer == null) return false;
+    final key =
+        _canonicalPmStorageKey(m.conversationKey ?? PmLogic.pmStorageKey(peer));
+    final list = state.messages[key] ?? const <Message>[];
+    if (!botThreadForeign(m, list)) return false;
+    _holdBotThreadOrphan(m);
+    return true;
+  }
+
+  void _holdBotThreadOrphan(Message m) {
+    final root = m.threadRoot;
+    if (root == null || root.isEmpty) return;
+    final held = _botThreadOrphans.putIfAbsent(root, () => <Message>[]);
+    final nymId = m.nymMessageId;
+    if (held.any((e) =>
+        e.id == m.id ||
+        (nymId != null && nymId.isNotEmpty && e.nymMessageId == nymId))) {
+      return;
+    }
+    held.add(m);
+    if (held.length > 50) held.removeRange(0, held.length - 50);
+    if (_botThreadOrphans.length > 500) {
+      _botThreadOrphans.remove(_botThreadOrphans.keys.first);
+    }
+  }
+
+  int _adoptBotThreadOrphans(String key, List<Message> list, Message root) {
+    if (root.threadRoot != null || _botThreadOrphans.isEmpty) return 0;
+    final held = _botThreadOrphans.remove(threadKeyForMessage(root));
+    if (held == null || held.isEmpty) return 0;
+    var added = 0;
+    for (final m in held) {
+      final peer = m.conversationPubkey;
+      if (peer == null) continue;
+      final mine = _canonicalPmStorageKey(
+          m.conversationKey ?? PmLogic.pmStorageKey(peer));
+      if (mine != key) continue;
+      if (list.any((e) => e.id == m.id)) continue;
+      m.seq = _nextIngestSeq();
+      _insertMessageSorted(key, list, m);
+      added++;
+    }
+    if (added > 0) _scheduleEmit();
+    return added;
+  }
+
+  int pruneForeignBotThreads(String key) {
+    final list = state.messages[key];
+    if (list == null || list.isEmpty) return 0;
+    final drop = Set<Message>.identity();
+    for (final m in list) {
+      if (botThreadForeign(m, list)) drop.add(m);
+    }
+    if (drop.isEmpty) return 0;
+    list.removeWhere(drop.contains);
+    return drop.length;
   }
 
   /// Hydrates cached profiles into the user store (boot from CacheStore).
@@ -5377,6 +5445,9 @@ List<Message> visibleMessagesFor(AppState s, String storageKey) {
         .where((m) => m.threadRoot == null || !rootIds.contains(m.threadRoot))
         .toList();
   }
+  if (visible.any((m) => m.threadRoot != null)) {
+    visible = visible.where((m) => !botThreadForeign(m, list)).toList();
+  }
   visible.sort(compareMessages);
   return visible;
 }
@@ -5385,6 +5456,19 @@ List<Message> visibleMessagesFor(AppState s, String storageKey) {
 /// `nymMessageId` for PM/group messages, the event id for channel messages.
 String threadKeyForMessage(Message m) =>
     (m.isPM || m.isGroup) ? (m.nymMessageId ?? m.id) : m.id;
+
+bool botThreadForeign(Message m, List<Message> list) {
+  if (!m.isPM || m.isGroup) return false;
+  final root = m.threadRoot;
+  if (root == null || root.isEmpty) return false;
+  final peer = m.conversationPubkey;
+  if (peer == null || peer.toLowerCase() != kNymbotPubkey) return false;
+  for (final e in list) {
+    if (identical(e, m)) continue;
+    if (e.threadRoot == null && threadKeyForMessage(e) == root) return false;
+  }
+  return true;
+}
 
 /// Reply count per thread root for one conversation store (raw, unfiltered —
 /// counts include replies from senders the viewer later blocked only until

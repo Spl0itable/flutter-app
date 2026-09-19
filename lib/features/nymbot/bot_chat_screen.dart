@@ -262,6 +262,13 @@ class _BotChatScreenState extends ConsumerState<BotChatScreen> {
           if (m.threadRoot == null || !rootIds.contains(m.threadRoot)) m,
       ];
     }
+    if (msgs.any((m) => m.threadRoot != null)) {
+      final all = msgs;
+      msgs = [
+        for (final m in all)
+          if (!botThreadForeign(m, all)) m,
+      ];
+    }
 
     // `.messages-container` bg: black@0.15 dark / white@0.3 light.
     final containerColor = c.isLight

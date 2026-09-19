@@ -3488,6 +3488,7 @@ class NostrController {
       }
       m.isBot = true;
     }
+    if (appState.holdForeignBotThread(m)) return;
     appState.ingestPMMessage(m);
     _maybeNotifyMessage(m, isGroup: false);
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
