@@ -5145,8 +5145,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
         addSystemMessage(tr(
             'Your message {reason} and was hidden locally. It was still sent.',
             {'reason': reason}));
-      } else if (SpamFilter.isSpamMessage(trimmed,
-          enabled: appSpamFilterEnabled, aggressive: appSpamFilterAggressive)) {
+      } else if (state.clientGatesActive &&
+          SpamFilter.isSpamMessage(trimmed,
+              enabled: appSpamFilterEnabled,
+              aggressive: appSpamFilterAggressive)) {
         // Heuristic spam → the message is NOT hidden from us (own spam is not
         // filtered), but a self-only line explains it was filtered for everyone
         // else, with a "Report false positive" action (messages.js:643-647).
