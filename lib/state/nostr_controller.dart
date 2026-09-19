@@ -585,6 +585,7 @@ class NostrController {
       _service = service;
       final attest =
           _attest ??= AttestService(kv: _ref.read(keyValueStoreProvider));
+      appAttestAuthority = attest.authorityPubkey;
       final selfPubkey = signer?.pubkey;
       if (selfPubkey != null && attest.restore(selfPubkey)) {
         service.attestBadge = attest.badge;
@@ -879,6 +880,7 @@ class NostrController {
     if (service == null || signer == null) return;
     final attest =
         _attest ??= AttestService(kv: _ref.read(keyValueStoreProvider));
+    appAttestAuthority = attest.authorityPubkey;
     await attest.ensureBadge(signer);
     service.attestBadge = attest.badge;
     appAttestAuthority = attest.authorityPubkey;
