@@ -4,7 +4,6 @@ import 'package:local_auth/local_auth.dart';
 
 import '../../core/theme/nym_colors.dart';
 import '../../services/storage/secure_store.dart';
-import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../i18n/i18n.dart';
 import 'identity_vault.dart' show SecureStoreLike;
@@ -193,39 +192,20 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
   Widget build(BuildContext context) {
     final c = context.nym;
     final isBio = _isBiometric;
-    // Boot unlock is a `.modal active nm-vault-overlay` — the `.modal` overlay
-    // over the page `--bg`: glass default rgba(0,0,0,0.7) (styles-chat.css:
-    // 1974); `body.solid-ui .modal { rgba(0,0,0,0.75) }` and
-    // `body.solid-ui.light-mode .modal { rgba(0,0,0,0.45) }`
-    // (styles-themes-responsive.css:1630-1636) — with a floating
-    // `.modal-content nm-vault-box` card (420 max, padding 32).
-    final solidUi = ref.watch(settingsProvider.select((s) => s.solidUi));
-    final overlay = !solidUi
-        ? Colors.black.withValues(alpha: 0.7)
-        : c.isLight
-            ? const Color(0x73000000) // black @ 0.45
-            : const Color(0xBF000000); // black @ 0.75
-    return Scaffold(
-      backgroundColor: Color.alphaBlend(overlay, c.bg),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Material(
-              color: Colors.transparent,
-              child: ModalChrome.box(
-                c,
-                child: Padding(
-                  padding: const EdgeInsets.all(32),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: _failMessage != null
-                        ? _errorChildren(c)
-                        : _promptChildren(c, isBio),
-                  ),
-                ),
+    return Material(
+      color: c.bg,
+      child: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: _failMessage != null
+                    ? _errorChildren(c)
+                    : _promptChildren(c, isBio),
               ),
             ),
           ),
