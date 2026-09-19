@@ -2821,10 +2821,12 @@ class NostrController {
   void _observeMessageTrust(NostrEvent event) {
     final selfPk = _identity?.pubkey ?? '';
     if (event.pubkey.isEmpty || event.pubkey == selfPk) return;
-    final earnedTrust = _ref
-        .read(appStateProvider.notifier)
-        .trackPubkeyMessage(event.pubkey, event.id);
-    if (earnedTrust) _scheduleTrustPersist();
+    if (nymVouchSpamGateEnabled) {
+      final earnedTrust = _ref
+          .read(appStateProvider.notifier)
+          .trackPubkeyMessage(event.pubkey, event.id);
+      if (earnedTrust) _scheduleTrustPersist();
+    }
     if (pow.validatePow(event, _nymchatPowFloor)) {
       _observeNymchatPubkey(event.pubkey);
     }

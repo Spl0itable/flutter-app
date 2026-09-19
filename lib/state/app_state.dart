@@ -91,17 +91,12 @@ const Set<String> kTrustRootPubkeys = {
 };
 
 /// Master switch for the web-of-trust SPAM GATE (the [AppState.isMessageFiltered]
-/// → [AppState.isSpamGated] visibility cut). HELD OFF until two prerequisites
-/// land, or it would hide legitimate messages:
-///   1. Flutter must mine the NIP-13 PoW floor on channel SENDS (it currently
-///      does not — `minePow` is never called), so Flutter-origin messages count
-///      as a Nymchat-client self-attestation the way every PWA message does;
-///      otherwise the gate hides them. (Off-thread PoW mining is part of the
-///      isolate-offload work.)
-///   2. The trust graph must persist + rebuild from D1, so a fresh session isn't
-///      gating off an almost-empty graph.
-/// The trust graph still OBSERVES / PUBLISHES / INGESTS vouches live regardless;
-/// only the message-hiding is gated behind this flag (default off).
+/// → [AppState.isSpamGated] visibility cut), which hid a stranger's messages
+/// until they had posted twice, carried the NIP-13 PoW floor or were vouched.
+/// Off everywhere now: the relay-pool spam engine reviews every message, and
+/// the gate hid first-time posters on any device whose trust graph was still
+/// empty. The trust graph still OBSERVES / PUBLISHES / INGESTS vouches; only
+/// the message-hiding sits behind this flag, which nothing turns on.
 bool nymVouchSpamGateEnabled = false;
 
 /// Live mirror of the heuristic CONTENT spam filter flags (PWA
@@ -318,6 +313,14 @@ class AppState {
 
   final bool proxyMode;
 
+  /// Whether the app's own automatic anti-spam heuristics apply. Through the
+  /// relay-pool proxy the pool and the spam engine already filter every
+  /// channel message, so the client-side web-of-trust gate, campaign
+  /// detector, content heuristics and gibberish-nym filter only run in direct
+  /// mode. Explicit user choices (blocks, keywords, filter packs, the PoW
+  /// floor, the verified-app filter) apply in both modes.
+  bool get clientGatesActive => !proxyMode;
+
   /// Monotonic counter bumped whenever something the MESSAGE LIST renders
   /// (messages, edits, deletions, reactions, zaps, polls) changes. Ambient
   /// churn that the list does NOT render — typing indicators, presence, unread
@@ -504,7 +507,7 @@ class AppState {
     // to content filtering — they carry no sender and must always show.
     if (m.isSystemRow) return false;
     if (blockedUsers.contains(m.pubkey)) return true;
-    if (!m.isOwn && isAutoMuted(m.pubkey)) return true;
+    if (!m.isOwn && clientGatesActive && isAutoMuted(m.pubkey)) return true;
     // Keyword hits hide on BOTH sides: a non-own match, and our OWN message that
     // tripped a blocked keyword (hidden locally though still sent — the PWA's
     // own-message `return`, messages.js:640-641).
@@ -520,7 +523,8 @@ class AppState {
     // Heuristic content spam — incoming-only (own-message spam is surfaced as a
     // self-only system notice instead, see [sendLocal]). Mirrors the `spamHit`
     // term of the PWA's non-own hide branch (messages.js:636,648).
-    if (!m.isOwn &&
+    if (clientGatesActive &&
+        !m.isOwn &&
         SpamFilter.isSpamMessage(m.content,
             enabled: appSpamFilterEnabled,
             aggressive: appSpamFilterAggressive)) {
@@ -529,7 +533,8 @@ class AppState {
     // Web-of-trust spam gate — only applied when explicitly enabled (see
     // [nymVouchSpamGateEnabled]); held off until PoW-on-send + graph persistence
     // exist so it can't hide legitimate messages on a fresh session.
-    if (nymVouchSpamGateEnabled &&
+    if (clientGatesActive &&
+        nymVouchSpamGateEnabled &&
         isSpamGated(m,
             verifiedDeveloper: kVerifiedDeveloperPubkey,
             verifiedBots: kVerifiedBotPubkeys)) {
@@ -556,8 +561,9 @@ class AppState {
     if (m.isSystemRow) return false;
     if (m.isOwn) return false;
     if (blockedUsers.contains(m.pubkey)) return false;
-    if (isAutoMuted(m.pubkey)) return false;
-    if (nymVouchSpamGateEnabled &&
+    if (clientGatesActive && isAutoMuted(m.pubkey)) return false;
+    if (clientGatesActive &&
+        nymVouchSpamGateEnabled &&
         isSpamGated(m,
             verifiedDeveloper: kVerifiedDeveloperPubkey,
             verifiedBots: kVerifiedBotPubkeys)) {
@@ -2031,8 +2037,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
         validatedPowBits(e.tags, e.id) < appPowFilterBits) {
       return;
     }
-    if (e.pubkey != state.selfPubkey && state.isAutoMuted(e.pubkey)) return;
-    if (e.pubkey != state.selfPubkey &&
+    if (state.clientGatesActive &&
+        e.pubkey != state.selfPubkey &&
+        state.isAutoMuted(e.pubkey)) {
+      return;
+    }
+    if (state.clientGatesActive &&
+        e.pubkey != state.selfPubkey &&
         !state.friends.contains(e.pubkey) &&
         !kVerifiedBotPubkeys.contains(e.pubkey)) {
       final verdict = crossContentFlood.check(e.content, e.pubkey,
@@ -5134,8 +5145,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
         addSystemMessage(tr(
             'Your message {reason} and was hidden locally. It was still sent.',
             {'reason': reason}));
-      } else if (SpamFilter.isSpamMessage(trimmed,
-          enabled: appSpamFilterEnabled, aggressive: appSpamFilterAggressive)) {
+      } else if (state.clientGatesActive &&
+          SpamFilter.isSpamMessage(trimmed,
+              enabled: appSpamFilterEnabled,
+              aggressive: appSpamFilterAggressive)) {
         // Heuristic spam → the message is NOT hidden from us (own spam is not
         // filtered), but a self-only line explains it was filtered for everyone
         // else, with a "Report false positive" action (messages.js:643-647).
@@ -5387,7 +5400,8 @@ final usersProvider = Provider<Map<String, User>>((ref) {
   // spamFilterEnabled && spamFilterAggressive — nostr-core.js:944-945). It runs
   // even with empty block sets, so the no-block fast-path is only valid when it
   // cannot fire.
-  final gibberishActive = appSpamFilterEnabled && appSpamFilterAggressive;
+  final gibberishActive =
+      s.clientGatesActive && appSpamFilterEnabled && appSpamFilterAggressive;
   if (s.blockedUsers.isEmpty && s.blockedKeywords.isEmpty && !gibberishActive) {
     // Return a FRESH O(1) view, not the raw `s.users`, so this provider's value
     // identity changes on every `AppState` emit. `_ingestProfile` (and the
