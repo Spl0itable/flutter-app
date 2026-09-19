@@ -276,6 +276,7 @@ class AppState {
     required this.unreadCounts,
     required this.view,
     this.connectedRelays = 0,
+    this.proxyMode = true,
     this.displayRev = 0,
     Map<String, int>? typing,
     Map<String, Poll>? polls,
@@ -314,6 +315,8 @@ class AppState {
 
   /// Number of relays currently connected (0 = offline).
   final int connectedRelays;
+
+  final bool proxyMode;
 
   /// Monotonic counter bumped whenever something the MESSAGE LIST renders
   /// (messages, edits, deletions, reactions, zaps, polls) changes. Ambient
@@ -568,6 +571,7 @@ class AppState {
     String? selfNym,
     ChatView? view,
     int? connectedRelays,
+    bool? proxyMode,
     int? displayRev,
   }) =>
       AppState(
@@ -582,6 +586,7 @@ class AppState {
         unreadCounts: unreadCounts,
         view: view ?? this.view,
         connectedRelays: connectedRelays ?? this.connectedRelays,
+        proxyMode: proxyMode ?? this.proxyMode,
         displayRev: displayRev ?? this.displayRev,
         typing: typing,
         polls: polls,
@@ -1474,6 +1479,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
   void setConnectedRelays(int count) {
     if (count == state.connectedRelays) return;
     state = state.copyWith(connectedRelays: count);
+  }
+
+  void setProxyMode(bool proxy) {
+    if (proxy == state.proxyMode) return;
+    state = state.copyWith(proxyMode: proxy);
   }
 
   // ---------------------------------------------------------------------------

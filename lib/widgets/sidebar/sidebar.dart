@@ -801,6 +801,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
     final connectedRelays = ref.watch(
       appStateProvider.select((s) => s.connectedRelays),
     );
+    final proxyMode = ref.watch(
+      appStateProvider.select((s) => s.proxyMode),
+    );
     // `.sidebar-header`: padding 20/16, bottom hairline. bg is black@0.15
     // (dark) and `body.light-mode .sidebar-header` → white@0.3
     // (styles-themes-responsive.css:1226) so it reads as a light wash, not a
@@ -907,7 +910,10 @@ class _SidebarState extends ConsumerState<Sidebar> {
           // `.nym-display` inside `.sidebar-header`, NOT nested in it. Its
           // `margin-top:10px` is the gap below the nym box.
           const SizedBox(height: 10),
-          _ConnectionStatusIndicator(connectedCount: connectedRelays),
+          _ConnectionStatusIndicator(
+            connectedCount: connectedRelays,
+            proxyMode: proxyMode,
+          ),
           _MeshStatusIndicator(onItemSelected: widget.onItemSelected),
           const _TranslatingIndicator(),
         ],
@@ -1092,9 +1098,13 @@ class _NymValueText extends StatelessWidget {
 /// relay is connected, else `Connecting...` (relays.js:3905-3914).
 /// [connectedCount] mirrors the PWA's `poolConnectedRelays.length`.
 class _ConnectionStatusIndicator extends StatelessWidget {
-  const _ConnectionStatusIndicator({required this.connectedCount});
+  const _ConnectionStatusIndicator({
+    required this.connectedCount,
+    required this.proxyMode,
+  });
 
   final int connectedCount;
+  final bool proxyMode;
 
   @override
   Widget build(BuildContext context) {
@@ -1102,11 +1112,14 @@ class _ConnectionStatusIndicator extends StatelessWidget {
     final connected = connectedCount > 0;
     // PWA pool branch (relays.js:3905-3914): in the default proxy/pool mode
     // (`useRelayProxy = !!apiHost`, app.js:487) an open pool with connected
-    // relays shows `Connected (N relays)` (primary dot); otherwise
-    // `Connecting...` with the `--warning` dot. The `Disconnected`/`--danger`
-    // state only exists in the non-proxy branch, which never runs by default.
+    // relays shows `Proxy Connected (N relays)` (primary dot); on the direct
+    // fallback it is `Direct Connected (N relays)`; otherwise `Connecting...`
+    // with the `--warning` dot.
     final label = connected
-        ? tr('Connected ({count} relays)', {'count': connectedCount})
+        ? (proxyMode
+            ? tr('Proxy Connected ({count} relays)', {'count': connectedCount})
+            : tr('Direct Connected ({count} relays)',
+                {'count': connectedCount}))
         : tr('Connecting...');
     final dotColor = connected ? c.primary : c.warning;
     return MouseRegion(
