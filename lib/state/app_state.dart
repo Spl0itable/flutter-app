@@ -57,6 +57,16 @@ const String kNymbotPubkey =
 /// single Nymbot; kept as a set to match the PWA shape and `_isPubkeyGated`.
 const Set<String> kVerifiedBotPubkeys = {kNymbotPubkey};
 
+const String kNymbotAvatarAsset = 'assets/images/nymbot-icon.png';
+const String kNymbotBannerAsset = 'assets/images/nymbot-banner.png';
+
+UserProfile pinVerifiedBotMedia(String pubkey, UserProfile p) {
+  if (!kVerifiedBotPubkeys.contains(pubkey)) return p;
+  p.picture = kNymbotAvatarAsset;
+  p.banner = kNymbotBannerAsset;
+  return p;
+}
+
 /// The seeded verified-bot [User]. The PWA's `getEffectiveUserStatus` is ONE
 /// central function whose bot override (`verifiedBotPubkeys.has(pubkey) →
 /// 'online'`, users.js:1112) every status render inherits automatically; the
@@ -1444,8 +1454,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
       nym: 'Nymbot',
       status: UserStatus.online,
       lastSeen: DateTime.now().millisecondsSinceEpoch,
-      profile:
-          UserProfile(picture: 'https://nymchat.app/images/nymbot-icon.png'),
+      profile: UserProfile(
+        picture: kNymbotAvatarAsset,
+        banner: kNymbotBannerAsset,
+      ),
     );
   }
 
@@ -2339,8 +2351,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   void _ingestProfile(NostrEvent e) {
-    final p = EventMapper.profile(e);
-    if (p == null) return;
+    final mapped = EventMapper.profile(e);
+    if (mapped == null) return;
+    final p = pinVerifiedBotMedia(e.pubkey, mapped);
     final resolvedName = _kind0DisplayName(p);
     final existing = state.users[e.pubkey];
     var changed = false;
@@ -3802,7 +3815,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
     // Avatar: an `avatar-update` tag sets (or clears, when empty) the picture
     // (users.js avatar branch). profile.picture is the canonical avatar source.
-    if (hasAvatarTag) {
+    if (hasAvatarTag && !kVerifiedBotPubkeys.contains(pubkey)) {
       if (avatarUrl != null && avatarUrl.isNotEmpty) {
         (u.profile ??= UserProfile()).picture = avatarUrl;
       } else {
@@ -4785,7 +4798,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Hydrates cached profiles into the user store (boot from CacheStore).
   void hydrateProfiles(Map<String, UserProfile> profiles) {
     final touched = <String>[];
-    profiles.forEach((pubkey, p) {
+    profiles.forEach((pubkey, hydrated) {
+      final p = pinVerifiedBotMedia(pubkey, hydrated);
       touched.add(pubkey);
       final existing = state.users[pubkey];
       // PWA name chain `name || username || display_name`, 20-char cap

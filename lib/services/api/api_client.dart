@@ -575,6 +575,14 @@ class _Pending {
 /// Every request carries the `isNymchatClient` UA header
 /// ([ApiConfig.userAgent]). Construction performs NO network — calls are lazy.
 /// The `http.Client` is injectable for tests.
+const String kOwnMediaApex = 'nymchat.app';
+
+bool isOwnMediaUrl(String url) {
+  final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+  if (host.isEmpty) return false;
+  return host == kOwnMediaApex || host.endsWith('.$kOwnMediaApex');
+}
+
 class ApiClient {
   ApiClient({
     http.Client? client,

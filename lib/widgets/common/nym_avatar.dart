@@ -19,6 +19,7 @@ String? proxiedAvatarUrl(String? url) {
   if (lower.startsWith('data:') || lower.startsWith('blob:')) return url;
   if (!lower.startsWith('http://') && !lower.startsWith('https://')) return url;
   if (url.contains('/api/proxy?')) return url;
+  if (isOwnMediaUrl(url)) return url;
   return _avatarApi.mediaProxyUrl(url);
 }
 
