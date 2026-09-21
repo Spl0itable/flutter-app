@@ -35,6 +35,8 @@ import 'pausable_animated_image.dart';
 
 /// True when [url] looks like an SVG (by extension, ignoring any query string),
 /// including the proxied form `…/api/proxy?url=<encoded …/foo.svg>`.
+bool isAssetImageUrl(String url) => url.startsWith('assets/');
+
 bool isSvgUrl(String url) {
   if (url.isEmpty) return false;
   final lower = url.toLowerCase();
@@ -445,8 +447,19 @@ class _InlineNetworkImageState extends State<InlineNetworkImage> {
 
   @override
   Widget build(BuildContext context) {
-    final url = _effectiveUrl;
     final cacheWidth = _decodeCacheWidth(context);
+    if (isAssetImageUrl(_baseUrl)) {
+      return Image.asset(
+        _baseUrl,
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        cacheWidth: cacheWidth,
+        gaplessPlayback: true,
+        errorBuilder: (ctx, _, __) => _fallback(ctx),
+      );
+    }
+    final url = _effectiveUrl;
     // The in-memory http path handles BOTH svg and raster (and never touches the
     // sqflite-backed disk cache). Use it for SVG-looking URLs and whenever the
     // caller opts out of the disk cache ([memoryOnly], i.e. emoji).

@@ -1770,6 +1770,7 @@ class NostrController {
     if (event.kind == EventKind.profile) {
       _storageSync?.markProfileCached(event.pubkey);
     }
+    final knownBefore = appState.isKnownEventId(event.id);
     appState.ingestEvent(event);
     // A SELF kind-0 (live relay update or the login profile-fetch fallback)
     // must also flow onto the live identity + the instant-restore login
@@ -1856,7 +1857,7 @@ class NostrController {
           _ref.read(p2pServiceProvider).registerOffer(offer);
         }
       }
-      _maybeNotifyChannel(event);
+      if (!knownBefore) _maybeNotifyChannel(event);
 
       // Clear the "Nymbot is thinking" channel typing strip the moment the bot's
       // reply lands — the PWA's `if (message.isBot) this._setBotChannelThinking(
@@ -3506,8 +3507,8 @@ class NostrController {
       m.isBot = true;
     }
     if (appState.holdForeignBotThread(m)) return;
-    appState.ingestPMMessage(m);
-    _maybeNotifyMessage(m, isGroup: false);
+    final landed = appState.ingestPMMessage(m);
+    if (landed) _maybeNotifyMessage(m, isGroup: false);
     // Backfill the sender's kind-0 from D1 if unknown (PWA `queueProfileFetch`).
     _maybeBackfillProfiles(m.pubkey);
     // Delivery receipt back to the sender (not for our own self-copy).
@@ -3542,8 +3543,11 @@ class NostrController {
     // Thread reply marker: the root's shared nymMessageId (threads).
     final threadRoot = _tagValue(tags, 'nymthread');
     final createdAtRaw = (rumor['created_at'] as num?)?.toInt() ?? 0;
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final createdAt = createdAtRaw > nowSec + 60 ? nowSec : createdAtRaw;
+    final times = EventMapper.rumorTimes(
+      key: nymMessageId ?? u.wrapId,
+      createdAtRaw: createdAtRaw,
+      ms: ms,
+    );
     final isOwn = senderPubkey == self;
     if (u.isPq) _resolvePqRootVerdict(senderPubkey, nymMessageId);
     return Message(
@@ -3551,9 +3555,10 @@ class NostrController {
       author: _nymFor(senderPubkey),
       pubkey: senderPubkey,
       content: content,
-      createdAt: createdAt,
+      createdAt: times.createdAt,
       originalCreatedAt: createdAtRaw,
       ms: ms,
+      timestamp: times.timestampMs,
       isOwn: isOwn,
       isGroup: true,
       groupId: groupId,
@@ -10753,10 +10758,30 @@ class NostrController {
   /// history, the dedup guards and every notification preference apply exactly
   /// as they do for a live message. Returns when the work is done or the budget
   /// expires — the caller reports completion to the OS.
+  static Future<T?> awaitBootValue<T>(
+    T? Function() read, {
+    required bool Function() booting,
+    required Duration limit,
+    Duration poll = const Duration(milliseconds: 100),
+  }) async {
+    var value = read();
+    final polls = limit.inMilliseconds ~/ poll.inMilliseconds;
+    for (var i = 0; value == null && booting() && i < polls; i++) {
+      await Future<void>.delayed(poll);
+      value = read();
+    }
+    return value;
+  }
+
   Future<void> runBackgroundCatchUp({
     Duration budget = const Duration(seconds: 20),
   }) async {
-    final sync = _storageSync;
+    final deadline = DateTime.now().add(budget);
+    final sync = await awaitBootValue<StorageSync>(
+      () => _storageSync,
+      booting: () => _started,
+      limit: budget * 0.6,
+    );
     // Not booted (relaunched into the background with a locked vault, or no
     // identity yet): nothing to pull, and the next window will try again.
     if (sync == null) return;
@@ -10778,7 +10803,6 @@ class NostrController {
     // conversation the app restored into — the most recently used one, i.e.
     // the likeliest to have new messages.
     _appInForeground = false;
-    final deadline = DateTime.now().add(budget);
 
     /// Runs one stage inside what remains of the budget. A stage that cannot
     /// get [needs] is skipped rather than started and cut off mid-fetch —
