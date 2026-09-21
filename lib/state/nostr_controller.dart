@@ -10753,10 +10753,30 @@ class NostrController {
   /// history, the dedup guards and every notification preference apply exactly
   /// as they do for a live message. Returns when the work is done or the budget
   /// expires — the caller reports completion to the OS.
+  static Future<T?> awaitBootValue<T>(
+    T? Function() read, {
+    required bool Function() booting,
+    required Duration limit,
+    Duration poll = const Duration(milliseconds: 100),
+  }) async {
+    var value = read();
+    final polls = limit.inMilliseconds ~/ poll.inMilliseconds;
+    for (var i = 0; value == null && booting() && i < polls; i++) {
+      await Future<void>.delayed(poll);
+      value = read();
+    }
+    return value;
+  }
+
   Future<void> runBackgroundCatchUp({
     Duration budget = const Duration(seconds: 20),
   }) async {
-    final sync = _storageSync;
+    final deadline = DateTime.now().add(budget);
+    final sync = await awaitBootValue<StorageSync>(
+      () => _storageSync,
+      booting: () => _started,
+      limit: budget * 0.6,
+    );
     // Not booted (relaunched into the background with a locked vault, or no
     // identity yet): nothing to pull, and the next window will try again.
     if (sync == null) return;
@@ -10778,7 +10798,6 @@ class NostrController {
     // conversation the app restored into — the most recently used one, i.e.
     // the likeliest to have new messages.
     _appInForeground = false;
-    final deadline = DateTime.now().add(budget);
 
     /// Runs one stage inside what remains of the budget. A stage that cannot
     /// get [needs] is skipped rather than started and cut off mid-fetch —
