@@ -2728,9 +2728,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Inserts a decrypted PM [m] (kind-14 rumor mapped via [PmLogic.mapPmRumor])
   /// into the `pm-<peer>` store, creating/refreshing the conversation. Dedups
   /// on event id and nymMessageId. Honors [closedPMs] for backlog.
-  void ingestPMMessage(Message m) {
+  bool isKnownEventId(String id) => id.isNotEmpty && _seenIds.contains(id);
+
+  bool ingestPMMessage(Message m) {
     final rawPeer = m.conversationPubkey;
-    if (rawPeer == null) return;
+    if (rawPeer == null) return false;
     // Canonical lowercase hex (mirrors [switchView]): the peer id keys the
     // conversation row, the unread counts, and — for the Nymbot — the
     // `view.id == kNymbotPubkey` BotChatScreen routing, all exact string
@@ -2748,12 +2750,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
         // Persist the re-open so it isn't undone on relaunch (F02).
         onClosedPmsChanged?.call();
       } else {
-        return;
+        return false;
       }
     }
-    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return;
+    if (m.id.isNotEmpty && !_seenIds.add(m.id)) return false;
     // NIP-09: drop deleted PM/group-rumor copies (pms.js:3722-3724).
-    if (suppressDeletedMessage(m)) return;
+    if (suppressDeletedMessage(m)) return false;
 
     final key =
         _canonicalPmStorageKey(m.conversationKey ?? PmLogic.pmStorageKey(peer));
@@ -2835,14 +2837,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
         changed = true;
       }
       if (changed) _scheduleEmit();
-      return;
+      return false;
     }
     if (m.nymMessageId != null && !_seenNymMessageIds.add(m.nymMessageId!)) {
-      return;
+      return false;
     }
     if (botThreadForeign(m, list)) {
       _holdBotThreadOrphan(m);
-      return;
+      return false;
     }
     m.seq = _nextIngestSeq();
 
@@ -2906,6 +2908,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _consumePendingEdit(id: m.id, nymMessageId: m.nymMessageId);
     _scheduleEmit();
     onPmMessageIngested?.call(key);
+    return true;
   }
 
   /// Inserts a decrypted group message [m] into the `group-<id>` store.
