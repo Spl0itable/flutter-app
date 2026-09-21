@@ -124,6 +124,8 @@ void main() {
     var unreachable = 0;
     final channels = <_FakeChannel>[];
     var attempt = 0;
+    FakeAsync? fa;
+    final epoch = DateTime(2026, 9, 21);
     final proxy = RelayPoolProxy(
       relays: RelayConfig.defaultRelays,
       dmRelays: RelayConfig.defaultRelays,
@@ -135,9 +137,11 @@ void main() {
         return ch;
       },
       onProxyUnreachable: () => unreachable++,
+      now: () => fa?.getClock(epoch).now() ?? DateTime.now(),
     );
     expect(proxy.shards.length, lessThanOrEqualTo(2));
     fakeAsync((async) {
+      fa = async;
       proxy.connectAll();
       async.flushMicrotasks();
       final first = channels.take(proxy.shards.length).toList();
@@ -157,9 +161,63 @@ void main() {
       async.flushMicrotasks();
       async.elapse(const Duration(seconds: 7));
       async.flushMicrotasks();
-      expect(unreachable, 1,
-          reason: 'two failed reconnects after a live session fall back');
+      expect(unreachable, 0,
+          reason: 'two quick failures right after a live session, the shape '
+              'of a resume from background, are a blip and keep retrying');
       expect(proxy.connectedCount, 0);
+      async.elapse(const Duration(seconds: 45));
+      async.flushMicrotasks();
+      expect(unreachable, 1,
+          reason: 'a streak that outlasts the grace period is the verdict');
+      expect(attempt, greaterThanOrEqualTo(4 * proxy.shards.length + 2),
+          reason: 'the shard kept reconnecting with backoff through the grace');
+    });
+    await proxy.disconnectAll();
+  });
+
+  test('a session that comes back inside the grace period stays on the proxy',
+      () async {
+    var unreachable = 0;
+    final channels = <_FakeChannel>[];
+    var attempt = 0;
+    FakeAsync? fa;
+    final epoch = DateTime(2026, 9, 21);
+    final proxy = RelayPoolProxy(
+      relays: RelayConfig.defaultRelays,
+      dmRelays: RelayConfig.defaultRelays,
+      poolUrl: 'wss://h/api/relay-pool',
+      channelFactory: (_) {
+        attempt++;
+        final ch = _FakeChannel(failImmediately: attempt > 2 && attempt <= 6);
+        channels.add(ch);
+        return ch;
+      },
+      onProxyUnreachable: () => unreachable++,
+      now: () => fa?.getClock(epoch).now() ?? DateTime.now(),
+    );
+    fakeAsync((async) {
+      fa = async;
+      proxy.connectAll();
+      async.flushMicrotasks();
+      for (final ch in channels.take(proxy.shards.length)) {
+        ch.inject(_status(['wss://relay.example']));
+      }
+      async.flushMicrotasks();
+      for (final ch in channels.take(proxy.shards.length).toList()) {
+        ch.drop();
+      }
+      async.elapse(const Duration(seconds: 20));
+      async.flushMicrotasks();
+      expect(unreachable, 0);
+      for (final ch in channels.where((c) => !c.failImmediately).skip(proxy.shards.length)) {
+        ch.inject(_status(['wss://relay.example']));
+      }
+      async.flushMicrotasks();
+      expect(proxy.connectedCount, 1, reason: 'the proxy came back');
+      async.elapse(const Duration(seconds: 60));
+      async.flushMicrotasks();
+      expect(unreachable, 0,
+          reason: 'a recovered session never turns into a fallback later');
     });
     await proxy.disconnectAll();
   });

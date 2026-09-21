@@ -7,10 +7,6 @@ import UIKit
   /// Open `beginBackgroundTask` identifier for "Stay Connected in Background".
   private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
-  /// Whether Dart still wants the keep-alive. Kept separate from the task id so
-  /// an expiring task can be renewed only while the setting is actually on.
-  private var keepAliveRequested = false
-
   /// Channel the background-refresh window calls into Dart on.
   private var backgroundRefreshChannel: FlutterMethodChannel?
 
@@ -101,11 +97,9 @@ import UIKit
       }
       switch call.method {
       case "start":
-        self.keepAliveRequested = true
         self.beginBackgroundTask()
         result(self.backgroundTaskID != .invalid)
       case "stop":
-        self.keepAliveRequested = false
         self.endBackgroundTask()
         result(nil)
       default:
@@ -121,15 +115,7 @@ import UIKit
     backgroundTaskID = UIApplication.shared.beginBackgroundTask(
       withName: "app.nymchat.background-connectivity"
     ) { [weak self] in
-      guard let self = self else { return }
-      // The OS is reclaiming this window. Ending the task is mandatory (the app
-      // is killed otherwise); re-requesting one keeps the connections alive for
-      // another window while the system still grants them.
-      let stillWanted = self.keepAliveRequested
-      self.endBackgroundTask()
-      if stillWanted {
-        self.beginBackgroundTask()
-      }
+      self?.endBackgroundTask()
     }
   }
 

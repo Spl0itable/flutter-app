@@ -386,9 +386,11 @@ class _ShardSocket {
     required this.onConnected,
     required this.onClosed,
     this.confirmTimeout = const Duration(seconds: 12),
-  });
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now;
 
   RelayShard shard;
+  final DateTime Function() _now;
   final String url;
   final WebSocketChannelFactory channelFactory;
   final Random rng;
@@ -412,6 +414,7 @@ class _ShardSocket {
   bool _frameSinceConnect = false;
 
   int failuresSinceFrame = 0;
+  DateTime? failureStreakStartedAt;
 
   bool get hasFrameSinceConnect => _frameSinceConnect;
 
@@ -493,6 +496,7 @@ class _ShardSocket {
     _reconnectAttempt = 0;
     _frameSinceConnect = true;
     failuresSinceFrame = 0;
+    failureStreakStartedAt = null;
     _confirmTimer?.cancel();
     _confirmTimer = null;
     // Any parseable inbound pool frame confirms the proxy endpoint is reachable
@@ -515,7 +519,10 @@ class _ShardSocket {
     // outright (host lookup / refused / dropped pre-handshake). Count the streak
     // so the proxy can fall back after the PWA's threshold.
     if (!confirmed) failuresBeforeConfirm++;
-    if (!_frameSinceConnect) failuresSinceFrame++;
+    if (!_frameSinceConnect) {
+      if (failuresSinceFrame == 0) failureStreakStartedAt = _now();
+      failuresSinceFrame++;
+    }
     connectedRelays = const [];
     _cleanup();
     onClosed(this);
@@ -597,9 +604,12 @@ class RelayPoolProxy implements PoolTransport {
     this.onProxyConnected,
     this.maxPreConnectFailures = 2,
     this.confirmTimeout = const Duration(seconds: 12),
+    this.postConfirmGrace = const Duration(seconds: 30),
+    DateTime Function()? now,
     this.eoseQuorum = 0.6,
     this.eoseTimeout = const Duration(seconds: 4),
   })  : _verify = verify ?? ((_) async => true),
+        _now = now ?? DateTime.now,
         _allRelays = {...relays},
         _geoRelayUrls = [...?geoRelayUrls],
         _dmRelays = dmRelays ?? RelayConfig.defaultRelays,
@@ -643,6 +653,10 @@ class RelayPoolProxy implements PoolTransport {
   final int maxPreConnectFailures;
 
   final Duration confirmTimeout;
+
+  final Duration postConfirmGrace;
+
+  final DateTime Function() _now;
 
   /// True once any shard has confirmed the proxy endpoint is reachable. Latches:
   /// after this, pre-connect failure counting is disabled forever.
@@ -796,6 +810,7 @@ class RelayPoolProxy implements PoolTransport {
         onConnected: _onShardConnected,
         onClosed: _onShardClosed,
         confirmTimeout: confirmTimeout,
+        now: _now,
       );
       _sockets.add(sock);
       sock.connect();
@@ -1157,6 +1172,10 @@ class RelayPoolProxy implements PoolTransport {
         ? sock.failuresSinceFrame
         : sock.failuresBeforeConfirm;
     if (streak < maxPreConnectFailures) return;
+    if (_proxyEverConnected) {
+      final since = sock.failureStreakStartedAt;
+      if (since == null || _now().difference(since) < postConfirmGrace) return;
+    }
     if (_sockets.any((s) => s.isOpen && s.hasFrameSinceConnect)) return;
     _unreachableFired = true;
     final cb = onProxyUnreachable;
