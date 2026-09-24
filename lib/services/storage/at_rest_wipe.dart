@@ -8,9 +8,12 @@ Future<void> forgetAtRestData(
   AtRestCipher? cipher,
   MeshFileStore? files,
 }) async {
-  final groupKeys =
-      kv.keys.where((k) => k.startsWith(StorageKeys.groupStorePrefix)).toList();
-  for (final key in groupKeys) {
+  final sealedKeys = kv.keys
+      .where((k) =>
+          k.startsWith(StorageKeys.groupStorePrefix) ||
+          StorageKeys.sealedPrefs.contains(k))
+      .toList();
+  for (final key in sealedKeys) {
     try {
       await kv.remove(key);
     } catch (_) {}

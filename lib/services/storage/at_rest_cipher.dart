@@ -29,6 +29,10 @@ class SecureAtRestKeyStore implements AtRestKeyStore {
   Future<void> delete() => _store.remove(keyName);
 }
 
+class AtRestKeyUnavailable implements Exception {
+  const AtRestKeyUnavailable();
+}
+
 class AtRestCipher {
   AtRestCipher(this._keys);
 
@@ -67,6 +71,14 @@ class AtRestCipher {
   }
 
   Future<SecretKey> _readOrCreate() async {
+    try {
+      return await _readOrCreateKey();
+    } catch (_) {
+      throw const AtRestKeyUnavailable();
+    }
+  }
+
+  Future<SecretKey> _readOrCreateKey() async {
     final stored = await _keys.read();
     if (stored != null && stored.isNotEmpty) {
       final bytes = base64.decode(stored);

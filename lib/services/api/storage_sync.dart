@@ -336,9 +336,9 @@ class StorageSync {
       // Closed-PM / left-group read state (settings.js:146-149; the PWA's
       // lazyStoredSet/Map keys, app.js:751-754).
       flat['closedPMs'] = _kvJsonList(kv, StorageKeys.closedPms);
-      flat['leftGroups'] = _kvJsonList(kv, 'nym_left_groups');
+      flat['leftGroups'] = const <dynamic>[];
       flat['closedPMTimes'] = _kvJsonMap(kv, StorageKeys.closedPmTimes);
-      flat['leftGroupTimes'] = _kvJsonMap(kv, StorageKeys.leftGroupTimes);
+      flat['leftGroupTimes'] = <String, dynamic>{};
       // Lightning address is cached per-pubkey (`nym_lightning_address_<pk>`,
       // zaps.js:234); the PWA syncs `this.lightningAddress` (null when unset).
       // Falls back to the global key, the same order the boot read uses

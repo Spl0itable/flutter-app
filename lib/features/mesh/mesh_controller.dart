@@ -271,7 +271,7 @@ class MeshController extends StateNotifier<MeshUiState> {
         state = state.copyWith(availability: availability);
       }));
 
-      bridge.start();
+      await bridge.start();
 
       await service.start();
       state = state.copyWith(
