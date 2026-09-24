@@ -13116,6 +13116,25 @@ class NostrController {
   /// on failure. The kind-24242 BUD auth event is signed locally and sent as the
   /// `Authorization: Nostr <base64>` header (`_signBlossomEvent`/`_putToBlossom`,
   /// users.js:516/533). [onProgress] reports 0..1 for the `#uploadProgress` bar.
+  static String blossomAuthHeader(String hashHex, int nowSec) {
+    final sk = keys.generatePrivateKey();
+    final signed = schnorr.finalizeEvent(
+      UnsignedEvent(
+        pubkey: keys.getPublicKeyHex(sk),
+        createdAt: nowSec,
+        kind: EventKind.blossomAuth,
+        tags: [
+          ['t', 'upload'],
+          ['x', hashHex],
+          ['expiration', '${nowSec + 600}'],
+        ],
+        content: 'Uploading blob with SHA-256 hash',
+      ),
+      sk,
+    );
+    return 'Nostr ${base64.encode(utf8.encode(jsonEncode(signed.toJson())))}';
+  }
+
   Future<String?> uploadImage(
     Uint8List bytes, {
     required String contentType,
@@ -13130,21 +13149,8 @@ class NostrController {
     final hashHex = sha256Hex(bytes);
     onProgress?.call(0.55);
 
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final authEvent = UnsignedEvent(
-      pubkey: identity.pubkey,
-      createdAt: nowSec,
-      kind: EventKind.blossomAuth, // 24242 BUD-01 auth (NOT NIP-98 27235)
-      tags: [
-        ['t', 'upload'],
-        ['x', hashHex],
-        ['expiration', '${nowSec + 600}'],
-      ],
-      content: 'Uploading blob with SHA-256 hash',
-    );
-    final signed = await sig.sign(authEvent);
-    final authHeader =
-        'Nostr ${base64.encode(utf8.encode(jsonEncode(signed.toJson())))}';
+    final authHeader = blossomAuthHeader(
+        hashHex, DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
     final api = ApiClient();
     try {
