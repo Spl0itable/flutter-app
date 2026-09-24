@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../services/storage/cache_store.dart';
 import '../../services/storage/secure_store.dart';
+import 'biometric_secret_store.dart';
 
 /// Abstractions over the data stores the panic wipe destroys, so tests can
 /// inject fakes and assert they were cleared.
@@ -67,7 +68,12 @@ class _SecureStoreAdapter implements PanicSecureStore {
   _SecureStoreAdapter(this._store);
   final SecureStore _store;
   @override
-  Future<void> wipe() => _store.wipeAll();
+  Future<void> wipe() async {
+    try {
+      await PlatformBiometricSecretStore().delete();
+    } catch (_) {}
+    await _store.wipeAll();
+  }
 }
 
 class _CacheStoreAdapter implements PanicCacheStore {

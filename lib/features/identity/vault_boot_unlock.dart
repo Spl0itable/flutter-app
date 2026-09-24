@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:local_auth/local_auth.dart';
 
 import '../../core/theme/nym_colors.dart';
-import '../../services/storage/secure_store.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../i18n/i18n.dart';
+import 'biometric_secret_store.dart';
 import 'identity_vault.dart' show SecureStoreLike;
 import 'modal_chrome.dart';
 import 'vault_settings_modal.dart' show identityVaultProvider;
@@ -98,29 +97,18 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
     setState(() => _busy = true);
     final vault = ref.read(identityVaultProvider);
     try {
-      String password;
+      final Map<String, String> secrets;
       if (_isBiometric) {
-        // TODO(verify): the PWA biometric factor derives the key from a WebAuthn
-        // PRF output; native has no PRF, so (matching VaultSettingsModal's enable
-        // path) we gate on local_auth and derive from a per-device secret. This
-        // is a platform-equivalence choice, not a 1:1 port of the PRF scheme.
-        final ok = await _biometricAuth();
-        if (!ok) throw StateError(tr('Biometric unlock was canceled.'));
-        password = await _deviceBiometricSecret();
+        secrets = await vault.unlockBiometric();
       } else {
-        password = _pw.text;
+        final password = _pw.text;
         // `unlockVault`'s own guard (key-vault.js:257) — like every unlock
         // failure it surfaces through the "Unlock failed" card, not inline.
         if (password.isEmpty) {
           throw StateError(tr('Enter your password or PIN.'));
         }
+        secrets = await vault.unlock(password);
       }
-      // `unlockVault` derives the key, verifies the check token (throws on a
-      // wrong factor) and returns the decrypted secrets. We hand them to the
-      // caller IN MEMORY (the native analog of the PWA's `_vaultMem`) — the
-      // encrypted `enc:v1:` blobs stay in secure storage and are never
-      // re-plaintexted, so unlock is required on every launch.
-      final secrets = await vault.unlock(password);
       if (mounted) widget.onUnlocked(secrets);
     } catch (e) {
       // `unlockVaultAtBoot`'s retry loop: `_vaultErrorModal(e.message ||
@@ -137,13 +125,15 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
 
   /// `e && e.message ? e.message : 'Unlock failed.'` (key-vault.js:344).
   static String _messageOf(Object e) {
-    final m = e is StateError
+    final m = e is BiometricVaultException
         ? e.message
-        : e is FormatException
+        : e is StateError
             ? e.message
-            : e is ArgumentError
-                ? e.message?.toString()
-                : null;
+            : e is FormatException
+                ? e.message
+                : e is ArgumentError
+                    ? e.message?.toString()
+                    : null;
     return (m == null || m.isEmpty) ? tr('Unlock failed.') : m;
   }
 
@@ -181,30 +171,6 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       okLabel: tr('Forget'),
       danger: true,
     );
-  }
-
-  Future<bool> _biometricAuth() async {
-    try {
-      final auth = LocalAuthentication();
-      return await auth.authenticate(
-        localizedReason: tr('Unlock your Nymchat identity'),
-        options: const AuthenticationOptions(biometricOnly: true),
-      );
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// The per-device biometric secret used as the PBKDF2 password (same key +
-  /// scheme as [VaultSettingsModal], so a biometric-enabled vault unlocks).
-  Future<String> _deviceBiometricSecret() async {
-    final secure = SecureStore();
-    const key = 'nym_vault_bio_secret';
-    final s = await secure.get(key);
-    // If it's missing the vault can't be unlocked biometrically (shouldn't
-    // happen for a vault that was enabled with biometric) — return empty so
-    // unlock fails cleanly into the error path rather than throwing.
-    return s ?? '';
   }
 
   @override

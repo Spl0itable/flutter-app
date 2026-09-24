@@ -1436,4 +1436,9 @@ const List<String> kAppStringsCatalog = <String>[
   // Post-quantum status line (settings_screen.dart).
   'Active for messages you send to other Nymchat users. Messages you receive, and your own synced settings and history, stay on standard encryption until this device has your nympq1\u2026 recovery code.',
   'Not available. Post-quantum encryption needs the ML-KEM implementation, which did not load.',
+  'This device can\'t keep a key behind its biometric lock. Choose a password or PIN instead.',
+  'Biometric setup could not be verified. Encryption was not turned on.',
+  'The fingerprints or face enrolled on this device have changed, so it no longer releases your identity key. Forget this identity and restore it with your saved nsec.',
+  'This device can\'t keep the biometric key in its secure hardware, so the biometric check here only guards the app screen. Turn encryption off and on again with a password or PIN for stronger protection.',
+  'The key is tied to the fingerprints or face enrolled now. If they change, this device erases it and you will need your saved nsec to get back in.',
 ];
