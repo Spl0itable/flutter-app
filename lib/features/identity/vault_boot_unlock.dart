@@ -35,7 +35,6 @@ class VaultBootUnlock extends ConsumerStatefulWidget {
     required this.onUnlocked,
     required this.onForget,
     this.secureStore,
-    this.canForget = true,
   });
 
   /// Called once the vault is unlocked, with the decrypted secrets (kept in
@@ -50,8 +49,6 @@ class VaultBootUnlock extends ConsumerStatefulWidget {
   /// Secure store the decrypted secrets are written back to. Defaults to the
   /// real platform keystore; tests inject an in-memory fake so no plugin is hit.
   final SecureStoreLike? secureStore;
-
-  final bool canForget;
 
   @override
   ConsumerState<VaultBootUnlock> createState() => _VaultBootUnlockState();
@@ -260,13 +257,11 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          if (widget.canForget) ...[
-            Flexible(
-                child: ModalChrome.iconButton(
-                    c, tr('Forget identity'), _busy ? null : _forget,
-                    height: 42)),
-            const SizedBox(width: 10),
-          ],
+          Flexible(
+              child: ModalChrome.iconButton(
+                  c, tr('Forget identity'), _busy ? null : _forget,
+                  height: 42)),
+          const SizedBox(width: 10),
           Flexible(
             child: ModalChrome.sendButton(
               c,
@@ -302,13 +297,11 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          if (widget.canForget) ...[
-            Flexible(
-                child: ModalChrome.iconButton(
-                    c, tr('Forget identity'), _forgetFromError,
-                    height: 42)),
-            const SizedBox(width: 10),
-          ],
+          Flexible(
+              child: ModalChrome.iconButton(
+                  c, tr('Forget identity'), _forgetFromError,
+                  height: 42)),
+          const SizedBox(width: 10),
           Flexible(child: ModalChrome.sendButton(c, tr('Try again'), _retry)),
         ],
       ),

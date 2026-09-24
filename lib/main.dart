@@ -146,6 +146,14 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
     setState(() => _unlocked = true);
   }
 
+  Future<void> _onWakeForget() async {
+    try {
+      await ref.read(nostrControllerProvider).signOut();
+    } finally {
+      if (mounted) setState(() => _wakeUnlocked = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_unlocked) {
@@ -170,8 +178,7 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
         onUnlocked: resumed
             ? (_) => setState(() => _wakeUnlocked = false)
             : _onUnlocked,
-        onForget: _onForget,
-        canForget: !resumed,
+        onForget: resumed ? () => unawaited(_onWakeForget()) : _onForget,
       ),
     );
   }

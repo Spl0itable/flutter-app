@@ -3,8 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/theme/nym_colors.dart';
 import 'package:nym_bar/core/theme/nym_theme.dart';
+import 'package:nym_bar/features/identity/biometric_secret_store.dart';
 import 'package:nym_bar/features/identity/identity_vault.dart';
 import 'package:nym_bar/features/identity/vault_boot_unlock.dart';
+import 'package:nym_bar/features/identity/vault_settings_modal.dart'
+    show identityVaultProvider;
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:nym_bar/state/settings_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -19,6 +22,29 @@ class _MemSecure implements SecureStoreLike {
   Future<void> remove(String key) async => map.remove(key);
   @override
   Future<void> wipeAll() async => map.clear();
+}
+
+class _Bio implements BiometricSecretStore {
+  String? stored;
+  int deletes = 0;
+
+  @override
+  Future<bool> isAvailable() async => true;
+
+  @override
+  Future<String?> read() async => stored;
+
+  @override
+  Future<void> write(String secret) async => stored = secret;
+
+  @override
+  Future<void> delete() async {
+    deletes++;
+    stored = null;
+  }
+
+  @override
+  Future<bool> confirmPresence() async => true;
 }
 
 Future<KeyValueStore> _kv() async {
@@ -57,25 +83,110 @@ void main() {
     expect(find.text('private chats', skipOffstage: false), findsOneWidget);
   });
 
-  testWidgets('the resume lock offers no way around the password',
-      (tester) async {
-    final kv = await _kv();
-    await tester.pumpWidget(ProviderScope(
-      overrides: [keyValueStoreProvider.overrideWithValue(kv)],
+  Widget host(KeyValueStore kv, IdentityVault vault, Widget child) {
+    return ProviderScope(
+      overrides: [
+        keyValueStoreProvider.overrideWithValue(kv),
+        identityVaultProvider.overrideWithValue(vault),
+      ],
       child: MaterialApp(
         theme: buildNymThemeData(resolveNymColors(
           theme: NymThemeKey.bitchat,
           brightness: Brightness.dark,
           solidUi: true,
         )),
-        home: VaultBootUnlock(
+        home: child,
+      ),
+    );
+  }
+
+  Future<(KeyValueStore, IdentityVault, _MemSecure, _Bio)>
+      biometricVault() async {
+    final kv = await _kv();
+    final secure = _MemSecure();
+    await secure.set('nym_session_nsec', 'the-secret');
+    final bio = _Bio();
+    final vault = IdentityVault(kv, secure, escrow: true, biometric: bio);
+    await vault.enableBiometric();
+    return (kv, vault, secure, bio);
+  }
+
+  void expectWiped(IdentityVault vault, _MemSecure secure, _Bio bio) {
+    expect(vault.isEnabled, isFalse);
+    expect(bio.stored, isNull);
+    expect(bio.deletes, greaterThan(0));
+    expect(secure.map.containsKey('nym_session_nsec'), isFalse);
+    expect(secure.map.containsKey('nym_vault_bg_key'), isFalse);
+  }
+
+  testWidgets(
+      'the lock over a woken app can forget the identity after a confirmation',
+      (tester) async {
+    final (kv, vault, secure, bio) = (await tester.runAsync(biometricVault))!;
+    expect(secure.map.containsKey('nym_vault_bg_key'), isTrue);
+    var forgotten = 0;
+    await tester.pumpWidget(host(
+      kv,
+      vault,
+      VaultLockedApp(
+        app: const Text('private chats'),
+        lock: VaultBootUnlock(
           onUnlocked: (_) {},
-          onForget: () {},
-          canForget: false,
+          onForget: () => forgotten++,
         ),
       ),
     ));
-    expect(find.text('FORGET IDENTITY'), findsNothing);
-    expect(find.text('UNLOCK'), findsOneWidget);
+
+    await tester.tap(find.text('FORGET IDENTITY'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('permanently deletes the encrypted identity'),
+        findsOneWidget);
+    await tester.tap(find.text('CANCEL'));
+    await tester.pumpAndSettle();
+    expect(forgotten, 0);
+    expect(vault.isEnabled, isTrue);
+
+    await tester.tap(find.text('FORGET IDENTITY'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('FORGET'));
+    await tester.pumpAndSettle();
+
+    expect(forgotten, 1);
+    expectWiped(vault, secure, bio);
+  });
+
+  testWidgets(
+      'a changed biometric enrollment can be forgotten from the lock over a '
+      'woken app', (tester) async {
+    final (kv, vault, secure, bio) = (await tester.runAsync(biometricVault))!;
+    bio.stored = null;
+    var forgotten = 0;
+    var unlocked = 0;
+    await tester.pumpWidget(host(
+      kv,
+      vault,
+      VaultLockedApp(
+        app: const Text('private chats'),
+        lock: VaultBootUnlock(
+          onUnlocked: (_) => unlocked++,
+          onForget: () => forgotten++,
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('UNLOCK'));
+    await tester.pumpAndSettle();
+    expect(unlocked, 0);
+    expect(
+      find.text(const BiometricVaultException(BiometricVaultFailure.invalidated)
+          .message),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('FORGET IDENTITY'));
+    await tester.pumpAndSettle();
+
+    expect(forgotten, 1);
+    expectWiped(vault, secure, bio);
   });
 }
