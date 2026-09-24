@@ -18,6 +18,7 @@ import 'services/notification_service.dart';
 import 'services/platform/background_connectivity.dart';
 import 'services/platform/background_refresh.dart';
 import 'services/platform/deep_link_target.dart';
+import 'services/platform/heartbeat.dart';
 import 'services/platform/deep_links.dart';
 import 'state/app_state.dart';
 import 'state/nostr_controller.dart';
@@ -52,6 +53,8 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
   final BackgroundRefreshService _backgroundRefresh =
       BackgroundRefreshService();
 
+  HeartbeatService? _heartbeat;
+
   /// Lets sign-out clear any dialogs/modals pushed above the boot gate. The
   /// remount (keyed [BootGate]) replaces the gate's content, but pushed routes
   /// live on the navigator above `home` and must be popped explicitly.
@@ -84,6 +87,8 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     _backgroundRefresh.start(
       () => ref.read(nostrControllerProvider).runBackgroundCatchUp(),
     );
+
+    _startHeartbeat();
 
     // 1) Deep links: cold-start + streamed `app_links` URLs.
     DeepLinkService? deepLinks;
@@ -154,9 +159,31 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     }
   }
 
+  void _startHeartbeat() {
+    if (!HeartbeatService.isSupported) return;
+    try {
+      final heartbeat = HeartbeatService(kv: ref.read(keyValueStoreProvider));
+      _heartbeat = heartbeat;
+      if (ref.read(settingsProvider).backgroundConnectivity) {
+        _setHeartbeat(true);
+      }
+    } catch (e) {
+      debugPrint('[Platform] heartbeat skipped: ${e.runtimeType}');
+    }
+  }
+
+  void _setHeartbeat(bool on) {
+    final heartbeat = _heartbeat;
+    if (heartbeat == null) return;
+    unawaited(heartbeat.setEnabled(on).catchError((Object e) {
+      debugPrint('[Platform] heartbeat ${on ? 'on' : 'off'} failed: ${e.runtimeType}');
+    }));
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _heartbeat?.dispose();
     _payloadSub?.cancel();
     _deepLinks?.dispose();
     _shareIntake?.dispose();
@@ -180,6 +207,10 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
       try {
         ref.read(nostrControllerProvider).onAppResumed();
       } catch (_) {}
+      final heartbeat = _heartbeat;
+      if (heartbeat != null) {
+        unawaited(heartbeat.resume().catchError((Object _) {}));
+      }
       return;
     }
 
@@ -290,6 +321,7 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
       settingsProvider.select((s) => s.backgroundConnectivity),
       (_, next) {
         if (!next) unawaited(_backgroundConnectivity.stop());
+        _setHeartbeat(next);
       },
     );
     // Notifications off: stop asking iOS for catch-up windows there is nothing
