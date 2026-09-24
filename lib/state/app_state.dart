@@ -2553,8 +2553,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         _reactionLastAction.keys.where((k) => k.startsWith('$oldId:')).toList();
     for (final k in stale) {
       final ts = _reactionLastAction.remove(k);
-      if (ts != null)
+      if (ts != null) {
         _reactionLastAction['$newId:${k.substring(oldId.length + 1)}'] = ts;
+      }
     }
     _recomputeReactionTally(oldId);
     _recomputeReactionTally(newId);
