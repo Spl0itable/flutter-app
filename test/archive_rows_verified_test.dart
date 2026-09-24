@@ -6,7 +6,8 @@ import 'package:nym_bar/models/nostr_event.dart';
 import 'package:nym_bar/services/api/storage_sync.dart';
 import 'package:nym_bar/services/nostr/verified_rows.dart';
 
-NostrEvent _signed(int kind, String content, {List<List<String>> tags = const []}) {
+NostrEvent _signed(int kind, String content,
+    {List<List<String>> tags = const []}) {
   final sk = generatePrivateKey();
   return schnorr.finalizeEvent(
     UnsignedEvent(
@@ -30,7 +31,8 @@ class _Sync implements StorageSync {
   final List<Map<String, dynamic>> rows;
 
   @override
-  Future<List<Map<String, dynamic>>> zapGet(String scope, List<String> ids) async =>
+  Future<List<Map<String, dynamic>>> zapGet(
+          String scope, List<String> ids) async =>
       rows;
 
   @override
@@ -43,7 +45,11 @@ void main() {
   test('archive rows keep only events their author signed', () async {
     final good = _signed(20000, 'real');
     final impostor = _forged(_signed(20000, 'fake'), pubkey: victim);
-    final rows = [good.toJson(), impostor, <String, dynamic>{'junk': true}];
+    final rows = [
+      good.toJson(),
+      impostor,
+      <String, dynamic>{'junk': true}
+    ];
 
     final kept = await verifiedRows(rows, _verify);
 

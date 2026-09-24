@@ -8,8 +8,7 @@ import 'package:nym_bar/state/app_state.dart';
 NostrEvent _seal() {
   final sk = generatePrivateKey();
   return schnorr.finalizeEvent(
-    UnsignedEvent(
-        pubkey: getPublicKeyHex(sk), createdAt: 1700000000, kind: 13),
+    UnsignedEvent(pubkey: getPublicKeyHex(sk), createdAt: 1700000000, kind: 13),
     sk,
   );
 }
@@ -38,7 +37,6 @@ void main() {
 
   test('the message inside must name the same author as the seal', () {
     final seal = _seal();
-    expect(BotChatController.fromBot(seal, {'pubkey': kNymbotPubkey}),
-        isFalse);
+    expect(BotChatController.fromBot(seal, {'pubkey': kNymbotPubkey}), isFalse);
   });
 }

@@ -15,8 +15,7 @@ void main() {
         'first_unlock_this_device');
   });
 
-  test('a fresh install clears what an earlier install left behind',
-      () async {
+  test('a fresh install clears what an earlier install left behind', () async {
     FlutterSecureStorage.setMockInitialValues(
         {'nym_session_nsec': 'old-nsec', 'nym_mesh_ed25519_seed': 'old'});
     SharedPreferences.setMockInitialValues({});
@@ -31,8 +30,7 @@ void main() {
     expect(await SecureStore().get('nym_session_nsec'), 'new-nsec');
   });
 
-  test('an existing install keeps its keys when it is first marked',
-      () async {
+  test('an existing install keeps its keys when it is first marked', () async {
     FlutterSecureStorage.setMockInitialValues({'nym_session_nsec': 'kept'});
     SharedPreferences.setMockInitialValues({'nym_theme': 'dark'});
     final prefs = await SharedPreferences.getInstance();
