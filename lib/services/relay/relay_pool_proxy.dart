@@ -829,6 +829,7 @@ class RelayPoolProxy implements PoolTransport {
       max(1, openShardCount),
       eoseQuorum: eoseQuorum,
       eoseTimeout: eoseTimeout,
+      onRejected: (event) => _deduper.forget(copyKey(event)),
     );
     _subscriptions[id] = sub;
     _activeFilters[id] = filters;
@@ -1259,7 +1260,7 @@ class RelayPoolProxy implements PoolTransport {
         // relay list.
         eventProvenance.record(event, sourceRelay);
         // Cross-shard dedup: the first shard to deliver an id wins.
-        if (!_deduper.add(event.id)) return;
+        if (!_deduper.add(copyKey(event))) return;
         // Normalize a split-child sub id back to its parent (see [_parentSubId]).
         final eventSubId = _parentSubId(subId);
         // Post-dedup event accounting (relays.js handleRelayMessage:3738-3746):

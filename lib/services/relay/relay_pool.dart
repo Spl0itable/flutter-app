@@ -37,12 +37,15 @@ class EventDeduper {
   }
 
   bool contains(String id) => _seen.contains(id);
+  void forget(String id) => _seen.remove(id);
   int get length => _seen.length;
   void clear() => _seen.clear();
 }
 
 /// Generates a PWA-style subscription id: a random base36 string, equivalent
 /// to JS `Math.random().toString(36).slice(2)`.
+String copyKey(NostrEvent event) => '${event.id}:${event.sig}';
+
 String generateSubId([Random? rng]) {
   final r = rng ?? Random();
   // 11 base36 chars ~= 56 bits of entropy, similar magnitude to the JS form.
@@ -134,8 +137,10 @@ class Subscription {
     this._relayCount, {
     required double eoseQuorum,
     required Duration eoseTimeout,
+    void Function(NostrEvent event)? onRejected,
   })  : _eoseQuorum = eoseQuorum,
-        _eoseTimeout = eoseTimeout;
+        _eoseTimeout = eoseTimeout,
+        _onRejected = onRejected;
 
   /// Transport-agnostic constructor used by both [RelayPool] and the proxy
   /// transport. Exposes the start/event/eose hooks under public names.
@@ -146,6 +151,7 @@ class Subscription {
     int relayCount, {
     required double eoseQuorum,
     required Duration eoseTimeout,
+    void Function(NostrEvent event)? onRejected,
   }) =>
       Subscription._(
         subId,
@@ -154,6 +160,7 @@ class Subscription {
         relayCount,
         eoseQuorum: eoseQuorum,
         eoseTimeout: eoseTimeout,
+        onRejected: onRejected,
       );
 
   final String subId;
@@ -162,8 +169,10 @@ class Subscription {
   final int _relayCount;
   final double _eoseQuorum;
   final Duration _eoseTimeout;
+  final void Function(NostrEvent event)? _onRejected;
 
   final EventDeduper _deduper = EventDeduper();
+  final EventDeduper _delivered = EventDeduper();
   final StreamController<NostrEvent> _events =
       StreamController<NostrEvent>.broadcast();
   final Completer<void> _eose = Completer<void>();
@@ -196,10 +205,17 @@ class Subscription {
   /// second pass — harmless.
   Future<void> onEvent(String relayUrl, NostrEvent event) async {
     if (_closed) return;
-    if (!_deduper.add(event.id)) return;
+    if (_delivered.contains(event.id)) return;
+    final key = copyKey(event);
+    if (!_deduper.add(key)) return;
     final ok = await _verify(event);
+    if (!ok) {
+      _deduper.forget(key);
+      _onRejected?.call(event);
+      return;
+    }
     if (_closed) return;
-    if (!ok) return;
+    if (!_delivered.add(event.id)) return;
     if (!_events.isClosed) _events.add(event);
   }
 
