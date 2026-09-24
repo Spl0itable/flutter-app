@@ -36,6 +36,7 @@ class VaultBootUnlock extends ConsumerStatefulWidget {
     required this.onUnlocked,
     required this.onForget,
     this.secureStore,
+    this.canForget = true,
   });
 
   /// Called once the vault is unlocked, with the decrypted secrets (kept in
@@ -51,8 +52,26 @@ class VaultBootUnlock extends ConsumerStatefulWidget {
   /// real platform keystore; tests inject an in-memory fake so no plugin is hit.
   final SecureStoreLike? secureStore;
 
+  final bool canForget;
+
   @override
   ConsumerState<VaultBootUnlock> createState() => _VaultBootUnlockState();
+}
+
+class VaultLockedApp extends StatelessWidget {
+  const VaultLockedApp({super.key, required this.app, required this.lock});
+
+  final Widget app;
+  final Widget lock;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+        textDirection: TextDirection.ltr,
+        children: [
+          Offstage(child: TickerMode(enabled: false, child: app)),
+          lock,
+        ],
+      );
 }
 
 class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
@@ -275,11 +294,13 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Flexible(
-              child: ModalChrome.iconButton(
-                  c, tr('Forget identity'), _busy ? null : _forget,
-                  height: 42)),
-          const SizedBox(width: 10),
+          if (widget.canForget) ...[
+            Flexible(
+                child: ModalChrome.iconButton(
+                    c, tr('Forget identity'), _busy ? null : _forget,
+                    height: 42)),
+            const SizedBox(width: 10),
+          ],
           Flexible(
             child: ModalChrome.sendButton(
               c,
@@ -315,11 +336,13 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
       Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Flexible(
-              child: ModalChrome.iconButton(
-                  c, tr('Forget identity'), _forgetFromError,
-                  height: 42)),
-          const SizedBox(width: 10),
+          if (widget.canForget) ...[
+            Flexible(
+                child: ModalChrome.iconButton(
+                    c, tr('Forget identity'), _forgetFromError,
+                    height: 42)),
+            const SizedBox(width: 10),
+          ],
           Flexible(child: ModalChrome.sendButton(c, tr('Try again'), _retry)),
         ],
       ),

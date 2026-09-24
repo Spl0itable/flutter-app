@@ -76,6 +76,8 @@ class _BootUnlockGate extends ConsumerStatefulWidget {
 
 class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
   late bool _unlocked;
+  bool _wakeUnlocked = false;
+  final GlobalKey _appKey = GlobalKey();
 
   /// Claims the background-refresh channel while locked; `app.dart` re-claims
   /// it with its own handler once the app tree mounts.
@@ -119,6 +121,7 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
         // window promptly, which is what keeps iOS granting more of them.
         if (secrets == null) return;
         if (!mounted) return;
+        _wakeUnlocked = true;
         _onUnlocked(secrets);
         // Let the freshly-mounted app finish wiring up before the catch-up
         // runs against it.
@@ -149,7 +152,15 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
 
   @override
   Widget build(BuildContext context) {
-    if (_unlocked) return const NymchatApp();
+    if (_unlocked) {
+      final app = KeyedSubtree(key: _appKey, child: const NymchatApp());
+      if (!_wakeUnlocked) return app;
+      return VaultLockedApp(app: app, lock: _unlockScreen(resumed: true));
+    }
+    return _unlockScreen();
+  }
+
+  Widget _unlockScreen({bool resumed = false}) {
     // The unlock screen needs the theme too; wrap it in a minimal MaterialApp
     // so it matches the app's appearance (the PWA applies the saved color mode
     // before showing the unlock modal). Reuses the same color provider the
@@ -160,8 +171,11 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
       debugShowCheckedModeBanner: false,
       theme: buildNymThemeData(colors),
       home: VaultBootUnlock(
-        onUnlocked: _onUnlocked,
+        onUnlocked: resumed
+            ? (_) => setState(() => _wakeUnlocked = false)
+            : _onUnlocked,
         onForget: _onForget,
+        canForget: !resumed,
       ),
     );
   }

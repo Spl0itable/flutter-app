@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 
 import '../../core/constants/storage_keys.dart';
+import '../../services/platform/background_refresh.dart';
 import '../../services/storage/key_value_store.dart';
 import '../../services/storage/secure_store.dart';
 
@@ -42,10 +43,12 @@ class SecureStoreAdapter implements SecureStoreLike {
 ///
 /// Blob format matches the PWA exactly: `enc:v1:<b64(iv)>:<b64(ciphertext)>`.
 class IdentityVault {
-  IdentityVault(this._kv, this._secure);
+  IdentityVault(this._kv, this._secure, {bool? escrow})
+      : _escrow = escrow ?? BackgroundRefreshService.isSupported;
 
   final KeyValueStore _kv;
   final SecureStoreLike _secure;
+  final bool _escrow;
 
   static const int _iterations = 310000;
   static const String _checkPlaintext = 'nymchat-vault-ok';
@@ -197,6 +200,7 @@ class IdentityVault {
   static const String _bgKeyName = 'nym_vault_bg_key';
 
   Future<void> _escrowBackgroundKey(SecretKey key) async {
+    if (!_escrow) return clearBackgroundKey();
     try {
       final bytes = await key.extractBytes();
       await _secure.set(_bgKeyName, base64.encode(bytes));
