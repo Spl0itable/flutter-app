@@ -96,11 +96,6 @@ dependencies:
   collection: ^1.18.0
   uuid: ^4.5.1
 
-  # Legacy WebView shell (kept during native migration)
-  webview_flutter: any
-  webview_flutter_android: ^4.0.0
-  webview_flutter_wkwebview: ^3.0.0
-  webview_flutter_web: any
   bluetooth_low_energy: ^6.1.0
 
 dev_dependencies:
