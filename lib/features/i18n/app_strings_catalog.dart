@@ -494,6 +494,7 @@ const List<String> kAppStringsCatalog = <String>[
   'Join group',
   'Join or create a mesh group',
   'Join request sent for "{name}". You\'ll be added once a member is online.',
+  'Join this group? A join request will be sent to a group member.',
   'Join {name}',
   'Joined Geohash Channels',
   'Joining via invite link is now disabled.',
