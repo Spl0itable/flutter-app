@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,7 +9,6 @@ import 'core/constants/storage_keys.dart';
 import 'core/theme/nym_theme.dart';
 import 'features/identity/vault_settings_modal.dart' show identityVaultProvider;
 import 'features/identity/vault_boot_unlock.dart';
-import 'services/api/http_overrides.dart';
 import 'services/platform/background_refresh.dart';
 import 'services/storage/key_value_store.dart';
 import 'services/storage/secure_store.dart';
@@ -20,7 +17,6 @@ import 'state/settings_provider.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  HttpOverrides.global = NymHttpOverrides();
 
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
