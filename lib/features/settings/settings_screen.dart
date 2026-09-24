@@ -2858,8 +2858,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               'connections and the Bluetooth mesh running while the app is in '
               'the background, so messages arrive without reopening it. Uses more '
               'battery and data. Android shows a permanent notification while it '
-              'is on; iOS limits how long connections can be held and, with '
-              'identity encryption on, catches up only while the device has '
+              'is on; iOS limits how long connections can be held, wakes the app '
+              'about every 20 minutes with an empty push every device gets '
+              'alike, and, with identity encryption on, catches up only while the device has '
               'been unlocked at least once since it was powered on.'),
           child: FormGroup(
             label: tr('Stay Connected in Background'),
@@ -2867,7 +2868,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 'while the app is in the background, so messages arrive '
                 'without reopening it. Uses more battery and data. Android shows a '
                 'permanent notification while it is on; iOS limits how long '
-                'connections can be held and, with identity encryption on, '
+                'connections can be held, wakes the app about every 20 '
+                'minutes with an empty push every device gets alike, and, '
+                'with identity encryption on, '
                 'catches up only while the device has been unlocked at least '
                 'once since it was powered on.'),
             // Save-gated like its Data & Backup siblings (09-M1): the platform

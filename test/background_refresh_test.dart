@@ -19,7 +19,13 @@ Future<Object?> _runRefreshFromNative() {
       .handlePlatformMessage(
     _channelName,
     _codec.encodeMethodCall(const MethodCall('runRefresh')),
-    (data) => reply.complete(_codec.decodeEnvelope(data!)),
+    (data) {
+      try {
+        reply.complete(_codec.decodeEnvelope(data!));
+      } catch (e) {
+        reply.completeError(e);
+      }
+    },
   );
   return reply.future;
 }
@@ -51,28 +57,31 @@ void main() {
     expect(reply.isCompleted, isFalse);
 
     var runs = 0;
-    BackgroundRefreshService(supported: true).start(() async => runs++);
+    BackgroundRefreshService(supported: true).start(() async {
+      runs++;
+      return true;
+    });
 
-    expect(await reply.future.timeout(const Duration(seconds: 5)), isNull);
+    expect(await reply.future.timeout(const Duration(seconds: 5)), isTrue);
     expect(runs, 1);
   });
 
   test('a catch-up that fails still ends the window', () async {
     BackgroundRefreshService(supported: true)
         .start(() async => throw StateError('relay down'));
-    expect(await _runRefreshFromNative(), isNull);
+    await expectLater(_runRefreshFromNative(), throwsA(isA<PlatformException>()));
   });
 
   test('a catch-up that hangs still ends the window within its budget',
       () async {
-    final hang = Completer<void>();
+    final hang = Completer<bool>();
     BackgroundRefreshService(supported: true).start(
       () => hang.future,
       budget: const Duration(milliseconds: 50),
     );
-    expect(
-      await _runRefreshFromNative().timeout(const Duration(seconds: 5)),
-      isNull,
+    await expectLater(
+      _runRefreshFromNative().timeout(const Duration(seconds: 5)),
+      throwsA(isA<PlatformException>()),
     );
     expect(hang.isCompleted, isFalse);
   });

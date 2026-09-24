@@ -114,15 +114,15 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
             await ref.read(identityVaultProvider).unlockForBackgroundWake();
         // No escrow (or a stale one): nothing can run. Returning ends the
         // window promptly, which is what keeps iOS granting more of them.
-        if (secrets == null) return;
-        if (!mounted) return;
+        if (secrets == null) return false;
+        if (!mounted) return false;
         _wakeUnlocked = true;
         _onUnlocked(secrets);
         // Let the freshly-mounted app finish wiring up before the catch-up
         // runs against it.
         await Future<void>.delayed(const Duration(milliseconds: 250));
       }
-      await ref.read(nostrControllerProvider).runBackgroundCatchUp();
+      return ref.read(nostrControllerProvider).runBackgroundCatchUp();
     });
   }
 

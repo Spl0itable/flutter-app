@@ -8,9 +8,9 @@ import 'package:flutter/services.dart';
 /// can notice, while suspended, that something arrived.
 ///
 /// iOS suspends a backgrounded app within seconds and will not wake it for
-/// network data — that is what APNs exists for, and Nymchat deliberately has no
-/// APNs registration, because a push provider would learn who is messaging
-/// whom. `BGTaskScheduler` is the alternative the system does offer: it grants
+/// network data — that is what APNs exists for, and Nymchat uses APNs only for
+/// a content-free heartbeat sent to every device alike, because a push per
+/// message would tell the provider who is messaging whom. `BGTaskScheduler` is the alternative the system does offer: it grants
 /// the app a short run at a time of ITS choosing, typically minutes to hours
 /// after the fact and influenced by how often the user opens the app. That is
 /// not real-time and cannot be made so; it turns "nothing until you next open
@@ -55,7 +55,7 @@ class BackgroundRefreshService {
   /// app if a task overruns its budget, and repeatedly overrunning teaches the
   /// scheduler to grant fewer windows.
   void start(
-    Future<void> Function() onRefresh, {
+    Future<bool> Function() onRefresh, {
     Duration budget = runBudget,
   }) {
     if (!_supported || _started) return;
@@ -63,11 +63,11 @@ class BackgroundRefreshService {
     _channel.setMethodCallHandler((call) async {
       if (call.method != 'runRefresh') return null;
       try {
-        await onRefresh().timeout(budget);
+        return await onRefresh().timeout(budget);
       } catch (e) {
-        debugPrint('[BackgroundRefresh] catch-up failed: $e');
+        debugPrint('[BackgroundRefresh] catch-up failed: ${e.runtimeType}');
+        throw PlatformException(code: 'failed');
       }
-      return null;
     });
   }
 

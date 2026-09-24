@@ -82,6 +82,7 @@ class StorageKeys {
   /// notification; iOS: the declared background modes plus a background-task
   /// window). Off by default — it costs battery.
   static const backgroundConnectivity = 'nym_background_connectivity';
+  static const heartbeatToken = 'nym_heartbeat_token';
   static const meshEnabled = 'nym_mesh_enabled';
 
   /// Ghost Mode on/off. Device-local on purpose: it is not part of the synced

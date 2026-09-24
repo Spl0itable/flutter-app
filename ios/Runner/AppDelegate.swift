@@ -11,6 +11,7 @@ import UIKit
 
   /// Channel the background-refresh window calls into Dart on.
   private var backgroundRefreshChannel: FlutterMethodChannel?
+  private var heartbeatChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -20,6 +21,7 @@ import UIKit
     excludeMessageStoreFromBackup()
     registerBackgroundConnectivityChannel()
     registerBackgroundRefreshChannel()
+    registerHeartbeatChannel()
     registerAttestChannel()
     registerVaultKeyChannel()
     // Must happen before launch finishes, or BGTaskScheduler throws.
@@ -142,10 +144,11 @@ import UIKit
   // MARK: - Background catch-up (BGAppRefresh)
 
   /// iOS will not wake a suspended app for network data without APNs, and
-  /// Nymchat has no APNs registration on purpose — a push provider would learn
-  /// who is messaging whom. `BGAppRefresh` is the alternative the system does
-  /// offer: a short run at a time of its choosing, which Dart uses to pull what
-  /// arrived and raise notifications for it. Minutes-to-hours late, never
+  /// Nymchat's only APNs use is a content-free heartbeat sent to every device
+  /// alike — a push per message would tell the provider who is messaging whom.
+  /// `BGAppRefresh` is the other wake the system offers: a short run at a
+  /// time of its choosing, which Dart uses to pull what arrived and raise
+  /// notifications for it. Minutes-to-hours late, never
   /// real-time, and entirely at the scheduler's discretion.
   private func registerBackgroundRefreshChannel() {
     guard let controller = window?.rootViewController as? FlutterViewController else { return }
@@ -188,32 +191,44 @@ import UIKit
     // early return below would otherwise end the chain permanently.
     scheduleBackgroundRefresh(earliest: Self.refreshInterval)
 
-    var completed = false
-    let finish: (Bool) -> Void = { success in
-      DispatchQueue.main.async {
-        guard !completed else { return }
-        completed = true
-        task.setTaskCompleted(success: success)
-      }
+    let finish = runDartRefresh { outcome in
+      task.setTaskCompleted(success: outcome != .failed)
     }
     // iOS kills the app if a task overruns, so both the OS deadline and a
     // self-imposed cap end the window even if Dart never answers.
-    task.expirationHandler = { finish(false) }
+    task.expirationHandler = { finish(.failed) }
+  }
+
+  @discardableResult
+  private func runDartRefresh(
+    _ done: @escaping (UIBackgroundFetchResult) -> Void
+  ) -> (UIBackgroundFetchResult) -> Void {
+    var completed = false
+    let finish: (UIBackgroundFetchResult) -> Void = { outcome in
+      DispatchQueue.main.async {
+        guard !completed else { return }
+        completed = true
+        done(outcome)
+      }
+    }
     if backgroundRefreshChannel == nil {
       registerBackgroundRefreshChannel()
     }
     guard let channel = backgroundRefreshChannel else {
-      finish(false)
-      return
+      finish(.failed)
+      return finish
     }
     channel.invokeMethod("runRefresh", arguments: nil) { result in
-      let unanswered =
-        result is FlutterError || (result as? NSObject) === FlutterMethodNotImplemented
-      finish(!unanswered)
+      if result is FlutterError || (result as? NSObject) === FlutterMethodNotImplemented {
+        finish(.failed)
+      } else {
+        finish((result as? Bool) == true ? .newData : .noData)
+      }
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.refreshBudget) {
-      finish(false)
+      finish(.failed)
     }
+    return finish
   }
 
   private func scheduleBackgroundRefresh(earliest: TimeInterval) {
@@ -229,6 +244,56 @@ import UIKit
       // unavailable — nothing to recover, the app simply catches up on resume.
       NSLog("[BackgroundRefresh] submit failed: \(error.localizedDescription)")
     }
+  }
+
+  private func registerHeartbeatChannel() {
+    guard let controller = window?.rootViewController as? FlutterViewController else { return }
+    let channel = FlutterMethodChannel(
+      name: "app.nymchat/heartbeat",
+      binaryMessenger: controller.binaryMessenger
+    )
+    heartbeatChannel = channel
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "register":
+        UIApplication.shared.registerForRemoteNotifications()
+        result(nil)
+      case "unregister":
+        UIApplication.shared.unregisterForRemoteNotifications()
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+    let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+    heartbeatChannel?.invokeMethod("token", arguments: hex)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didFailToRegisterForRemoteNotificationsWithError error: Error
+  ) {
+    super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
+    heartbeatChannel?.invokeMethod("registrationFailed", arguments: error.localizedDescription)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+  ) {
+    guard application.applicationState != .active else {
+      completionHandler(.noData)
+      return
+    }
+    runDartRefresh(completionHandler)
   }
 
   /// Must match `BGTaskSchedulerPermittedIdentifiers` in Info.plist.

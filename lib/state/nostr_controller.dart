@@ -10778,11 +10778,11 @@ class NostrController {
     return value;
   }
 
-  Future<void> runBackgroundCatchUp({
+  Future<bool> runBackgroundCatchUp({
     Duration budget = const Duration(seconds: 20),
   }) async {
     final deadline = DateTime.now().add(budget);
-    if (!hasChosenIdentity(_ref.read(keyValueStoreProvider))) return;
+    if (!hasChosenIdentity(_ref.read(keyValueStoreProvider))) return false;
     final sync = await awaitBootValue<StorageSync>(
       () => _storageSync,
       booting: () => _started,
@@ -10790,8 +10790,8 @@ class NostrController {
     );
     // Not booted (relaunched into the background with a locked vault, or no
     // identity yet): nothing to pull, and the next window will try again.
-    if (sync == null) return;
-    if (!_ref.read(settingsProvider).notificationsEnabled) return;
+    if (sync == null) return false;
+    if (!_ref.read(settingsProvider).notificationsEnabled) return false;
 
     final kv = _ref.read(keyValueStoreProvider);
     final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -10859,6 +10859,7 @@ class NostrController {
       // is not a risk: the replay guards reject anything already surfaced.
       await kv.setInt(StorageKeys.backgroundCatchUpTs, nowMs ~/ 1000);
     }
+    return true;
   }
 
   /// Catch-up stage 2: restore the joined channels' archives and notify for any
