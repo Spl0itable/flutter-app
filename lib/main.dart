@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
 import 'app.dart';
@@ -13,6 +14,7 @@ import 'features/identity/vault_boot_unlock.dart';
 import 'services/api/http_overrides.dart';
 import 'services/platform/background_refresh.dart';
 import 'services/storage/key_value_store.dart';
+import 'services/storage/secure_store.dart';
 import 'state/nostr_controller.dart';
 import 'state/settings_provider.dart';
 
@@ -30,6 +32,7 @@ Future<void> main() async {
   // emulator/device is offline) so they don’t terminate the app.
   await runZonedGuarded(() async {
     // Open the key/value store (mirrors the PWA's synchronous localStorage).
+    await SecureStore.settleInstall(await SharedPreferences.getInstance());
     final kv = await KeyValueStore.open();
 
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
