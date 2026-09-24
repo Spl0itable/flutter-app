@@ -39,6 +39,7 @@ const List<String> kAppStringsCatalog = <String>[
   '@{user} cannot receive zaps (no lightning address set)',
   'A decentralized, pseudonymous chat built on the ',
   'A named room · optional password for privacy',
+  'A signer answered without the connection secret, so Nymchat did not trust it. Update your signer app, or paste a bunker:// link instead.',
   'ACTIVATE',
   'ANON',
   'About',
