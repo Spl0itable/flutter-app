@@ -184,6 +184,8 @@ class StorageKeys {
   static const leftGroupTimes = 'nym_left_group_times';
   static String lastPmSyncFor(String pubkey) => 'nym_last_pm_sync_$pubkey';
   static const pendingGroupInvite = 'nym_pending_group_invite';
+  static const groupStorePrefix = 'nym_groups_';
+  static String groupStoreFor(String pubkey) => '$groupStorePrefix$pubkey';
 
   /// The mesh sender outbox: sends the Bluetooth mesh carried because the
   /// internet route was down, replayed to Nostr when relays return.

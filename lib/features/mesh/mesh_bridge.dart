@@ -14,11 +14,9 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../../features/pms/pm_logic.dart' show ReceiptInfo;
 import '../../models/channel.dart';
@@ -39,6 +37,7 @@ import 'mesh_controller.dart';
 import 'mesh_diagnostics.dart';
 import 'mesh_outbox.dart';
 import '../../services/mesh/protocol/nostr_carrier_packet.dart';
+import '../../services/storage/mesh_file_store.dart';
 
 /// The bare storage key of the mesh "Nearby" public channel (renders as
 /// `#mesh` — an ordinary channel in the sidebar's Channels list).
@@ -1075,20 +1074,8 @@ class MeshBridge {
 
   // ---- Disk ----------------------------------------------------------------
 
-  Future<String?> _saveFile(String fileName, Uint8List bytes) async {
-    try {
-      final dir = Directory(
-          '${(await getApplicationDocumentsDirectory()).path}/mesh_files');
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      final stamp = DateTime.now().microsecondsSinceEpoch;
-      final safe = fileName.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-      final path = '${dir.path}/${stamp}_$safe';
-      await File(path).writeAsBytes(bytes, flush: true);
-      return path;
-    } catch (_) {
-      return null;
-    }
-  }
+  Future<String?> _saveFile(String fileName, Uint8List bytes) =>
+      MeshFileStore.instance.save(fileName, bytes);
 }
 
 /// Exposes a peer's rich profile to the bridge/registry (avatar bytes) — reused

@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/nym_colors.dart';
+import '../../services/storage/at_rest_wipe.dart';
+import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../i18n/i18n.dart';
 import 'biometric_secret_store.dart';
@@ -145,8 +149,14 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
   /// `_forgetIdentityAndReload` — no second confirmation (key-vault.js:345,398),
   /// unlike the prompt's Forget which confirms first.
   Future<void> _forgetFromError() async {
-    await ref.read(identityVaultProvider).reset();
+    await _resetIdentity();
     if (mounted) widget.onForget();
+  }
+
+  Future<void> _resetIdentity() async {
+    final kv = ref.read(keyValueStoreProvider);
+    await ref.read(identityVaultProvider).reset();
+    unawaited(forgetAtRestData(kv));
   }
 
   /// "Forget identity" — confirm, then reset the vault (`resetVault`) and hand
@@ -154,7 +164,7 @@ class _VaultBootUnlockState extends ConsumerState<VaultBootUnlock> {
   Future<void> _forget() async {
     final confirmed = await _confirmForget();
     if (!confirmed) return;
-    await ref.read(identityVaultProvider).reset();
+    await _resetIdentity();
     if (mounted) widget.onForget();
   }
 

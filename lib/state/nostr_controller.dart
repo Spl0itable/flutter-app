@@ -83,6 +83,7 @@ import '../services/nostr/nym_generator.dart';
 import '../services/nostr/verified_rows.dart';
 import '../services/storage/cache_store.dart';
 import '../services/storage/key_value_store.dart';
+import '../services/storage/sealed_key_value.dart';
 import '../services/storage/secure_store.dart';
 import 'app_state.dart';
 import 'settings_provider.dart';
@@ -9692,7 +9693,8 @@ class NostrController {
       for (final g in st.groups) {
         data[g.id] = _serializeGroupForLocal(g, st);
       }
-      kv.setString('nym_groups_${identity.pubkey}', jsonEncode(data));
+      _groupStoreFor(kv).write(
+          StorageKeys.groupStoreFor(identity.pubkey), jsonEncode(data));
     } catch (_) {}
     try {
       final groups = _groups;
@@ -9710,6 +9712,15 @@ class NostrController {
     } catch (_) {}
   }
 
+  SealedKeyValue? _sealedGroupStore;
+
+  SealedKeyValue _groupStoreFor(KeyValueStore kv) {
+    final existing = _sealedGroupStore;
+    if (existing != null && identical(existing.kv, kv)) return existing;
+    return _sealedGroupStore =
+        SealedKeyValue(kv, blocked: () => PanicWipe.inProgress);
+  }
+
   /// Restores the persisted group store + ephemeral keys at boot (the PWA's
   /// `_loadGroupConversations`, groups.js:556-600, and `_loadEphemeralKeys`,
   /// groups.js:291-311). Runs through the same additive apply the D1 restore
@@ -9720,7 +9731,8 @@ class NostrController {
     final kv = _ref.read(keyValueStoreProvider);
     final appState = _ref.read(appStateProvider.notifier);
     try {
-      final raw = kv.getString('nym_groups_${identity.pubkey}');
+      final raw = await _groupStoreFor(kv)
+          .read(StorageKeys.groupStoreFor(identity.pubkey));
       if (raw != null && raw.isNotEmpty) {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
