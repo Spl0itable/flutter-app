@@ -13,6 +13,7 @@ import '../../core/crypto/key_format.dart';
 import '../../core/theme/nym_colors.dart';
 import '../../core/utils/nym_utils.dart';
 import '../../core/theme/nym_metrics.dart';
+import '../../core/utils/secret_screen.dart';
 import '../../services/nostr/nym_generator.dart';
 import '../../state/app_state.dart';
 import '../../state/nostr_controller.dart';
@@ -723,6 +724,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (_pqRootVisible) const SecretGuard(),
         Text(tr('Post-quantum recovery code'),
             style: TextStyle(color: c.text, fontSize: 12)),
         const SizedBox(height: 4),
@@ -762,7 +764,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
               tooltip: tr('Copy'),
               icon: NymSvgIcon(NymIcons.ctxCopy, size: 16, color: c.textDim),
               onPressed: () => _copyToClipboard(
-                  code, tr('Post-quantum recovery code copied')),
+                  code, tr('Post-quantum recovery code copied'),
+                  secret: true),
             ),
           ],
         ),
@@ -1019,6 +1022,7 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (_nsecVisible && nsec.isNotEmpty) const SecretGuard(),
         Text(tr('nsec (Nostr Private Key)'),
             style: TextStyle(color: c.text, fontSize: 12)),
         const SizedBox(height: 6),
@@ -1058,7 +1062,8 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 tooltip: tr('Copy'),
                 icon: NymSvgIcon(NymIcons.ctxCopy, size: 16, color: c.textDim),
                 onPressed: () =>
-                    _copyToClipboard(nsec, tr('Private key copied')),
+                    _copyToClipboard(nsec, tr('Private key copied'),
+                        secret: true),
               ),
           ],
         ),
@@ -1283,8 +1288,12 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
     setState(() => _nick.text = splitNymSuffix(generated).base);
   }
 
-  void _copyToClipboard(String value, String confirm) {
-    Clipboard.setData(ClipboardData(text: value));
+  void _copyToClipboard(String value, String confirm, {bool secret = false}) {
+    if (secret) {
+      SecretScreen.copy(value);
+    } else {
+      Clipboard.setData(ClipboardData(text: value));
+    }
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(confirm)));
   }

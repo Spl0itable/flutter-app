@@ -289,6 +289,7 @@ class _ShellWithTutorialState extends ConsumerState<_ShellWithTutorial> {
       copyValue: ctrl.pqRootCode,
       copyLabel: tr('Copy code'),
       copiedMessage: tr('Post-quantum recovery code copied'),
+      secret: true,
     );
   }
 

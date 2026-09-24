@@ -2,6 +2,7 @@ package com.nym.bar
 
 import android.content.Intent
 import android.os.Build
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -60,6 +61,23 @@ class MainActivity : FlutterFragmentActivity() {
                             }
                         }
                     }.start()
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            SECURE_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "secure" -> {
+                    if (call.arguments == true) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    } else {
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    }
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
@@ -128,5 +146,6 @@ class MainActivity : FlutterFragmentActivity() {
         private const val BACKGROUND_CHANNEL = "app.nymchat/background_connectivity"
         private const val BUILD_INTEGRITY_CHANNEL = "app.nymchat/build_integrity"
         private const val ATTEST_CHANNEL = "app.nymchat/attest"
+        private const val SECURE_CHANNEL = "app.nymchat/secure"
     }
 }
