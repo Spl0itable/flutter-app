@@ -1799,9 +1799,8 @@ class _MiniIconState extends State<_MiniIcon> {
 /// A unified PRIVATE MESSAGES list entry: either a 1:1 PM thread or a group.
 /// Carries the `lastMessageTime` both kinds sort by.
 class _PmEntry {
-  _PmEntry.pm(PMConversation pm)
-      : pm = pm,
-        group = null,
+  _PmEntry.pm(PMConversation this.pm)
+      : group = null,
         lastMessageTime = pm.lastMessageTime;
   _PmEntry.group(Group g)
       : pm = null,

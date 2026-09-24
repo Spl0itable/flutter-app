@@ -29,7 +29,9 @@ void main() {
 
   AppStateNotifier fresh() {
     crossContentFlood = CrossContentFlood();
-    return AppStateNotifier()..goLive(self, 'me#0001');
+    return AppStateNotifier()
+      ..goLive(self, 'me#0001')
+      ..setProxyMode(false);
   }
 
   int visible(AppStateNotifier n) =>

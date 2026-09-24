@@ -13108,8 +13108,9 @@ class NostrController {
     final tags = raw['tags'];
     if (tags is! List) return null;
     for (final t in tags) {
-      if (t is List && t.length >= 2 && t[0] == 'p')
+      if (t is List && t.length >= 2 && t[0] == 'p') {
         return '${t[1]}'.toLowerCase();
+      }
     }
     return null;
   }
