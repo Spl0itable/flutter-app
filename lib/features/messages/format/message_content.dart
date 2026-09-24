@@ -60,8 +60,6 @@ String proxiedMedia(String url, {bool emoji = false}) {
   final lower = url.toLowerCase();
   if (lower.startsWith('data:') || lower.startsWith('blob:')) return url;
   if (!lower.startsWith('http://') && !lower.startsWith('https://')) return url;
-  // Already proxied (e.g. nym_format pre-proxied via proxyBase) — leave as-is.
-  if (url.contains('/api/proxy?')) return url;
   if (isOwnMediaUrl(url)) return url;
   return _proxyApi.mediaProxyUrl(url, emoji: emoji);
 }

@@ -49,6 +49,17 @@ class ApiConfig {
 
   static HttpClient socketClient() => HttpClient()..userAgent = null;
 
+  static bool isOwnHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'nymchat.app' || h.endsWith('.nymchat.app');
+  }
+
+  static String userAgentFor(Uri url) =>
+      isOwnHost(url.host) ? userAgent : dartUserAgent;
+
+  static Map<String, String> socketHeadersFor(Uri url) =>
+      {'User-Agent': userAgentFor(url)};
+
   /// `wss://<host>/api/relay-pool` — the multiplexed relay-pool socket
   /// (`_getRelayPoolUrl`, spec §4.2).
   static String relayPoolUrl() => 'wss://$apiHost/api/relay-pool';

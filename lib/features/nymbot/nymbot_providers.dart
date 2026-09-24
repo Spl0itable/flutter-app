@@ -17,8 +17,10 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/constants/event_kinds.dart';
 import '../../core/crypto/key_format.dart' show normalizePubkeyInput;
 import '../../core/crypto/gift_wrap.dart' as giftwrap;
+import '../../core/crypto/schnorr.dart' as schnorr;
 import '../../core/utils/nym_utils.dart';
 import '../../models/message.dart';
 import '../../models/nostr_event.dart';
@@ -1063,6 +1065,12 @@ class BotChatController extends StateNotifier<BotChatState> {
     return null;
   }
 
+  static bool fromBot(NostrEvent seal, Map<String, dynamic> rumor) =>
+      seal.kind == EventKind.seal &&
+      seal.pubkey == kNymbotPubkey &&
+      rumor['pubkey'] == seal.pubkey &&
+      schnorr.verifyEvent(seal);
+
   List<giftwrap.UnwrapCandidate> anonUnwrapCandidates(NostrEvent wrap) {
     String? pTag;
     for (final t in wrap.tags) {
@@ -1109,6 +1117,7 @@ class BotChatController extends StateNotifier<BotChatState> {
       final unwrapped = await giftwrap.unwrapGiftWrap(wrap, candidates);
       if (unwrapped == null || !mounted) return;
       final rumor = unwrapped.rumor;
+      if (!fromBot(unwrapped.seal, rumor)) return;
       final msg = PmLogic.mapPmRumor(
         rumor: rumor,
         wrapId: wrap.id,

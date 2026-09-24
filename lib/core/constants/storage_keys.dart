@@ -44,6 +44,7 @@ class StorageKeys {
   static const vaultSalt = 'nym_vault_salt';
   static const vaultCred = 'nym_vault_cred';
   static const vaultCheck = 'nym_vault_check';
+  static const vaultBioProtected = 'nym_vault_bio_protected';
   static const encryptAtRestPref = 'nym_encrypt_at_rest_pref';
   static const encryptAtRestPromptDismissed =
       'nym_encrypt_at_rest_prompt_dismissed';

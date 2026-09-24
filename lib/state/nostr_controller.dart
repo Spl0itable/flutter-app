@@ -80,6 +80,7 @@ import '../services/nostr/event_time_ceilings.dart';
 import '../services/nostr/identity_service.dart';
 import '../services/nostr/nostr_service.dart';
 import '../services/nostr/nym_generator.dart';
+import '../services/nostr/verified_rows.dart';
 import '../services/storage/cache_store.dart';
 import '../services/storage/key_value_store.dart';
 import '../services/storage/secure_store.dart';
@@ -253,6 +254,10 @@ class NostrController {
     }
   }
 
+  Future<bool> _verifyArchived(NostrEvent event) =>
+      _service?.verifyEvent(event) ??
+      Future<bool>.value(schnorr.verifyEvent(event));
+
   Future<NostrEvent?> archivedEvent(String eventId) async {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(eventId)) return null;
     try {
@@ -266,7 +271,8 @@ class NostrController {
       final first = list.first;
       if (first is! Map) return null;
       final ev = NostrEvent.fromJson(Map<String, dynamic>.from(first));
-      return ev.id == eventId ? ev : null;
+      if (ev.id != eventId) return null;
+      return await _verifyArchived(ev) ? ev : null;
     } catch (_) {
       return null;
     }
@@ -9294,14 +9300,13 @@ class NostrController {
           return true;
         }());
         if (found.isNotEmpty) {
+          final profiles = await verifiedRows(
+              found.values.where((ev) => ev.isNotEmpty), _verifyArchived);
           // One emit for the whole D1 profile batch (up to 100 rows) instead of
           // one Riverpod rebuild per profile.
           appState.runBatched(() {
-            for (final entry in found.entries) {
-              final ev = entry.value;
-              if (ev.isEmpty) continue; // cache hit, no event payload
+            for (final parsed in profiles) {
               try {
-                final parsed = NostrEvent.fromJson(ev);
                 appState.ingestEvent(parsed);
                 // Cache the FULL self kind-0 so a later profile save merges
                 // against the user's REAL profile instead of an empty map.
@@ -10449,7 +10454,7 @@ class NostrController {
       await _service?.publishNymSyncWrap(payload: payload, dTag: dTag);
     });
     _zapArchive?.dispose();
-    _zapArchive = ZapArchive(sync);
+    _zapArchive = ZapArchive(sync, verify: _verifyArchived);
 
     // N26: republish the notification read-state wrap whenever the seen-keys map
     // grows here (a notification read/dismissed), the native equivalent of the
@@ -10777,6 +10782,7 @@ class NostrController {
     Duration budget = const Duration(seconds: 20),
   }) async {
     final deadline = DateTime.now().add(budget);
+    if (!hasChosenIdentity(_ref.read(keyValueStoreProvider))) return;
     final sync = await awaitBootValue<StorageSync>(
       () => _storageSync,
       booting: () => _started,
@@ -11068,13 +11074,13 @@ class NostrController {
         const Duration(seconds: 10),
         onTimeout: () => const <Map<String, dynamic>>[],
       );
+      final restored = await verifiedRows(events, _verifyArchived);
       final appState = _ref.read(appStateProvider.notifier);
       // One emit for the whole archive page instead of one Riverpod rebuild (+
       // spam/flood re-run) per archived event — the D1-backfill freeze fix.
       appState.runBatched(() {
-        for (final raw in events) {
+        for (final ev in restored) {
           try {
-            final ev = NostrEvent.fromJson(raw);
             eventProvenance.recordLocal(ev, 'NYMCHAT ARCHIVE');
             // Backlog restore: mark historical by provenance so an archived event
             // that reads as ≈now isn't flood-dimmed or snap-in animated.
@@ -13111,6 +13117,25 @@ class NostrController {
   /// on failure. The kind-24242 BUD auth event is signed locally and sent as the
   /// `Authorization: Nostr <base64>` header (`_signBlossomEvent`/`_putToBlossom`,
   /// users.js:516/533). [onProgress] reports 0..1 for the `#uploadProgress` bar.
+  static String blossomAuthHeader(String hashHex, int nowSec) {
+    final sk = keys.generatePrivateKey();
+    final signed = schnorr.finalizeEvent(
+      UnsignedEvent(
+        pubkey: keys.getPublicKeyHex(sk),
+        createdAt: nowSec,
+        kind: EventKind.blossomAuth,
+        tags: [
+          ['t', 'upload'],
+          ['x', hashHex],
+          ['expiration', '${nowSec + 600}'],
+        ],
+        content: 'Uploading blob with SHA-256 hash',
+      ),
+      sk,
+    );
+    return 'Nostr ${base64.encode(utf8.encode(jsonEncode(signed.toJson())))}';
+  }
+
   Future<String?> uploadImage(
     Uint8List bytes, {
     required String contentType,
@@ -13125,21 +13150,8 @@ class NostrController {
     final hashHex = sha256Hex(bytes);
     onProgress?.call(0.55);
 
-    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final authEvent = UnsignedEvent(
-      pubkey: identity.pubkey,
-      createdAt: nowSec,
-      kind: EventKind.blossomAuth, // 24242 BUD-01 auth (NOT NIP-98 27235)
-      tags: [
-        ['t', 'upload'],
-        ['x', hashHex],
-        ['expiration', '${nowSec + 600}'],
-      ],
-      content: 'Uploading blob with SHA-256 hash',
-    );
-    final signed = await sig.sign(authEvent);
-    final authHeader =
-        'Nostr ${base64.encode(utf8.encode(jsonEncode(signed.toJson())))}';
+    final authHeader = blossomAuthHeader(
+        hashHex, DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
     final api = ApiClient();
     try {

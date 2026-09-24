@@ -1,5 +1,7 @@
 import BackgroundTasks
 import Flutter
+import LocalAuthentication
+import Security
 import UIKit
 
 @main
@@ -19,6 +21,7 @@ import UIKit
     registerBackgroundConnectivityChannel()
     registerBackgroundRefreshChannel()
     registerAttestChannel()
+    registerVaultKeyChannel()
     // Must happen before launch finishes, or BGTaskScheduler throws.
     registerBackgroundRefreshTask()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -38,6 +41,17 @@ import UIKit
       var values = URLResourceValues()
       values.isExcludedFromBackup = true
       try? url.setResourceValues(values)
+    }
+  }
+
+  private func registerVaultKeyChannel() {
+    guard let controller = window?.rootViewController as? FlutterViewController else { return }
+    let channel = FlutterMethodChannel(
+      name: "app.nymchat/vault_key",
+      binaryMessenger: controller.binaryMessenger
+    )
+    channel.setMethodCallHandler { call, result in
+      VaultKey.handle(call, result: result)
     }
   }
 
@@ -159,7 +173,7 @@ import UIKit
   private func registerBackgroundRefreshTask() {
     BGTaskScheduler.shared.register(
       forTaskWithIdentifier: Self.refreshTaskIdentifier,
-      using: nil
+      using: DispatchQueue.main
     ) { [weak self] task in
       guard let refreshTask = task as? BGAppRefreshTask else {
         task.setTaskCompleted(success: false)
@@ -176,18 +190,27 @@ import UIKit
 
     var completed = false
     let finish: (Bool) -> Void = { success in
-      guard !completed else { return }
-      completed = true
-      task.setTaskCompleted(success: success)
+      DispatchQueue.main.async {
+        guard !completed else { return }
+        completed = true
+        task.setTaskCompleted(success: success)
+      }
     }
     // iOS kills the app if a task overruns, so both the OS deadline and a
     // self-imposed cap end the window even if Dart never answers.
     task.expirationHandler = { finish(false) }
+    if backgroundRefreshChannel == nil {
+      registerBackgroundRefreshChannel()
+    }
     guard let channel = backgroundRefreshChannel else {
       finish(false)
       return
     }
-    channel.invokeMethod("runRefresh", arguments: nil) { _ in finish(true) }
+    channel.invokeMethod("runRefresh", arguments: nil) { result in
+      let unanswered =
+        result is FlutterError || (result as? NSObject) === FlutterMethodNotImplemented
+      finish(!unanswered)
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.refreshBudget) {
       finish(false)
     }
@@ -212,4 +235,83 @@ import UIKit
   private static let refreshTaskIdentifier = "app.nymchat.refresh"
   private static let refreshInterval: TimeInterval = 15 * 60
   private static let refreshBudget: TimeInterval = 25
+}
+
+enum VaultKey {
+  private static let base: [String: Any] = [
+    kSecClass as String: kSecClassGenericPassword,
+    kSecAttrService as String: "app.nymchat.vault",
+    kSecAttrAccount as String: "vault_key",
+  ]
+
+  static func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    let args = call.arguments as? [String: Any] ?? [:]
+    let reply: (Any?) -> Void = { value in DispatchQueue.main.async { result(value) } }
+    switch call.method {
+    case "store":
+      guard let secret = args["secret"] as? String, let data = secret.data(using: .utf8) else {
+        result(FlutterError(code: "failed", message: nil, details: nil))
+        return
+      }
+      DispatchQueue.global(qos: .userInitiated).async { reply(store(data)) }
+    case "load":
+      let title = args["title"] as? String ?? ""
+      let cancel = args["cancel"] as? String ?? ""
+      DispatchQueue.global(qos: .userInitiated).async { reply(load(title, cancel)) }
+    case "erase":
+      DispatchQueue.global(qos: .userInitiated).async {
+        SecItemDelete(base as CFDictionary)
+        reply(nil)
+      }
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private static func store(_ data: Data) -> Any? {
+    SecItemDelete(base as CFDictionary)
+    guard
+      let access = SecAccessControlCreateWithFlags(
+        nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .biometryCurrentSet, nil)
+    else {
+      return FlutterError(code: "unavailable", message: nil, details: nil)
+    }
+    var query = base
+    query[kSecAttrAccessControl as String] = access
+    query[kSecValueData as String] = data
+    let status = SecItemAdd(query as CFDictionary, nil)
+    if status == errSecSuccess { return nil }
+    return failure(status)
+  }
+
+  private static func load(_ title: String, _ cancel: String) -> Any? {
+    let context = LAContext()
+    context.localizedReason = title
+    context.localizedCancelTitle = cancel
+    context.localizedFallbackTitle = ""
+    var query = base
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    query[kSecUseAuthenticationContext as String] = context
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    if status == errSecItemNotFound { return nil }
+    guard status == errSecSuccess else { return failure(status) }
+    guard let data = item as? Data, let secret = String(data: data, encoding: .utf8) else {
+      return FlutterError(code: "failed", message: nil, details: nil)
+    }
+    return secret
+  }
+
+  private static func failure(_ status: OSStatus) -> FlutterError {
+    let message = SecCopyErrorMessageString(status, nil) as String?
+    switch status {
+    case errSecUserCanceled:
+      return FlutterError(code: "cancelled", message: message, details: nil)
+    case errSecNotAvailable, errSecInteractionNotAllowed:
+      return FlutterError(code: "unavailable", message: message, details: nil)
+    default:
+      return FlutterError(code: "failed", message: message, details: nil)
+    }
+  }
 }

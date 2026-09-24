@@ -49,7 +49,8 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
   /// only chance a suspended app gets to notice what arrived and notify about
   /// it. No-op on Android, where the foreground service keeps the socket open
   /// and events arrive live.
-  final BackgroundRefreshService _backgroundRefresh = BackgroundRefreshService();
+  final BackgroundRefreshService _backgroundRefresh =
+      BackgroundRefreshService();
 
   /// Lets sign-out clear any dialogs/modals pushed above the boot gate. The
   /// remount (keyed [BootGate]) replaces the gate's content, but pushed routes
@@ -76,6 +77,13 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
   Future<void> _initPlatform() async {
     if (!mounted) return;
     final controller = ref.read(nostrControllerProvider);
+
+    // iOS background catch-up. Registered whether or not notifications are on
+    // right now, so switching them on later needs no relaunch; the catch-up
+    // itself re-checks the setting before doing anything.
+    _backgroundRefresh.start(
+      () => ref.read(nostrControllerProvider).runBackgroundCatchUp(),
+    );
 
     // 1) Deep links: cold-start + streamed `app_links` URLs.
     DeepLinkService? deepLinks;
@@ -108,12 +116,6 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
       if (ref.read(settingsProvider).notificationsEnabled) {
         unawaited(notifications.ensurePermission());
       }
-      // iOS background catch-up. Registered whether or not notifications are on
-      // right now, so switching them on later needs no relaunch; the catch-up
-      // itself re-checks the setting before doing anything.
-      _backgroundRefresh.start(
-        () => ref.read(nostrControllerProvider).runBackgroundCatchUp(),
-      );
     } catch (e) {
       debugPrint('[Platform] notifications skipped: $e');
     }
