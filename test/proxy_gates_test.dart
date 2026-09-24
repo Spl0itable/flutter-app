@@ -7,7 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:nym_bar/features/messages/cross_content_flood.dart';
 import 'package:nym_bar/models/nostr_event.dart';
+import 'package:nym_bar/models/user.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:nym_bar/state/app_state.dart';
 import 'package:nym_bar/state/settings_provider.dart';
@@ -81,6 +83,47 @@ void main() {
     n.blockUser(_stranger);
     expect(visibleMessagesFor(c.read(appStateProvider), '#nymchat').length, 0,
         reason: 'an explicit block applies in both modes');
+    c.dispose();
+  });
+
+  test('the campaign detector stands down through the proxy', () async {
+    crossContentFlood = CrossContentFlood();
+    final c = await _container();
+    final n = c.read(appStateProvider.notifier);
+    n.setProxyMode(true);
+    final t = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    for (var i = 0; i < 4; i++) {
+      n.ingestEvent(NostrEvent(
+        id: '${i + 3}' * 64,
+        pubkey: _stranger,
+        createdAt: t - 120 + i * 30,
+        kind: 23333,
+        tags: [
+          ['n', 'Stranger#dddd'],
+          ['d', 'nymchat'],
+        ],
+        content: 'yep the same long paragraph that keeps coming round the '
+            'channel every minute with a fresh nonce on the end ghdr5c${i}n15',
+        sig: '0' * 128,
+      ));
+    }
+    expect(c.read(appStateProvider).isAutoMuted(_stranger), isFalse);
+    expect(visibleMessagesFor(c.read(appStateProvider), '#nymchat').length, 4);
+    c.dispose();
+  });
+
+  test('a gibberish nym is listed through the proxy', () async {
+    final c = await _container();
+    final n = c.read(appStateProvider.notifier);
+    n.setProxyMode(true);
+    n.setUserPresence(
+        pubkey: _stranger,
+        status: UserStatus.online,
+        nym: 'aAbBcCdDeE',
+        lastSeenMs: 1);
+    expect(c.read(usersProvider).containsKey(_stranger), isTrue);
+    n.setProxyMode(false);
+    expect(c.read(usersProvider).containsKey(_stranger), isFalse);
     c.dispose();
   });
 }
