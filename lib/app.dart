@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/theme/nym_theme.dart';
 import 'features/i18n/app_strings_catalog.dart';
 import 'features/commands/command_i18n.dart';
+import 'features/groups/group_invite_confirm.dart';
 import 'features/i18n/i18n.dart';
 import 'features/i18n/localization_service.dart';
 import 'features/mesh/mesh_controller.dart';
@@ -14,6 +15,7 @@ import 'features/notifications/notification_route_target.dart';
 import 'features/notifications/notification_routing.dart';
 import 'features/onboarding/boot_gate.dart';
 import 'features/share/share_intake.dart';
+import 'models/group.dart';
 import 'services/notification_service.dart';
 import 'services/platform/background_connectivity.dart';
 import 'services/platform/background_refresh.dart';
@@ -93,7 +95,8 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     // 1) Deep links: cold-start + streamed `app_links` URLs.
     DeepLinkService? deepLinks;
     try {
-      deepLinks = DeepLinkService(NostrControllerDeepLinkTarget(controller));
+      deepLinks = DeepLinkService(NostrControllerDeepLinkTarget(controller,
+          confirmInvite: _confirmGroupInvite));
       _deepLinks = deepLinks;
       await deepLinks.start();
     } catch (e) {
@@ -157,6 +160,12 @@ class _NymchatAppState extends ConsumerState<NymchatApp>
     } catch (e) {
       debugPrint('[Platform] notification tap ignored: $e');
     }
+  }
+
+  Future<bool> _confirmGroupInvite(GroupInviteToken token) async {
+    final navContext = _navKey.currentContext;
+    if (navContext == null || !navContext.mounted) return false;
+    return confirmGroupInviteJoin(navContext, token);
   }
 
   void _startHeartbeat() {

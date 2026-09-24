@@ -115,15 +115,9 @@ void main() {
       }
     });
 
-    test('declares no push background modes', () {
-      // The app registers no APNs or PushKit token — no FCM, no
-      // `registerForRemoteNotifications` — so notifications never transit a
-      // push provider. Declaring modes it does not use would misstate that in
-      // the one place a reviewer or auditor looks first.
-      for (final mode in ['voip', 'remote-notification']) {
-        expect(plist, isNot(contains('<string>$mode</string>')),
-            reason: '$mode implies a push registration this app does not make');
-      }
+    test('declares silent heartbeat push and no VoIP push', () {
+      expect(plist, contains('<string>remote-notification</string>'));
+      expect(plist, isNot(contains('<string>voip</string>')));
     });
 
     test('permits the background-refresh task identifier', () {

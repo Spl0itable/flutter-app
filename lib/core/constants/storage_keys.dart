@@ -181,9 +181,12 @@ class StorageKeys {
   // PMs / groups
   static const closedPms = 'nym_closed_pms';
   static const closedPmTimes = 'nym_closed_pm_times';
+  static const leftGroups = 'nym_left_groups';
   static const leftGroupTimes = 'nym_left_group_times';
   static String lastPmSyncFor(String pubkey) => 'nym_last_pm_sync_$pubkey';
   static const pendingGroupInvite = 'nym_pending_group_invite';
+  static const groupStorePrefix = 'nym_groups_';
+  static String groupStoreFor(String pubkey) => '$groupStorePrefix$pubkey';
 
   /// The mesh sender outbox: sends the Bluetooth mesh carried because the
   /// internet route was down, replayed to Nostr when relays return.
@@ -196,6 +199,13 @@ class StorageKeys {
   /// This device's one-time mesh prekeys (private halves). Persisted so mail
   /// sealed to a key we published before a restart can still be opened.
   static const meshPrekeys = 'nym_mesh_prekeys';
+
+  static const sealedPrefs = [
+    leftGroups,
+    leftGroupTimes,
+    meshGossipArchive,
+    meshPrekeys,
+  ];
 
   // Notifications / sync
   static const notificationsEnabled = 'nym_notifications_enabled';

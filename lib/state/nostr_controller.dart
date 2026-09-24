@@ -83,6 +83,7 @@ import '../services/nostr/nym_generator.dart';
 import '../services/nostr/verified_rows.dart';
 import '../services/storage/cache_store.dart';
 import '../services/storage/key_value_store.dart';
+import '../services/storage/sealed_key_value.dart';
 import '../services/storage/secure_store.dart';
 import 'app_state.dart';
 import 'settings_provider.dart';
@@ -489,6 +490,7 @@ class NostrController {
             _cachedLoginProfileName(kv) ?? 'nym', identity.pubkey);
       }
 
+      await _loadLeftGroupStore();
       final appState = _ref.read(appStateProvider.notifier);
       appState.goLive(identity.pubkey, identity.nym);
 
@@ -9465,12 +9467,6 @@ class NostrController {
         .setString(key, jsonEncode(values.toList()));
   }
 
-  /// The PWA's `nym_left_groups` localStorage key (`_saveLeftGroups`). No typed
-  /// [StorageKeys] constant exists (the native group store doesn't yet hydrate
-  /// from it — see [_applySyncedSettings]); kept as a literal so the outbound
-  /// settings sync (storage_sync.dart reads `'nym_left_groups'`) round-trips.
-  static const String _kLeftGroupsKey = 'nym_left_groups';
-
   /// Applies a synced `channelLastRead` map (app.js:6565-6577): monotonic max per
   /// key via [AppStateNotifier.markChannelRead], which keeps the newer watermark
   /// and persists through `onChannelReadChanged`. No-op for a null/non-map value.
@@ -9641,24 +9637,99 @@ class NostrController {
   /// Reads the KV left-group set + leave times and merges them into the live
   /// group store (boot + post-sync). Mirrors the PWA `_loadLeftGroups`.
   void _hydrateLeftGroups(AppStateNotifier appState) {
-    final ids = _readSet(_kLeftGroupsKey);
-    final times = <String, int>{};
-    final raw =
-        _ref.read(keyValueStoreProvider).getString(StorageKeys.leftGroupTimes);
-    if (raw != null && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          decoded.forEach((k, v) {
-            final t = v is num ? v.toInt() : int.tryParse('$v');
-            if (t != null) times['$k'] = t;
-          });
-        }
-      } catch (_) {}
-    }
+    final ids = _decodeIdSet(_leftGroupCache[StorageKeys.leftGroups]);
+    final times = _decodeTimes(_leftGroupCache[StorageKeys.leftGroupTimes]);
     if (ids.isNotEmpty || times.isNotEmpty) {
       appState.mergeLeftGroups(ids, times);
     }
+  }
+
+  final Map<String, String> _leftGroupCache = <String, String>{};
+  bool _leftGroupsLoaded = false;
+  bool _leftGroupsLocked = false;
+  bool _leftGroupsRetrying = false;
+
+  static Set<String> _decodeIdSet(String? raw) {
+    if (raw == null || raw.isEmpty) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) return decoded.map((e) => e.toString()).toSet();
+    } catch (_) {}
+    return <String>{};
+  }
+
+  static Map<String, int> _decodeTimes(String? raw) {
+    final times = <String, int>{};
+    if (raw == null || raw.isEmpty) return times;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        decoded.forEach((k, v) {
+          final t = v is num ? v.toInt() : int.tryParse('$v');
+          if (t != null) times['$k'] = t;
+        });
+      }
+    } catch (_) {}
+    return times;
+  }
+
+  Future<bool> _readLeftGroupStore() async {
+    final store = _groupStoreFor(_ref.read(keyValueStoreProvider));
+    final ids = await store.readDetailed(StorageKeys.leftGroups);
+    final times = await store.readDetailed(StorageKeys.leftGroupTimes);
+    if (ids.locked || times.locked) return false;
+    _leftGroupCache.remove(StorageKeys.leftGroups);
+    _leftGroupCache.remove(StorageKeys.leftGroupTimes);
+    final idsValue = ids.value;
+    final timesValue = times.value;
+    if (idsValue != null && idsValue.isNotEmpty) {
+      _leftGroupCache[StorageKeys.leftGroups] = idsValue;
+    }
+    if (timesValue != null && timesValue.isNotEmpty) {
+      _leftGroupCache[StorageKeys.leftGroupTimes] = timesValue;
+    }
+    return true;
+  }
+
+  Future<void> _loadLeftGroupStore() async {
+    _leftGroupCache.clear();
+    try {
+      _leftGroupsLocked = !await _readLeftGroupStore();
+    } catch (_) {
+      _leftGroupsLocked = true;
+    }
+    _leftGroupsLoaded = true;
+  }
+
+  Future<void> _retryLockedLeftGroups() async {
+    if (_leftGroupsRetrying || !_leftGroupsLocked) return;
+    _leftGroupsRetrying = true;
+    try {
+      final live = Map<String, String>.of(_leftGroupCache);
+      if (!await _readLeftGroupStore()) return;
+      final appState = _ref.read(appStateProvider.notifier);
+      _hydrateLeftGroups(appState);
+      final liveIds = _decodeIdSet(live[StorageKeys.leftGroups]);
+      final liveTimes = _decodeTimes(live[StorageKeys.leftGroupTimes]);
+      if (liveIds.isNotEmpty || liveTimes.isNotEmpty) {
+        appState.mergeLeftGroups(liveIds, liveTimes);
+      }
+      _leftGroupsLocked = false;
+      _persistLeftGroups();
+    } catch (_) {
+    } finally {
+      _leftGroupsRetrying = false;
+    }
+  }
+
+  void _writeLeftGroupValue(String key, String value) {
+    _leftGroupCache[key] = value;
+    if (!_leftGroupsLoaded) return;
+    if (_leftGroupsLocked) {
+      unawaited(_retryLockedLeftGroups());
+      return;
+    }
+    _groupStoreFor(_ref.read(keyValueStoreProvider)).write(key, value);
   }
 
   /// Persists the live left-group state to KV — the PWA's `_saveLeftGroups()`
@@ -9668,8 +9739,9 @@ class NostrController {
   /// ([_hydrateLeftGroups]) is lost across a relaunch.
   void _persistLeftGroups() {
     final appState = _ref.read(appStateProvider.notifier);
-    _persistSet(_kLeftGroupsKey, appState.leftGroups);
-    _ref.read(keyValueStoreProvider).setString(
+    _writeLeftGroupValue(
+        StorageKeys.leftGroups, jsonEncode(appState.leftGroups.toList()));
+    _writeLeftGroupValue(
         StorageKeys.leftGroupTimes, jsonEncode(appState.leftGroupTimes));
   }
 
@@ -9692,7 +9764,8 @@ class NostrController {
       for (final g in st.groups) {
         data[g.id] = _serializeGroupForLocal(g, st);
       }
-      kv.setString('nym_groups_${identity.pubkey}', jsonEncode(data));
+      _groupStoreFor(kv).write(
+          StorageKeys.groupStoreFor(identity.pubkey), jsonEncode(data));
     } catch (_) {}
     try {
       final groups = _groups;
@@ -9710,6 +9783,15 @@ class NostrController {
     } catch (_) {}
   }
 
+  SealedKeyValue? _sealedGroupStore;
+
+  SealedKeyValue _groupStoreFor(KeyValueStore kv) {
+    final existing = _sealedGroupStore;
+    if (existing != null && identical(existing.kv, kv)) return existing;
+    return _sealedGroupStore =
+        SealedKeyValue(kv, blocked: () => PanicWipe.inProgress);
+  }
+
   /// Restores the persisted group store + ephemeral keys at boot (the PWA's
   /// `_loadGroupConversations`, groups.js:556-600, and `_loadEphemeralKeys`,
   /// groups.js:291-311). Runs through the same additive apply the D1 restore
@@ -9720,7 +9802,8 @@ class NostrController {
     final kv = _ref.read(keyValueStoreProvider);
     final appState = _ref.read(appStateProvider.notifier);
     try {
-      final raw = kv.getString('nym_groups_${identity.pubkey}');
+      final raw = await _groupStoreFor(kv)
+          .read(StorageKeys.groupStoreFor(identity.pubkey));
       if (raw != null && raw.isNotEmpty) {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
@@ -11878,34 +11961,22 @@ class NostrController {
     final appState = _ref.read(appStateProvider.notifier);
     if (leftGroups is List) {
       try {
-        final merged = _readSet(_kLeftGroupsKey)
+        final merged = _decodeIdSet(_leftGroupCache[StorageKeys.leftGroups])
           ..addAll(leftGroups.whereType<String>().where((s) => s.isNotEmpty));
-        _persistSet(_kLeftGroupsKey, merged);
+        _writeLeftGroupValue(
+            StorageKeys.leftGroups, jsonEncode(merged.toList()));
       } catch (_) {}
     }
     if (rawLeftTimes is Map) {
       try {
-        final merged = <String, int>{};
-        final existing = _ref
-            .read(keyValueStoreProvider)
-            .getString(StorageKeys.leftGroupTimes);
-        if (existing != null && existing.isNotEmpty) {
-          final decoded = jsonDecode(existing);
-          if (decoded is Map) {
-            decoded.forEach((k, v) {
-              final t = v is num ? v.toInt() : int.tryParse('$v');
-              if (t != null) merged['$k'] = t;
-            });
-          }
-        }
+        final merged =
+            _decodeTimes(_leftGroupCache[StorageKeys.leftGroupTimes]);
         rawLeftTimes.forEach((k, v) {
           final t = v is num ? v.toInt() : int.tryParse('$v');
           if (t == null || t <= 0) return;
           if (t > (merged['$k'] ?? 0)) merged['$k'] = t;
         });
-        _ref
-            .read(keyValueStoreProvider)
-            .setString(StorageKeys.leftGroupTimes, jsonEncode(merged));
+        _writeLeftGroupValue(StorageKeys.leftGroupTimes, jsonEncode(merged));
       } catch (_) {}
     }
     // Apply the merged left-group state to the LIVE group store (not just KV):

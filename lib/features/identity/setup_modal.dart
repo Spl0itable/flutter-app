@@ -655,8 +655,15 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       Center(
         child: Column(
           children: [
-            Text(_remoteStatus,
-                style: TextStyle(color: c.textDim, fontSize: 13)),
+            ValueListenableBuilder<bool>(
+              valueListenable: _nip46?.bareAck ?? ValueNotifier<bool>(false),
+              builder: (context, bare, _) => Text(
+                  bare && _remoteStatus == tr('Waiting for remote signer...')
+                      ? tr('A signer answered without the connection secret, so Nymchat did not trust it. Update your signer app, or paste a bunker:// link instead.')
+                      : _remoteStatus,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: c.textDim, fontSize: 13)),
+            ),
             const SizedBox(height: 12),
             if (_nostrConnectUri != null)
               Container(
