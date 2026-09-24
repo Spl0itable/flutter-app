@@ -173,7 +173,7 @@ import UIKit
   private func registerBackgroundRefreshTask() {
     BGTaskScheduler.shared.register(
       forTaskWithIdentifier: Self.refreshTaskIdentifier,
-      using: nil
+      using: DispatchQueue.main
     ) { [weak self] task in
       guard let refreshTask = task as? BGAppRefreshTask else {
         task.setTaskCompleted(success: false)
@@ -190,18 +190,27 @@ import UIKit
 
     var completed = false
     let finish: (Bool) -> Void = { success in
-      guard !completed else { return }
-      completed = true
-      task.setTaskCompleted(success: success)
+      DispatchQueue.main.async {
+        guard !completed else { return }
+        completed = true
+        task.setTaskCompleted(success: success)
+      }
     }
     // iOS kills the app if a task overruns, so both the OS deadline and a
     // self-imposed cap end the window even if Dart never answers.
     task.expirationHandler = { finish(false) }
+    if backgroundRefreshChannel == nil {
+      registerBackgroundRefreshChannel()
+    }
     guard let channel = backgroundRefreshChannel else {
       finish(false)
       return
     }
-    channel.invokeMethod("runRefresh", arguments: nil) { _ in finish(true) }
+    channel.invokeMethod("runRefresh", arguments: nil) { result in
+      let unanswered =
+        result is FlutterError || (result as? NSObject) === FlutterMethodNotImplemented
+      finish(!unanswered)
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + Self.refreshBudget) {
       finish(false)
     }

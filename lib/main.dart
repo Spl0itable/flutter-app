@@ -88,9 +88,8 @@ class _BootUnlockGateState extends ConsumerState<_BootUnlockGate> {
     if (_unlocked) {
       // No vault: boot the identity + relays now (was main()'s fire-and-forget).
       _bootController();
-    } else {
-      _armBackgroundWake();
     }
+    _armBackgroundWake();
   }
 
   /// A locked process boots nothing — the app tree below this gate never

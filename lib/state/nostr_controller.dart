@@ -10782,6 +10782,7 @@ class NostrController {
     Duration budget = const Duration(seconds: 20),
   }) async {
     final deadline = DateTime.now().add(budget);
+    if (!hasChosenIdentity(_ref.read(keyValueStoreProvider))) return;
     final sync = await awaitBootValue<StorageSync>(
       () => _storageSync,
       booting: () => _started,
