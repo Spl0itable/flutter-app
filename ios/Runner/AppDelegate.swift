@@ -24,6 +24,7 @@ import UIKit
     registerHeartbeatChannel()
     registerAttestChannel()
     registerVaultKeyChannel()
+    registerPasskeyBackupChannel()
     // Must happen before launch finishes, or BGTaskScheduler throws.
     registerBackgroundRefreshTask()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -54,6 +55,17 @@ import UIKit
     )
     channel.setMethodCallHandler { call, result in
       VaultKey.handle(call, result: result)
+    }
+  }
+
+  private func registerPasskeyBackupChannel() {
+    guard let controller = window?.rootViewController as? FlutterViewController else { return }
+    let channel = FlutterMethodChannel(
+      name: "app.nymchat/passkey_backup",
+      binaryMessenger: controller.binaryMessenger
+    )
+    channel.setMethodCallHandler { call, result in
+      PasskeyBackup.handle(call, result: result)
     }
   }
 

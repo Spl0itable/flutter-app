@@ -44,6 +44,7 @@ import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
 import '../identity/key_backup/key_backup_store.dart';
 import '../identity/key_backup/key_backup_ui.dart';
+import '../identity/key_backup/passkey_backup_service.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import '../../services/filter/filter_packs.dart';
 import 'settings_helpers.dart';
@@ -1541,6 +1542,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         secretHex: bytesToHex(sk), pubkeyHex: identity.pubkey);
   }
 
+  Future<void> _backUpKeyWithPasskey(PasskeyBackupService service) async {
+    final identity = ref.read(nostrControllerProvider).identity;
+    final sk = identity?.privkey;
+    if (identity == null || sk == null) return;
+    await runPasskeyBackup(context, service,
+        secretHex: bytesToHex(sk), pubkeyHex: identity.pubkey);
+  }
+
   Future<void> _removeKeyBackups(KeyBackupStore store) async {
     final identity = ref.read(nostrControllerProvider).identity;
     if (identity == null) return;
@@ -1642,17 +1651,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 'false', label: tr('Disabled (show all images)')),
     ];
     final backupStores = ref.watch(keyBackupStoresProvider);
+    final passkeyBackup =
+        ref.watch(passkeyBackupAvailableProvider).valueOrNull == true
+            ? ref.watch(passkeyBackupServiceProvider)
+            : null;
     final backupIdentity = nostrCtrl.identity;
-    final canBackUpKey = backupStores.isNotEmpty &&
+    final canBackUpKey = (backupStores.isNotEmpty || passkeyBackup != null) &&
         backupIdentity?.privkey != null &&
         (backupIdentity?.loginMethod == 'nsec' ||
             (backupIdentity?.loginMethod == null &&
                 ctrl.keypairMode == 'persistent'));
-    final backupHint = tr(
-        'Back up your key, encrypted with a PIN, to your own cloud account so '
-        'you can restore it on another device. Your key stays yours: Google '
-        "and Apple only store an encrypted copy that they can't read without "
-        'your PIN.');
+    final backupHint = backupStores.isEmpty
+        ? tr('Back up your key with a passkey so you can restore it on '
+            'another device. Your key stays yours: the backup is encrypted, '
+            'and only your passkey can unlock it.')
+        : tr('Back up your key, encrypted with a PIN, to your own cloud '
+            'account so you can restore it on another device. Your key stays '
+            "yours: Google and Apple only store an encrypted copy that they "
+            "can't read without your PIN.");
     return [
       _GroupSpec(
         text: tr('Identity Encryption Encrypt identity (nsec) key on this '
@@ -1691,6 +1707,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     key: Key('keyBackupBackUp_${store.cloud.name}'),
                     label: keyBackupBackUpLabel(store.cloud),
                     onPressed: () => _backUpKey(store),
+                  ),
+                if (passkeyBackup != null)
+                  NymOutlineButton(
+                    key: const Key('keyBackupBackUp_passkey'),
+                    label: tr('Back up with a passkey'),
+                    onPressed: () => _backUpKeyWithPasskey(passkeyBackup),
                   ),
                 for (final store in backupStores)
                   NymOutlineButton(

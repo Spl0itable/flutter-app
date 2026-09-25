@@ -14,6 +14,7 @@ import '../modal_chrome.dart';
 import 'key_backup_crypto.dart';
 import 'key_backup_service.dart';
 import 'key_backup_store.dart';
+import 'passkey_backup_service.dart';
 
 typedef PinSubmit = Future<String?> Function(String pin);
 
@@ -639,10 +640,128 @@ Future<bool> runKeyBackupRemove(
   return true;
 }
 
+String passkeyErrorMessage(PasskeyBackupError error) => switch (error) {
+      PasskeyBackupError.notFound ||
+      PasskeyBackupError.noCredential =>
+        tr('No key backup is linked to this passkey.'),
+      PasskeyBackupError.unsupported => tr(
+          "This passkey provider can't hold a key backup. Try a different "
+          'passkey provider, or use Continue with Google.'),
+      PasskeyBackupError.blobFailed => tr(
+          "The passkey didn't save the backup. Try again, or use a different "
+          'passkey provider.'),
+      PasskeyBackupError.publishFailed => tr(
+          "Couldn't reach any relay to save the backup. Check your connection "
+          'and try again.'),
+      PasskeyBackupError.rp =>
+        tr("Passkeys aren't set up for this app yet."),
+      PasskeyBackupError.exists =>
+        tr('This passkey is already registered here. Choose another one.'),
+      PasskeyBackupError.canceled ||
+      PasskeyBackupError.other =>
+        tr('Something went wrong with the passkey backup. Please try again.'),
+    };
+
+PasskeyBackupError _passkeyError(Object e) =>
+    e is PasskeyBackupException ? e.error : PasskeyBackupError.other;
+
+Future<bool> runPasskeySignIn(
+  BuildContext context,
+  PasskeyBackupService service,
+  Future<void> Function(String secretHex) signIn,
+) async {
+  String secret;
+  try {
+    secret = await service.restore();
+  } catch (e) {
+    final error = _passkeyError(e);
+    if (!context.mounted) return false;
+    if (error == PasskeyBackupError.canceled ||
+        error == PasskeyBackupError.noCredential ||
+        error == PasskeyBackupError.notFound) {
+      final create = await showAppConfirm(
+        context,
+        error == PasskeyBackupError.canceled
+            ? tr('No passkey was chosen. Create a new key and back it up with '
+                'a passkey?')
+            : tr('No key backup is linked to this passkey. Create a new key '
+                'and back it up with a passkey?'),
+        title: tr('Passkey backup'),
+        okLabel: tr('Create new key'),
+      );
+      if (!create || !context.mounted) return false;
+      return runPasskeyCreateNewKey(context, service, signIn);
+    }
+    await showAppAlert(context, passkeyErrorMessage(error),
+        title: tr('Passkey backup'));
+    return false;
+  }
+  await signIn(secret);
+  return true;
+}
+
+Future<bool> runPasskeyCreateNewKey(
+  BuildContext context,
+  PasskeyBackupService service,
+  Future<void> Function(String secretHex) signIn,
+) async {
+  final sk = generatePrivateKey();
+  final secretHex = bytesToHex(sk);
+  final pubkeyHex = getPublicKeyHex(sk);
+  wipeBytes(sk);
+  try {
+    await service.backUp(secretHex: secretHex, pubkeyHex: pubkeyHex);
+  } catch (e) {
+    if (_passkeyError(e) == PasskeyBackupError.canceled) return false;
+    if (!context.mounted) return false;
+    await showAppAlert(
+      context,
+      tr("Your new key was created, but its passkey backup didn't complete. "
+          "You'll be signed in now. To try again, go to Settings and choose "
+          'Back up with a passkey.'),
+      title: tr('Passkey backup'),
+    );
+  }
+  await signIn(secretHex);
+  return true;
+}
+
+Future<bool> runPasskeyBackup(
+  BuildContext context,
+  PasskeyBackupService service, {
+  required String secretHex,
+  required String pubkeyHex,
+}) async {
+  try {
+    await service.backUp(secretHex: secretHex, pubkeyHex: pubkeyHex);
+  } catch (e) {
+    final error = _passkeyError(e);
+    if (error == PasskeyBackupError.canceled || !context.mounted) return false;
+    await showAppAlert(context, passkeyErrorMessage(error),
+        title: tr('Passkey backup'));
+    return false;
+  }
+  if (!context.mounted) return true;
+  await showAppAlert(
+    context,
+    tr('Your key is backed up with this passkey. Your key stays yours: the '
+        'backup is encrypted, and only this passkey can unlock it. To restore '
+        'it on another device where the passkey is available, choose Continue '
+        'with a passkey.'),
+    title: tr('Backed up'),
+  );
+  return true;
+}
+
 class KeyBackupSignInButtons extends ConsumerStatefulWidget {
-  const KeyBackupSignInButtons({super.key, required this.onSecret});
+  const KeyBackupSignInButtons({
+    super.key,
+    required this.onSecret,
+    this.showPasskeyCreate = false,
+  });
 
   final Future<void> Function(String secretHex) onSecret;
+  final bool showPasskeyCreate;
 
   @override
   ConsumerState<KeyBackupSignInButtons> createState() =>
@@ -651,13 +770,13 @@ class KeyBackupSignInButtons extends ConsumerStatefulWidget {
 
 class _KeyBackupSignInButtonsState
     extends ConsumerState<KeyBackupSignInButtons> {
-  BackupCloud? _busy;
+  String? _busy;
 
-  Future<void> _run(KeyBackupStore store) async {
+  Future<void> _run(String id, Future<void> Function() flow) async {
     if (_busy != null) return;
-    setState(() => _busy = store.cloud);
+    setState(() => _busy = id);
     try {
-      await runKeyBackupSignIn(context, ref, store, widget.onSecret);
+      await flow();
     } catch (_) {
       if (mounted) {
         await showAppAlert(
@@ -668,42 +787,74 @@ class _KeyBackupSignInButtonsState
     }
   }
 
+  Widget _button(NymColors c, String id, String label,
+      Future<void> Function() flow) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: KeyedSubtree(
+        key: Key('keyBackupContinue_$id'),
+        child: ModalChrome.sendButton(
+          c,
+          label,
+          _busy == null ? () => _run(id, flow) : null,
+          fullWidth: true,
+          child: _busy == id
+              ? SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: c.primary),
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final stores = ref.watch(keyBackupStoresProvider);
-    if (stores.isEmpty) return const SizedBox.shrink();
+    final passkeyReady =
+        ref.watch(passkeyBackupAvailableProvider).valueOrNull == true;
+    final passkey = passkeyReady ? ref.watch(passkeyBackupServiceProvider) : null;
+    if (stores.isEmpty && passkey == null) return const SizedBox.shrink();
     final c = context.nym;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final store in stores) ...[
-          KeyedSubtree(
-            key: Key('keyBackupContinue_${store.cloud.name}'),
-            child: ModalChrome.sendButton(
-              c,
-              keyBackupContinueLabel(store.cloud),
-              _busy == null ? () => _run(store) : null,
-              fullWidth: true,
-              child: _busy == store.cloud
-                  ? SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: c.primary),
-                    )
-                  : null,
-            ),
+        for (final store in stores)
+          _button(
+            c,
+            store.cloud.name,
+            keyBackupContinueLabel(store.cloud),
+            () => runKeyBackupSignIn(context, ref, store, widget.onSecret),
           ),
-          const SizedBox(height: 8),
+        if (passkey != null) ...[
+          _button(
+            c,
+            'passkey',
+            tr('Continue with a passkey'),
+            () => runPasskeySignIn(context, passkey, widget.onSecret),
+          ),
+          if (widget.showPasskeyCreate)
+            _button(
+              c,
+              'passkeyCreate',
+              tr('Create a new key and back it up with a passkey'),
+              () => runPasskeyCreateNewKey(context, passkey, widget.onSecret),
+            ),
         ],
         Text(
-          stores.length == 1
-              ? tr('Your key stays yours. {provider} only keeps an encrypted '
-                  "copy that it can't read without your PIN.",
-                  {'provider': stores.first.cloud.label})
-              : tr('Your key stays yours. Google and Apple only keep an '
-                  "encrypted copy that they can't read without your PIN."),
+          stores.isEmpty
+              ? tr('Your key stays yours. The backup is encrypted, and only '
+                  'your passkey can unlock it.')
+              : stores.length == 1
+                  ? tr('Your key stays yours. {provider} only keeps an '
+                      "encrypted copy that it can't read without your PIN.",
+                      {'provider': stores.first.cloud.label})
+                  : tr('Your key stays yours. Google and Apple only keep an '
+                      "encrypted copy that they can't read without your PIN."),
           style: TextStyle(color: c.textDim, fontSize: 11),
         ),
       ],

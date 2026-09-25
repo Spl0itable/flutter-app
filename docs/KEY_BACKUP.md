@@ -1,4 +1,4 @@
-# Google and Apple key backup
+# Google, Apple and passkey key backup
 
 "Continue with Google" / "Continue with Apple" back up the user's locally generated Nostr key, encrypted with a PIN, to their own cloud account, and restore it on another device. The format is `nym-key-backup-v1`, shared byte for byte with Nymbot (web and Flutter) and the Nymchat web app. The canonical test vector is `test/key-backup-vector.json`.
 
@@ -14,6 +14,8 @@ Every button stays hidden until its provider is configured, so a build without t
 | `GOOGLE_SERVER_CLIENT_ID` | the Web OAuth client id, shared with the web apps | Google on Android (required there as `serverClientId`), optional on iOS |
 | `APPLE_BACKUP` | `true` | Apple on iOS (default off) |
 | `APPLE_KEYCHAIN_GROUP` | `<TEAMID>.com.nym.shared` (the full access group, team prefix included) | Apple on iOS, so Nymbot and Nymchat share backups |
+| `PASSKEY_BACKUP` | `true` | Continue with a passkey on iOS 17+ and Android 9+ (default off) |
+| `PASSKEY_RP_ID` | defaults to `web.nymchat.app` | the WebAuthn RP ID, the same one the Nymchat web app uses (`location.hostname`) |
 
 Example:
 
@@ -54,3 +56,39 @@ flutter build ipa \
 ## Android
 
 Nothing beyond the Google Cloud setup above and `GOOGLE_SERVER_CLIENT_ID`. The Apple option never shows on Android.
+
+## Passkey (`nym-passkey-backup-v1`)
+
+"Continue with a passkey" restores a key from a passkey; if no passkey is chosen or none has a backup, it offers "Create a new key and back it up with a passkey", which the sign-up tab also shows directly. Settings has "Back up with a passkey" for local keys. The canonical vector is `test/passkey-backup-vector.json`.
+
+- PRF (iOS 18+, Android through Credential Manager): the key is NIP-44 encrypted with a key derived from the passkey's PRF output and published as a kind 30078 event (`d` = `nym-key-backup`), signed by a locator key that is also derived from the PRF output, to the app's default relays plus relay.damus.io, nos.lol, relay.primal.net, relay.nostr.band and nostr.mom.
+- largeBlob fallback (iOS 17+, and Android providers that support it): the key is written into the passkey itself.
+- Native code: `ios/Runner/PasskeyBackup.swift` (AuthenticationServices) and `android/app/src/main/kotlin/com/nym/bar/PasskeyBackup.kt` (androidx.credentials 1.6.0), on the `app.nymchat/passkey_backup` method channel.
+
+Keep `PASSKEY_BACKUP` off until all of this is in place, or the passkey sheet fails with a domain error:
+
+- `https://web.nymchat.app/.well-known/apple-app-site-association` must list the app under `webcredentials`:
+  ```json
+  "webcredentials": { "apps": ["KJ6U2Y9B2M.com.nym.bar"] }
+  ```
+- iOS: enable **Associated Domains** on the App ID `com.nym.bar`, regenerate the provisioning profile, then add to `Runner.entitlements` and `RunnerDebug.entitlements`:
+  ```xml
+  <key>com.apple.developer.associated-domains</key>
+  <array>
+      <string>webcredentials:web.nymchat.app</string>
+  </array>
+  ```
+  The entitlement is not in the repo: the capability was removed because the automatic provisioning profile does not include it, and adding it back before the profile has it breaks signing.
+- `https://web.nymchat.app/.well-known/assetlinks.json` must grant the Android app the login-credentials relation, with the SHA-256 of every signing certificate in use (the release key below, plus the Play app signing key if the app ships through Play):
+  ```json
+  {
+    "relation": ["delegate_permission/common.get_login_creds"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.nym.bar",
+      "sha256_cert_fingerprints": [
+        "29:F3:59:CC:6A:BA:A6:70:93:5A:2A:96:92:43:AD:A6:6B:56:BD:39:07:AB:D0:C0:24:53:35:FD:E8:2C:F4:D9"
+      ]
+    }
+  }
+  ```

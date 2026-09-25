@@ -21,6 +21,7 @@ import '../i18n/i18n.dart';
 import 'dev_nsec_modal.dart';
 import 'key_backup/key_backup_store.dart';
 import 'key_backup/key_backup_ui.dart';
+import 'key_backup/passkey_backup_service.dart';
 import 'modal_chrome.dart';
 import 'nip46_service.dart';
 
@@ -408,7 +409,9 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     widget.onComplete();
   }
 
-  bool get _hasKeyBackup => ref.watch(keyBackupStoresProvider).isNotEmpty;
+  bool get _hasKeyBackup =>
+      ref.watch(keyBackupStoresProvider).isNotEmpty ||
+      ref.watch(passkeyBackupAvailableProvider).valueOrNull == true;
 
   @override
   Widget build(BuildContext context) {
@@ -570,7 +573,10 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       ),
       if (_hasKeyBackup) ...[
         ModalChrome.orDivider(c),
-        KeyBackupSignInButtons(onSecret: _loginWithBackupSecret),
+        KeyBackupSignInButtons(
+          onSecret: _loginWithBackupSecret,
+          showPasskeyCreate: true,
+        ),
       ],
       const SizedBox(height: 20),
       // `#setupSignupTos` (index.html:1341): centered ToS/Privacy footer.

@@ -1,11 +1,15 @@
 import 'package:flutter/foundation.dart';
 
+const String kDefaultPasskeyRpId = 'web.nymchat.app';
+
 class KeyBackupConfig {
   const KeyBackupConfig({
     this.googleIosClientId = '',
     this.googleServerClientId = '',
     this.appleBackup = false,
     this.appleKeychainGroup = '',
+    this.passkeyBackup = false,
+    this.passkeyRpId = kDefaultPasskeyRpId,
   });
 
   static const KeyBackupConfig environment = KeyBackupConfig(
@@ -13,12 +17,17 @@ class KeyBackupConfig {
     googleServerClientId: String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID'),
     appleBackup: String.fromEnvironment('APPLE_BACKUP') == 'true',
     appleKeychainGroup: String.fromEnvironment('APPLE_KEYCHAIN_GROUP'),
+    passkeyBackup: String.fromEnvironment('PASSKEY_BACKUP') == 'true',
+    passkeyRpId: String.fromEnvironment('PASSKEY_RP_ID',
+        defaultValue: kDefaultPasskeyRpId),
   );
 
   final String googleIosClientId;
   final String googleServerClientId;
   final bool appleBackup;
   final String appleKeychainGroup;
+  final bool passkeyBackup;
+  final String passkeyRpId;
 
   bool googleEnabledOn(TargetPlatform platform, {bool web = kIsWeb}) {
     if (web) return false;
@@ -31,6 +40,12 @@ class KeyBackupConfig {
         return false;
     }
   }
+
+  bool passkeyEnabledOn(TargetPlatform platform, {bool web = kIsWeb}) =>
+      !web &&
+      passkeyBackup &&
+      passkeyRpId.isNotEmpty &&
+      (platform == TargetPlatform.iOS || platform == TargetPlatform.android);
 
   bool appleEnabledOn(TargetPlatform platform, {bool web = kIsWeb}) =>
       !web && appleBackup && platform == TargetPlatform.iOS;
