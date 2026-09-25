@@ -19,6 +19,8 @@ import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../i18n/i18n.dart';
 import 'dev_nsec_modal.dart';
+import 'key_backup/key_backup_store.dart';
+import 'key_backup/key_backup_ui.dart';
 import 'modal_chrome.dart';
 import 'nip46_service.dart';
 
@@ -387,6 +389,27 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     widget.onComplete();
   }
 
+  Future<void> _loginWithBackupSecret(String secretHex) async {
+    if (_loggingIn) return;
+    setState(() {
+      _loggingIn = true;
+      _loginError = null;
+    });
+    try {
+      await ref.read(nostrControllerProvider).loginWithNsec(secretHex);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loggingIn = false);
+      await showAppAlert(
+          context, tr('Invalid nsec key. Please check and try again.'));
+      return;
+    }
+    if (!mounted) return;
+    widget.onComplete();
+  }
+
+  bool get _hasKeyBackup => ref.watch(keyBackupStoresProvider).isNotEmpty;
+
   @override
   Widget build(BuildContext context) {
     final c = context.nym;
@@ -545,6 +568,10 @@ class _SetupModalState extends ConsumerState<SetupModal> {
               : null,
         ),
       ),
+      if (_hasKeyBackup) ...[
+        ModalChrome.orDivider(c),
+        KeyBackupSignInButtons(onSecret: _loginWithBackupSecret),
+      ],
       const SizedBox(height: 20),
       // `#setupSignupTos` (index.html:1341): centered ToS/Privacy footer.
       _tosText(c, tr('By entering, you agree to our ')),
@@ -561,6 +588,10 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         style: TextStyle(color: c.textDim, fontSize: 13),
       ),
       const SizedBox(height: 18),
+      if (_hasKeyBackup) ...[
+        KeyBackupSignInButtons(onSecret: _loginWithBackupSecret),
+        ModalChrome.orDivider(c),
+      ],
       // `.send-btn` "Login with Remote Signer" + hint.
       ModalChrome.sendButton(
         c,

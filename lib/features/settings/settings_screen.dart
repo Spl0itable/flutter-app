@@ -16,6 +16,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/crypto/pow.dart';
 import '../../core/crypto/bech32_codec.dart' as bech32;
+import '../../core/crypto/keys.dart' show bytesToHex;
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/theme/nym_theme.dart';
@@ -41,6 +42,8 @@ import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
+import '../identity/key_backup/key_backup_store.dart';
+import '../identity/key_backup/key_backup_ui.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import '../../services/filter/filter_packs.dart';
 import 'settings_helpers.dart';
@@ -1530,6 +1533,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // --- Privacy & Security ---------------------------------------------------
 
+  Future<void> _backUpKey(KeyBackupStore store) async {
+    final identity = ref.read(nostrControllerProvider).identity;
+    final sk = identity?.privkey;
+    if (identity == null || sk == null) return;
+    await runKeyBackupCreate(context, ref, store,
+        secretHex: bytesToHex(sk), pubkeyHex: identity.pubkey);
+  }
+
+  Future<void> _removeKeyBackups(KeyBackupStore store) async {
+    final identity = ref.read(nostrControllerProvider).identity;
+    if (identity == null) return;
+    await runKeyBackupRemove(context, ref, store, pubkeyHex: identity.pubkey);
+  }
+
   List<_GroupSpec> _privacy(Settings s, SettingsController ctrl) {
     // The moderation sets (friends / blocked users / blocked keywords) live on
     // AppState, not Settings.
@@ -1624,6 +1641,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 'friends', label: tr('Disabled (for friends only)')),
       (value: 'false', label: tr('Disabled (show all images)')),
     ];
+    final backupStores = ref.watch(keyBackupStoresProvider);
+    final backupIdentity = nostrCtrl.identity;
+    final canBackUpKey = backupStores.isNotEmpty &&
+        backupIdentity?.privkey != null &&
+        (backupIdentity?.loginMethod == 'nsec' ||
+            (backupIdentity?.loginMethod == null &&
+                ctrl.keypairMode == 'persistent'));
+    final backupHint = tr(
+        'Back up your key, encrypted with a PIN, to your own cloud account so '
+        'you can restore it on another device. Your key stays yours: Google '
+        "and Apple only store an encrypted copy that they can't read without "
+        'your PIN.');
     return [
       _GroupSpec(
         text: tr('Identity Encryption Encrypt identity (nsec) key on this '
@@ -1647,6 +1676,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
       ),
+      if (canBackUpKey)
+        _GroupSpec(
+          text: '${tr('Cloud Key Backup')} $backupHint',
+          child: FormGroup(
+            label: tr('Cloud Key Backup'),
+            hint: backupHint,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final store in backupStores)
+                  NymOutlineButton(
+                    key: Key('keyBackupBackUp_${store.cloud.name}'),
+                    label: keyBackupBackUpLabel(store.cloud),
+                    onPressed: () => _backUpKey(store),
+                  ),
+                for (final store in backupStores)
+                  NymOutlineButton(
+                    key: Key('keyBackupRemove_${store.cloud.name}'),
+                    label: keyBackupRemoveLabel(store.cloud),
+                    danger: true,
+                    onPressed: () => _removeKeyBackups(store),
+                  ),
+              ],
+            ),
+          ),
+        ),
       // The hidden hardcore warning is part of the group's textContent even
       // when collapsed away in the PWA, so it's always searchable.
       _GroupSpec(
