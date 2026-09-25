@@ -82,7 +82,7 @@ bool _isSpace(String ch) => ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
 /// never encrypted, published to relays, shown as message bubbles, or stored.
 /// A 1:1 port of the interception regex in the PWA's `sendPM`.
 final RegExp botPMCommandRe = RegExp(
-    r'^\s*\?(help|commands|balance|buy|clear|transfer|gift|model|anon)\b',
+    r'^\s*\?(help|commands|balance|buy|clear|transfer|gift|model|anon|git|github)\b',
     caseSensitive: false);
 
 // =============================================================================
@@ -793,6 +793,11 @@ class BotChatController extends StateNotifier<BotChatState> {
     }
     if (RegExp(r'^\?model\b', caseSensitive: false).hasMatch(trimmed)) {
       handleModelCommand(trimmed);
+      return;
+    }
+    if (RegExp(r'^\?(git|github)\b', caseSensitive: false).hasMatch(trimmed)) {
+      _system('Repositories are in the Nymbot apps, not in Nymchat. Nothing '
+          'you typed after ?git was sent. Connect a repository at nymbot.ai.');
       return;
     }
     if (RegExp(r'^\?anon\b', caseSensitive: false).hasMatch(trimmed)) {

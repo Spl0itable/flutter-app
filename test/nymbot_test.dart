@@ -320,8 +320,10 @@ void main() {
       expect(botPMSubcommands('?git'), isNull);
     });
 
-    test('?git is no longer intercepted on the device', () {
-      expect(botPMCommandRe.hasMatch('?git token ghp_x'), isFalse);
+    test('?git is caught on the device so a pasted token is never sent', () {
+      expect(botPMCommandRe.hasMatch('?git token ghp_x'), isTrue);
+      expect(botPMCommandRe.hasMatch('?github token ghp_x'), isTrue);
+      expect(botPMCommandRe.hasMatch('?gitlab'), isFalse);
       expect(botPMCommandRe.hasMatch('?model off'), isTrue);
     });
   });
