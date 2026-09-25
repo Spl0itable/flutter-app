@@ -82,7 +82,7 @@ dependencies:
   # Auth / biometrics
   local_auth: ^2.3.0
   google_sign_in: ^7.2.0
-  sign_in_with_apple: ^8.2.0
+  sign_in_with_apple: ^7.0.1
 
   # UI helpers
   flutter_svg: ^2.0.10+1
