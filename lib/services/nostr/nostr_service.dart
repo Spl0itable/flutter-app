@@ -751,7 +751,7 @@ class NostrService {
     // Hybrid post-quantum key announcements.
     //
     // Under D1 this is a live tail only, like every other filter here: history
-    // comes from the archive (`_pqAnnouncementFromD1`) and a discovery miss
+    // comes from the archive (`PqAnnouncementSource`) and a discovery miss
     // additionally fetches the single peer it needs. Asking the relays for one
     // announcement per author made this the one filter that backfilled in
     // proxy-pool mode, on every reconnect and every subscription rebuild.

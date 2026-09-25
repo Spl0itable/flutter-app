@@ -2317,6 +2317,15 @@ class StorageSync {
     return events;
   }
 
+  Future<Map<String, dynamic>?> pqKey(String pubkey) async {
+    final res = await _api.botAction({'action': 'pq-key', 'pubkey': pubkey});
+    if (!res.containsKey('event')) {
+      throw ApiException('pq-key', 200, 'missing event');
+    }
+    final ev = res['event'];
+    return ev is Map ? Map<String, dynamic>.from(ev) : null;
+  }
+
   /// Purges a NIP-09-deleted channel message from the D1 archive
   /// (`channel-delete`, storage.js:1123-1150). A PUBLIC call — the signed
   /// kind-5 [deletionEvent] IS the authorization (the worker verifies its
