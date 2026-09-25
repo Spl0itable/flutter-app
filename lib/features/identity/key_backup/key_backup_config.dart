@@ -26,7 +26,8 @@ class KeyBackupConfig {
         String.fromEnvironment('APPLE_BACKUP', defaultValue: 'true') == 'true',
     appleKeychainGroup: String.fromEnvironment('APPLE_KEYCHAIN_GROUP',
         defaultValue: kAppleKeychainGroup),
-    passkeyBackup: String.fromEnvironment('PASSKEY_BACKUP') == 'true',
+    passkeyBackup:
+        String.fromEnvironment('PASSKEY_BACKUP', defaultValue: 'true') == 'true',
     passkeyRpId: String.fromEnvironment('PASSKEY_RP_ID',
         defaultValue: kDefaultPasskeyRpId),
   );

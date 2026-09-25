@@ -393,15 +393,16 @@ void main() {
   });
 
   group('config', () {
-    test('passkey backup is off by default and never on the web', () {
-      expect(KeyBackupConfig.environment.passkeyBackup, isFalse);
+    test('passkey backup is on by default and never on the web', () {
+      expect(KeyBackupConfig.environment.passkeyBackup, isTrue);
       expect(KeyBackupConfig.environment.passkeyRpId, 'web.nymchat.app');
       const on = KeyBackupConfig(passkeyBackup: true);
       expect(on.passkeyEnabledOn(TargetPlatform.iOS, web: false), isTrue);
       expect(on.passkeyEnabledOn(TargetPlatform.android, web: false), isTrue);
       expect(on.passkeyEnabledOn(TargetPlatform.macOS, web: false), isFalse);
       expect(on.passkeyEnabledOn(TargetPlatform.iOS, web: true), isFalse);
-      expect(defaultPasskeyBackupService(), isNull);
+      expect(defaultPasskeyBackupService(platform: TargetPlatform.android)?.rpId, 'web.nymchat.app');
+      expect(defaultPasskeyBackupService(config: const KeyBackupConfig(), platform: TargetPlatform.android), isNull);
       expect(
           defaultPasskeyBackupService(
                   config: on, platform: TargetPlatform.android)!
