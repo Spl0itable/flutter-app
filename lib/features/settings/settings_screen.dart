@@ -41,6 +41,9 @@ import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
+import '../identity/key_backup/key_backup_actions.dart';
+import '../identity/key_backup/key_backup_store.dart';
+import '../identity/nick_edit_modal.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import '../../services/filter/filter_packs.dart';
 import 'settings_helpers.dart';
@@ -1624,6 +1627,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 'friends', label: tr('Disabled (for friends only)')),
       (value: 'false', label: tr('Disabled (show all images)')),
     ];
+    final canBackUpKey = canShowKeyBackup(ref);
+    final backupHint = '${keyBackupHint(passkeyOnly: ref.watch(keyBackupStoresProvider).isEmpty)} '
+        '${tr('The backup options are in View or Edit Nym\u2019s Details, '
+            'beside your private key and recovery code.')}';
     return [
       _GroupSpec(
         text: tr('Identity Encryption Encrypt identity (nsec) key on this '
@@ -1647,6 +1654,22 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
       ),
+      if (canBackUpKey)
+        _GroupSpec(
+          text: '${tr('Cloud Key Backup')} $backupHint',
+          child: FormGroup(
+            label: tr('Cloud Key Backup'),
+            hint: backupHint,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: NymOutlineButton(
+                key: const Key('keyBackupOpenDetails'),
+                label: tr("View or Edit Nym's Details"),
+                onPressed: () => NickEditModal.open(context),
+              ),
+            ),
+          ),
+        ),
       // The hidden hardcore warning is part of the group's textContent even
       // when collapsed away in the PWA, so it's always searchable.
       _GroupSpec(

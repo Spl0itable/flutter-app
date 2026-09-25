@@ -338,3 +338,18 @@ PqRootAction pqRootDecide({
   if (holdRoot) return PqRootAction.publishRecord;
   return PqRootAction.generate;
 }
+
+enum PqRootSeed { none, pending, generate }
+
+PqRootSeed pqRootSeedForKey({
+  required bool holdRoot,
+  required bool localKey,
+  required bool throwawayKeypair,
+  required bool pendingForThisKey,
+  required bool freshKey,
+}) {
+  if (holdRoot || !localKey || throwawayKeypair) return PqRootSeed.none;
+  if (pendingForThisKey) return PqRootSeed.pending;
+  if (freshKey) return PqRootSeed.generate;
+  return PqRootSeed.none;
+}

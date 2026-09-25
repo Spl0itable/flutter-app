@@ -401,6 +401,8 @@ class NostrController {
     if (hooks != null) _dispatcher.hooksOverride = hooks;
   }
 
+  void showSystemNotice(String text) => _emitSystemMessage(text);
+
   void _emitSystemMessage(String text) {
     final sink = _systemMessageSink;
     if (sink != null) {
@@ -477,6 +479,8 @@ class NostrController {
       // key or seals a blob. Vault-encrypted at rest, so it arrives via
       // [unlockedSecrets] exactly as the nsec does.
       await _loadPqRoot(unlockedSecrets: unlockedSecrets);
+      await _seedNewKeyPqRoot(identity,
+          freshKey: identityService.generatedFreshKey);
 
       // Durable login (nsec/NIP-46): never surface the boot chain's leftover
       // auto-ephemeral / derived nick as the account's name — the PWA seeds
@@ -1456,7 +1460,8 @@ class NostrController {
   /// and `goLive`s the store — the "re-run the boot→goLive path" that makes the
   /// next state the real account. Finally we bump [bootEpochProvider] so the
   /// boot gate (now seeing a saved login) lands on the shell.
-  Future<void> loginWithNsec(String nsec) async {
+  Future<void> loginWithNsec(String nsec,
+      {String? pqRootCode, bool newKey = false}) async {
     final kv = _ref.read(keyValueStoreProvider);
     // Vault-aware secret writes (see the [init] construction site).
     final identityService = IdentityService(
@@ -1466,13 +1471,21 @@ class NostrController {
     );
     // Persist method + nsec + pubkey (throws on an invalid key — propagated so
     // the modal can show its existing error and NOT complete).
-    await identityService.loginWithNsec(nsec);
+    final loggedIn = await identityService.loginWithNsec(nsec);
 
     // Re-boot as the persisted nsec account: tear down the ephemeral session,
     // allow a fresh boot on this provider instance, then `init()` restores the
     // saved login and re-subscribes under the new pubkey.
     await _teardownLiveSession();
     _started = false;
+    final root = pqRootCode == null ? null : pqRootFromCode(pqRootCode.trim());
+    if (root != null) {
+      if (newKey) {
+        _pqRootForNewKey = (pubkey: loggedIn.pubkey, root: root);
+      } else {
+        _pqRootCandidate = root;
+      }
+    }
     await init();
 
     // Remount the boot gate so it re-checks (now has a saved login) and tears
@@ -5868,6 +5881,7 @@ class NostrController {
     _pqRootWaitTimer?.cancel();
     _pqRootWaitTimer = null;
     _pqRootWaiters.clear();
+    _pqRootCandidate = null;
   }
 
   /// Persists the root through the vault, so it is encrypted at rest exactly
@@ -5974,7 +5988,7 @@ class NostrController {
         // record; without it another device generates a rival root.
         final held = _pqRoot;
         if (held == null) return;
-        await sync.pqRootRecordSet(PqRootRecord.forRoot(held));
+        await _createPqRoot(sync, existing: held);
         return;
 
       case PqRootAction.awaitLink:
@@ -6005,20 +6019,70 @@ class NostrController {
         // kept announcing an nsec-derived key. A root we kept but could not
         // publish is exactly the publishRecord case above, and the next boot
         // finishes the job.
-        final root = pq.pqGenerateRoot();
-        if (!await _persistPqRoot(root)) return;
-        // Best-effort: a failure here is recovered by publishRecord, so it
-        // must not cost us the root we just persisted.
-        await sync.pqRootRecordSet(PqRootRecord.forRoot(root));
-        try {
-          await _ref
-              .read(keyValueStoreProvider)
-              .setString(StorageKeys.pqRootBackupNotice, 'pending');
-        } catch (_) {}
-        _pushPqKeysToPeers();
-        await publishPqAnnouncement(force: true);
+        final candidate = _pqRootCandidate;
+        _pqRootCandidate = null;
+        await _createPqRoot(sync, existing: candidate);
         return;
     }
+  }
+
+  Future<void> _createPqRoot(StorageSync sync, {Uint8List? existing}) async {
+    final root = existing ?? pq.pqGenerateRoot();
+    final held = _pqRoot;
+    if (held == null || !_sameBytes(held, root)) {
+      if (!await _persistPqRoot(root)) return;
+    }
+    // Best-effort: a failure here is recovered by publishRecord, so it
+    // must not cost us the root we just persisted.
+    await sync.pqRootRecordSet(PqRootRecord.forRoot(root));
+    if (existing == null) await _armPqRootBackupNotice();
+    _pushPqKeysToPeers();
+    await publishPqAnnouncement(force: true);
+  }
+
+  Future<void> _armPqRootBackupNotice() async {
+    try {
+      await _ref
+          .read(keyValueStoreProvider)
+          .setString(StorageKeys.pqRootBackupNotice, 'pending');
+    } catch (_) {}
+  }
+
+  static bool _sameBytes(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  Uint8List? _pqRootCandidate;
+  ({String pubkey, Uint8List root})? _pqRootForNewKey;
+
+  Future<void> _seedNewKeyPqRoot(Identity identity,
+      {required bool freshKey}) async {
+    final pending = _pqRootForNewKey;
+    _pqRootForNewKey = null;
+    final seed = pqRootSeedForKey(
+      holdRoot: _pqRoot != null,
+      localKey: identity.privkey != null,
+      throwawayKeypair: _ref
+          .read(keyValueStoreProvider)
+          .getBool(StorageKeys.randomKeypairPerSession, defaultValue: false),
+      pendingForThisKey: pending != null && pending.pubkey == identity.pubkey,
+      freshKey: freshKey,
+    );
+    final Uint8List root;
+    switch (seed) {
+      case PqRootSeed.none:
+        return;
+      case PqRootSeed.pending:
+        root = pending!.root;
+      case PqRootSeed.generate:
+        root = pq.pqGenerateRoot();
+    }
+    if (!await _persistPqRoot(root)) return;
+    await _armPqRootBackupNotice();
   }
 
   /// Adopts a pasted `nympq1…` code (§5's manual path, and the way out of §7

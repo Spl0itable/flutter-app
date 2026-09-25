@@ -128,6 +128,11 @@ class MainActivity : FlutterFragmentActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             VAULT_KEY_CHANNEL,
         ).setMethodCallHandler { call, result -> vaultKey(call, Reply(result)) }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            PASSKEY_BACKUP_CHANNEL,
+        ).setMethodCallHandler { call, result -> PasskeyBackup.handle(this, call, result) }
     }
 
     private class Reply(private val result: MethodChannel.Result) {
@@ -315,6 +320,7 @@ class MainActivity : FlutterFragmentActivity() {
         private const val ATTEST_CHANNEL = "app.nymchat/attest"
         private const val SECURE_CHANNEL = "app.nymchat/secure"
         private const val VAULT_KEY_CHANNEL = "app.nymchat/vault_key"
+        private const val PASSKEY_BACKUP_CHANNEL = "app.nymchat/passkey_backup"
         private const val VAULT_KEY_ALIAS = "nymchat_vault_key"
         private const val VAULT_KEY_FILE = "nymchat_vault_key.bin"
     }

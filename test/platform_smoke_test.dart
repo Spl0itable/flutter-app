@@ -138,18 +138,18 @@ void main() {
   });
 
   group('iOS entitlements + project', () {
-    test('keychain entitlement present; associated domains deliberately absent',
+    test('keychain, Sign in with Apple, universal link and passkey domain entitlements present',
         () {
-      final ent = _read('ios/Runner/Runner.entitlements');
-      expect(ent, contains('keychain-access-groups'));
-      // Universal Links (applinks:) were deliberately REMOVED: the automatic
-      // App Store provisioning profile lacks the Associated Domains
-      // capability, and shipping the entitlement without it fails signing.
-      // The file documents this; deep links still work via the custom scheme.
-      // If the capability is ever added in the Apple Developer portal, restore
-      // `applinks:app.nymchat.app` and flip this expectation back.
-      expect(ent, isNot(contains('applinks:')));
-      expect(ent, contains('Associated Domains'));
+      for (final path in ['ios/Runner/Runner.entitlements', 'ios/Runner/RunnerDebug.entitlements']) {
+        final ent = _read(path);
+        expect(ent, contains('keychain-access-groups'));
+        expect(ent, contains(r'$(AppIdentifierPrefix)com.nym.bar'));
+        expect(ent, contains(r'$(AppIdentifierPrefix)com.nym.shared'));
+        expect(ent, contains('com.apple.developer.applesignin'));
+        expect(ent, contains('webcredentials:web.nymchat.app'));
+        expect(ent, contains('applinks:web.nymchat.app'));
+        expect(ent.indexOf('com.nym.bar'), lessThan(ent.indexOf('com.nym.shared')));
+      }
     });
 
     test('entitlements wired into the Xcode build settings', () {
