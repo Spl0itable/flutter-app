@@ -1,6 +1,11 @@
 import 'package:flutter/foundation.dart';
 
 const String kDefaultPasskeyRpId = 'web.nymchat.app';
+const String kGoogleIosClientId =
+    '435441872913-8lb1h9498kapbl00am68t046it4dv0iu.apps.googleusercontent.com';
+const String kGoogleWebClientId =
+    '435441872913-ccmsrqp8nsi3vqm27cptpsld3kqb5i2g.apps.googleusercontent.com';
+const String kAppleKeychainGroup = 'KJ6U2Y9B2M.com.nym.shared';
 
 class KeyBackupConfig {
   const KeyBackupConfig({
@@ -13,10 +18,14 @@ class KeyBackupConfig {
   });
 
   static const KeyBackupConfig environment = KeyBackupConfig(
-    googleIosClientId: String.fromEnvironment('GOOGLE_IOS_CLIENT_ID'),
-    googleServerClientId: String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID'),
-    appleBackup: String.fromEnvironment('APPLE_BACKUP') == 'true',
-    appleKeychainGroup: String.fromEnvironment('APPLE_KEYCHAIN_GROUP'),
+    googleIosClientId: String.fromEnvironment('GOOGLE_IOS_CLIENT_ID',
+        defaultValue: kGoogleIosClientId),
+    googleServerClientId: String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID',
+        defaultValue: kGoogleWebClientId),
+    appleBackup:
+        String.fromEnvironment('APPLE_BACKUP', defaultValue: 'true') == 'true',
+    appleKeychainGroup: String.fromEnvironment('APPLE_KEYCHAIN_GROUP',
+        defaultValue: kAppleKeychainGroup),
     passkeyBackup: String.fromEnvironment('PASSKEY_BACKUP') == 'true',
     passkeyRpId: String.fromEnvironment('PASSKEY_RP_ID',
         defaultValue: kDefaultPasskeyRpId),

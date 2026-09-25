@@ -94,7 +94,7 @@
 			<string>google-sign-in</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.REPLACE-WITH-GOOGLE-IOS-CLIENT-ID</string>
+				<string>com.googleusercontent.apps.435441872913-8lb1h9498kapbl00am68t046it4dv0iu</string>
 			</array>
 		</dict>
 	</array>

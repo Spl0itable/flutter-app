@@ -178,10 +178,16 @@ void main() {
       }
     });
 
-    test('the environment defaults leave the feature off', () {
-      expect(KeyBackupConfig.environment.appleBackup, isFalse);
-      expect(KeyBackupConfig.environment.googleIosClientId, isEmpty);
-      expect(KeyBackupConfig.environment.googleServerClientId, isEmpty);
+    test('the environment defaults carry the shipped Google ids and Apple group, with passkeys off', () {
+      const env = KeyBackupConfig.environment;
+      expect(env.googleIosClientId, kGoogleIosClientId);
+      expect(env.googleServerClientId, kGoogleWebClientId);
+      expect(env.appleBackup, isTrue);
+      expect(env.appleKeychainGroup, 'KJ6U2Y9B2M.com.nym.shared');
+      expect(env.passkeyBackup, isFalse);
+      expect(env.googleEnabledOn(TargetPlatform.iOS, web: false), isTrue);
+      expect(env.googleEnabledOn(TargetPlatform.android, web: false), isTrue);
+      expect(env.googleEnabledOn(TargetPlatform.iOS, web: true), isFalse);
     });
   });
 
