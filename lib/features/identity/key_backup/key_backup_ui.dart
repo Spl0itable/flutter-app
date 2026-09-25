@@ -18,6 +18,25 @@ import 'passkey_backup_service.dart';
 
 typedef PinSubmit = Future<String?> Function(String pin);
 
+typedef BackupSignIn = Future<void> Function(BackupSecret restored);
+
+Future<void> _completeSignIn(
+  BuildContext context,
+  BackupSecret restored,
+  BackupSignIn signIn,
+) async {
+  if (restored.pqIgnored && context.mounted) {
+    await showAppAlert(
+      context,
+      tr("The post-quantum recovery code in this backup couldn't be read, so "
+          "it was skipped. You'll be signed in with your key. If you have "
+          'your nympq1… code, paste it in View or Edit Nym\u2019s Details.'),
+      title: tr('Recovery code skipped'),
+    );
+  }
+  await signIn(restored);
+}
+
 String keyBackupContinueLabel(BackupCloud cloud) => switch (cloud) {
       BackupCloud.google => tr('Continue with Google'),
       BackupCloud.apple => tr('Continue with Apple'),
@@ -411,7 +430,7 @@ Future<bool> runKeyBackupSignIn(
   BuildContext context,
   WidgetRef ref,
   KeyBackupStore store,
-  Future<void> Function(String secretHex) signIn,
+  BackupSignIn signIn,
 ) async {
   final cloud = store.cloud;
   final opened = await _openSession(context, ref, store);
@@ -458,7 +477,8 @@ Future<bool> runKeyBackupSignIn(
       chosen = picked;
     }
     found = const [];
-    await signIn(chosen.secretHex);
+    if (!context.mounted) return false;
+    await _completeSignIn(context, chosen.backup, signIn);
     return true;
   }
 
@@ -495,7 +515,7 @@ Future<bool> runKeyBackupSignIn(
   );
   final secret = created;
   if (!ok || secret == null || !context.mounted) return false;
-  await signIn(secret);
+  await signIn(BackupSecret(secretHex: secret));
   return true;
 }
 
@@ -505,6 +525,7 @@ Future<bool> runKeyBackupCreate(
   KeyBackupStore store, {
   required String secretHex,
   required String pubkeyHex,
+  String? pqCode,
 }) async {
   final cloud = store.cloud;
   final opened = await _openSession(context, ref, store);
@@ -544,7 +565,7 @@ Future<bool> runKeyBackupCreate(
               return null;
             }
           }
-          await session.upload(key, secretHex);
+          await session.upload(key, secretHex, pqCode: pqCode);
           await session.deleteEntries(existing);
         } catch (e) {
           return _errorMessage(e, cloud);
@@ -668,9 +689,9 @@ PasskeyBackupError _passkeyError(Object e) =>
 Future<bool> runPasskeySignIn(
   BuildContext context,
   PasskeyBackupService service,
-  Future<void> Function(String secretHex) signIn,
+  BackupSignIn signIn,
 ) async {
-  String secret;
+  BackupSecret secret;
   try {
     secret = await service.restore();
   } catch (e) {
@@ -696,14 +717,15 @@ Future<bool> runPasskeySignIn(
         title: tr('Passkey backup'));
     return false;
   }
-  await signIn(secret);
+  if (!context.mounted) return false;
+  await _completeSignIn(context, secret, signIn);
   return true;
 }
 
 Future<bool> runPasskeyCreateNewKey(
   BuildContext context,
   PasskeyBackupService service,
-  Future<void> Function(String secretHex) signIn,
+  BackupSignIn signIn,
 ) async {
   final sk = generatePrivateKey();
   final secretHex = bytesToHex(sk);
@@ -717,12 +739,12 @@ Future<bool> runPasskeyCreateNewKey(
     await showAppAlert(
       context,
       tr("Your new key was created, but its passkey backup didn't complete. "
-          "You'll be signed in now. To try again, go to Settings and choose "
-          'Back up with a passkey.'),
+          "You'll be signed in now. To try again, open View or Edit Nym\u2019s "
+          'Details and choose Back up with a passkey.'),
       title: tr('Passkey backup'),
     );
   }
-  await signIn(secretHex);
+  await signIn(BackupSecret(secretHex: secretHex));
   return true;
 }
 
@@ -731,9 +753,11 @@ Future<bool> runPasskeyBackup(
   PasskeyBackupService service, {
   required String secretHex,
   required String pubkeyHex,
+  String? pqCode,
 }) async {
   try {
-    await service.backUp(secretHex: secretHex, pubkeyHex: pubkeyHex);
+    await service.backUp(
+        secretHex: secretHex, pubkeyHex: pubkeyHex, pqCode: pqCode);
   } catch (e) {
     final error = _passkeyError(e);
     if (error == PasskeyBackupError.canceled || !context.mounted) return false;
@@ -760,7 +784,7 @@ class KeyBackupSignInButtons extends ConsumerStatefulWidget {
     this.showPasskeyCreate = false,
   });
 
-  final Future<void> Function(String secretHex) onSecret;
+  final BackupSignIn onSecret;
   final bool showPasskeyCreate;
 
   @override

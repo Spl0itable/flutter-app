@@ -401,6 +401,8 @@ class NostrController {
     if (hooks != null) _dispatcher.hooksOverride = hooks;
   }
 
+  void showSystemNotice(String text) => _emitSystemMessage(text);
+
   void _emitSystemMessage(String text) {
     final sink = _systemMessageSink;
     if (sink != null) {

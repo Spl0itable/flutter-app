@@ -4,8 +4,13 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/crypto/keys.dart';
+import 'package:nym_bar/core/crypto/nip44.dart' as nip44;
+import 'package:nym_bar/features/identity/pq_root.dart';
 import 'package:nym_bar/features/identity/key_backup/key_backup_crypto.dart';
 import 'package:nym_bar/features/identity/key_backup/key_backup_service.dart';
+
+String? dec(String payload, Uint8List key) =>
+    decryptBackupSecret(payload, key)?.secretHex;
 
 void main() {
   final vector = jsonDecode(File('test/key-backup-vector.json').readAsStringSync())
@@ -45,21 +50,21 @@ void main() {
         expect(bytesToHex(key), c['keyHex']);
       });
 
-      test('payload with the fixed nonce', () {
-        final payload = encryptBackupSecret(secretHex, key,
+      test('legacy payload with the fixed nonce', () {
+        final payload = nip44.encrypt(secretHex, key,
             nonce: hexToBytes(c['nonceHex'] as String));
         expect(payload, c['payload']);
       });
 
       test('decrypts back to the secret key', () {
-        expect(decryptBackupSecret(c['payload'] as String, key), secretHex);
+        expect(dec(c['payload'] as String, key), secretHex);
       });
 
       test('the other provider context cannot decrypt it', () async {
         final other = BackupCloud.values.firstWhere((x) => x != cloud);
         final wrong = deriveBackupKeySync(c['pin'] as String,
             backupSalt(other, c['accountId'] as String));
-        expect(decryptBackupSecret(c['payload'] as String, wrong), isNull);
+        expect(dec(c['payload'] as String, wrong), isNull);
       });
     });
   }
@@ -76,15 +81,15 @@ void main() {
     final a = encryptBackupSecret(secretHex, key);
     final b = encryptBackupSecret(secretHex, key);
     expect(a, isNot(b));
-    expect(decryptBackupSecret(a, key), secretHex);
+    expect(dec(a, key), secretHex);
   });
 
   test('garbage, wrong keys and non-key plaintexts decrypt to null', () {
     final key = hexToBytes(cases.first['keyHex'] as String);
-    expect(decryptBackupSecret('not base64 at all', key), isNull);
-    expect(decryptBackupSecret(cases.first['payload'] as String, Uint8List(32)),
+    expect(dec('not base64 at all', key), isNull);
+    expect(dec(cases.first['payload'] as String, Uint8List(32)),
         isNull);
-    expect(decryptBackupSecret(cases.first['payload'] as String, key), secretHex);
+    expect(dec(cases.first['payload'] as String, key), secretHex);
   });
 
   test('PIN validation', () {
@@ -141,5 +146,109 @@ void main() {
     expect(short.startsWith(npub.substring(0, 12)), isTrue);
     expect(short.endsWith(npub.substring(npub.length - 6)), isTrue);
     expect(short.length, lessThan(npub.length));
+  });
+  group('bundle', () {
+    final bundle = vector['bundle'] as Map<String, dynamic>;
+    final pq = bundle['pqCode'] as String;
+    final bundleCases = (bundle['cases'] as List).cast<Map<String, dynamic>>();
+
+    test('plaintext has exactly the vector keys, order and spacing', () {
+      expect(encodeBackupBundle(secretHex, pqCode: pq), bundle['plaintext']);
+      expect(encodeBackupBundle(secretHex), '{"v":1,"sk":"$secretHex"}');
+      expect(encodeBackupBundle(secretHex.toUpperCase(), pqCode: pq),
+          bundle['plaintext']);
+    });
+
+    for (final c in bundleCases) {
+      test('${c['provider']} payload with the fixed nonce and back', () {
+        final key = hexToBytes(c['keyHex'] as String);
+        final payload = encryptBackupSecret(secretHex, key,
+            pqCode: pq, nonce: hexToBytes(c['nonceHex'] as String));
+        expect(payload, c['payload']);
+        expect(nip44.decrypt(payload, key), bundle['plaintext']);
+        final back = decryptBackupSecret(c['payload'] as String, key)!;
+        expect(back.secretHex, secretHex);
+      });
+    }
+
+    test('the vector code is not a real nympq1 code, so it is skipped', () {
+      expect(pqRootFromCode(pq), isNull);
+      final back = parseBackupPlaintext(bundle['plaintext'] as String)!;
+      expect(back.secretHex, secretHex);
+      expect(back.pqCode, isNull);
+      expect(back.pqIgnored, isTrue);
+    });
+
+    test('a real code round-trips', () {
+      final code = pqRootToCode(randomBytes(32));
+      final key = hexToBytes(bundleCases.first['keyHex'] as String);
+      final back = decryptBackupSecret(
+          encryptBackupSecret(secretHex, key, pqCode: code), key)!;
+      expect(back.secretHex, secretHex);
+      expect(back.pqCode, code);
+      expect(back.pqIgnored, isFalse);
+    });
+
+    test('the legacy bare-hex payloads still restore, without a code', () {
+      for (final c in cases) {
+        final back = decryptBackupSecret(
+            c['payload'] as String, hexToBytes(c['keyHex'] as String))!;
+        expect(back.secretHex, secretHex);
+        expect(back.pqCode, isNull);
+        expect(back.pqIgnored, isFalse);
+      }
+    });
+
+    test('a bad pq is ignored and flagged, never failing the key', () {
+      for (final bad in [
+        '"nympq1notacode"',
+        '"npub1qqqqqqqq"',
+        '42',
+        '""',
+      ]) {
+        final back =
+            parseBackupPlaintext('{"v":1,"sk":"$secretHex","pq":$bad}')!;
+        expect(back.secretHex, secretHex, reason: bad);
+        expect(back.pqCode, isNull, reason: bad);
+        expect(back.pqIgnored, isTrue, reason: bad);
+      }
+      final flipped = pq.substring(0, pq.length - 1) +
+          (pq.endsWith('q') ? 'p' : 'q');
+      final back =
+          parseBackupPlaintext('{"v":1,"sk":"$secretHex","pq":"$flipped"}')!;
+      expect(back.pqIgnored, isTrue);
+    });
+
+    test('an absent or null pq is not a note', () {
+      for (final plain in [
+        '{"v":1,"sk":"$secretHex"}',
+        '{"v":1,"sk":"$secretHex","pq":null}',
+      ]) {
+        final back = parseBackupPlaintext(plain)!;
+        expect(back.pqCode, isNull);
+        expect(back.pqIgnored, isFalse);
+      }
+    });
+
+    test('anything without a valid sk is rejected', () {
+      for (final plain in [
+        '{"v":2,"sk":"$secretHex","pq":"$pq"}',
+        '{"v":1,"sk":"abc","pq":"$pq"}',
+        '{"v":1,"pq":"$pq"}',
+        '["$secretHex"]',
+        'nope',
+        secretHex.substring(1),
+      ]) {
+        expect(parseBackupPlaintext(plain), isNull, reason: plain);
+      }
+    });
+
+    test('encoding something that is not a nympq1 string throws', () {
+      for (final bad in ['npub1abc', 'nympq1"x', 'NYMPQ1ABC', 'nympq1 a']) {
+        expect(() => encodeBackupBundle(secretHex, pqCode: bad),
+            throwsArgumentError,
+            reason: bad);
+      }
+    });
   });
 }

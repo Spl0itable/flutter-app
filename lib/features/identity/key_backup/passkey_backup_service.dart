@@ -11,6 +11,7 @@ import '../../../core/crypto/bech32_codec.dart' as bech32;
 import '../../../core/crypto/keys.dart';
 import '../../../models/nostr_event.dart';
 import 'key_backup_config.dart';
+import 'key_backup_crypto.dart' show BackupSecret;
 import 'key_backup_service.dart' show shortNpub;
 import 'passkey_backup_crypto.dart';
 
@@ -435,7 +436,11 @@ class PasskeyBackupService {
 
   Future<bool> isAvailable() => _platform.isAvailable();
 
-  Future<void> backUp({required String secretHex, required String pubkeyHex}) async {
+  Future<void> backUp({
+    required String secretHex,
+    required String pubkeyHex,
+    String? pqCode,
+  }) async {
     final salt = passkeyPrfSalt();
     final label = '$rpName key backup · ${shortNpub(bech32.encodeNpub(pubkeyHex))}';
     final created = await _platform.create(
@@ -461,7 +466,7 @@ class PasskeyBackupService {
       prf.fillRange(0, prf.length, 0);
       try {
         final event = keys.buildEvent(secretHex,
-            createdAt: _now(), nonce: _nonce?.call());
+            createdAt: _now(), pqCode: pqCode, nonce: _nonce?.call());
         final ok = await _relays.publish(event, _publishRelays);
         if (ok < 1) {
           throw const PasskeyBackupException(PasskeyBackupError.publishFailed);
@@ -472,7 +477,7 @@ class PasskeyBackupService {
       return;
     }
     if (created.largeBlobSupported) {
-      final blob = encodeLargeBlob(secretHex);
+      final blob = encodeLargeBlob(secretHex, pqCode: pqCode);
       try {
         final got = await _platform.get(
           rpId: rpId,
@@ -491,7 +496,7 @@ class PasskeyBackupService {
     throw const PasskeyBackupException(PasskeyBackupError.unsupported);
   }
 
-  Future<String> restore() async {
+  Future<BackupSecret> restore() async {
     final got = await _platform.get(
       rpId: rpId,
       challenge: randomBytes(32),

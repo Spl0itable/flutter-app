@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
@@ -19,6 +20,8 @@ import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
 import '../i18n/i18n.dart';
 import 'dev_nsec_modal.dart';
+import 'key_backup/key_backup_crypto.dart';
+import 'key_backup/key_backup_pq_restore.dart';
 import 'key_backup/key_backup_store.dart';
 import 'key_backup/key_backup_ui.dart';
 import 'key_backup/passkey_backup_service.dart';
@@ -390,20 +393,24 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     widget.onComplete();
   }
 
-  Future<void> _loginWithBackupSecret(String secretHex) async {
+  Future<void> _loginWithBackupSecret(BackupSecret restored) async {
     if (_loggingIn) return;
     setState(() {
       _loggingIn = true;
       _loginError = null;
     });
+    final ctrl = ref.read(nostrControllerProvider);
     try {
-      await ref.read(nostrControllerProvider).loginWithNsec(secretHex);
+      await ctrl.loginWithNsec(restored.secretHex);
     } catch (_) {
       if (!mounted) return;
       setState(() => _loggingIn = false);
       await showAppAlert(
           context, tr('Invalid nsec key. Please check and try again.'));
       return;
+    }
+    if (restored.pqCode != null) {
+      unawaited(restoreBackupPqCode(ctrl, restored));
     }
     if (!mounted) return;
     widget.onComplete();

@@ -6,6 +6,8 @@ Code: `lib/features/identity/key_backup/`.
 
 Every button stays hidden until its provider is configured, so a build without the settings below behaves exactly as before.
 
+The encrypted plaintext (and the passkey largeBlob) is the bundle `{"v":1,"sk":"<64 lowercase hex>","pq":"<nympq1… code>"}`, with `pq` left out when the account has no post-quantum recovery code. Restore also accepts the older bare 64-hex plaintext. A restored code goes through the same link path as a pasted one, after sign-in; a code that can't be parsed or doesn't match the account is skipped with a note and never blocks the sign-in. The "Back up to Google / Apple / with a passkey" and "Remove backups" buttons live in View or Edit Nym's Details, beside the nsec and the recovery code, for local keys only; Settings links there.
+
 ## Build settings (`--dart-define`)
 
 | Define | Value | Needed for |
@@ -59,7 +61,7 @@ Nothing beyond the Google Cloud setup above and `GOOGLE_SERVER_CLIENT_ID`. The A
 
 ## Passkey (`nym-passkey-backup-v1`)
 
-"Continue with a passkey" restores a key from a passkey; if no passkey is chosen or none has a backup, it offers "Create a new key and back it up with a passkey", which the sign-up tab also shows directly. Settings has "Back up with a passkey" for local keys. The canonical vector is `test/passkey-backup-vector.json`.
+"Continue with a passkey" restores a key from a passkey; if no passkey is chosen or none has a backup, it offers "Create a new key and back it up with a passkey", which the sign-up tab also shows directly. View or Edit Nym's Details has "Back up with a passkey" for local keys. The canonical vector is `test/passkey-backup-vector.json`.
 
 - PRF (iOS 18+, Android through Credential Manager): the key is NIP-44 encrypted with a key derived from the passkey's PRF output and published as a kind 30078 event (`d` = `nym-key-backup`), signed by a locator key that is also derived from the PRF output, to the app's default relays plus relay.damus.io, nos.lol, relay.primal.net, relay.nostr.band and nostr.mom.
 - largeBlob fallback (iOS 17+, and Android providers that support it): the key is written into the passkey itself.

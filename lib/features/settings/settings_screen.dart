@@ -16,7 +16,6 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../core/constants/storage_keys.dart';
 import '../../core/crypto/pow.dart';
 import '../../core/crypto/bech32_codec.dart' as bech32;
-import '../../core/crypto/keys.dart' show bytesToHex;
 import '../../core/theme/nym_colors.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../core/theme/nym_theme.dart';
@@ -42,9 +41,9 @@ import '../translate/auto_translate.dart' show autoTranslateTargetFor;
 import '../messages/format/message_content.dart' show InlineEmojiText;
 import '../identity/modal_chrome.dart';
 import '../identity/vault_settings_modal.dart';
+import '../identity/key_backup/key_backup_actions.dart';
 import '../identity/key_backup/key_backup_store.dart';
-import '../identity/key_backup/key_backup_ui.dart';
-import '../identity/key_backup/passkey_backup_service.dart';
+import '../identity/nick_edit_modal.dart';
 import '../../widgets/wallpaper/wallpaper_cache.dart';
 import '../../services/filter/filter_packs.dart';
 import 'settings_helpers.dart';
@@ -1534,28 +1533,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // --- Privacy & Security ---------------------------------------------------
 
-  Future<void> _backUpKey(KeyBackupStore store) async {
-    final identity = ref.read(nostrControllerProvider).identity;
-    final sk = identity?.privkey;
-    if (identity == null || sk == null) return;
-    await runKeyBackupCreate(context, ref, store,
-        secretHex: bytesToHex(sk), pubkeyHex: identity.pubkey);
-  }
-
-  Future<void> _backUpKeyWithPasskey(PasskeyBackupService service) async {
-    final identity = ref.read(nostrControllerProvider).identity;
-    final sk = identity?.privkey;
-    if (identity == null || sk == null) return;
-    await runPasskeyBackup(context, service,
-        secretHex: bytesToHex(sk), pubkeyHex: identity.pubkey);
-  }
-
-  Future<void> _removeKeyBackups(KeyBackupStore store) async {
-    final identity = ref.read(nostrControllerProvider).identity;
-    if (identity == null) return;
-    await runKeyBackupRemove(context, ref, store, pubkeyHex: identity.pubkey);
-  }
-
   List<_GroupSpec> _privacy(Settings s, SettingsController ctrl) {
     // The moderation sets (friends / blocked users / blocked keywords) live on
     // AppState, not Settings.
@@ -1650,25 +1627,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       (value: 'friends', label: tr('Disabled (for friends only)')),
       (value: 'false', label: tr('Disabled (show all images)')),
     ];
-    final backupStores = ref.watch(keyBackupStoresProvider);
-    final passkeyBackup =
-        ref.watch(passkeyBackupAvailableProvider).valueOrNull == true
-            ? ref.watch(passkeyBackupServiceProvider)
-            : null;
-    final backupIdentity = nostrCtrl.identity;
-    final canBackUpKey = (backupStores.isNotEmpty || passkeyBackup != null) &&
-        backupIdentity?.privkey != null &&
-        (backupIdentity?.loginMethod == 'nsec' ||
-            (backupIdentity?.loginMethod == null &&
-                ctrl.keypairMode == 'persistent'));
-    final backupHint = backupStores.isEmpty
-        ? tr('Back up your key with a passkey so you can restore it on '
-            'another device. Your key stays yours: the backup is encrypted, '
-            'and only your passkey can unlock it.')
-        : tr('Back up your key, encrypted with a PIN, to your own cloud '
-            'account so you can restore it on another device. Your key stays '
-            "yours: Google and Apple only store an encrypted copy that they "
-            "can't read without your PIN.");
+    final canBackUpKey = canShowKeyBackup(ref);
+    final backupHint = '${keyBackupHint(passkeyOnly: ref.watch(keyBackupStoresProvider).isEmpty)} '
+        '${tr('The backup options are in View or Edit Nym\u2019s Details, '
+            'beside your private key and recovery code.')}';
     return [
       _GroupSpec(
         text: tr('Identity Encryption Encrypt identity (nsec) key on this '
@@ -1698,30 +1660,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           child: FormGroup(
             label: tr('Cloud Key Backup'),
             hint: backupHint,
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final store in backupStores)
-                  NymOutlineButton(
-                    key: Key('keyBackupBackUp_${store.cloud.name}'),
-                    label: keyBackupBackUpLabel(store.cloud),
-                    onPressed: () => _backUpKey(store),
-                  ),
-                if (passkeyBackup != null)
-                  NymOutlineButton(
-                    key: const Key('keyBackupBackUp_passkey'),
-                    label: tr('Back up with a passkey'),
-                    onPressed: () => _backUpKeyWithPasskey(passkeyBackup),
-                  ),
-                for (final store in backupStores)
-                  NymOutlineButton(
-                    key: Key('keyBackupRemove_${store.cloud.name}'),
-                    label: keyBackupRemoveLabel(store.cloud),
-                    danger: true,
-                    onPressed: () => _removeKeyBackups(store),
-                  ),
-              ],
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: NymOutlineButton(
+                key: const Key('keyBackupOpenDetails'),
+                label: tr("View or Edit Nym's Details"),
+                onPressed: () => NickEditModal.open(context),
+              ),
             ),
           ),
         ),

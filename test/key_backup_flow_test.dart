@@ -69,7 +69,7 @@ Future<String?> openWith(FakeStore store, String pin) async {
   final key = await fastDerive(pin, backupSalt(store.cloud, store.accountId));
   for (final p in store.files.values) {
     final s = decryptBackupSecret(p, key);
-    if (s != null) return s;
+    if (s != null) return s.secretHex;
   }
   return null;
 }
@@ -211,7 +211,7 @@ void main() {
       await seed(store, '2468', secret);
       final got = <String>[];
       await tester.pumpWidget(host(
-          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
 
       await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
       await settle(tester);
@@ -233,7 +233,7 @@ void main() {
       await seed(store, '2468', newSecret());
       final got = <String>[];
       await tester.pumpWidget(host(
-          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
 
       await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
       await settle(tester);
@@ -281,7 +281,7 @@ void main() {
       await seed(store, '99999999', newSecret());
       final got = <String>[];
       await tester.pumpWidget(host(
-          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
 
       await tester.tap(find.byKey(const Key('keyBackupContinue_apple')));
       await settle(tester);
@@ -308,7 +308,7 @@ void main() {
       final store = FakeStore(BackupCloud.google);
       final got = <String>[];
       await tester.pumpWidget(host(
-          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
 
       await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
       await settle(tester);
@@ -339,7 +339,7 @@ void main() {
       final store = FakeStore(BackupCloud.google)..cancel = true;
       final got = <String>[];
       await tester.pumpWidget(host(
-          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          [store], KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
       await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
       await settle(tester);
       expect(store.signIns, 1);
@@ -389,7 +389,7 @@ void main() {
       expect(store.files.containsKey('f1'), isTrue);
       final key =
           await fastDerive('5555', backupSalt(store.cloud, store.accountId));
-      expect(decryptBackupSecret(store.files['f2']!, key), secret);
+      expect(decryptBackupSecret(store.files['f2']!, key)?.secretHex, secret);
     });
 
     testWidgets('backing up with no existing copy uploads one file',

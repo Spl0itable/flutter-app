@@ -7,6 +7,7 @@ import 'package:pointycastle/export.dart'
 
 import '../../../core/crypto/keys.dart';
 import '../../../core/crypto/nip44.dart' as nip44;
+import '../pq_root.dart';
 
 const String kKeyBackupFormat = 'nym-key-backup-v1';
 const int kKeyBackupIterations = 600000;
@@ -27,6 +28,7 @@ typedef BackupKeyDeriver = Future<Uint8List> Function(
 
 final RegExp _pinPattern = RegExp(r'^[0-9]{4,8}$');
 final RegExp _secretPattern = RegExp(r'^[0-9a-f]{64}$');
+final RegExp _pqTextPattern = RegExp(r'^nympq1[02-9ac-hj-np-z]+$');
 
 bool isValidBackupPin(String pin) => _pinPattern.hasMatch(pin);
 
@@ -57,21 +59,66 @@ Future<Uint8List> deriveBackupKey(String pin, Uint8List salt) {
   return compute(_deriveInIsolate, <Object>[pin, Uint8List.fromList(salt)]);
 }
 
-String encryptBackupSecret(String secretHex, Uint8List key,
-    {Uint8List? nonce}) {
-  final normalized = secretHex.toLowerCase();
-  if (!_secretPattern.hasMatch(normalized)) {
-    throw ArgumentError('secret must be 64 hex characters');
-  }
-  return nip44.encrypt(normalized, key, nonce: nonce);
+class BackupSecret {
+  const BackupSecret({
+    required this.secretHex,
+    this.pqCode,
+    this.pqIgnored = false,
+  });
+
+  final String secretHex;
+  final String? pqCode;
+  final bool pqIgnored;
 }
 
-String? decryptBackupSecret(String payload, Uint8List key) {
+bool isValidBackupPqCode(String code) => pqRootFromCode(code) != null;
+
+String encodeBackupBundle(String secretHex, {String? pqCode}) {
+  final sk = secretHex.toLowerCase();
+  if (!_secretPattern.hasMatch(sk)) {
+    throw ArgumentError('secret must be 64 hex characters');
+  }
+  final pq = pqCode?.trim();
+  if (pq == null || pq.isEmpty) return '{"v":1,"sk":"$sk"}';
+  if (!_pqTextPattern.hasMatch(pq)) {
+    throw ArgumentError('pq must be a nympq1 code');
+  }
+  return '{"v":1,"sk":"$sk","pq":"$pq"}';
+}
+
+BackupSecret? parseBackupPlaintext(String plain) {
+  if (_secretPattern.hasMatch(plain)) return BackupSecret(secretHex: plain);
+  final Object? decoded;
   try {
-    final plain = nip44.decrypt(payload.trim(), key);
-    if (!_secretPattern.hasMatch(plain)) return null;
-    if (hexToBytes(plain).length != 32) return null;
-    return plain;
+    decoded = jsonDecode(plain);
+  } catch (_) {
+    return null;
+  }
+  if (decoded is! Map || decoded['v'] != 1) return null;
+  final sk = decoded['sk'];
+  if (sk is! String) return null;
+  final secret = sk.toLowerCase();
+  if (!_secretPattern.hasMatch(secret)) return null;
+  if (hexToBytes(secret).length != 32) return null;
+  if (!decoded.containsKey('pq') || decoded['pq'] == null) {
+    return BackupSecret(secretHex: secret);
+  }
+  final pq = decoded['pq'];
+  if (pq is String && isValidBackupPqCode(pq.trim())) {
+    return BackupSecret(secretHex: secret, pqCode: pq.trim());
+  }
+  return BackupSecret(secretHex: secret, pqIgnored: true);
+}
+
+String encryptBackupSecret(String secretHex, Uint8List key,
+    {String? pqCode, Uint8List? nonce}) {
+  return nip44.encrypt(encodeBackupBundle(secretHex, pqCode: pqCode), key,
+      nonce: nonce);
+}
+
+BackupSecret? decryptBackupSecret(String payload, Uint8List key) {
+  try {
+    return parseBackupPlaintext(nip44.decrypt(payload.trim(), key));
   } catch (_) {
     return null;
   }

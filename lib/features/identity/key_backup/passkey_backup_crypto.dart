@@ -8,6 +8,7 @@ import '../../../core/crypto/keys.dart';
 import '../../../core/crypto/nip44.dart' as nip44;
 import '../../../core/crypto/schnorr.dart';
 import '../../../models/nostr_event.dart';
+import 'key_backup_crypto.dart';
 
 const String kPasskeyBackupFormat = 'nym-passkey-backup-v1';
 const String kPasskeyPrfSaltLabel = 'nym-key-backup-v1';
@@ -28,8 +29,6 @@ final BigInt _secpN = BigInt.parse(
   'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141',
   radix: 16,
 );
-
-final RegExp _secretPattern = RegExp(r'^[0-9a-f]{64}$');
 
 Uint8List passkeyPrfSalt() => Uint8List.fromList(
     crypto.sha256.convert(utf8.encode(kPasskeyPrfSaltLabel)).bytes);
@@ -61,25 +60,20 @@ class PasskeyBackupKeys {
   final Uint8List locatorSecret;
   final String locatorPubkey;
 
-  String encrypt(String secretHex, {Uint8List? nonce}) {
-    final normalized = secretHex.toLowerCase();
-    if (!_secretPattern.hasMatch(normalized)) {
-      throw ArgumentError('secret must be 64 hex characters');
-    }
-    return nip44.encrypt(normalized, encKey, nonce: nonce);
-  }
+  String encrypt(String secretHex, {String? pqCode, Uint8List? nonce}) =>
+      nip44.encrypt(encodeBackupBundle(secretHex, pqCode: pqCode), encKey,
+          nonce: nonce);
 
-  String? decrypt(String payload) {
+  BackupSecret? decrypt(String payload) {
     try {
-      final plain = nip44.decrypt(payload.trim(), encKey);
-      return _secretPattern.hasMatch(plain) ? plain : null;
+      return parseBackupPlaintext(nip44.decrypt(payload.trim(), encKey));
     } catch (_) {
       return null;
     }
   }
 
   NostrEvent buildEvent(String secretHex,
-      {required int createdAt, Uint8List? nonce}) {
+      {required int createdAt, String? pqCode, Uint8List? nonce}) {
     return finalizeEvent(
       UnsignedEvent(
         pubkey: locatorPubkey,
@@ -88,7 +82,7 @@ class PasskeyBackupKeys {
         tags: const [
           ['d', kPasskeyBackupDTag],
         ],
-        content: encrypt(secretHex, nonce: nonce),
+        content: encrypt(secretHex, pqCode: pqCode, nonce: nonce),
       ),
       locatorSecret,
     );
@@ -100,7 +94,7 @@ class PasskeyBackupKeys {
         '#d': [kPasskeyBackupDTag],
       };
 
-  String? secretFromEvents(Iterable<NostrEvent> events) {
+  BackupSecret? secretFromEvents(Iterable<NostrEvent> events) {
     final valid = events
         .where((e) =>
             e.kind == kPasskeyBackupKind &&
@@ -119,23 +113,14 @@ class PasskeyBackupKeys {
   }
 }
 
-Uint8List encodeLargeBlob(String secretHex) {
-  final normalized = secretHex.toLowerCase();
-  if (!_secretPattern.hasMatch(normalized)) {
-    throw ArgumentError('secret must be 64 hex characters');
-  }
-  return Uint8List.fromList(utf8.encode(jsonEncode({'v': 1, 'sk': normalized})));
-}
+Uint8List encodeLargeBlob(String secretHex, {String? pqCode}) =>
+    Uint8List.fromList(
+        utf8.encode(encodeBackupBundle(secretHex, pqCode: pqCode)));
 
-String? decodeLargeBlob(Uint8List? blob) {
+BackupSecret? decodeLargeBlob(Uint8List? blob) {
   if (blob == null || blob.isEmpty) return null;
   try {
-    final decoded = jsonDecode(utf8.decode(blob));
-    if (decoded is! Map || decoded['v'] != 1) return null;
-    final sk = decoded['sk'];
-    if (sk is! String) return null;
-    final normalized = sk.toLowerCase();
-    return _secretPattern.hasMatch(normalized) ? normalized : null;
+    return parseBackupPlaintext(utf8.decode(blob));
   } catch (_) {
     return null;
   }

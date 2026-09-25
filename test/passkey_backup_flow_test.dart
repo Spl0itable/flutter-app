@@ -73,7 +73,9 @@ void main() {
 
   String? backedUpSecret() {
     if (relays.published.isEmpty) return null;
-    return PasskeyBackupKeys.fromPrf(prf).decrypt(relays.published.last.content);
+    return PasskeyBackupKeys.fromPrf(prf)
+        .decrypt(relays.published.last.content)
+        ?.secretHex;
   }
 
   Future<void> seedBackup(String secret) => service.backUp(
@@ -126,7 +128,7 @@ void main() {
       platform.calls.clear();
       final got = <String>[];
       await tester.pumpWidget(host(
-          KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkey')));
       await settle(tester);
@@ -140,7 +142,7 @@ void main() {
       platform.getError = PasskeyBackupError.canceled;
       final got = <String>[];
       await tester.pumpWidget(host(
-          KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkey')));
       await settle(tester);
@@ -165,7 +167,7 @@ void main() {
       platform.hasCredential = true;
       final got = <String>[];
       await tester.pumpWidget(host(
-          KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkey')));
       await settle(tester);
@@ -184,7 +186,7 @@ void main() {
       platform.getError = PasskeyBackupError.rp;
       final got = <String>[];
       await tester.pumpWidget(host(
-          KeyBackupSignInButtons(onSecret: (s) async => got.add(s))));
+          KeyBackupSignInButtons(onSecret: (s) async => got.add(s.secretHex))));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkey')));
       await settle(tester);
@@ -199,7 +201,7 @@ void main() {
       tall(tester);
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -216,22 +218,22 @@ void main() {
         ..largeBlob = true;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
       expect(got, hasLength(1));
-      expect(decodeLargeBlob(platform.storedBlob), got.single);
+      expect(decodeLargeBlob(platform.storedBlob)?.secretHex, got.single);
       expect(relays.published, isEmpty);
     });
 
-    testWidgets('a failed backup still signs in and points to Settings',
+    testWidgets('a failed backup still signs in and points to the Nym details',
         (tester) async {
       tall(tester);
       relays.accept = false;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -248,7 +250,7 @@ void main() {
       platform.createError = PasskeyBackupError.canceled;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);

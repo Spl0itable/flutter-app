@@ -22,6 +22,7 @@ import '../../widgets/common/nym_avatar.dart';
 import '../../widgets/nym_icons.dart';
 import '../i18n/i18n.dart';
 import 'dev_nsec_modal.dart';
+import 'key_backup/key_backup_actions.dart';
 import 'modal_chrome.dart';
 import 'nym_identicon.dart';
 
@@ -656,12 +657,14 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 size: 18,
                 color: c.secondary,
               ),
-              Text(
-                tr("Reveal this nym's private key and recovery code"),
-                style: TextStyle(
-                    color: c.secondary,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600),
+              Flexible(
+                child: Text(
+                  tr("Reveal this nym's private key and recovery code"),
+                  style: TextStyle(
+                      color: c.secondary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
+                ),
               ),
             ],
           ),
@@ -701,6 +704,10 @@ class _NickEditModalState extends ConsumerState<NickEditModal> {
                 _nsecRow(c),
                 const SizedBox(height: 16),
                 _pqRootRow(c),
+                if (canShowKeyBackup(ref)) ...[
+                  const SizedBox(height: 16),
+                  const KeyBackupActions(),
+                ],
               ],
             ),
           ),

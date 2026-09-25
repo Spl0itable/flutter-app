@@ -11,13 +11,20 @@ class BackupCandidate {
     required this.secretHex,
     required this.pubkeyHex,
     required this.entries,
+    this.pqCode,
+    this.pqIgnored = false,
   });
 
   final String secretHex;
+  final String? pqCode;
+  final bool pqIgnored;
   final String pubkeyHex;
   final List<BackupEntry> entries;
 
   String get npub => bech32.encodeNpub(pubkeyHex);
+
+  BackupSecret get backup =>
+      BackupSecret(secretHex: secretHex, pqCode: pqCode, pqIgnored: pqIgnored);
 }
 
 String shortNpub(String npub) {
@@ -68,8 +75,9 @@ class KeyBackupSession {
       } catch (_) {
         continue;
       }
-      final secret = decryptBackupSecret(payload, key);
-      if (secret == null) continue;
+      final bundle = decryptBackupSecret(payload, key);
+      if (bundle == null) continue;
+      final secret = bundle.secretHex;
       final sk = hexToBytes(secret);
       final String pubkey;
       try {
@@ -82,11 +90,23 @@ class KeyBackupSession {
       final existing = byPubkey[pubkey];
       if (existing != null) {
         existing.entries.add(entry);
+        if (existing.pqCode == null &&
+            (bundle.pqCode != null || bundle.pqIgnored)) {
+          byPubkey[pubkey] = BackupCandidate(
+            secretHex: secret,
+            pubkeyHex: pubkey,
+            entries: existing.entries,
+            pqCode: bundle.pqCode,
+            pqIgnored: bundle.pqCode == null,
+          );
+        }
       } else {
         byPubkey[pubkey] = BackupCandidate(
           secretHex: secret,
           pubkeyHex: pubkey,
           entries: [entry],
+          pqCode: bundle.pqCode,
+          pqIgnored: bundle.pqIgnored,
         );
       }
     }
@@ -102,8 +122,9 @@ class KeyBackupSession {
     ];
   }
 
-  Future<void> upload(Uint8List key, String secretHex) async {
-    final payload = encryptBackupSecret(secretHex, key, nonce: _nonce?.call());
+  Future<void> upload(Uint8List key, String secretHex, {String? pqCode}) async {
+    final payload = encryptBackupSecret(secretHex, key,
+        pqCode: pqCode, nonce: _nonce?.call());
     await store.write(payload);
   }
 

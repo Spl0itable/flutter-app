@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nym_bar/core/crypto/keys.dart';
+import 'package:nym_bar/core/crypto/nip44.dart' as nip44;
+import 'package:nym_bar/features/identity/pq_root.dart';
 import 'package:nym_bar/core/crypto/schnorr.dart';
 import 'package:nym_bar/features/identity/key_backup/key_backup_config.dart';
 import 'package:nym_bar/features/identity/key_backup/passkey_backup_crypto.dart';
@@ -38,12 +40,12 @@ void main() {
       expect(keys.locatorPubkey, v['locatorPubkeyHex']);
     });
 
-    test('payload with the fixed nonce and back', () {
+    test('legacy payload with the fixed nonce and back', () {
       final keys = PasskeyBackupKeys.fromPrf(prf);
-      final payload =
-          keys.encrypt(secret, nonce: hexToBytes(v['nonceHex'] as String));
+      final payload = nip44.encrypt(secret, keys.encKey,
+          nonce: hexToBytes(v['nonceHex'] as String));
       expect(payload, v['payload']);
-      expect(keys.decrypt(v['payload'] as String), secret);
+      expect(keys.decrypt(v['payload'] as String)?.secretHex, secret);
     });
 
     test('wipe zeroes the derived keys', () {
@@ -64,7 +66,7 @@ void main() {
         ['d', 'nym-key-backup'],
       ]);
       expect(verifyEvent(e), isTrue);
-      expect(keys.decrypt(e.content), secret);
+      expect(keys.decrypt(e.content)?.secretHex, secret);
       expect(e.content, isNot(contains(secret)));
       expect(keys.filter, {
         'kinds': [30078],
@@ -94,7 +96,8 @@ void main() {
         ),
         generatePrivateKey(),
       );
-      expect(keys.secretFromEvents([older, forged, newer, stranger]), secret);
+      expect(keys.secretFromEvents([older, forged, newer, stranger])?.secretHex,
+          secret);
       expect(keys.secretFromEvents([]), isNull);
     });
   });
@@ -103,7 +106,7 @@ void main() {
     test('encodes the JSON the other apps write', () {
       expect(utf8.decode(encodeLargeBlob(secret)),
           '{"v":1,"sk":"$secret"}');
-      expect(decodeLargeBlob(encodeLargeBlob(secret)), secret);
+      expect(decodeLargeBlob(encodeLargeBlob(secret))?.secretHex, secret);
     });
 
     test('rejects anything else', () {
@@ -112,6 +115,71 @@ void main() {
       expect(decodeLargeBlob(utf8.encode('{"v":2,"sk":"$secret"}')), isNull);
       expect(decodeLargeBlob(utf8.encode('{"v":1,"sk":"abc"}')), isNull);
       expect(decodeLargeBlob(utf8.encode('nope')), isNull);
+    });
+  });
+
+  group('bundle', () {
+    final bundle = v['bundle'] as Map<String, dynamic>;
+    final plaintext = bundle['plaintext'] as String;
+    final vectorPq = (jsonDecode(plaintext) as Map)['pq'] as String;
+    final realPq = pqRootToCode(randomBytes(32));
+
+    test('payload with the fixed nonce and back', () {
+      final keys = PasskeyBackupKeys.fromPrf(prf);
+      final payload = keys.encrypt(secret,
+          pqCode: vectorPq, nonce: hexToBytes(bundle['nonceHex'] as String));
+      expect(payload, bundle['payload']);
+      expect(nip44.decrypt(payload, keys.encKey), plaintext);
+      final back = keys.decrypt(bundle['payload'] as String)!;
+      expect(back.secretHex, secret);
+      expect(back.pqIgnored, isTrue);
+    });
+
+    test('the legacy payload still restores', () {
+      final back =
+          PasskeyBackupKeys.fromPrf(prf).decrypt(v['payload'] as String)!;
+      expect(back.secretHex, secret);
+      expect(back.pqCode, isNull);
+      expect(back.pqIgnored, isFalse);
+    });
+
+    test('largeBlob holds the same bundle', () {
+      final blob = encodeLargeBlob(secret, pqCode: vectorPq);
+      expect(utf8.decode(blob), bundle['largeBlob']);
+      expect(decodeLargeBlob(blob)!.secretHex, secret);
+      final real = decodeLargeBlob(encodeLargeBlob(secret, pqCode: realPq))!;
+      expect(real.pqCode, realPq);
+    });
+
+    test('the event carries the code for restore', () {
+      final keys = PasskeyBackupKeys.fromPrf(prf);
+      final e = keys.buildEvent(secret, createdAt: 1700000000, pqCode: realPq);
+      expect(keys.secretFromEvents([e])?.pqCode, realPq);
+    });
+
+    test('backUp with a code publishes the bundle and restore returns it',
+        () async {
+      final platform = FakePasskeyPlatform(prf: prf);
+      final service = fakePasskeyService(platform, FakeRelays());
+      await service.backUp(
+          secretHex: secret,
+          pubkeyHex: getPublicKeyHex(hexToBytes(secret)),
+          pqCode: realPq);
+      final back = await service.restore();
+      expect(back.secretHex, secret);
+      expect(back.pqCode, realPq);
+    });
+
+    test('backUp through largeBlob writes the bundle', () async {
+      final platform = FakePasskeyPlatform()
+        ..prfEnabled = false
+        ..largeBlob = true;
+      final service = fakePasskeyService(platform, FakeRelays());
+      await service.backUp(
+          secretHex: secret,
+          pubkeyHex: getPublicKeyHex(hexToBytes(secret)),
+          pqCode: vectorPq);
+      expect(utf8.decode(platform.storedBlob!), bundle['largeBlob']);
     });
   });
 
@@ -217,7 +285,7 @@ void main() {
       expect(relays.publishedTo, ['wss://a', 'wss://b']);
       final e = relays.published.single;
       expect(e.pubkey, v['locatorPubkeyHex']);
-      expect(PasskeyBackupKeys.fromPrf(prf).decrypt(e.content), secret);
+      expect(PasskeyBackupKeys.fromPrf(prf).decrypt(e.content)?.secretHex, secret);
       expect(platform.lastCreate!['rpId'], 'web.nymchat.app');
       expect(platform.lastCreate!['userName'] as String,
           startsWith('Nymchat key backup · npub1'));
@@ -243,7 +311,7 @@ void main() {
       await service.backUp(
           secretHex: secret, pubkeyHex: getPublicKeyHex(hexToBytes(secret)));
       expect(platform.calls, ['create', 'get']);
-      expect(decodeLargeBlob(platform.storedBlob), secret);
+      expect(decodeLargeBlob(platform.storedBlob)?.secretHex, secret);
       expect(relays.published, isEmpty);
     });
 
@@ -287,7 +355,7 @@ void main() {
       await service.backUp(
           secretHex: secret, pubkeyHex: getPublicKeyHex(hexToBytes(secret)));
       platform.calls.clear();
-      expect(await service.restore(), secret);
+      expect((await service.restore()).secretHex, secret);
       expect(platform.calls, ['get']);
       expect(platform.lastGet!['allowCredentials'], isEmpty);
       expect(platform.lastGet!['largeBlobRead'], isTrue);
@@ -302,7 +370,7 @@ void main() {
         ..largeBlob = true;
       await service.backUp(
           secretHex: secret, pubkeyHex: getPublicKeyHex(hexToBytes(secret)));
-      expect(await service.restore(), secret);
+      expect((await service.restore()).secretHex, secret);
     });
 
     test('restore with nothing linked says not found', () async {
