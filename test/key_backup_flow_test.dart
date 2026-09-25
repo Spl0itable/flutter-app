@@ -16,6 +16,7 @@ import 'package:nym_bar/features/identity/key_backup/key_backup_service.dart';
 import 'package:nym_bar/features/identity/key_backup/key_backup_store.dart';
 import 'package:nym_bar/features/identity/key_backup/key_backup_ui.dart';
 import 'package:nym_bar/features/identity/setup_modal.dart';
+import 'package:nym_bar/widgets/common/brand_buttons.dart';
 import 'package:nym_bar/services/storage/key_value_store.dart';
 import 'package:nym_bar/state/settings_provider.dart';
 
@@ -158,15 +159,13 @@ void main() {
       expect(
           defaultKeyBackupStores(config: cfg, platform: TargetPlatform.iOS)
               .map((s) => s.cloud),
-          [BackupCloud.google, BackupCloud.apple]);
+          [BackupCloud.apple, BackupCloud.google]);
     });
 
     test('the backup copy is in the sweep catalog', () {
       for (final s in const [
         'Continue with Google',
         'Continue with Apple',
-        'Back up to Google',
-        'Back up to Apple',
         'Remove Google backups',
         'Remove Apple backups',
         'Cloud Key Backup',
@@ -197,8 +196,8 @@ void main() {
         (tester) async {
       await tester.pumpWidget(
           host(const [], KeyBackupSignInButtons(onSecret: (_) async {})));
-      expect(find.text('CONTINUE WITH GOOGLE'), findsNothing);
-      expect(find.text('CONTINUE WITH APPLE'), findsNothing);
+      expect(find.text('Continue with Google'), findsNothing);
+      expect(find.text('Continue with Apple'), findsNothing);
     });
 
     testWidgets('show one button per configured provider', (tester) async {
@@ -206,8 +205,8 @@ void main() {
         [FakeStore(BackupCloud.google), FakeStore(BackupCloud.apple)],
         KeyBackupSignInButtons(onSecret: (_) async {}),
       ));
-      expect(find.text('CONTINUE WITH GOOGLE'), findsOneWidget);
-      expect(find.text('CONTINUE WITH APPLE'), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
+      expect(find.text('Continue with Apple'), findsOneWidget);
     });
 
     testWidgets('restores the backed-up key with the right PIN',
@@ -491,10 +490,25 @@ void main() {
       tall(tester);
       await tester.pumpWidget(modalHost([FakeStore(BackupCloud.google)]));
       await tester.pump();
-      expect(find.text('CONTINUE WITH GOOGLE'), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
       await tester.tap(find.text('Login'));
       await tester.pump();
-      expect(find.text('CONTINUE WITH GOOGLE'), findsOneWidget);
+      expect(find.text('Continue with Google'), findsOneWidget);
+    });
+
+    testWidgets('puts Apple before Google, well apart from Enter',
+        (tester) async {
+      tall(tester);
+      await tester.pumpWidget(modalHost(
+          [FakeStore(BackupCloud.apple), FakeStore(BackupCloud.google)]));
+      await tester.pump();
+      final enter = tester.getRect(find.byKey(const Key('setupEnterBtn')));
+      final apple =
+          tester.getRect(find.byKey(const Key('keyBackupContinue_apple')));
+      final google =
+          tester.getRect(find.byKey(const Key('keyBackupContinue_google')));
+      expect(apple.top - enter.bottom, greaterThanOrEqualTo(brandGroupGap));
+      expect(apple.bottom, lessThan(google.top));
     });
 
     testWidgets('hides the buttons when nothing is configured',
@@ -502,8 +516,8 @@ void main() {
       tall(tester);
       await tester.pumpWidget(modalHost(const []));
       await tester.pump();
-      expect(find.text('CONTINUE WITH GOOGLE'), findsNothing);
-      expect(find.text('CONTINUE WITH APPLE'), findsNothing);
+      expect(find.text('Continue with Google'), findsNothing);
+      expect(find.text('Continue with Apple'), findsNothing);
     });
   });
 }

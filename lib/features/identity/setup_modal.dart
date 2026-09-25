@@ -18,6 +18,7 @@ import '../../services/platform/deep_links.dart';
 import '../../state/nostr_controller.dart';
 import '../../state/settings_provider.dart';
 import '../../widgets/common/app_dialog.dart';
+import '../../widgets/common/brand_buttons.dart';
 import '../i18n/i18n.dart';
 import 'dev_nsec_modal.dart';
 import 'key_backup/key_backup_crypto.dart';
@@ -580,10 +581,11 @@ class _SetupModalState extends ConsumerState<SetupModal> {
         ),
       ),
       if (_hasKeyBackup) ...[
+        const SizedBox(height: brandGroupGap - 16),
         ModalChrome.orDivider(c),
         KeyBackupSignInButtons(
           onSecret: _loginWithBackupSecret,
-          showPasskeyCreate: true,
+          signUp: true,
         ),
       ],
       const SizedBox(height: 20),
@@ -605,6 +607,7 @@ class _SetupModalState extends ConsumerState<SetupModal> {
       if (_hasKeyBackup) ...[
         KeyBackupSignInButtons(onSecret: _loginWithBackupSecret),
         ModalChrome.orDivider(c),
+        const SizedBox(height: brandGroupGap - 16),
       ],
       // `.send-btn` "Login with Remote Signer" + hint.
       ModalChrome.sendButton(
