@@ -270,6 +270,8 @@ void main() {
           app(SetupModal(onComplete: () {}), const [], passkey: service));
       await tester.pump();
       await tester.pump();
+      await tester.tap(find.text('Login'));
+      await tester.pump();
 
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkey')));
       await settle(tester);

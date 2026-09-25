@@ -8,6 +8,7 @@ import '../../../core/crypto/keys.dart';
 import '../../../core/theme/nym_colors.dart';
 import '../../../core/theme/nym_metrics.dart';
 import '../../../widgets/common/app_dialog.dart';
+import '../../../widgets/common/brand_buttons.dart';
 import '../../../widgets/common/keyboard_inset_dialog.dart';
 import '../../i18n/i18n.dart';
 import '../modal_chrome.dart';
@@ -36,16 +37,6 @@ Future<void> _completeSignIn(
   }
   await signIn(restored);
 }
-
-String keyBackupContinueLabel(BackupCloud cloud) => switch (cloud) {
-      BackupCloud.google => tr('Continue with Google'),
-      BackupCloud.apple => tr('Continue with Apple'),
-    };
-
-String keyBackupBackUpLabel(BackupCloud cloud) => switch (cloud) {
-      BackupCloud.google => tr('Back up to Google'),
-      BackupCloud.apple => tr('Back up to Apple'),
-    };
 
 String keyBackupRemoveLabel(BackupCloud cloud) => switch (cloud) {
       BackupCloud.google => tr('Remove Google backups'),
@@ -786,11 +777,11 @@ class KeyBackupSignInButtons extends ConsumerStatefulWidget {
   const KeyBackupSignInButtons({
     super.key,
     required this.onSecret,
-    this.showPasskeyCreate = false,
+    this.signUp = false,
   });
 
   final BackupSignIn onSecret;
-  final bool showPasskeyCreate;
+  final bool signUp;
 
   @override
   ConsumerState<KeyBackupSignInButtons> createState() =>
@@ -816,29 +807,47 @@ class _KeyBackupSignInButtonsState
     }
   }
 
-  Widget _button(NymColors c, String id, String label,
-      Future<void> Function() flow) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: KeyedSubtree(
-        key: Key('keyBackupContinue_$id'),
-        child: ModalChrome.sendButton(
-          c,
-          label,
-          _busy == null ? () => _run(id, flow) : null,
-          fullWidth: true,
-          child: _busy == id
-              ? SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: c.primary),
-                )
-              : null,
+  VoidCallback? _tap(String id, Future<void> Function() flow) =>
+      _busy == null ? () => _run(id, flow) : null;
+
+  Widget _cloudButton(KeyBackupStore store) {
+    final id = store.cloud.name;
+    final onPressed = _tap(
+        id, () => runKeyBackupSignIn(context, ref, store, widget.onSecret));
+    return KeyedSubtree(
+      key: Key('keyBackupContinue_$id'),
+      child: switch (store.cloud) {
+        BackupCloud.apple =>
+          AppleButton(onPressed: onPressed, busy: _busy == id),
+        BackupCloud.google =>
+          GoogleButton(onPressed: onPressed, busy: _busy == id),
+      },
+    );
+  }
+
+  Widget _passkeyButton(PasskeyBackupService passkey) {
+    final id = widget.signUp ? 'passkeyCreate' : 'passkey';
+    return KeyedSubtree(
+      key: Key('keyBackupContinue_$id'),
+      child: PasskeyButton(
+        label: widget.signUp
+            ? tr('Sign up with a passkey')
+            : tr('Continue with a passkey'),
+        busy: _busy == id,
+        onPressed: _tap(
+          id,
+          widget.signUp
+              ? () => runPasskeyCreateNewKey(context, passkey, widget.onSecret)
+              : () => runPasskeySignIn(context, passkey, widget.onSecret),
         ),
       ),
     );
   }
+
+  Widget _hint(NymColors c, String text) => Padding(
+        padding: const EdgeInsets.only(top: 6),
+        child: Text(text, style: TextStyle(color: c.textDim, fontSize: 11)),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -852,40 +861,32 @@ class _KeyBackupSignInButtonsState
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (final store in stores)
-          _button(
+        for (final store in stores) ...[
+          if (store != stores.first) const SizedBox(height: 8),
+          _cloudButton(store),
+        ],
+        if (stores.isNotEmpty)
+          _hint(
             c,
-            store.cloud.name,
-            keyBackupContinueLabel(store.cloud),
-            () => runKeyBackupSignIn(context, ref, store, widget.onSecret),
+            stores.length == 1
+                ? tr('Your key stays yours. {provider} only keeps an '
+                    "encrypted copy that it can't read without your PIN.",
+                    {'provider': stores.first.cloud.label})
+                : tr('Your key stays yours. Google and Apple only keep an '
+                    "encrypted copy that they can't read without your PIN."),
           ),
         if (passkey != null) ...[
-          _button(
+          if (stores.isNotEmpty) const SizedBox(height: brandPasskeyGap),
+          _passkeyButton(passkey),
+          _hint(
             c,
-            'passkey',
-            tr('Continue with a passkey'),
-            () => runPasskeySignIn(context, passkey, widget.onSecret),
+            widget.signUp
+                ? tr('Your new key is backed up with a passkey. The backup is '
+                    'encrypted, and only your passkey can unlock it.')
+                : tr('Your key stays yours. The backup is encrypted, and only '
+                    'your passkey can unlock it.'),
           ),
-          if (widget.showPasskeyCreate)
-            _button(
-              c,
-              'passkeyCreate',
-              tr('Create a new key and back it up with a passkey'),
-              () => runPasskeyCreateNewKey(context, passkey, widget.onSecret),
-            ),
         ],
-        Text(
-          stores.isEmpty
-              ? tr('Your key stays yours. The backup is encrypted, and only '
-                  'your passkey can unlock it.')
-              : stores.length == 1
-                  ? tr('Your key stays yours. {provider} only keeps an '
-                      "encrypted copy that it can't read without your PIN.",
-                      {'provider': stores.first.cloud.label})
-                  : tr('Your key stays yours. Google and Apple only keep an '
-                      "encrypted copy that they can't read without your PIN."),
-          style: TextStyle(color: c.textDim, fontSize: 11),
-        ),
       ],
     );
   }

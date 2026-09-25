@@ -6517,8 +6517,7 @@ class NostrController {
     if (view.kind == ViewKind.pm) {
       // Bot `?` control commands are handled entirely on-device and intercepted
       // BEFORE any echo/encrypt/publish (pms.js:1581-1591): they are never
-      // encrypted, published, shown as bubbles, or stored — `?git` can carry a
-      // GitHub access token that must never reach the relays.
+      // encrypted, published, shown as bubbles, or stored.
       if (isVerifiedBot(view.id)) {
         if (botPMCommandRe.hasMatch(canonicalizeCommandInput(trimmed))) {
           unawaited(_ref

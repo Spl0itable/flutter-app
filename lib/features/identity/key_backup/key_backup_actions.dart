@@ -5,8 +5,10 @@ import '../../../core/crypto/keys.dart';
 import '../../../core/theme/nym_colors.dart';
 import '../../../state/nostr_controller.dart';
 import '../../../state/settings_provider.dart';
+import '../../../widgets/common/brand_buttons.dart';
 import '../../i18n/i18n.dart';
 import '../../settings/settings_widgets.dart';
+import 'key_backup_crypto.dart';
 import 'key_backup_store.dart';
 import 'key_backup_ui.dart';
 import 'passkey_backup_service.dart';
@@ -97,32 +99,44 @@ class KeyBackupActions extends ConsumerWidget {
               'this device has it.')}',
           style: TextStyle(color: c.textDim, fontSize: 11),
         ),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final store in stores)
-              NymOutlineButton(
-                key: Key('keyBackupBackUp_${store.cloud.name}'),
-                label: keyBackupBackUpLabel(store.cloud),
-                onPressed: () => _backUp(context, ref, store),
-              ),
-            if (passkey != null)
-              NymOutlineButton(
-                key: const Key('keyBackupBackUp_passkey'),
-                label: tr('Back up with a passkey'),
-                onPressed: () => _backUpWithPasskey(context, ref, passkey),
-              ),
-            for (final store in stores)
-              NymOutlineButton(
-                key: Key('keyBackupRemove_${store.cloud.name}'),
-                label: keyBackupRemoveLabel(store.cloud),
-                danger: true,
-                onPressed: () => _remove(context, ref, store),
-              ),
-          ],
-        ),
+        for (final store in stores) ...[
+          const SizedBox(height: 8),
+          KeyedSubtree(
+            key: Key('keyBackupBackUp_${store.cloud.name}'),
+            child: switch (store.cloud) {
+              BackupCloud.apple =>
+                AppleButton(onPressed: () => _backUp(context, ref, store)),
+              BackupCloud.google =>
+                GoogleButton(onPressed: () => _backUp(context, ref, store)),
+            },
+          ),
+        ],
+        if (stores.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final store in stores)
+                NymOutlineButton(
+                  key: Key('keyBackupRemove_${store.cloud.name}'),
+                  label: keyBackupRemoveLabel(store.cloud),
+                  danger: true,
+                  onPressed: () => _remove(context, ref, store),
+                ),
+            ],
+          ),
+        ],
+        if (passkey != null) ...[
+          SizedBox(height: stores.isEmpty ? 8 : brandPasskeyGap),
+          KeyedSubtree(
+            key: const Key('keyBackupBackUp_passkey'),
+            child: PasskeyButton(
+              label: tr('Back up with a passkey'),
+              onPressed: () => _backUpWithPasskey(context, ref, passkey),
+            ),
+          ),
+        ],
       ],
     );
   }

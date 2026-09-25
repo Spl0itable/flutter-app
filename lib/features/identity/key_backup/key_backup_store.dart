@@ -229,8 +229,8 @@ List<KeyBackupStore> defaultKeyBackupStores({
 }) {
   final p = platform ?? defaultTargetPlatform;
   return [
-    if (config.googleEnabledOn(p)) GoogleKeyBackupStore(config),
     if (config.appleEnabledOn(p)) AppleKeyBackupStore(config),
+    if (config.googleEnabledOn(p)) GoogleKeyBackupStore(config),
   ];
 }
 

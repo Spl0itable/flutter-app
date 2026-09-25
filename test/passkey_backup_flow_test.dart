@@ -82,32 +82,36 @@ void main() {
       secretHex: secret, pubkeyHex: getPublicKeyHex(hexToBytes(secret)));
 
   group('buttons', () {
-    testWidgets('show Continue with a passkey when passkeys are available',
-        (tester) async {
+    testWidgets('login offers only Continue with a passkey', (tester) async {
       await tester.pumpWidget(
           host(KeyBackupSignInButtons(onSecret: (_) async {})));
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsOneWidget);
-      expect(find.text('CREATE A NEW KEY AND BACK IT UP WITH A PASSKEY'),
+      expect(find.text('Continue with a passkey'), findsOneWidget);
+      expect(find.text('Sign up with a passkey'), findsNothing);
+      expect(find.byKey(const Key('keyBackupContinue_passkeyCreate')),
           findsNothing);
     });
 
-    testWidgets('the sign-up variant also offers creating a new key',
-        (tester) async {
-      await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (_) async {}, showPasskeyCreate: true)));
+    testWidgets('sign-up offers only Sign up with a passkey', (tester) async {
+      await tester.pumpWidget(host(
+          KeyBackupSignInButtons(onSecret: (_) async {}, signUp: true)));
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsOneWidget);
-      expect(find.text('CREATE A NEW KEY AND BACK IT UP WITH A PASSKEY'),
+      expect(find.text('Sign up with a passkey'), findsOneWidget);
+      expect(find.text('Continue with a passkey'), findsNothing);
+      expect(
+          find.text('Your new key is backed up with a passkey. The backup is '
+              'encrypted, and only your passkey can unlock it.'),
           findsOneWidget);
+      expect(find.byKey(const Key('keyBackupContinue_passkey')), findsNothing);
     });
 
     testWidgets('hidden when passkeys are unavailable', (tester) async {
       await tester.pumpWidget(host(
-          KeyBackupSignInButtons(onSecret: (_) async {}, showPasskeyCreate: true),
+          KeyBackupSignInButtons(onSecret: (_) async {}, signUp: true),
           available: false));
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsNothing);
+      expect(find.text('Continue with a passkey'), findsNothing);
+      expect(find.text('Sign up with a passkey'), findsNothing);
     });
 
     testWidgets('hidden when the platform reports no passkey support',
@@ -116,7 +120,8 @@ void main() {
       await tester.pumpWidget(
           host(KeyBackupSignInButtons(onSecret: (_) async {})));
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsNothing);
+      expect(find.text('Continue with a passkey'), findsNothing);
+      expect(find.text('Sign up with a passkey'), findsNothing);
     });
   });
 
@@ -201,7 +206,7 @@ void main() {
       tall(tester);
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), signUp: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -218,7 +223,7 @@ void main() {
         ..largeBlob = true;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), signUp: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -233,7 +238,7 @@ void main() {
       relays.accept = false;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), signUp: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -250,7 +255,7 @@ void main() {
       platform.createError = PasskeyBackupError.canceled;
       final got = <String>[];
       await tester.pumpWidget(host(KeyBackupSignInButtons(
-          onSecret: (s) async => got.add(s.secretHex), showPasskeyCreate: true)));
+          onSecret: (s) async => got.add(s.secretHex), signUp: true)));
       await tester.pump();
       await tester.tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
       await settle(tester);
@@ -312,27 +317,31 @@ void main() {
       );
     }
 
-    testWidgets('sign-up shows both passkey options, login only restore',
+    testWidgets('sign-up shows only Sign up, login only Continue',
         (tester) async {
       tall(tester);
       await tester.pumpWidget(modal());
       await tester.pump();
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsOneWidget);
-      expect(find.text('CREATE A NEW KEY AND BACK IT UP WITH A PASSKEY'),
-          findsOneWidget);
+      expect(find.text('Sign up with a passkey'), findsOneWidget);
+      expect(find.text('Continue with a passkey'), findsNothing);
       await tester.tap(find.text('Login'));
       await tester.pump();
-      expect(find.text('CONTINUE WITH A PASSKEY'), findsOneWidget);
-      expect(find.text('CREATE A NEW KEY AND BACK IT UP WITH A PASSKEY'),
-          findsNothing);
+      expect(find.text('Continue with a passkey'), findsOneWidget);
+      expect(find.text('Sign up with a passkey'), findsNothing);
+      await tester.tap(find.text('Sign up'));
+      await tester.pump();
+      expect(find.text('Sign up with a passkey'), findsOneWidget);
+      expect(find.text('Continue with a passkey'), findsNothing);
     });
   });
 
   test('the passkey copy is in the sweep catalog', () {
     for (final s in const [
       'Continue with a passkey',
-      'Create a new key and back it up with a passkey',
+      'Sign up with a passkey',
+      'Your new key is backed up with a passkey. The backup is encrypted, '
+          'and only your passkey can unlock it.',
       'Back up with a passkey',
       'No key backup is linked to this passkey.',
       'Create new key',
