@@ -401,7 +401,8 @@ class _SetupModalState extends ConsumerState<SetupModal> {
     });
     final ctrl = ref.read(nostrControllerProvider);
     try {
-      await ctrl.loginWithNsec(restored.secretHex);
+      await ctrl.loginWithNsec(restored.secretHex,
+          pqRootCode: restored.pqCode, newKey: restored.created);
     } catch (_) {
       if (!mounted) return;
       setState(() => _loggingIn = false);
@@ -409,7 +410,7 @@ class _SetupModalState extends ConsumerState<SetupModal> {
           context, tr('Invalid nsec key. Please check and try again.'));
       return;
     }
-    if (restored.pqCode != null) {
+    if (restored.pqCode != null && !restored.created) {
       unawaited(restoreBackupPqCode(ctrl, restored));
     }
     if (!mounted) return;

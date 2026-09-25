@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -60,10 +61,18 @@ class FakeController extends NostrController {
     return true;
   }
 
+  final List<({String? pqRootCode, bool newKey})> loginArgs = [];
+
   @override
-  Future<void> loginWithNsec(String nsec) async {
+  Future<void> loginWithNsec(String nsec,
+      {String? pqRootCode, bool newKey = false}) async {
     logins.add(nsec);
-    linkNeeded = true;
+    loginArgs.add((pqRootCode: pqRootCode, newKey: newKey));
+    if (newKey && pqRootCode != null) {
+      code = pqRootCode;
+    } else {
+      linkNeeded = true;
+    }
   }
 
   @override
@@ -168,6 +177,18 @@ void main() {
     });
   }
 
+  void signedIn(String secret, {String? loginMethod = 'nsec', String? code}) {
+    final sk = hexToBytes(secret);
+    ctrl
+      ..fakeIdentity = Identity(
+        pubkey: getPublicKeyHex(sk),
+        privkey: loginMethod == 'nip46' ? null : sk,
+        nym: 'tester#abcd',
+        loginMethod: loginMethod,
+      )
+      ..code = code;
+  }
+
   group('restoring through the setup modal', () {
     Future<void> continueWithGoogle(WidgetTester tester, String pin) async {
       await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
@@ -191,6 +212,7 @@ void main() {
       await continueWithGoogle(tester, '2468');
 
       expect(ctrl.logins, [secret]);
+      expect(ctrl.loginArgs.single, (pqRootCode: code, newKey: false));
       expect(ctrl.links, [code]);
       expect(ctrl.code, code);
       expect(ctrl.notices, isEmpty);
@@ -313,18 +335,6 @@ void main() {
       await settle(tester);
     }
 
-    void signedIn(String secret, {String? loginMethod = 'nsec', String? code}) {
-      final sk = hexToBytes(secret);
-      ctrl
-        ..fakeIdentity = Identity(
-          pubkey: getPublicKeyHex(sk),
-          privkey: loginMethod == 'nip46' ? null : sk,
-          nym: 'tester#abcd',
-          loginMethod: loginMethod,
-        )
-        ..code = code;
-    }
-
     testWidgets('holds the backup buttons beside the nsec and recovery code',
         (tester) async {
       tall(tester);
@@ -437,6 +447,172 @@ void main() {
       await openReveal(tester);
       expect(find.byKey(const Key('keyBackupActions')), findsNothing);
       expect(find.byKey(const Key('keyBackupBackUp_google')), findsNothing);
+    });
+  });
+
+  group('a brand-new key gets its recovery code at once', () {
+    testWidgets('Continue with Google on a new account backs up both',
+        (tester) async {
+      tall(tester);
+      final store = FakeStore(BackupCloud.google);
+      await tester.pumpWidget(app(SetupModal(onComplete: () {}), [store]));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('keyBackupContinue_google')));
+      await settle(tester);
+      await tester.enterText(find.byKey(const Key('keyBackupPin')), '2468');
+      await tester.enterText(
+          find.byKey(const Key('keyBackupPinConfirm')), '2468');
+      await tester.tap(find.text('CREATE AND BACK UP'));
+      await settle(tester);
+
+      final backup = (await openBackup(store, '2468'))!;
+      expect(backup.pqCode, isNotNull);
+      expect(pqRootFromCode(backup.pqCode!), isNotNull);
+      expect(ctrl.logins, [backup.secretHex]);
+      expect(ctrl.loginArgs.single, (pqRootCode: backup.pqCode, newKey: true));
+      expect(ctrl.code, backup.pqCode);
+      expect(ctrl.links, isEmpty);
+    });
+
+    testWidgets('creating a key with a passkey backs up both', (tester) async {
+      tall(tester);
+      final prf = Uint8List.fromList(List.filled(32, 0xa1));
+      final relays = FakeRelays();
+      final service = fakePasskeyService(FakePasskeyPlatform(prf: prf), relays);
+      await tester.pumpWidget(
+          app(SetupModal(onComplete: () {}), const [], passkey: service));
+      await tester.pump();
+      await tester.pump();
+      await tester
+          .tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
+      await settle(tester);
+
+      final backup = PasskeyBackupKeys.fromPrf(prf)
+          .decrypt(relays.published.single.content)!;
+      expect(pqRootFromCode(backup.pqCode!), isNotNull);
+      expect(ctrl.logins, [backup.secretHex]);
+      expect(ctrl.loginArgs.single, (pqRootCode: backup.pqCode, newKey: true));
+      expect(ctrl.links, isEmpty);
+    });
+
+    testWidgets('the largeBlob fallback carries the new code too',
+        (tester) async {
+      tall(tester);
+      final platform = FakePasskeyPlatform()
+        ..prfEnabled = false
+        ..largeBlob = true;
+      final service = fakePasskeyService(platform, FakeRelays());
+      await tester.pumpWidget(
+          app(SetupModal(onComplete: () {}), const [], passkey: service));
+      await tester.pump();
+      await tester.pump();
+      await tester
+          .tap(find.byKey(const Key('keyBackupContinue_passkeyCreate')));
+      await settle(tester);
+
+      final backup = decodeLargeBlob(platform.storedBlob)!;
+      expect(pqRootFromCode(backup.pqCode!), isNotNull);
+      expect(ctrl.loginArgs.single, (pqRootCode: backup.pqCode, newKey: true));
+    });
+
+    testWidgets('the reveal then shows the nsec and the code together',
+        (tester) async {
+      tall(tester);
+      final secret = newSecret();
+      final code = realCode();
+      await tester.pumpWidget(app(
+        details(() => signedIn(secret, code: code)),
+        [FakeStore(BackupCloud.google)],
+      ));
+      await tester.pump();
+      await tester
+          .tap(find.text("Reveal this nym's private key and recovery code"));
+      await settle(tester);
+      expect(find.text('nsec (Nostr Private Key)'), findsOneWidget);
+      expect(find.text('Post-quantum recovery code'), findsOneWidget);
+      expect(
+          find.text('This device has no recovery code yet. Paste the one '
+              'from a device that already has it — you will find it in this '
+              'same panel there — so both can read the same quantum-resistant '
+              'messages.'),
+          findsNothing);
+    });
+  });
+
+  group('seeding the root for a key', () {
+    PqRootSeed seed({
+      bool hold = false,
+      bool local = true,
+      bool throwaway = false,
+      bool pending = false,
+      bool fresh = false,
+    }) =>
+        pqRootSeedForKey(
+          holdRoot: hold,
+          localKey: local,
+          throwawayKeypair: throwaway,
+          pendingForThisKey: pending,
+          freshKey: fresh,
+        );
+
+    test('a freshly generated key gets a root right away', () {
+      expect(seed(fresh: true), PqRootSeed.generate);
+    });
+
+    test('a new key signed in with its code adopts that code', () {
+      expect(seed(pending: true), PqRootSeed.pending);
+      expect(seed(pending: true, fresh: true), PqRootSeed.pending);
+    });
+
+    test('existing accounts are left to the usual record check', () {
+      expect(seed(), PqRootSeed.none);
+      expect(seed(hold: true, fresh: true), PqRootSeed.none);
+      expect(seed(hold: true, pending: true), PqRootSeed.none);
+    });
+
+    test('remote signers and throwaway keys get none', () {
+      expect(seed(local: false, fresh: true), PqRootSeed.none);
+      expect(seed(throwaway: true, fresh: true), PqRootSeed.none);
+      expect(seed(throwaway: true, pending: true), PqRootSeed.none);
+    });
+  });
+
+  group('controller wiring', () {
+    final src = File('lib/state/nostr_controller.dart').readAsStringSync();
+
+    test('the root is seeded right after it is loaded at boot', () {
+      final load = src.indexOf('await _loadPqRoot(unlockedSecrets');
+      final seed = src.indexOf('await _seedNewKeyPqRoot(identity');
+      expect(load, greaterThan(-1));
+      expect(seed, greaterThan(load));
+      expect(src.substring(load, seed).split('\n').length, lessThan(4));
+    });
+
+    test('generating adopts a backed-up code before minting a new one', () {
+      final branch = src.substring(src.indexOf('case PqRootAction.generate:'));
+      final body =
+          branch.substring(0, branch.indexOf('Future<void> _armPqRoot'));
+      expect(body.contains('_createPqRoot(sync, existing: candidate)'), isTrue);
+      expect(body.contains('existing ?? pq.pqGenerateRoot()'), isTrue);
+      expect(body.indexOf('_persistPqRoot(root)'),
+          lessThan(body.indexOf('pqRootRecordSet(')));
+      expect(body.contains('publishPqAnnouncement(force: true)'), isTrue);
+    });
+
+    test('a held but unrecorded root is recorded and announced', () {
+      final branch =
+          src.substring(src.indexOf('case PqRootAction.publishRecord:'));
+      final body =
+          branch.substring(0, branch.indexOf('case PqRootAction.awaitLink:'));
+      expect(body.contains('_createPqRoot(sync, existing: held)'), isTrue);
+    });
+
+    test('login keeps a new key\'s code apart from a restored one', () {
+      final login = src.substring(src.indexOf('Future<void> loginWithNsec('));
+      final body = login.substring(0, login.indexOf('await init();'));
+      expect(
+          body.contains('_pqRootForNewKey = (pubkey: loggedIn.pubkey'), isTrue);
+      expect(body.contains('_pqRootCandidate = root;'), isTrue);
     });
   });
 

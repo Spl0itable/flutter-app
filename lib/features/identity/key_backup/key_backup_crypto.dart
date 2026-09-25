@@ -7,6 +7,7 @@ import 'package:pointycastle/export.dart'
 
 import '../../../core/crypto/keys.dart';
 import '../../../core/crypto/nip44.dart' as nip44;
+import '../../../core/crypto/pq.dart' as pq;
 import '../pq_root.dart';
 
 const String kKeyBackupFormat = 'nym-key-backup-v1';
@@ -64,14 +65,18 @@ class BackupSecret {
     required this.secretHex,
     this.pqCode,
     this.pqIgnored = false,
+    this.created = false,
   });
 
   final String secretHex;
   final String? pqCode;
   final bool pqIgnored;
+  final bool created;
 }
 
 bool isValidBackupPqCode(String code) => pqRootFromCode(code) != null;
+
+String newBackupPqCode() => pqRootToCode(pq.pqGenerateRoot());
 
 String encodeBackupBundle(String secretHex, {String? pqCode}) {
   final sk = secretHex.toLowerCase();

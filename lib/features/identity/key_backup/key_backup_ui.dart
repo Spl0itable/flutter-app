@@ -482,7 +482,7 @@ Future<bool> runKeyBackupSignIn(
     return true;
   }
 
-  String? created;
+  BackupSecret? created;
   final ok = await KeyBackupPinDialog.show(
     context,
     KeyBackupPinDialog(
@@ -500,22 +500,24 @@ Future<bool> runKeyBackupSignIn(
         final sk = generatePrivateKey();
         final secretHex = bytesToHex(sk);
         wipeBytes(sk);
+        final pqCode = newBackupPqCode();
         final key = await session.deriveKey(pin);
         try {
-          await session.upload(key, secretHex);
+          await session.upload(key, secretHex, pqCode: pqCode);
         } catch (e) {
           return _errorMessage(e, cloud);
         } finally {
           wipeBytes(key);
         }
-        created = secretHex;
+        created = BackupSecret(
+            secretHex: secretHex, pqCode: pqCode, created: true);
         return null;
       },
     ),
   );
   final secret = created;
   if (!ok || secret == null || !context.mounted) return false;
-  await signIn(BackupSecret(secretHex: secret));
+  await signIn(secret);
   return true;
 }
 
@@ -731,8 +733,10 @@ Future<bool> runPasskeyCreateNewKey(
   final secretHex = bytesToHex(sk);
   final pubkeyHex = getPublicKeyHex(sk);
   wipeBytes(sk);
+  final pqCode = newBackupPqCode();
   try {
-    await service.backUp(secretHex: secretHex, pubkeyHex: pubkeyHex);
+    await service.backUp(
+        secretHex: secretHex, pubkeyHex: pubkeyHex, pqCode: pqCode);
   } catch (e) {
     if (_passkeyError(e) == PasskeyBackupError.canceled) return false;
     if (!context.mounted) return false;
@@ -744,7 +748,8 @@ Future<bool> runPasskeyCreateNewKey(
       title: tr('Passkey backup'),
     );
   }
-  await signIn(BackupSecret(secretHex: secretHex));
+  await signIn(
+      BackupSecret(secretHex: secretHex, pqCode: pqCode, created: true));
   return true;
 }
 
