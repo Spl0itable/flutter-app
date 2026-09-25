@@ -179,9 +179,12 @@ class Subscription {
   final Set<String> _eosedRelays = <String>{};
   Timer? _eoseTimer;
   bool _closed = false;
+  bool _answered = false;
 
   /// Deduped (and verified) events for this subscription.
   Stream<NostrEvent> get events => _events.stream;
+
+  bool get answered => _answered;
 
   /// Completes when enough relays have signaled EOSE, or on timeout.
   Future<void> get eose => _eose.future;
@@ -216,12 +219,14 @@ class Subscription {
     }
     if (_closed) return;
     if (!_delivered.add(event.id)) return;
+    _answered = true;
     if (!_events.isClosed) _events.add(event);
   }
 
   /// Called by the pool when an EOSE for this sub arrives from [relayUrl].
-  void onEose(String relayUrl) {
+  void onEose(String relayUrl, {bool closed = false}) {
     if (_closed) return;
+    if (!closed) _answered = true;
     _eosedRelays.add(relayUrl);
     final needed = max(1, (_relayCount * _eoseQuorum).ceil());
     if (_eosedRelays.length >= needed) {
@@ -606,7 +611,7 @@ class RelayPool implements PoolTransport {
       case ClosedMessage(:final subId, :final reason):
         // Treat a relay-side CLOSED as that relay reaching EOSE for quorum
         // purposes so a closed sub doesn't stall the eose future.
-        _subscriptions[subId]?.onEose(relayUrl);
+        _subscriptions[subId]?.onEose(relayUrl, closed: true);
         _dropIfRelayWideRejection(relayUrl, reason);
       case OkMessage(:final message):
         // Handled per-connection via publish() futures.

@@ -4987,7 +4987,7 @@ class NostrController {
           _pqRegistry.acceptsLayered(pk, nowSec: nowSec, enabled: true);
       final announcedAt = _pqRegistry.announcedAtFor(pk, nowSec: nowSec);
       final bitchatAt = _bitchatSeenAt[pk] ?? 0;
-      final miss = _pqLookupMisses[pk];
+      final miss = _pqLookupLimiter.missedAt(pk);
       final why = pqPeerDiagnosis(
         supported: supported,
         modeOff: modeOff,
@@ -5061,12 +5061,7 @@ class NostrController {
   /// for the same new peer open one subscription rather than two, and a peer
   /// who simply has no announcement is not re-queried on every send.
   final Map<String, Future<void>> _pqLookups = {};
-  final Map<String, int> _pqLookupMisses = {};
-
-  /// How long a miss is trusted. Long enough that the send path is not
-  /// re-querying constantly, short enough to pick up a peer who upgrades
-  /// mid-conversation.
-  static const int _pqMissTtlMs = 10 * 60 * 1000;
+  final PqLookupLimiter _pqLookupLimiter = PqLookupLimiter();
 
   /// How long a SEND may wait on a peer's announcement before going with what
   /// it already knows. Deliberately short: a first message that goes classical
@@ -5125,14 +5120,22 @@ class NostrController {
     // Re-checking is rate-limited rather than free: a peer who really has no
     // key — a Bitchat user, a signer login — must not be re-queried on every
     // send.
-    final missedAt = _pqLookupMisses[pubkey];
-    if (missedAt != null && nowMs - missedAt < _pqMissTtlMs) {
+    if (!_pqLookupLimiter.due(pubkey,
+        nowMs: nowMs,
+        announcedAtSec: announcedAt,
+        keyless: _pqRegistry.keyFor(pubkey, nowSec: nowSec, enabled: true) ==
+            null)) {
       return Future<void>.value();
     }
+    var answered = false;
     final f = _pqAnnouncementFromD1(pubkey).then((gotIt) {
       // D1 answered with a verified key, so there is nothing to ask the relays.
-      if (gotIt) return Future<void>.value();
-      return service.fetchPqAnnouncement(
+      if (gotIt) {
+        answered = true;
+        return Future<void>.value();
+      }
+      return service
+          .fetchPqAnnouncement(
         pubkey,
         found: () =>
             _pqRegistry.keyFor(
@@ -5141,18 +5144,23 @@ class NostrController {
               enabled: true,
             ) !=
             null,
-      );
+      )
+          .then((v) {
+        answered = v;
+      });
     }).whenComplete(() {
       _pqLookups.remove(pubkey);
-      final sec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final ms = DateTime.now().millisecondsSinceEpoch;
       // A lookup that came back without a key counts as a miss, so the rate
       // limit applies to it — otherwise a keyless peer would be re-queried on
       // every send now that a keyless entry no longer stops the search.
-      if (_pqRegistry.keyFor(pubkey, nowSec: sec, enabled: true) == null) {
-        _pqLookupMisses[pubkey] = DateTime.now().millisecondsSinceEpoch;
-      } else {
-        _pqLookupMisses.remove(pubkey);
-      }
+      _pqLookupLimiter.record(
+        pubkey,
+        found: _pqRegistry.keyFor(pubkey, nowSec: ms ~/ 1000, enabled: true) !=
+            null,
+        answered: answered,
+        nowMs: ms,
+      );
     });
     // BOUNDED, because the send path awaits this and a lookup is an
     // optimization while delivery is not.
@@ -5872,6 +5880,7 @@ class NostrController {
     _pqRoot = null;
     _pqRootLocked = false;
     _pqRootSettled = false;
+    _pqRootRecordPending = false;
     _pqRootInFlight = false;
     _pqRootStore = const PqRootStore();
     _pqRootStoreUnreadable = false;
@@ -5908,7 +5917,11 @@ class NostrController {
     // next read that succeeds. Running once at boot meant a device that could
     // not reach D1 at launch spent the whole session with no root, announcing
     // an nsec-derived key.
-    if (_pqRootSettled && (_pqRoot != null || _pqRootLocked)) return;
+    if (_pqRootSettled &&
+        !_pqRootRecordPending &&
+        (_pqRoot != null || _pqRootLocked)) {
+      return;
+    }
     // One at a time. The settings restore starts this without awaiting it, so
     // two overlapping runs could each reach §6.4 and mint a rival root for the
     // same account — the single failure the ordering exists to prevent.
@@ -5922,6 +5935,7 @@ class NostrController {
   }
 
   bool _pqRootInFlight = false;
+  bool _pqRootRecordPending = false;
 
   Future<void> _ensurePqRootLocked(StorageSync sync) async {
     // The order of these questions is the safety property; it lives in one
@@ -5963,7 +5977,10 @@ class NostrController {
       recordMatchesHeldRoot: matches,
     );
 
-    if (action != PqRootAction.wait) _pqRootSettled = true;
+    if (action != PqRootAction.wait) {
+      _pqRootSettled = true;
+      _pqRootRecordPending = false;
+    }
     // Anything but awaitLink means this device holds, or is about to hold, the
     // account's root, so nothing is unreadable-pending-a-link.
     if (action != PqRootAction.awaitLink && action != PqRootAction.wait) {
@@ -6082,6 +6099,8 @@ class NostrController {
         root = pq.pqGenerateRoot();
     }
     if (!await _persistPqRoot(root)) return;
+    _pqRootSettled = true;
+    _pqRootRecordPending = true;
     await _armPqRootBackupNotice();
   }
 

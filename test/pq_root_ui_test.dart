@@ -333,8 +333,9 @@ void main() {
 
     test('and a settled answer costs nothing to re-ask', () {
       expect(
-          ctrl.contains(
-              'if (_pqRootSettled && (_pqRoot != null || _pqRootLocked)) return;'),
+          ctrl.contains('if (_pqRootSettled &&\n'
+              '        !_pqRootRecordPending &&\n'
+              '        (_pqRoot != null || _pqRootLocked)) {'),
           isTrue);
     });
 

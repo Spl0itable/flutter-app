@@ -1299,7 +1299,7 @@ class RelayPoolProxy implements PoolTransport {
             _banRelay(relayUrl, reason);
           }
           _stampShardLatency(id, sock.shard.id);
-          _subscriptions[id]?.onEose(sock.shard.id);
+          _subscriptions[id]?.onEose(sock.shard.id, closed: true);
         }
       case PoolOk(:final id, :final message, :final relayUrl):
         // Publish ACK; publish() does not await per-relay OK in proxy mode.
