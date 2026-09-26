@@ -136,6 +136,7 @@ class Nip98Auth {
     required Uint8List privkey,
     required String pubkey,
     int? createdAt,
+    String? payload,
   }) {
     final ts = createdAt ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final tags = <List<String>>[
@@ -143,6 +144,7 @@ class Nip98Auth {
       ['method', 'POST'],
       if (url.isNotEmpty) ['u', url],
       if (action.isNotEmpty) ['action', action],
+      if (payload != null) ['payload', payload],
     ];
     final unsigned = UnsignedEvent(
       pubkey: pubkey,

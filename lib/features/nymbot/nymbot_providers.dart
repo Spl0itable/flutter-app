@@ -463,18 +463,24 @@ class BotChatController extends StateNotifier<BotChatState> {
   /// local key: money actions sign fresh (single-use replay gate), routine
   /// actions reuse the shared 90s cache. Falls back to a pre-supplied [_auth]
   /// blob when no signer is bound.
-  Future<Map<String, dynamic>?> _authFor(String action) async {
+  Future<Map<String, dynamic>?> _authFor(String action,
+      [String? payload]) async {
     final signer = _signer;
     if (signer != null) {
       final auth = await Nip98Auth.buildSigned(
         action: action,
         url: _service.baseUrl,
         signer: signer,
-        sensitive: _sensitiveActions.contains(action),
+        sensitive: payload != null || _sensitiveActions.contains(action),
+        extraTags: payload == null
+            ? const <List<String>>[]
+            : <List<String>>[
+                ['payload', payload]
+              ],
       );
       if (auth != null) return auth;
     }
-    return _auth;
+    return payload == null ? _auth : null;
   }
 
   // --- Canonical-store plumbing -----------------------------------------------
@@ -1779,7 +1785,7 @@ class BotChatController extends StateNotifier<BotChatState> {
     final res = await _service.transfer(
         pubkey: _pubkey!,
         targetPubkey: targetPubkey,
-        auth: () => _authFor('transfer-credits'));
+        signedFor: (payload) => _authFor('transfer-credits', payload));
     // Mirror the PWA: zero the displayed balances once the transfer succeeds.
     if (res['error'] == null) {
       final b = state.balance;

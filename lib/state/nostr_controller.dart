@@ -10587,6 +10587,7 @@ class NostrController {
           action: 'api-ws',
           url: _apiWsAuthUrl(),
           signer: signer,
+          sensitive: true,
         ));
     api.activateApiSocket();
     // ONE multiplexed `/api` socket for the whole app (the PWA's single

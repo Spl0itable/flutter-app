@@ -89,6 +89,7 @@ class NymbotService {
     Map<String, dynamic> extra, {
     required String pubkey,
     Future<Map<String, dynamic>?> Function()? auth,
+    Future<Map<String, dynamic>?> Function(String payload)? signedFor,
     Duration timeout = _defaultTimeout,
     bool anon = false,
   }) async {
@@ -99,16 +100,16 @@ class NymbotService {
       final res = await ws(action, extra, timeout: timeout);
       if (res != null) return res;
     }
-    final authEvent = auth == null ? null : await auth();
-    return _postRaw(
-      <String, dynamic>{
-        'action': action,
-        'pubkey': pubkey,
-        if (authEvent != null) 'auth': authEvent,
-        ...extra,
-      },
-      timeout: timeout,
-    );
+    final body = <String, dynamic>{
+      'action': action,
+      'pubkey': pubkey,
+      ...extra,
+    };
+    final authEvent = signedFor != null
+        ? await signedFor(Nip98Auth.payloadHashHex(body))
+        : (auth == null ? null : await auth());
+    if (authEvent != null) body['auth'] = authEvent;
+    return _postRaw(body, timeout: timeout);
   }
 
   /// `https://<host>/api/bot` — the PWA hits a same-origin `/api/bot`
@@ -396,13 +397,13 @@ class NymbotService {
     required String tier,
     required String reqId,
     required List<Map<String, dynamic>> outputs,
-    Future<Map<String, dynamic>?> Function()? auth,
+    Future<Map<String, dynamic>?> Function(String payload)? signedFor,
   }) async {
     final res = await _botRequest(
       'voucher-issue',
       <String, dynamic>{'tier': tier, 'reqId': reqId, 'outputs': outputs},
       pubkey: pubkey,
-      auth: auth,
+      signedFor: signedFor,
     );
     _throwOnError(res);
     return res.data;
@@ -431,14 +432,14 @@ class NymbotService {
   Future<Map<String, dynamic>> transfer({
     required String pubkey,
     required String targetPubkey,
-    Future<Map<String, dynamic>?> Function()? auth,
+    Future<Map<String, dynamic>?> Function(String payload)? signedFor,
     bool anon = false,
   }) async {
     final res = await _botRequest(
       'transfer-credits',
       <String, dynamic>{'targetPubkey': targetPubkey},
       pubkey: pubkey,
-      auth: auth,
+      signedFor: signedFor,
       anon: anon,
     );
     _throwOnStatus(res);
