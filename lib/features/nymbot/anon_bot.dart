@@ -379,7 +379,8 @@ class AnonBotManager {
         final res = await _service.transfer(
           pubkey: old.pk,
           targetPubkey: target.pk,
-          auth: () async => _authFor('transfer-credits', old),
+          signedFor: (payload) async =>
+              _authFor('transfer-credits', old, payload),
           anon: true,
         );
         moved += ((res['transferred'] as num?)?.toInt() ?? 0) +
@@ -456,12 +457,14 @@ class AnonBotManager {
     return event;
   }
 
-  Map<String, dynamic> _authFor(String action, AnonBotIdentity id) =>
+  Map<String, dynamic> _authFor(String action, AnonBotIdentity id,
+          [String? payload]) =>
       Nip98Auth.build(
         action: action,
         url: _service.baseUrl,
         privkey: id.sk,
         pubkey: id.pk,
+        payload: payload,
       );
 
   Future<Map<String, dynamic>?> authFor(String action) async {
@@ -592,10 +595,13 @@ class AnonBotManager {
   }
 
   String? _accountPubkey;
-  Future<Map<String, dynamic>?> Function(String action)? _accountAuth;
+  Future<Map<String, dynamic>?> Function(String action, [String? payload])?
+      _accountAuth;
 
   void bindAccount(
-      String pubkey, Future<Map<String, dynamic>?> Function(String action)? auth) {
+      String pubkey,
+      Future<Map<String, dynamic>?> Function(String action, [String? payload])?
+          auth) {
     _accountPubkey = pubkey;
     _accountAuth = auth;
   }
@@ -613,7 +619,8 @@ class AnonBotManager {
         tier: pending.tier,
         reqId: pending.reqId,
         outputs: pending.outputs.map((o) => o.toWire()).toList(),
-        auth: () async => _accountAuth?.call('voucher-issue'),
+        signedFor: (payload) async =>
+            _accountAuth?.call('voucher-issue', payload),
       );
     } on NymbotException catch (e) {
       final code = e.statusCode ?? 0;

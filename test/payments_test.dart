@@ -473,6 +473,36 @@ void main() {
       expect(res['transferred'], 42);
     });
 
+    test('transfer-credits signs a payload tag bound to its body', () async {
+      Map<String, dynamic>? sent;
+      final client = MockClient((req) async {
+        sent = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response('{"transferred":1}', 200,
+            headers: {'content-type': 'application/json'});
+      });
+      final svc = NymbotService(
+          client: client, baseUrl: 'https://web.nymchat.app/api/bot');
+      await svc.transfer(
+        pubkey: _testPub,
+        targetPubkey: 'e' * 64,
+        signedFor: (payload) async => Nip98Auth.build(
+          action: 'transfer-credits',
+          url: svc.baseUrl,
+          privkey: _testPriv,
+          pubkey: _testPub,
+          payload: payload,
+        ),
+      );
+      final event = NostrEvent.fromJson(
+          (sent!['auth'] as Map).cast<String, dynamic>());
+      expect(schnorr.verifyEvent(event), isTrue);
+      final unsigned = Map<String, dynamic>.from(sent!)..remove('auth');
+      final keys = unsigned.keys.toList()..sort();
+      final canonical = {for (final k in keys) k: unsigned[k]};
+      expect(event.tagValue('payload'),
+          sha256.convert(utf8.encode(jsonEncode(canonical))).toString());
+    });
+
     test('buildAuth produces a kind-27235 event bound to the bot url', () {
       final svc = NymbotService(baseUrl: 'https://web.nymchat.app/api/bot');
       final auth = svc.buildAuth(

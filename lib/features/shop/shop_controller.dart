@@ -311,15 +311,20 @@ class ShopController extends StateNotifier<ShopState> {
   /// present (the PWA's `_signBotAuth` → generic `signEvent` dispatch,
   /// pms.js:1649-1679 — so NIP-46 remote signers authenticate too), falling
   /// back to the raw privkey. Returns null only when neither can sign.
-  Future<Map<String, dynamic>?> _auth(
-      String action, ShopIdentity identity) async {
+  Future<Map<String, dynamic>?> _auth(String action, ShopIdentity identity,
+      [String? payload]) async {
     final signer = identity.signer;
     if (signer != null) {
       final auth = await Nip98Auth.buildSigned(
         action: action,
         url: _api.storageUrl,
         signer: signer,
-        sensitive: _sensitiveActions.contains(action),
+        sensitive: payload != null || _sensitiveActions.contains(action),
+        extraTags: payload == null
+            ? const <List<String>>[]
+            : <List<String>>[
+                ['payload', payload]
+              ],
       );
       if (auth != null) return auth;
     }
@@ -330,6 +335,7 @@ class ShopController extends StateNotifier<ShopState> {
       url: _api.storageUrl,
       privkey: sk,
       pubkey: identity.pubkey,
+      payload: payload,
     );
   }
 
@@ -530,15 +536,17 @@ class ShopController extends StateNotifier<ShopState> {
     required ShopIdentity identity,
     String? gifterNym,
   }) async {
-    final auth = await _auth('shop-transfer', identity);
-    final data = await _api.storageAction({
+    final body = <String, dynamic>{
       'action': 'shop-transfer',
       'pubkey': identity.pubkey,
       'itemId': itemId,
       'toPubkey': toPubkey,
       if (gifterNym != null) 'gifterNym': gifterNym,
-      if (auth != null) 'auth': auth,
-    });
+    };
+    final auth = await _auth(
+        'shop-transfer', identity, Nip98Auth.payloadHashHex(body));
+    if (auth != null) body['auth'] = auth;
+    final data = await _api.storageAction(body);
     // Publish the recipient's notification DM (shop.js:1748-1750).
     final giftEvent = data['giftEvent'];
     if (giftEvent is Map) {
