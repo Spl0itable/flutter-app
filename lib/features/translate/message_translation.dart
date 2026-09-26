@@ -6,7 +6,7 @@ import '../../core/theme/nym_metrics.dart';
 import '../../state/app_state.dart';
 import '../../state/settings_provider.dart';
 import '../i18n/i18n.dart';
-import 'auto_translate.dart';
+import 'translate_target.dart';
 import 'translate_languages.dart';
 import 'translate_service.dart';
 import 'translation_cache.dart';

@@ -174,11 +174,6 @@ class StorageSync {
       'notifyFriendsOnly',
       'syncMLSHistory',
       'seenCalls',
-      // As with uiLanguage above: the PWA files these under `messaging`.
-      'autoTranslate',
-      'autoTranslateChannels',
-      'autoTranslatePMs',
-      'autoTranslateGroups',
     ],
     'channels': [
       'pinnedChannels',
