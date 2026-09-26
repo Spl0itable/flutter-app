@@ -97,6 +97,7 @@ class StorageKeys {
   static const groupchatPmOnlyMode = 'nym_groupchat_pm_only_mode';
   static const nickStyle = 'nym_nick_style';
   static const pinnedLandingChannel = 'nym_pinned_landing_channel';
+  static const lastView = 'nym_last_view';
   static const dmFwdSecEnabled = 'nym_dm_fwdsec_enabled';
   static const dmTtlSeconds = 'nym_dm_ttl_seconds';
   static const readReceiptsScope = 'nym_read_receipts_scope';

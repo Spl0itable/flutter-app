@@ -87,6 +87,7 @@ import '../services/storage/key_value_store.dart';
 import '../services/storage/sealed_key_value.dart';
 import '../services/storage/secure_store.dart';
 import 'app_state.dart';
+import 'last_view.dart';
 import 'settings_provider.dart';
 
 /// The well-known "common" geohash channels seeded into the sidebar on connect
@@ -436,6 +437,8 @@ class NostrController {
     unawaited(NativeSchnorr.ensureLoaded());
     try {
       final kv = _ref.read(keyValueStoreProvider);
+      final bootView =
+          BootViewRestore(_ref.read(appStateProvider.notifier), kv);
       // `secretWrite` routes identity-secret persistence through the vault
       // (key-vault.js `secretSet`): with the vault enabled + unlocked (the
       // boot gate unlocked the SAME provider instance), post-boot writes stay
@@ -497,7 +500,9 @@ class NostrController {
 
       await _loadLeftGroupStore();
       final appState = _ref.read(appStateProvider.notifier);
+      bootView.beforeGoLive();
       appState.goLive(identity.pubkey, identity.nym);
+      bootView.afterGoLive();
 
       // Restore friends / blocked users / blocked keywords from KV.
       _hydrateSocialState(appState);
@@ -612,6 +617,8 @@ class NostrController {
       // its groups and can decrypt group wraps; the D1 settings restore then
       // merges on top.
       await _hydrateGroupStore();
+      final restoredView = bootView.apply();
+      if (restoredView?.kind == ViewKind.channel) _persistJoinedChannels();
       // Seed Low Data Mode from the persisted setting BEFORE the relay layer
       // shards its geo relays (the PWA reads `settings.lowDataMode` in
       // `_computeExpectedShards`, relays.js:1905-1978; boot applies the saved
@@ -720,9 +727,16 @@ class NostrController {
       // not only on a later view switch (`_onViewOpened`). This MUST run after
       // `_initStorageSync` wires `_storageSync`; otherwise `_backfillChannelArchive`
       // hits its `sync == null` early-return and the default channel never loads.
-      final bootView = _ref.read(appStateProvider).view;
-      if (bootView.kind == ViewKind.channel) {
-        unawaited(_backfillChannelArchive(bootView.id));
+      final openView = _ref.read(appStateProvider).view;
+      if (restoredView != null && openView == restoredView) {
+        _onViewOpened(openView);
+        if (openView.kind == ViewKind.channel &&
+            isChannelGeohash(openView.id)) {
+          unawaited(_service?.connectGeoRelaysForGeohash(openView.id) ??
+              Future.value());
+        }
+      } else if (openView.kind == ViewKind.channel) {
+        unawaited(_backfillChannelArchive(openView.id));
       }
 
       // Discover recently-active GEOHASH + NAMED channels from the D1 archive,
@@ -1596,6 +1610,7 @@ class NostrController {
       StorageKeys.autoEphemeral,
       StorageKeys.autoEphemeralNick,
       StorageKeys.autoEphemeralChannel,
+      StorageKeys.lastView,
       StorageKeys.randomKeypairPerSession,
       StorageKeys.colorMode,
       StorageKeys.purchasesCache,
@@ -10721,6 +10736,7 @@ class NostrController {
   /// also restores all 1:1 PMs up front rather than per-conversation. All work
   /// is best-effort and never blocks the (already-committed) view switch.
   void _onViewOpened(ChatView view) {
+    rememberLastView(_ref.read(keyValueStoreProvider), view);
     // Reading a conversation clears ITS bell-badge entries WITHOUT opening the
     // notifications modal (PWA `_markChannelRead` → `_markConversationNotifications
     // Seen`, channels.js:1738-1739; C02-4). The notification `route` is the bare

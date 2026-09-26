@@ -3989,6 +3989,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// column; sidebar taps leave it false.
   bool _forceNewColumnHint = false;
 
+  int _viewSwitchCount = 0;
+
+  int get viewSwitchCount => _viewSwitchCount;
+
+  ChatView get currentView => state.view;
+
+  AppState get currentState => state;
+
   /// Reads-and-clears the one-shot force-new-column hint (columns deck only).
   bool consumeForceNewColumnHint() {
     final v = _forceNewColumnHint;
@@ -4010,6 +4018,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       view = ChatView.pm(view.id.toLowerCase());
     }
     _forceNewColumnHint = forceNewColumn;
+    _viewSwitchCount++;
     // Clear unread for the target on entry (mirrors marking-as-read), and stamp
     // the read watermark to NOW so a later D1 backfill of this conversation's
     // older history doesn't re-inflate the badge (PWA `_markChannelRead`).
