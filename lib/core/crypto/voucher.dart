@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:pointycastle/digests/sha256.dart';
@@ -11,6 +12,8 @@ const List<int> voucherDenoms = [
 ];
 
 const int voucherMaxOutputs = 32;
+
+const List<String> voucherTiers = ['standard', 'pro'];
 
 const String voucherHtcDomain = 'Nymbot_Voucher_HashToCurve_v1';
 const String voucherDleqDomain = 'Nymbot_Voucher_DLEQ_v1';
@@ -137,4 +140,19 @@ List<int>? voucherSplitAmount(int amount) {
     }
   }
   return left == 0 ? out : null;
+}
+
+String? voucherKeysetId(Map<dynamic, dynamic> keys, List<int> denoms) {
+  final parts = <String>[];
+  for (final tier in voucherTiers) {
+    final tierKeys = keys[tier];
+    if (tierKeys is! Map) return null;
+    for (final denom in denoms) {
+      final hex = tierKeys['$denom'];
+      if (hex is! String || hex.isEmpty) return null;
+      parts.add('$tier:$denom:$hex');
+    }
+  }
+  final digest = _sha256(Uint8List.fromList(utf8.encode(parts.join('|'))));
+  return bytesToHex(digest).substring(0, 16);
 }

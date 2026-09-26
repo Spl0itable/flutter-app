@@ -386,6 +386,92 @@ void main() {
     });
   });
 
+  group('edit authorship', () {
+    NostrEvent chanEvt(String id, String pubkey, String content,
+            {String? editOf}) =>
+        NostrEvent(
+          id: id,
+          pubkey: pubkey,
+          createdAt: 1000,
+          kind: EventKind.namedChannel,
+          tags: [
+            ['d', 'nymchat'],
+            ['n', 'sat#beef'],
+            if (editOf != null) ['edit', editOf],
+          ],
+          content: content,
+        );
+    const attacker =
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+
+    test('an edit from a different pubkey is ignored', () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      n.markNymchatPubkey(_other);
+      n.markNymchatPubkey(attacker);
+      n.ingestEvent(chanEvt('orig', _other, 'hello'));
+      n.ingestEvent(chanEvt('forged', attacker, 'pwned', editOf: 'orig'));
+      final msgs = c
+          .read(messagesForCurrentViewProvider)
+          .where((m) => m.id == 'orig' || m.id == 'forged')
+          .toList();
+      expect(msgs.length, 1);
+      expect(msgs.single.content, 'hello');
+      expect(msgs.single.isEdited, isFalse);
+    });
+
+    test('a buffered forged edit is not applied when the original lands',
+        () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      n.markNymchatPubkey(_other);
+      n.markNymchatPubkey(attacker);
+      n.ingestEvent(chanEvt('forged', attacker, 'pwned', editOf: 'orig'));
+      n.ingestEvent(chanEvt('orig', _other, 'hello'));
+      final m = c
+          .read(messagesForCurrentViewProvider)
+          .firstWhere((m) => m.id == 'orig');
+      expect(m.content, 'hello');
+      expect(m.isEdited, isFalse);
+    });
+
+    test('a buffered forged edit does not displace the author edit', () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      n.markNymchatPubkey(_other);
+      n.markNymchatPubkey(attacker);
+      n.ingestEvent(chanEvt('real', _other, 'fixed', editOf: 'orig'));
+      n.ingestEvent(chanEvt('forged', attacker, 'pwned', editOf: 'orig'));
+      n.ingestEvent(chanEvt('orig', _other, 'hello'));
+      final m = c
+          .read(messagesForCurrentViewProvider)
+          .firstWhere((m) => m.id == 'orig');
+      expect(m.content, 'fixed');
+      expect(m.isEdited, isTrue);
+    });
+
+    test('an echoed own edit still applies', () async {
+      final c = await _container();
+      addTearDown(c.dispose);
+      final n = c.read(appStateProvider.notifier);
+      _seedChannelMessage(c,
+          id: 'mine',
+          pubkey: _self,
+          author: 'you#1a2b',
+          content: 'old',
+          isOwn: true);
+      n.applyEditOrDefer('mine', 'new', editorPubkey: _self);
+      final m = c
+          .read(messagesForCurrentViewProvider)
+          .firstWhere((m) => m.id == 'mine');
+      expect(m.content, 'new');
+      expect(m.isEdited, isTrue);
+    });
+  });
+
   group('reactor nyms accessor', () {
     test('exposes real reactor nyms for the reactors modal', () async {
       final c = await _container();

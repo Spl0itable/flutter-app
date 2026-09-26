@@ -711,6 +711,99 @@ void main() {
     });
   });
 
+  group('PM and group edit authorship', () {
+    Message pm(String id, String author, String peer) => Message(
+          id: 'wrap_$id',
+          nymMessageId: id,
+          author: 'peer#0001',
+          pubkey: author,
+          content: 'original',
+          createdAt: 1000,
+          isPM: true,
+          conversationKey: 'pm-$peer',
+          conversationPubkey: peer,
+        );
+    Message groupMsg(String gid, String id, String author) => Message(
+          id: 'wrap_$id',
+          nymMessageId: id,
+          pubkey: author,
+          author: 'm#$author',
+          content: 'original',
+          createdAt: 1000,
+          isGroup: true,
+          groupId: gid,
+          conversationKey: GroupLogic.groupStorageKey(gid),
+        );
+    Message stored(AppStateNotifier n, String key, String nymId) =>
+        n.state.messages[key]!.firstWhere((m) => m.nymMessageId == nymId);
+
+    test('PM edit from the author applies, from anyone else is ignored', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestPMMessage(pm('p1', 'peerpk', 'peerpk'));
+      n.applyEditOrDefer('p1', 'forged', editorPubkey: 'evilpk');
+      expect(stored(n, 'pm-peerpk', 'p1').content, 'original');
+      expect(stored(n, 'pm-peerpk', 'p1').isEdited, isFalse);
+      n.applyEditOrDefer('p1', 'fixed', editorPubkey: 'peerpk');
+      expect(stored(n, 'pm-peerpk', 'p1').content, 'fixed');
+      expect(stored(n, 'pm-peerpk', 'p1').isEdited, isTrue);
+    });
+
+    test('peer cannot edit my own PM', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestPMMessage(pm('p2', 'selfpk', 'peerpk'));
+      n.applyEditOrDefer('p2', 'forged', editorPubkey: 'peerpk');
+      expect(stored(n, 'pm-peerpk', 'p2').content, 'original');
+      n.applyEditOrDefer('p2', 'mine', editorPubkey: 'selfpk');
+      expect(stored(n, 'pm-peerpk', 'p2').content, 'mine');
+    });
+
+    test('group edit matches nymMessageId and requires the author', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'member', 'selfpk'],
+        createdBy: 'owner',
+      );
+      n.upsertGroup(g);
+      n.ingestGroupMessage(groupMsg(g.id, 'g1', 'member'));
+      final key = GroupLogic.groupStorageKey(g.id);
+      n.applyEditOrDefer('g1', 'forged', editorPubkey: 'owner');
+      expect(stored(n, key, 'g1').content, 'original');
+      n.applyEditOrDefer('g1', 'fixed', editorPubkey: 'member');
+      expect(stored(n, key, 'g1').content, 'fixed');
+      expect(stored(n, key, 'g1').isEdited, isTrue);
+    });
+
+    test('buffered group edits apply only for the matching author', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      final g = Group(
+        id: GroupLogic.generateGroupId(),
+        name: 'g',
+        members: ['owner', 'member', 'selfpk'],
+        createdBy: 'owner',
+      );
+      n.upsertGroup(g);
+      n.applyEditOrDefer('g2', 'forged', editorPubkey: 'owner');
+      n.ingestGroupMessage(groupMsg(g.id, 'g2', 'member'));
+      final key = GroupLogic.groupStorageKey(g.id);
+      expect(stored(n, key, 'g2').content, 'original');
+      expect(stored(n, key, 'g2').isEdited, isFalse);
+
+      n.applyEditOrDefer('g3', 'forged', editorPubkey: 'owner');
+      n.applyEditOrDefer('g3', 'late fix', editorPubkey: 'member');
+      n.ingestGroupMessage(groupMsg(g.id, 'g3', 'member'));
+      expect(stored(n, key, 'g3').content, 'late fix');
+    });
+
+    test('local edit path still rewrites own messages', () {
+      final n = AppStateNotifier()..goLive('selfpk', 'me#0001');
+      n.ingestPMMessage(pm('p3', 'selfpk', 'peerpk'));
+      expect(n.applyLocalEdit('p3', 'edited'), isTrue);
+      expect(stored(n, 'pm-peerpk', 'p3').content, 'edited');
+    });
+  });
+
   group('Closed PM re-open semantics', () {
     Message pmFrom(String peer, String content, int createdAtSec) => Message(
           id: 'pm_${peer}_$createdAtSec',

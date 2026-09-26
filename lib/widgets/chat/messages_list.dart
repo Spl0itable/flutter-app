@@ -9,7 +9,6 @@ import '../../core/utils/nym_utils.dart';
 import '../../core/theme/nym_metrics.dart';
 import '../../features/i18n/i18n.dart';
 import '../../features/polls/poll_card.dart';
-import '../../features/translate/auto_translate.dart';
 import '../../features/reactions/reaction_picker.dart';
 import '../../models/channel.dart';
 import '../../models/message.dart';
@@ -472,22 +471,6 @@ class _MessagesListState extends ConsumerState<MessagesList> {
       _unitWidgetCache.clear();
     }
 
-    // Auto-translate: proactively translate the loaded messages of the viewed
-    // conversation — on entry, on backfill/reload, and as new messages arrive
-    // (this widget re-runs whenever `messages` changes) — so received messages
-    // localize without waiting for each row to scroll into view. Post-frame so
-    // we don't mutate the provider during build; the notifier caps concurrency
-    // and skips anything already translated.
-    final autoTarget = autoTranslateTargetFor(settings);
-    if (settings.autoTranslate && autoTarget.isNotEmpty) {
-      final msgsForTranslate = messages;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        ref
-            .read(autoTranslateProvider.notifier)
-            .ensureForView(msgsForTranslate, autoTarget, settings);
-      });
-    }
     // The history-edge notice is channel-only (the PWA's PM back-pager never
     // prepends one).
     final isChannel = view.kind == ViewKind.channel;

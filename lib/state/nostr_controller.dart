@@ -3394,8 +3394,9 @@ class NostrController {
     // group and 1:1 PM branches below.
     final editId = _tagValue(tags, 'edit');
     if (editId != null && editId.isNotEmpty) {
+      if (!u.senderVerified) return;
       final content = rumor['content'] as String? ?? '';
-      appState.applyEditOrDefer(editId, content);
+      appState.applyEditOrDefer(editId, content, editorPubkey: senderPubkey);
       return;
     }
 

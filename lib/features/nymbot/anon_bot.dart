@@ -502,13 +502,38 @@ class AnonBotManager {
     final cached = _keyset;
     if (cached != null && !force) return cached;
     final data = await _service.voucherKeys();
-    final keys = data['keys'];
-    final id = data['keysetId'];
-    if (keys is! Map || id is! String || id.isEmpty) {
+    final pinned = verifiedVoucherKeyset(data);
+    if (pinned == null) {
       throw AnonBotException('Voucher keys unavailable.');
     }
-    _keyset = data;
-    return data;
+    _keyset = pinned;
+    return pinned;
+  }
+
+  static Map<String, dynamic>? verifiedVoucherKeyset(
+      Map<String, dynamic> data) {
+    final keys = data['keys'];
+    final id = data['keysetId'];
+    final rawDenoms = data['denoms'];
+    if (keys is! Map || id is! String || id.isEmpty) return null;
+    final denoms = rawDenoms == null
+        ? voucherDenoms
+        : rawDenoms is List && rawDenoms.every((d) => d is int && d > 0)
+            ? rawDenoms.cast<int>().toList()
+            : null;
+    if (denoms == null || denoms.isEmpty) return null;
+    final computed = voucherKeysetId(keys, denoms);
+    if (computed == null || computed != id.toLowerCase()) return null;
+    return <String, dynamic>{
+      'keysetId': computed,
+      'denoms': denoms,
+      'keys': <String, Map<String, String>>{
+        for (final tier in voucherTiers)
+          tier: <String, String>{
+            for (final d in denoms) '$d': (keys[tier] as Map)['$d'] as String,
+          },
+      },
+    };
   }
 
   String? keysetId() => _keyset?['keysetId'] as String?;

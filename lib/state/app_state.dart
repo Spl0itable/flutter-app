@@ -1330,14 +1330,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
   final Set<String> _seenNymMessageIds = <String>{};
 
   /// Edits whose original message hasn't landed yet (out-of-order relay
-  /// delivery): originalId → new content. Mirrors the PWA's `editedMessages`
-  /// map (messages.js:447,1932-1962). When an edit-tagged event arrives before
-  /// the message it rewrites, [applyEditOrDefer] stores it here keyed by the
-  /// original id; [_consumePendingEdit] applies + clears it the moment a normal
+  /// delivery): originalId → editor pubkey → new content. Mirrors the PWA's
+  /// `editedMessages` map (messages.js:447,1932-1962). When an edit-tagged
+  /// event arrives before the message it rewrites, [applyEditOrDefer] stores it
+  /// here keyed by the original id; [_consumePendingEdit] applies + clears it the moment a normal
   /// message with a matching `id`/`nymMessageId` is ingested, so an edit can
   /// never leak through as a brand-new bubble. Capped to avoid unbounded growth
   /// when an original never arrives.
-  final Map<String, String> _pendingEdits = <String, String>{};
+  final Map<String, Map<String, String>> _pendingEdits =
+      <String, Map<String, String>>{};
 
   /// PM peer pubkeys the user explicitly closed; older backlog for them is
   /// ignored (docs/specs/03 §3.3 `closedPMs`).
@@ -2073,7 +2074,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // `editedMessages`, messages.js:447,1932-1962).
     final editId = e.tagValue('edit');
     if (editId != null && editId.isNotEmpty) {
-      applyEditOrDefer(editId, e.content);
+      applyEditOrDefer(editId, e.content, editorPubkey: e.pubkey);
       return;
     }
     // Cross-transport dedup. A `['nymmesh', <id>]` tag marks this event as the
@@ -4237,11 +4238,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// Applies an edit to a stored message (channel/PM/group): replaces its
   /// content + flags it edited. Mirrors `publishEditedChannelMessage`'s local
   /// rewrite + the PM/group `editedMessages` apply. No-op if not found.
-  bool applyLocalEdit(String messageId, String newContent) {
+  bool applyLocalEdit(String messageId, String newContent,
+      {String? authorPubkey}) {
     var changed = false;
     for (final list in state.messages.values) {
       for (final m in list) {
-        if (m.id == messageId || m.nymMessageId == messageId) {
+        if ((m.id == messageId || m.nymMessageId == messageId) &&
+            (authorPubkey == null || m.pubkey == authorPubkey)) {
           m.content = newContent;
           m.isEdited = true;
           changed = true;
@@ -4260,11 +4263,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// The caller must NOT also append the edit event as a new message — this is
   /// what fixes the user-reported "edit shows as a duplicate" bug, mirroring the
   /// PWA's `editedMessages` map (messages.js:447,1932-1962).
-  void applyEditOrDefer(String originalId, String newContent) {
-    if (originalId.isEmpty) return;
-    if (!applyLocalEdit(originalId, newContent)) {
+  void applyEditOrDefer(String originalId, String newContent,
+      {required String editorPubkey}) {
+    if (originalId.isEmpty || editorPubkey.isEmpty) return;
+    if (_hasMessageWithId(originalId)) {
+      applyLocalEdit(originalId, newContent, authorPubkey: editorPubkey);
+    } else {
       // Original not seen yet — remember the edit until its message arrives.
-      _pendingEdits[originalId] = newContent;
+      final byEditor =
+          _pendingEdits.putIfAbsent(originalId, () => <String, String>{});
+      byEditor.remove(editorPubkey);
+      byEditor[editorPubkey] = newContent;
+      if (byEditor.length > 8) byEditor.remove(byEditor.keys.first);
       // Bound the buffer; an original that never lands shouldn't grow it forever.
       if (_pendingEdits.length > 2000) {
         _pendingEdits.remove(_pendingEdits.keys.first);
@@ -4279,7 +4289,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
   bool _consumePendingEdit({String? id, String? nymMessageId}) {
     if (_pendingEdits.isEmpty) return false;
     String? hitKey;
-    String? content;
     if (id != null && id.isNotEmpty && _pendingEdits.containsKey(id)) {
       hitKey = id;
     } else if (nymMessageId != null &&
@@ -4288,9 +4297,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
       hitKey = nymMessageId;
     }
     if (hitKey == null) return false;
-    content = _pendingEdits.remove(hitKey);
-    if (content == null) return false;
-    return applyLocalEdit(hitKey, content);
+    final pending = _pendingEdits.remove(hitKey);
+    if (pending == null) return false;
+    var applied = false;
+    for (final entry in pending.entries) {
+      if (applyLocalEdit(hitKey, entry.value, authorPubkey: entry.key)) {
+        applied = true;
+      }
+    }
+    return applied;
+  }
+
+  bool _hasMessageWithId(String messageId) {
+    for (final list in state.messages.values) {
+      for (final m in list) {
+        if (m.id == messageId || m.nymMessageId == messageId) return true;
+      }
+    }
+    return false;
   }
 
   // -------------------------------------------------------------------------
